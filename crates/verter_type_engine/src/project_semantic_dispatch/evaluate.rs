@@ -2173,13 +2173,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         frame: &mut DeferredEvaluationFrame,
         read: CacheRead<QueryResult<SemanticNodeId>>,
-        miss_fallback: SemanticNodeId,
+        miss_fallback: impl FnOnce() -> SemanticNodeId,
     ) -> DeferredEvaluationAction {
         frame.merge_read(&read);
         crate::request_context::observe_component_meta_read_suppress(&read);
         match read.value {
             QueryResult::Value(next) => frame.advance_or_finish(next),
-            _ => DeferredEvaluationAction::Finish(miss_fallback),
+            _ => DeferredEvaluationAction::Finish(miss_fallback()),
         }
     }
 
@@ -2596,8 +2596,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 }
                             }
                         }
-                        let fallback = self.opaque(QueryError::Miss);
-                        self.deferred_read_action(frame, read, fallback)
+                        self.deferred_read_action(frame, read, || self.opaque(QueryError::Miss))
                     }
                     DeferredEvaluationStage::AwaitIndexedObject { index } => match index {
                         IndexKey::Computed(index_node) => {
@@ -2627,8 +2626,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 index,
                                 mode: frame.context.mode,
                             });
-                            let fallback = self.opaque(QueryError::Miss);
-                            self.deferred_read_action(frame, read, fallback)
+                            self.deferred_read_action(frame, read, || self.opaque(QueryError::Miss))
                         }
                     },
                     DeferredEvaluationStage::AwaitIndexedIndex { object } => {
@@ -2638,8 +2636,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             index,
                             mode: frame.context.mode,
                         });
-                        let fallback = self.opaque(QueryError::Miss);
-                        self.deferred_read_action(frame, read, fallback)
+                        self.deferred_read_action(frame, read, || self.opaque(QueryError::Miss))
                     }
                     DeferredEvaluationStage::AwaitValueChildren {
                         data,
@@ -2763,8 +2760,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     mapper: mapper.clone(),
                                     context: frame.context,
                                 });
-                                let fallback = self.opaque(QueryError::Miss);
-                                self.deferred_read_action(frame, read, fallback)
+                                self.deferred_read_action(frame, read, || {
+                                    self.opaque(QueryError::Miss)
+                                })
                             }
                             // A NOMINAL (`unique symbol`) carrier is
                             // TERMINAL: resolving its head would project the
@@ -2826,8 +2824,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     pending: pending.clone(),
                                 });
                                 let frame = frames.last_mut().expect("active evaluator frame");
-                                let fallback = self.opaque(QueryError::Miss);
-                                self.deferred_read_action(frame, read, fallback)
+                                self.deferred_read_action(frame, read, || {
+                                    self.opaque(QueryError::Miss)
+                                })
                             }
                             SemanticNodeData::TemplateLiteral {
                                 quasis,
@@ -2840,7 +2839,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                         context: self.template_literal_reduce_context(),
                                     });
                                 let frame = frames.last_mut().expect("active evaluator frame");
-                                self.deferred_read_action(frame, read, current)
+                                self.deferred_read_action(frame, read, || current)
                             }
                             SemanticNodeData::InstantiationRef { base, args }
                                 if demand == DeferredEvaluationDemand::MappedIndexValue
@@ -2865,7 +2864,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     ),
                                 ));
                                 let frame = frames.last_mut().expect("active evaluator frame");
-                                self.deferred_read_action(frame, read, current)
+                                self.deferred_read_action(frame, read, || current)
                             }
                             SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
                                 canonical_id,
@@ -2888,8 +2887,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     ),
                                 ));
                                 let frame = frames.last_mut().expect("active evaluator frame");
-                                let fallback = self.opaque(QueryError::Miss);
-                                self.deferred_read_action(frame, read, fallback)
+                                self.deferred_read_action(frame, read, || {
+                                    self.opaque(QueryError::Miss)
+                                })
                             }
                             SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_) => {
                                 let context = frames

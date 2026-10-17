@@ -361,10 +361,12 @@ impl ScopeStack {
         self.next_token
     }
 
+    /// Owners usually close innermost first, so the search starts at the
+    /// newest.
     fn position(&self, token: u64) -> usize {
         self.entries
             .iter()
-            .position(|entry| entry.token == token)
+            .rposition(|entry| entry.token == token)
             .expect("an open construction owner is registered on its thread")
     }
 
@@ -612,22 +614,29 @@ impl NodeRootScope {
         }
     }
 
+    /// Hand a delivery lease to a construction owner on this thread: the
+    /// OLDEST owner of its arena, or the innermost owner when the lease
+    /// names no arena. A closing owner hands its deliveries to another open
+    /// owner of the arena, so a delivery stays held until no owner of its
+    /// arena is open on the thread, whichever owner holds it; the oldest is
+    /// the one least likely to close first, so the delivery is not handed on
+    /// again at every nested scope's close.
     pub(crate) fn capture_delivery(
         lease: super::delivery_lease::SemanticDeliveryLease,
         arena: Option<usize>,
     ) {
         let mut lease = Some(lease);
         SCOPES.with(|scopes| {
-            if let Some(scope) = scopes
-                .borrow_mut()
-                .entries
-                .iter_mut()
-                .rev()
-                .find(|candidate| {
-                    arena.is_none_or(|arena| Arc::as_ptr(&candidate.arena) as usize == arena)
-                })
-            {
-                lease = scope.adopt(lease.take().unwrap());
+            let mut scopes = scopes.borrow_mut();
+            let owner = match arena {
+                Some(arena) => scopes
+                    .entries
+                    .iter_mut()
+                    .find(|candidate| Arc::as_ptr(&candidate.arena) as usize == arena),
+                None => scopes.entries.last_mut(),
+            };
+            if let Some(owner) = owner {
+                lease = owner.adopt(lease.take().unwrap());
             }
         });
         drop(lease);

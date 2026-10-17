@@ -390,7 +390,7 @@ impl SemanticGraphStore {
             capture: &mut ReadCapture<'_>,
         ) -> Result<ClaimAttempt, ValueRead> {
             // Count every logical entry, warm and cold alike.
-            crate::loop5_instrumentation::EXECUTE_COOPERATIVE_CALLS.fetch_add(1, Ordering::Relaxed);
+            self.note_lookup_entry();
 
             // Request cancellation is a typed ReturnOnly terminal and must be
             // observed before even a warm probe: canceled requests do not consume
@@ -434,18 +434,7 @@ impl SemanticGraphStore {
             // One logical miss per claim. A producer that publishes between
             // this lookup and the claim's own warm re-read is credited as a
             // hit there; that race is benign.
-            crate::loop5_instrumentation::FAMILY_MEMO_MISSES.fetch_add(1, Ordering::Relaxed);
-            #[cfg(any(test, feature = "test-support"))]
-            crate::project_semantic_dispatch::raise::record_dispatch_cold(prepared.key());
-            #[cfg(any(test, feature = "test-support"))]
-            crate::capture_token::with_active_capture(|t| {
-                t.record_dispatch(prepared.key(), /* hit */ false)
-            });
-            tracing::debug!(
-                target: "verter::memo::miss",
-                key = ?prepared.key(),
-                "memo_miss"
-            );
+            self.note_lookup_miss(prepared.key());
             Ok(ClaimAttempt {
                 prepared,
                 independent,

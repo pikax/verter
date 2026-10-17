@@ -579,6 +579,26 @@ pub(super) struct PublishedResult {
     carrier: verter_session_query::facts::fact_cache::ReadSetSignature,
     /// The workspace's edit clocks the build computed under.
     published_at: WorkspaceEdit,
+    /// Whether the family memo admitted the result: a later lookup of the
+    /// key would hit it, where a result completed for this request alone
+    /// misses.
+    resident: bool,
+}
+
+/// What a dispatcher's kept results answer a query entry with
+/// ([`ProjectSemanticDispatch::replay_kept_read`]).
+pub(super) enum KeptReplay {
+    /// No kept result serves the entry: it looks the key up in the memo.
+    Absent,
+    /// The kept result, admitted for the active demand, and its carrier.
+    Served(
+        CacheRead<QueryResult<SemanticQueryValue>>,
+        verter_session_query::facts::fact_cache::ReadSetSignature,
+    ),
+    /// The active demand cannot pay for the kept result: the entry computes
+    /// the key, as a refused stored result does, and that computation
+    /// delivers the facts it reads.
+    Refused(cost_receipt::ReplayRefusal),
 }
 
 /// The clocks every workspace edit advances: content, source environment
@@ -1363,15 +1383,54 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let (read, carrier) = {
             let published = self.published_results.borrow();
             let result = published.get(key)?;
-            if result.published_at != self.workspace_edit()
-                || !self.graph().serves_stored_value(&result.read.value)
-            {
+            if !self.kept_result_serves(result) {
                 return None;
             }
             (result.read.clone(), result.carrier.clone())
         };
         let read = self.served_read(key, read, nesting).ok()?;
         Some((read, carrier))
+    }
+
+    /// Answer a query entry from a result this dispatcher's build already
+    /// published for `key`, before any family-memo lookup, tracer or claim
+    /// is set up. The entry observes the lookup the memo would have made (a
+    /// hit for a result the memo admitted, a miss for one completed for this
+    /// request alone) and is served exactly as [`Self::own_published_read`]
+    /// serves it after a missed lookup: its receipt replayed into the active
+    /// demand, its carrier handed to the caller. A result is held only under
+    /// the edit clocks it was computed at, so an edit since makes the entry
+    /// look the key up again.
+    pub(super) fn replay_kept_read(
+        &self,
+        key: &SemanticQueryKey,
+        nesting: cost_receipt::Nesting,
+    ) -> KeptReplay {
+        if self.snapshot.flags().is_cancelled() {
+            return KeptReplay::Absent;
+        }
+        let (read, carrier, resident) = {
+            let published = self.published_results.borrow();
+            let Some(result) = published.get(key) else {
+                return KeptReplay::Absent;
+            };
+            if !self.kept_result_serves(result) {
+                return KeptReplay::Absent;
+            }
+            (result.read.clone(), result.carrier.clone(), result.resident)
+        };
+        self.graph().note_replayed_lookup(key, resident);
+        match self.served_read(key, read, nesting) {
+            Ok(read) => KeptReplay::Served(read, carrier),
+            Err(refusal) => KeptReplay::Refused(refusal),
+        }
+    }
+
+    /// Whether a kept result still serves: its edit clocks are current and
+    /// its value names no released node or retired kernel epoch.
+    fn kept_result_serves(&self, result: &PublishedResult) -> bool {
+        result.published_at == self.workspace_edit()
+            && self.graph().serves_stored_value(&result.read.value)
     }
 
     /// Whether `key` has a request-local completion open on this dispatcher
@@ -1386,12 +1445,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// landed while it ran (or after, before this call) moved the clocks
     /// past that sample, so the result is never served after it. Only a
     /// priced read is kept: a result is served only with its receipt.
+    /// `resident` when the family memo admitted the result.
     pub(super) fn keep_published(
         &self,
         key: &SemanticQueryKey,
         read: &CacheRead<QueryResult<SemanticQueryValue>>,
         carrier: verter_session_query::facts::fact_cache::ReadSetSignature,
         computed_at: WorkspaceEdit,
+        resident: bool,
     ) {
         if read.receipt.priced().is_none() {
             return;
@@ -1403,6 +1464,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 read: read.clone(),
                 carrier,
                 published_at,
+                resident,
             },
         );
     }
@@ -3985,6 +4047,86 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Ok(guard) => guard,
             Err(read) => return read,
         };
+        // A result this dispatcher's build already published answers before
+        // any closure, tracer or claim is set up.
+        let replayed = if plain_read && isolated_root.is_none() && !self.request_local_is_open(&key)
+        {
+            self.replay_kept_read(&key, cost_receipt::Nesting::Entered)
+        } else {
+            KeptReplay::Absent
+        };
+        let (cache_read, is_cold, refusal_carrier) = match replayed {
+            KeptReplay::Served(read, carrier) => {
+                crate::fact_signature_helpers::ReadSetSignatureExt::bubble_via_tls(&carrier);
+                (read, false, None)
+            }
+            KeptReplay::Refused(refusal) => self.claim_cold_query(
+                &key,
+                publication,
+                operand_evidence,
+                &carrier_prelude,
+                isolated_root.is_some(),
+                connected_guard.is_root(),
+                Some(refusal),
+            ),
+            KeptReplay::Absent => self.claim_cold_query(
+                &key,
+                publication,
+                operand_evidence,
+                &carrier_prelude,
+                isolated_root.is_some(),
+                connected_guard.is_root(),
+                None,
+            ),
+        };
+        let mut cache_read = self.attribute_query_read(&key, is_cold, cache_read, &carrier_prelude);
+        if connected_guard.is_root() {
+            if let Some(reasons) = self.connected_demand_trip() {
+                self.append_connected_limit_diagnostics(&key, reasons, &mut cache_read);
+            }
+        }
+        if let (Some(identity), Some(carrier)) = (isolated_root, refusal_carrier) {
+            self.seal_root_refusal(identity, &cache_read, carrier);
+        }
+        self.fold_cache_read_fact(&cache_read);
+        self.deposit_operation_refusals(cache_read.walker_diagnostics.iter());
+        tracing::debug!(
+            target: "verter::dispatch::execute_via_helper",
+            ?key,
+            suppress = cache_read.cache_suppress,
+            "execute_via_cold_build_helper"
+        );
+        drop(query_depth_guard);
+        cache_read
+    }
+
+    /// The family-memo protocol of one cold-query entry: a warm lookup,
+    /// then a claim for this execution's task — the recursion carrier,
+    /// another task's result, or this key's producer, which runs the traced
+    /// build, settles, is admitted and completes — or a request-local
+    /// completion ([`completes_request_locally`]). `refused` is a kept
+    /// result the active demand could not pay for: the entry computes the
+    /// key without a further lookup. Returns the read, whether a cold build
+    /// ran, and the facts a sealed refusal of an isolated root keeps.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn claim_cold_query(
+        &self,
+        key: &SemanticQueryKey,
+        publication: Option<&mut Option<crate::semantic_query_memo::PublishedMemoCandidate>>,
+        operand_evidence: Option<
+            &mut Option<crate::semantic_query::operand::SemanticOperandEvidence>,
+        >,
+        carrier_prelude: &CarrierNormalizationPrelude,
+        isolated_root: bool,
+        connected_root: bool,
+        refused: Option<cost_receipt::ReplayRefusal>,
+    ) -> (
+        CacheRead<QueryResult<SemanticQueryValue>>,
+        bool,
+        Option<TracedFacts>,
+    ) {
+        let plain_read = publication.is_none() && operand_evidence.is_none();
         let graph = Arc::clone(self.graph());
         // Per-key recursion sentinel: when the memo detects same-path
         // re-entry on an `Instantiate` key, extract the decl name and
@@ -4386,20 +4528,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // A stored result this demand cannot pay for is computed here
         // instead, once; a recomputation answered by another unpayable
         // result is the demand's trip.
-        let mut refused = None;
+        let mut refused = refused;
         // A cheap intermediate nested in another computation, outside every
         // checker obligation, completes for this request alone
         // ([`completes_request_locally`]). A key whose family-memo producer
         // is open on this task re-enters through the memo, which answers it
         // as every same-path re-entry.
         let request_local = plain_read
-            && isolated_root.is_none()
-            && !connected_guard.is_root()
-            && completes_request_locally(&key)
+            && !isolated_root
+            && !connected_root
+            && completes_request_locally(key)
             && self.active_operand_evidence.borrow().is_empty()
             && self.dispatch_txn.borrow().obligations.decides_root()
-            && !graph.is_same_path_claim(&key);
-        let cache_read = if self.request_local_is_open(&key) {
+            && !graph.is_same_path_claim(key);
+        let cache_read = if self.request_local_is_open(key) {
             // The key's own request-local completion is open: the same-path
             // re-entry a family-memo claim answers with its recursion carrier.
             self.connected_demand.note_divergence_certificate();
@@ -4413,28 +4555,30 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // pay for is computed instead, and a result this dispatcher kept
             // answers a miss. Only the claim, its flight and the admission
             // are left out.
-            let attempt = match graph.begin_query_claim(self.ctx, flags, key.clone(), &mut capture)
-            {
-                Err(read) => match self.served_read(&key, read, cost_receipt::Nesting::Entered) {
+            let begun = if refused.is_some() {
+                graph.begin_query_recompute(flags, key.clone())
+            } else {
+                graph.begin_query_claim(self.ctx, flags, key.clone(), &mut capture)
+            };
+            let attempt = match begun {
+                Err(read) => match self.served_read(key, read, cost_receipt::Nesting::Entered) {
                     Ok(read) => Err(read),
                     Err(_) => graph.begin_query_recompute(flags, key.clone()),
                 },
-                Ok(attempt) => {
-                    match self.own_published_read(&key, cost_receipt::Nesting::Entered) {
-                        Some((read, carrier)) => {
-                            crate::fact_signature_helpers::ReadSetSignatureExt::bubble_via_tls(
-                                &carrier,
-                            );
-                            Err(read)
-                        }
-                        None => Ok(attempt),
+                Ok(attempt) => match self.own_published_read(key, cost_receipt::Nesting::Entered) {
+                    Some((read, carrier)) => {
+                        crate::fact_signature_helpers::ReadSetSignatureExt::bubble_via_tls(
+                            &carrier,
+                        );
+                        Err(read)
                     }
-                }
+                    None => Ok(attempt),
+                },
             };
             match attempt {
                 Err(read) => read,
                 Ok(attempt) => {
-                    let _open = RequestLocalOpen::enter(&self.request_local_open, &key);
+                    let _open = RequestLocalOpen::enter(&self.request_local_open, key);
                     let traced_build = traced_build.take().expect("the completion runs once");
                     let computed_at = self.workspace_edit();
                     let request = crate::request_context::current_request_budget();
@@ -4451,7 +4595,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let (read, kept) =
                         graph.complete_request_local(attempt, flags, output, receipt);
                     if let Some(carrier) = kept {
-                        self.keep_published(&key, &read, carrier, computed_at);
+                        self.keep_published(key, &read, carrier, computed_at, false);
                     }
                     read
                 }
@@ -4464,7 +4608,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // tasks may join, so it is taken only to produce.
                 let mut own_published = || {
                     plain_read
-                        .then(|| self.own_published_read(&key, cost_receipt::Nesting::Entered))
+                        .then(|| self.own_published_read(key, cost_receipt::Nesting::Entered))
                         .flatten()
                         .map(|(read, carrier)| {
                             crate::fact_signature_helpers::ReadSetSignatureExt::bubble_via_tls(
@@ -4484,13 +4628,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 ) {
                     Acquired::Served(read) => read,
                     Acquired::Read(read) => {
-                        match self.served_read(&key, read, cost_receipt::Nesting::Entered) {
+                        match self.served_read(key, read, cost_receipt::Nesting::Entered) {
                             Ok(read) => read,
                             Err(refusal) if !recompute => {
                                 refused = Some(refusal);
                                 continue;
                             }
-                            Err(refusal) => self.refused_replay_read(&key, refusal),
+                            Err(refusal) => self.refused_replay_read(key, refusal),
                         }
                     }
                     Acquired::Recursive(recursion) => {
@@ -4515,7 +4659,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         let request = crate::request_context::current_request_budget();
                         let recording = self.connected_demand.record_cost(lease.cost_identity());
                         let output = traced_build();
-                        if isolated_root.is_some() {
+                        if isolated_root {
                             refusal_carrier = TracedFacts::of_output(&output, rooting.take());
                         }
                         let receipt =
@@ -4532,7 +4676,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     let published = settled.published_carrier();
                                     let read = settled.complete(self.ctx, &mut capture);
                                     if let Some(carrier) = published {
-                                        self.keep_published(&key, &read, carrier, computed_at);
+                                        self.keep_published(key, &read, carrier, computed_at, true);
                                     }
                                     read
                                 }
@@ -4544,25 +4688,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         drop(execution);
         let is_cold = cold_build_ran.load(std::sync::atomic::Ordering::Relaxed);
-        let mut cache_read = self.attribute_query_read(&key, is_cold, cache_read, &carrier_prelude);
-        if connected_guard.is_root() {
-            if let Some(reasons) = self.connected_demand_trip() {
-                self.append_connected_limit_diagnostics(&key, reasons, &mut cache_read);
-            }
-        }
-        if let (Some(identity), Some(carrier)) = (isolated_root, refusal_carrier) {
-            self.seal_root_refusal(identity, &cache_read, carrier);
-        }
-        self.fold_cache_read_fact(&cache_read);
-        self.deposit_operation_refusals(cache_read.walker_diagnostics.iter());
-        tracing::debug!(
-            target: "verter::dispatch::execute_via_helper",
-            ?key,
-            suppress = cache_read.cache_suppress,
-            "execute_via_cold_build_helper"
-        );
-        drop(query_depth_guard);
-        cache_read
+        (cache_read, is_cold, refusal_carrier)
     }
 }
 

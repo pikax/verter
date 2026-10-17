@@ -2266,7 +2266,45 @@ impl SemanticGraphStore {
             fact_status: crate::semantic_query::FactStatus::Complete,
             receipt: crate::semantic_query::ReadReceipt::Priced(entry.cost_receipt),
         };
+        self.note_warm_hit(key);
+        Some(hit)
+    }
 
+    /// The observations of one family-memo lookup entry, warm or cold.
+    pub(crate) fn note_lookup_entry(&self) {
+        crate::loop5_instrumentation::EXECUTE_COOPERATIVE_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The observations a family-memo lookup that missed `key` makes.
+    pub(crate) fn note_lookup_miss(&self, key: &SemanticQueryKey) {
+        crate::loop5_instrumentation::FAMILY_MEMO_MISSES.fetch_add(1, Ordering::Relaxed);
+        #[cfg(any(test, feature = "test-support"))]
+        crate::project_semantic_dispatch::raise::record_dispatch_cold(key);
+        #[cfg(any(test, feature = "test-support"))]
+        crate::capture_token::with_active_capture(|t| t.record_dispatch(key, /* hit */ false));
+        tracing::debug!(
+            target: "verter::memo::miss",
+            ?key,
+            "memo_miss"
+        );
+    }
+
+    /// The observations of a lookup of `key` a dispatcher answers from a
+    /// result it already holds, in place of a family-memo lookup: the
+    /// lookup entry, then the warm hit a lookup of a result the memo holds
+    /// (`resident`) makes, else the miss a lookup of a result completed for
+    /// one request alone makes.
+    pub(crate) fn note_replayed_lookup(&self, key: &SemanticQueryKey, resident: bool) {
+        self.note_lookup_entry();
+        if resident {
+            self.note_warm_hit(key);
+        } else {
+            self.note_lookup_miss(key);
+        }
+    }
+
+    /// The observations a family-memo lookup answered warm for `key` makes.
+    fn note_warm_hit(&self, key: &SemanticQueryKey) {
         // Instrumentation — fast-path attribution.
         crate::loop5_instrumentation::WARM_HIT_FAST_PATH_HITS
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2313,8 +2351,6 @@ impl SemanticGraphStore {
             ?key,
             "memo_hit"
         );
-
-        Some(hit)
     }
 
     /// Abort and retire one canceled cold owner without publishing a result.
@@ -2938,28 +2974,20 @@ pub fn semantic_graph_carrier(
 
     // Collapse the observed self-roots per canonical; a conflicting hash for
     // the same canonical is a torn observation. A build observes a handful
-    // of roots, so they are compared linearly.
+    // of roots, so they are compared linearly, in plain loops: this runs
+    // once per cold build.
     let mut self_root_hashes: smallvec::SmallVec<
         [(&Arc<str>, verter_session_query::analysis::types::Hash16); 4],
     > = smallvec::SmallVec::new();
     for (canonical, observed_hash) in observed_self_roots {
-        match self_root_hashes
-            .iter()
-            .find(|(root, _)| root.as_ref() == canonical.as_ref())
-        {
-            Some((_, existing)) if existing != observed_hash => {
+        match root_position(&self_root_hashes, canonical) {
+            Some(index) if self_root_hashes[index].1 != *observed_hash => {
                 return Err(crate::cache_runtime::NonAdmissionReason::SelfRootConflict)
             }
             Some(_) => {}
             None => self_root_hashes.push((canonical, *observed_hash)),
         }
     }
-    let root_hash = |canonical: &str| {
-        self_root_hashes
-            .iter()
-            .find(|(root, _)| root.as_ref() == canonical)
-            .map(|(_, hash)| hash)
-    };
 
     // Every traced `FileWholeHash` for a self-root canonical MUST agree
     // with the observed hash (else the dependency rail and the observed
@@ -2970,10 +2998,10 @@ pub fn semantic_graph_carrier(
     if !self_root_hashes.is_empty() {
         for fact in verter_session_query::facts::fact_cache::signature_entries(&traced_facts) {
             if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
-                if root_hash(canonical_id.as_str())
-                    .is_some_and(|observed_hash| hash != observed_hash)
-                {
-                    return Err(crate::cache_runtime::NonAdmissionReason::SelfRootConflict);
+                if let Some(index) = root_position(&self_root_hashes, canonical_id) {
+                    if *hash != self_root_hashes[index].1 {
+                        return Err(crate::cache_runtime::NonAdmissionReason::SelfRootConflict);
+                    }
                 }
             }
         }
@@ -2989,33 +3017,23 @@ pub fn semantic_graph_carrier(
     if !self_root_hashes.is_empty() {
         for fact in &traced_facts {
             if let FactVersionRef::FileWholeHash { canonical_id, .. } = fact {
-                if let Some(index) = self_root_hashes
-                    .iter()
-                    .position(|(root, _)| root.as_ref() == canonical_id.as_str())
-                {
+                if let Some(index) = root_position(&self_root_hashes, canonical_id) {
                     named[index] = true;
                 }
             }
         }
     }
     let mut facts = traced_facts;
-    facts.extend(
-        self_root_hashes
-            .iter()
-            .zip(&named)
-            .filter(|(_, named)| !**named)
-            .map(
-                |((canonical, observed_hash), _)| FactVersionRef::FileWholeHash {
-                    canonical_id: canonical.as_ref().to_string(),
-                    hash: *observed_hash,
-                },
-            ),
-    );
-
-    let self_root_canonicals: Vec<Arc<str>> = self_root_hashes
-        .iter()
-        .map(|(canonical, _)| Arc::clone(canonical))
-        .collect();
+    let mut self_root_canonicals: Vec<Arc<str>> = Vec::with_capacity(self_root_hashes.len());
+    for (index, (canonical, observed_hash)) in self_root_hashes.iter().enumerate() {
+        if !named[index] {
+            facts.push(FactVersionRef::FileWholeHash {
+                canonical_id: canonical.as_ref().to_string(),
+                hash: *observed_hash,
+            });
+        }
+        self_root_canonicals.push(Arc::clone(canonical));
+    }
     crate::fact_signature_helpers::bound_completed_structural_carrier(
         view,
         facts,
@@ -3026,6 +3044,19 @@ pub fn semantic_graph_carrier(
 // ──────────────────────────────────────────────────────────────────────────
 // Internal helpers
 // ──────────────────────────────────────────────────────────────────────────
+
+/// The position of `canonical` among collapsed self-roots.
+fn root_position(
+    roots: &[(&Arc<str>, verter_session_query::analysis::types::Hash16)],
+    canonical: &str,
+) -> Option<usize> {
+    for (index, (root, _)) in roots.iter().enumerate() {
+        if root.as_ref() == canonical {
+            return Some(index);
+        }
+    }
+    None
+}
 
 /// The empty dispatch dependency signature: one shared allocation, so a
 /// result that depends on no dispatch fence costs no allocation.
