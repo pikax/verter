@@ -89,10 +89,9 @@
 //! alongside churned ones pins its chunk), so the retained storage is bounded
 //! by the live set times the chunk size, never by history.
 
-use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hash, Hasher};
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc, Weak};
 
 use smallvec::SmallVec;
 
@@ -574,18 +573,6 @@ impl ArenaInner {
     }
 }
 
-/// Process-global seed for structural fingerprints. A single
-/// [`RandomState`] captured once per process — SipHash-quality and randomly
-/// seeded so workspace-derived names carried in node payloads cannot be
-/// used to force fingerprint (and thus bucket) collisions. Fingerprints are
-/// purely an in-memory, per-generation interning optimisation and never
-/// cross a process / serialization boundary, so a per-process random seed
-/// is correct.
-fn fingerprint_seed() -> &'static RandomState {
-    static SEED: OnceLock<RandomState> = OnceLock::new();
-    SEED.get_or_init(RandomState::new)
-}
-
 /// Structural fingerprint of `(data, scope)` — the 64-bit narrowing key for
 /// the dedup bucket index. Hashes the FULL structural identity (payload
 /// incl. spans, plus origin scope) through the node's own [`Hash`] impl, so
@@ -594,15 +581,25 @@ fn fingerprint_seed() -> &'static RandomState {
 /// narrows candidates; per-bucket content `Eq` is the identity authority,
 /// so a fingerprint collision never aliases two distinct nodes.
 ///
-/// Because it routes through [`fingerprint_seed`], the fingerprint of a
-/// given payload is stable within a process run but unpredictable across
-/// runs — the HashDoS defense. The scope enters as its own seeded digest
-/// ([`scope_digest`]), a function of the scope's value alone, so equal
-/// pairs still fingerprint equal.
+/// It hashes with SipHash-1-3 under a per-process random key
+/// ([`super::fingerprint_hasher`]), so the fingerprint of a given payload
+/// is stable within a process run but unpredictable across runs: a
+/// workspace-derived name carried in a payload cannot be chosen to force
+/// fingerprint (and thus bucket) collisions — the HashDoS defense.
+/// Fingerprints never cross a process or serialization boundary. The scope
+/// enters as its own keyed digest ([`scope_digest`]), a function of the
+/// scope's value alone, so equal pairs still fingerprint equal.
 fn structural_fingerprint(data: &SemanticNodeData, scope: &NodeScopeId) -> u64 {
-    let mut hasher = fingerprint_seed().build_hasher();
+    let mut hasher = super::fingerprint_hasher::FingerprintHasher::new();
     data.hash(&mut hasher);
     hasher.write_u64(scope_digest(scope));
+    hasher.finish()
+}
+
+/// The keyed fingerprint hash of a scope.
+fn keyed_scope_hash(scope: &NodeScopeId) -> u64 {
+    let mut hasher = super::fingerprint_hasher::FingerprintHasher::new();
+    scope.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -630,7 +627,7 @@ fn scope_digest(scope: &NodeScopeId) -> u64 {
         local_scope,
     } = scope
     else {
-        return fingerprint_seed().hash_one(scope);
+        return keyed_scope_hash(scope);
     };
     LAST_FILE_SCOPE.with(|last| {
         let mut last = last.borrow_mut();
@@ -640,7 +637,7 @@ fn scope_digest(scope: &NodeScopeId) -> u64 {
                 return *digest;
             }
         }
-        let digest = fingerprint_seed().hash_one(scope);
+        let digest = keyed_scope_hash(scope);
         *last = Some((
             Arc::clone(canonical_id),
             *owner,

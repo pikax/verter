@@ -55,6 +55,7 @@ pub mod derivation;
 pub mod family;
 mod family_intern;
 mod family_retention;
+mod fingerprint_hasher;
 mod flow_return_memo;
 mod hash_cons_memos;
 pub mod inflight;
