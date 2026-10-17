@@ -118,7 +118,10 @@ pub mod output_materialization;
 pub mod query_error_disposition;
 mod query_frames;
 #[cfg(any(test, feature = "test-support"))]
-pub use query_frames::{OpenRequestStateForTests, SemanticTask, TaskOutcomeForTests};
+pub use query_frames::{
+    take_call_suspensions_for_tests, CallSuspensionForTests, OpenRequestStateForTests,
+    SemanticTask, TaskOutcomeForTests,
+};
 pub mod signature_discovery;
 pub mod signature_utility;
 // Private adjacent module: crate-wide compile-time `assert_not_impl_any!`
@@ -574,6 +577,9 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// and how many queries the decision is evaluating in place, which read
     /// only those answers.
     decision_seam: std::cell::RefCell<Option<query_frames::DecisionSeam>>,
+    /// The call resolution whose frame is stepping, while its walk runs:
+    /// the walk it resumes and the answers its operand demands read.
+    call_seam: std::cell::RefCell<Option<query_frames::CallSeam>>,
     /// The binder the running substitution walk replaces, classified once
     /// for every node the walk visits ([`Self::substitution_binder`]).
     /// Emptied at each walk's entry, so it never outlives the hold the
@@ -982,6 +988,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self_evaluation_receipts: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             driven_root_traced: std::cell::RefCell::new(None),
             decision_seam: std::cell::RefCell::new(None),
+            call_seam: std::cell::RefCell::new(None),
             substitution_binder: std::cell::RefCell::new(None),
         }
     }
@@ -1040,6 +1047,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self_evaluation_receipts,
             driven_root_traced,
             decision_seam,
+            call_seam,
             substitution_binder,
         } = self;
         instantiate_active.swap(&other.instantiate_active);
@@ -1077,6 +1085,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self_evaluation_receipts.swap(&other.self_evaluation_receipts);
         driven_root_traced.swap(&other.driven_root_traced);
         decision_seam.swap(&other.decision_seam);
+        call_seam.swap(&other.call_seam);
         substitution_binder.swap(&other.substitution_binder);
     }
 

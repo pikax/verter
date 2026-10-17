@@ -96,6 +96,12 @@ impl<'a> ReadCapture<'a> {
         }
     }
 
+    /// Also capture the candidate this read's cold build admits, if any.
+    pub(crate) fn and_publication(mut self, slot: &'a mut Option<PublishedMemoCandidate>) -> Self {
+        self.publication = Some(slot);
+        self
+    }
+
     /// Hand the answering result's carrier to `slot` instead of bubbling it
     /// into the tracers active now: a consumer that is not running when the
     /// result arrives replays the carrier into its own tracer when it

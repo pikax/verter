@@ -91,6 +91,8 @@ const NOTHING_OPEN: OpenRequestStateForTests = OpenRequestStateForTests {
     active_instantiations: 0,
     open_cost_scopes: 0,
     request_local_open: 0,
+    open_obligation_frames: 0,
+    collecting_sessions: 0,
 };
 
 /// A task whose chain reaches a `typeof` another task is producing waits on
@@ -513,4 +515,197 @@ fn a_semantic_task_dropped_without_returning_gives_its_lender_the_request_state(
         returned,
         "a dropped task's charges reach its lender"
     );
+}
+
+const CALL_FILE: &str = "/semantic-task/call.ts";
+
+/// A generic call whose second argument relates over an alias both its
+/// argument's type and its parameter's name, each argument inferring its
+/// own literal for `T`.
+const CALL: &str = "type Box<T> = { v: T };\n\
+                    declare function pick<T>(a: T, b: Box<T>): T;\n\
+                    declare const box: Box<2>;\n\
+                    const r = pick(1, box);\n";
+
+fn call_host() -> Arc<crate::VerterHost> {
+    let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        CALL_FILE,
+        &crate::u6_flow_shape_corpus_tests::module_script(CALL),
+        crate::FileLanguage::script_ts(),
+    );
+    host
+}
+
+/// The `typeof` of the call's result.
+fn call_result_key(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+) -> SemanticQueryKey {
+    dispatch.typeof_key_for(
+        ValueRootKey {
+            scope: ScopeId::file(
+                CALL_FILE,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
+            name: verter_type_expr::OwnedStr::from("r"),
+        },
+        ProjectionReductionContext::published(ProjectionMode::Navigate),
+    )
+}
+
+/// Lend the call result's task with the demands its call's walk stops on
+/// held by another task, poll it until the walk waits with its collector
+/// holding the first argument's inference, and hand it to `then`.
+fn suspend_the_call<R>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    waker: &Waker,
+    then: impl FnOnce(&mut Option<SemanticTask<'_, '_, crate::resolver_core::HostCapabilities>>) -> R,
+) -> R {
+    let _ = verter_type_engine::project_semantic_dispatch::take_call_suspensions_for_tests();
+    dispatch
+        .with_semantic_task_for_tests(call_result_key(dispatch), |slot| {
+            let task = slot.as_mut().expect("the task is lent");
+            task.hold_call_needs_for_tests();
+            assert!(
+                task.poll_for_tests(waker).is_pending(),
+                "the call's walk waits on another task's producer"
+            );
+            let suspensions =
+                verter_type_engine::project_semantic_dispatch::take_call_suspensions_for_tests();
+            let [suspension] = suspensions.as_slice() else {
+                panic!("the call's walk suspends once: {suspensions:?}");
+            };
+            assert!(
+                suspension
+                    .needs
+                    .iter()
+                    .all(|need| matches!(need, SemanticQueryKey::Instantiate(_))),
+                "it waits on the instantiations relating `box` to `Box<T>` unwraps: {suspension:?}"
+            );
+            assert_eq!(
+                suspension.collected_candidates, 1,
+                "its collector holds what the first argument inferred"
+            );
+            then(slot)
+        })
+        .expect("the cold root runs as a task")
+}
+
+/// A generic call whose argument relation needs instantiations another task
+/// is producing suspends with its inference unfinished: the walk stops
+/// before relating `box` to `Box<T>`, its collector holding what `1`
+/// inferred for `T`, out of the transaction while the task waits. Moved to
+/// another thread, it stays pending; once the producers go away it resumes
+/// there with the same collector — `T` still holds `1` beside the `2` the
+/// second argument infers — and answers as an uninterrupted resolution
+/// does, leaving nothing open.
+#[test]
+fn a_generic_call_suspends_with_its_inference_open_and_resumes_to_the_uninterrupted_answer() {
+    let uninterrupted = {
+        let host = call_host();
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let read = dispatch.execute_read(call_result_key(&dispatch));
+        let answer = match read.value() {
+            QueryResult::Value(node) => QueryResult::Value(SemanticQueryValue::TypeNode(*node)),
+            other => panic!("the uninterrupted call answers a type: {other:?}"),
+        };
+        display(&dispatch, &answer)
+    };
+    assert_eq!(
+        uninterrupted, "Union(2 | 1)",
+        "`pick(1, box)` infers `T` from both arguments: what the first deposited survives the second"
+    );
+
+    let host = call_host();
+    let dispatch = ProjectSemanticDispatch::new(&*host);
+    let graph = host.project_type_store().semantic_graph();
+    let counter = Arc::new(CountingWaker::default());
+    let waker = Waker::from(Arc::clone(&counter));
+    let answer = suspend_the_call(&dispatch, &waker, |slot| {
+        let task = slot.as_mut().expect("the task is lent");
+        assert!(
+            task.live_frames_for_tests() >= 2,
+            "the call's frame waits under the `typeof` that reached it"
+        );
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 1);
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    assert!(
+                        task.poll_for_tests(&waker).is_pending(),
+                        "moved to another thread, the call still waits"
+                    );
+                })
+                .join()
+                .expect("the pending poll returns");
+        });
+        assert!(task.release_held_call_needs_for_tests() > 0);
+        assert!(
+            counter.0.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "the producers going away wake the task"
+        );
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| match task.poll_for_tests(&waker) {
+                    Poll::Ready(TaskOutcomeForTests::Answered(answer)) => answer,
+                    Poll::Ready(TaskOutcomeForTests::Stopped) => panic!("nothing stops the task"),
+                    Poll::Pending => panic!("the woken call produces its operands itself"),
+                })
+                .join()
+                .expect("the resumed task answers")
+        })
+    });
+    assert!(
+        verter_type_engine::project_semantic_dispatch::take_call_suspensions_for_tests().is_empty(),
+        "the resumed walk relates over answered operands"
+    );
+    assert_eq!(display(&dispatch, &answer), uninterrupted);
+    assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+    assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+    assert!(graph.resident_flight_keys_for_tests().is_empty());
+}
+
+/// A call suspended with its inference open, then released while pending —
+/// its request abandoned, or the task dropped on another thread — releases
+/// its collector, its executor frame, its frames' flights and its wait: no
+/// session is left that could still collect, no obligation frame stays
+/// open, and the request state its lender gets back holds nothing open.
+#[test]
+fn a_call_released_while_suspended_with_its_inference_open_leaves_nothing_open() {
+    for dropped_elsewhere in [false, true] {
+        let host = call_host();
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let graph = host.project_type_store().semantic_graph();
+        let waker = Waker::from(Arc::new(CountingWaker::default()));
+        suspend_the_call(&dispatch, &waker, |slot| {
+            if dropped_elsewhere {
+                let task = slot.take().expect("the task is lent");
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(move || drop(task))
+                        .join()
+                        .expect("the task drops on another thread");
+                });
+            }
+            // Otherwise the task is left pending: the entry takes it back.
+        });
+        assert_eq!(
+            dispatch.open_request_state_for_tests(),
+            NOTHING_OPEN,
+            "the released call closes what it opened (dropped elsewhere: {dropped_elsewhere})"
+        );
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        assert!(
+            graph.resident_flight_keys_for_tests().is_empty(),
+            "the call's flights and the held producers go"
+        );
+        // The request goes on: the call resolves afresh to its answer.
+        let read = dispatch.execute_read(call_result_key(&dispatch));
+        let answer = match read.value() {
+            QueryResult::Value(node) => QueryResult::Value(SemanticQueryValue::TypeNode(*node)),
+            other => panic!("the call resolves after the release: {other:?}"),
+        };
+        assert_eq!(display(&dispatch, &answer), "Union(2 | 1)");
+    }
 }

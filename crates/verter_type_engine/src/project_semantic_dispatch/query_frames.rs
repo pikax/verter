@@ -28,6 +28,13 @@
 //! runs again once that need is delivered. A chain of conditionals each
 //! deciding over the one before is therefore a chain of frames too.
 //!
+//! A call an initializer's evaluation reaches resolves as a frame too,
+//! when its resolution is a machinery root. Its candidate walk stops before
+//! an argument relation whose operands need instantiations or `typeof`s the
+//! frame has no answer for, holding its candidate's collecting session out
+//! of the transaction, and resumes with the same session once each is
+//! delivered: a call's inference spans the frame's suspensions.
+//!
 //! Every other query, and every query a frame's step evaluates in place,
 //! keeps the synchronous path; code a step reaches never drives.
 //!
@@ -87,6 +94,10 @@ pub(super) struct QueryProgram<'p, 'a, C: crate::resolver_core::ResolverCapabili
     /// step needed it (the drive runs one chain, so a demand starts right
     /// after the step that needed it, or after its wait restarts it).
     child_depth: u32,
+    /// Test-only: the demands a call's walk suspends on are claimed by
+    /// another task first, and held until released.
+    #[cfg(any(test, feature = "test-support"))]
+    held_call_needs: Option<Vec<(crate::semantic_query_memo::ExecutionTask, ProducerLease<'p>)>>,
 }
 
 /// A suspended semantic computation.
@@ -95,12 +106,64 @@ pub(super) enum QueryFrame<'p, 'a, C: crate::resolver_core::ResolverCapabilities
 }
 
 /// The build a frame carries between its steps: an instantiation's, a
-/// `typeof`'s whose value's annotation is lowering, or a conditional
-/// type's decision.
+/// `typeof`'s whose value's annotation is lowering, a conditional type's
+/// decision, or a call's resolution.
 pub(super) enum FrameBuild {
     Instantiate(Box<InstantiateBuild>),
     Typeof(Box<TypeofBuild>),
     Conditional(Box<ConditionalBuild>),
+    Call(Box<CallBuild>),
+}
+
+/// A call resolution between its steps: the executor frame its walk
+/// opened, the walk itself once it stopped — its candidate's collecting
+/// session included — and the answers to the operand demands it stopped
+/// on, the one it waits on and the others it reached.
+///
+/// The walk stops before an argument relation whose operands — the
+/// argument's type and its parameter's — name instantiations or `typeof`s
+/// the frame has no answer for: the frame needs each, and the walk resumes
+/// at that argument with the same collector, which then relates over
+/// answered operands. Nothing the frame's needs evaluate meanwhile sees the
+/// collector: it is out of the transaction until the walk resumes, so a
+/// call nested in those evaluations deposits into its own.
+#[derive(Default)]
+pub(super) struct CallBuild {
+    /// The call's executor frame, open from the walk's first step until it
+    /// closes.
+    frame: Option<usize>,
+    suspension: Option<Box<super::call_resolve::CallSuspension>>,
+    answers: FxHashMap<SemanticQueryKey, QueryDelivery>,
+    awaiting: Option<SemanticQueryKey>,
+    /// The claim the awaited demand entered with, until the runtime takes it.
+    claim: Option<ClaimAttempt>,
+    pending: std::collections::VecDeque<(SemanticQueryKey, ClaimAttempt)>,
+}
+
+/// What the walk of the call whose frame is stepping reads at its seam:
+/// the walk it resumes, and its operand demands' answers and needs.
+pub(super) struct CallSeam {
+    key: crate::semantic_query::ResolveCallKey,
+    resume: Option<Box<super::call_resolve::CallSuspension>>,
+    answers: FxHashMap<SemanticQueryKey, QueryDelivery>,
+    needs: Vec<(SemanticQueryKey, ClaimAttempt)>,
+    /// The frame depth a needed demand's own frame runs at.
+    depth: u32,
+}
+
+/// What a frame's build did in one step.
+enum FramePoll {
+    Need(SemanticQueryKey),
+    Done(Box<crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>>),
+}
+
+impl From<InstantiatePoll> for FramePoll {
+    fn from(poll: InstantiatePoll) -> Self {
+        match poll {
+            InstantiatePoll::Need(key) => Self::Need(key),
+            InstantiatePoll::Done(output) => Self::Done(Box::new((*output).into())),
+        }
+    }
 }
 
 /// A conditional type's decision between its steps: the answers to the
@@ -335,6 +398,26 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> SemanticTask<'p,
     pub fn live_frames_for_tests(&self) -> usize {
         self.execution.live_frames()
     }
+
+    /// From now on, have another task produce each demand a call's walk
+    /// suspends on before this task claims it, so the walk waits on it with
+    /// its collector held, until [`Self::release_held_call_needs_for_tests`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn hold_call_needs_for_tests(&mut self) {
+        if let Some(program) = self.program.as_mut() {
+            program.held_call_needs.get_or_insert_with(Vec::new);
+        }
+    }
+
+    /// Let the other task's producers of the held demands go, without a
+    /// result: the walk's waits wake, and the task produces them itself.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn release_held_call_needs_for_tests(&mut self) -> usize {
+        self.program
+            .as_mut()
+            .and_then(|program| program.held_call_needs.take())
+            .map_or(0, |held| held.len())
+    }
 }
 
 /// What a semantic task's root answered.
@@ -354,6 +437,11 @@ pub struct OpenRequestStateForTests {
     pub active_instantiations: usize,
     pub open_cost_scopes: usize,
     pub request_local_open: usize,
+    /// Executor and relation frames open on the checker transaction.
+    pub open_obligation_frames: usize,
+    /// Inference sessions that may still collect: collecting on the checker
+    /// transaction, or held out of it by a suspended continuation.
+    pub collecting_sessions: usize,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -380,6 +468,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             active_instantiations: self.instantiate_active.borrow().len(),
             open_cost_scopes: self.connected_demand.open_cost_scopes_for_tests(),
             request_local_open: self.request_local_open.borrow().len(),
+            open_obligation_frames: self.dispatch_txn.borrow().reentry().depth(),
+            collecting_sessions: self.dispatch_txn.borrow().collecting_sessions_for_tests(),
         }
     }
 }
@@ -427,6 +517,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             task: graph.execution_task(),
             retries: FxHashMap::default(),
             child_depth: 1,
+            #[cfg(any(test, feature = "test-support"))]
+            held_call_needs: None,
         };
         program.retries.insert(key.clone(), attempt);
         SemanticTask {
@@ -498,6 +590,35 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Drop for LentTas
 }
 
 impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> QueryProgram<'p, 'a, C> {
+    /// Claim `key` as another task's producer, when the test holds the
+    /// demands a call's walk suspends on.
+    #[cfg(any(test, feature = "test-support"))]
+    fn hold_call_need_for_tests(&mut self, key: &SemanticQueryKey) {
+        let Some(held) = self.held_call_needs.as_mut() else {
+            return;
+        };
+        let dispatch = &self.dispatch;
+        let other = self.graph.task_registry_for_tests().register_task();
+        let mut capture = ReadCapture::default();
+        let Ok(mut attempt) = self.graph.begin_query_claim(
+            dispatch.ctx,
+            dispatch.snapshot.flags(),
+            key.clone(),
+            &mut capture,
+        ) else {
+            return;
+        };
+        if let Claim::Produce(lease) = self.graph.claim_query(
+            dispatch.ctx,
+            dispatch.snapshot.flags(),
+            &mut attempt,
+            &other,
+            &mut capture,
+        ) {
+            held.push((other, lease));
+        }
+    }
+
     /// The frame that produces `key` one level below the needing frame.
     fn producing_frame(
         &self,
@@ -627,10 +748,17 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
                 let step = self.dispatch.step_instantiate_frame(frame, delivery);
                 // A decision's need entered already: its claim continues
                 // when the runtime starts it.
-                if let (EvalStep::Need { demand, .. }, Some(FrameBuild::Conditional(build))) =
-                    (&step, frame.build.as_mut())
-                {
-                    if let Some(claim) = build.claim.take() {
+                if let EvalStep::Need { demand, .. } = &step {
+                    let claim = match frame.build.as_mut() {
+                        Some(FrameBuild::Conditional(build)) => build.claim.take(),
+                        Some(FrameBuild::Call(build)) => {
+                            #[cfg(any(test, feature = "test-support"))]
+                            self.hold_call_need_for_tests(demand);
+                            build.claim.take()
+                        }
+                        _ => None,
+                    };
+                    if let Some(claim) = claim {
                         self.retries.insert(demand.clone(), claim);
                     }
                 }
@@ -757,6 +885,14 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
 
     fn abandon(&mut self, frame: QueryFrame<'p, 'a, C>) {
         let QueryFrame::Instantiate(mut frame) = frame;
+        // A call stopped between its steps releases the collector its walk
+        // held and closes the executor frame it opened.
+        if let Some(FrameBuild::Call(build)) = frame.build.as_mut() {
+            if let Some(idx) = build.frame.take() {
+                self.dispatch
+                    .abandon_resolve_call_build(idx, build.suspension.take());
+            }
+        }
         // A build stopped between its steps leaves the declaration it
         // entered; its producer lease aborts its flight as it drops.
         if let Some((identity, args)) = frame.active.take() {
@@ -1028,6 +1164,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         delivery: FrameDelivery,
     ) -> super::locator_view_worklist::ProjectionDelivery {
         self.consume_delivery(delivery.delivery, delivery.depth)
+    }
+
+    /// The read a delivery a build consumes itself answers it with
+    /// ([`Self::read_delivery`]).
+    pub(super) fn read_frame_delivery(&self, delivery: FrameDelivery) -> ValueRead {
+        self.read_delivery(
+            delivery.delivery,
+            Nesting::Frame {
+                depth: delivery.depth,
+            },
+        )
     }
 
     /// The node a delivery answers its consumer with, and whether it
@@ -1304,23 +1451,31 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Ok(delivery) => delivery,
             Err(()) => unreachable!("a stopped drive delivers nothing"),
         });
-        let poll = match frame.build.as_mut() {
-            Some(FrameBuild::Instantiate(build)) => self.drain_instantiate(
-                build,
-                delivery.map(|delivery| self.consume_delivery(delivery, frame.depth + 1)),
-            ),
+        let poll: FramePoll = match frame.build.as_mut() {
+            Some(FrameBuild::Instantiate(build)) => self
+                .drain_instantiate(
+                    build,
+                    delivery.map(|delivery| self.consume_delivery(delivery, frame.depth + 1)),
+                )
+                .into(),
             // A typeof build consumes its delivery where its evaluation
             // reads it.
-            Some(FrameBuild::Typeof(build)) => self.drain_typeof(
-                build,
-                delivery.map(|delivery| FrameDelivery {
-                    delivery,
-                    depth: frame.depth + 1,
-                }),
-            ),
+            Some(FrameBuild::Typeof(build)) => self
+                .drain_typeof(
+                    build,
+                    delivery.map(|delivery| FrameDelivery {
+                        delivery,
+                        depth: frame.depth + 1,
+                    }),
+                )
+                .into(),
             // A decision keeps its deliveries as answers to its reads.
-            Some(FrameBuild::Conditional(build)) => {
-                self.drain_conditional(&frame.key, build, delivery, frame.depth + 1)
+            Some(FrameBuild::Conditional(build)) => self
+                .drain_conditional(&frame.key, build, delivery, frame.depth + 1)
+                .into(),
+            // So does a call's walk, for its operands.
+            Some(FrameBuild::Call(build)) => {
+                self.drain_call(&frame.key, build, delivery, frame.depth + 1)
             }
             None => {
                 self.open_cold_build(None);
@@ -1340,7 +1495,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             ),
                         };
                         match begun {
-                            InstantiateStart::Done(output) => InstantiatePoll::Done(output),
+                            InstantiateStart::Done(output) => InstantiatePoll::Done(output).into(),
                             InstantiateStart::Build(build) => {
                                 frame.active =
                                     Some((build.active_identity.clone(), Arc::clone(&build.args)));
@@ -1349,7 +1504,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 else {
                                     unreachable!("the build was just inserted")
                                 };
-                                self.drain_instantiate(build, None)
+                                self.drain_instantiate(build, None).into()
                             }
                         }
                     }
@@ -1367,20 +1522,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             ),
                         };
                         match begun {
-                            TypeofStart::Done(output) => InstantiatePoll::Done(output),
+                            TypeofStart::Done(output) => InstantiatePoll::Done(output).into(),
                             TypeofStart::Build(build) => {
                                 let FrameBuild::Typeof(build) =
                                     frame.build.insert(FrameBuild::Typeof(build))
                                 else {
                                     unreachable!("the build was just inserted")
                                 };
-                                self.drain_typeof(build, None)
+                                self.drain_typeof(build, None).into()
                             }
                         }
                     }
                     SemanticQueryKey::Conditional { .. } => {
                         match self.cold_build_budget_refusal(&frame.key) {
-                            Some(refusal) => InstantiatePoll::Done(Box::new(refusal)),
+                            Some(refusal) => InstantiatePoll::Done(Box::new(refusal)).into(),
                             None => {
                                 let FrameBuild::Conditional(build) =
                                     frame.build.insert(FrameBuild::Conditional(Box::default()))
@@ -1388,11 +1543,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     unreachable!("the build was just inserted")
                                 };
                                 self.drain_conditional(&frame.key, build, None, frame.depth + 1)
+                                    .into()
+                            }
+                        }
+                    }
+                    SemanticQueryKey::ResolveCall(_) => {
+                        match self.cold_build_budget_refusal(&frame.key) {
+                            Some(refusal) => InstantiatePoll::Done(Box::new(refusal)).into(),
+                            None => {
+                                let FrameBuild::Call(build) =
+                                    frame.build.insert(FrameBuild::Call(Box::default()))
+                                else {
+                                    unreachable!("the build was just inserted")
+                                };
+                                self.drain_call(&frame.key, build, None, frame.depth + 1)
                             }
                         }
                     }
                     _ => unreachable!(
-                        "a frame produces an instantiation, a typeof or a conditional decision"
+                        "a frame produces an instantiation, a typeof, a conditional decision \
+                         or a call resolution"
                     ),
                 }
             }
@@ -1400,11 +1570,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         drop(installed);
         drop(taint);
         match poll {
-            InstantiatePoll::Need(key) => EvalStep::Need {
+            FramePoll::Need(key) => EvalStep::Need {
                 demand: key,
                 role: (),
             },
-            InstantiatePoll::Done(output) => {
+            FramePoll::Done(output) => {
                 // Finishing the build left the declaration it entered.
                 frame.active = None;
                 EvalStep::Complete(self.complete_instantiate_frame(frame, *output))
@@ -1441,7 +1611,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     fn complete_instantiate_frame(
         &self,
         frame: &mut InstantiateFrame<'_, 'a, C>,
-        output: crate::project_semantic_dispatch::walk::QueryBuildOutput,
+        output: crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>,
     ) -> QueryDelivery {
         let finalise = frame
             .tracer
@@ -1449,7 +1619,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .expect("a stepped frame owns its tracer")
             .finish();
         let (output, rooting) = self.close_cold_build(
-            output.into(),
+            output,
             std::mem::take(&mut frame.taint),
             finalise,
             &CarrierNormalizationPrelude::none(),
@@ -1503,8 +1673,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return delivery;
             }
         };
+        let mut publication = None;
         let read = {
-            let mut capture = ReadCapture::deferring_carrier(&mut carrier);
+            let mut capture =
+                ReadCapture::deferring_carrier(&mut carrier).and_publication(&mut publication);
             match lease.settle(self.ctx, self.snapshot.flags(), output, receipt.clone()) {
                 Err(read) => read,
                 Ok(mut settled) => {
@@ -1522,6 +1694,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
         };
+        // A call's admitted publication is its component's commit boundary:
+        // the members its walk completed publish against it, or are
+        // aborted with it.
+        if let SemanticQueryKey::ResolveCall(call) = &frame.key {
+            self.dispatch_txn.borrow_mut().call.last_root_failure = None;
+            match &publication {
+                Some(publication) => self.resolve_call_drain_completed_members(call, publication),
+                None => self.relation_abort_completed_members(),
+            }
+        }
         QueryDelivery {
             read: self.attribute_query_read(
                 &frame.key,
@@ -1532,4 +1714,159 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             carrier,
         }
     }
+
+    /// Carry a call resolution's frame on: record a delivery as the answer
+    /// to the operand demand its walk waited on, need the next one its walk
+    /// reached, or run the walk — resuming it where it stopped — until it
+    /// stops again or closes.
+    fn drain_call(
+        &self,
+        key: &SemanticQueryKey,
+        build: &mut CallBuild,
+        delivery: Option<QueryDelivery>,
+        depth: u32,
+    ) -> FramePoll {
+        let SemanticQueryKey::ResolveCall(call) = key else {
+            unreachable!("a call frame produces a call resolution")
+        };
+        if let Some(delivery) = delivery {
+            let answered = build
+                .awaiting
+                .take()
+                .expect("a delivery answers the demand the walk waited on");
+            build.answers.insert(answered, delivery);
+        }
+        if let Some((need, claim)) = build.pending.pop_front() {
+            build.awaiting = Some(need.clone());
+            build.claim = Some(claim);
+            return FramePoll::Need(need);
+        }
+        let idx = match build.frame {
+            Some(idx) => idx,
+            None => match self.open_resolve_call_build(call) {
+                Ok(idx) => *build.frame.insert(idx),
+                Err(refusal) => return FramePoll::Done(refusal),
+            },
+        };
+        let installed = self.call_seam.replace(Some(CallSeam {
+            key: (**call).clone(),
+            resume: build.suspension.take(),
+            answers: std::mem::take(&mut build.answers),
+            needs: Vec::new(),
+            depth,
+        }));
+        verter_debug_assert!(installed.is_none(), "one call walk runs per step");
+        let step = self.step_resolve_call_build(call, idx);
+        let seam = self
+            .call_seam
+            .take()
+            .expect("the walk's seam stays installed for its run");
+        build.answers = seam.answers;
+        match step {
+            super::call_resolve::CallWalkStep::Suspended(suspension) => {
+                #[cfg(any(test, feature = "test-support"))]
+                CALL_SUSPENSIONS_FOR_TESTS.with(|observed| {
+                    observed.borrow_mut().push(CallSuspensionForTests {
+                        needs: seam.needs.iter().map(|(need, _)| need.clone()).collect(),
+                        collected_candidates: suspension.collected_candidates(),
+                    })
+                });
+                build.suspension = Some(suspension);
+                let mut needs = seam.needs.into_iter();
+                let (need, claim) = needs.next().expect("a suspended walk waits on a demand");
+                build.awaiting = Some(need.clone());
+                build.claim = Some(claim);
+                build.pending = needs.collect();
+                FramePoll::Need(need)
+            }
+            super::call_resolve::CallWalkStep::Done(output) => {
+                build.frame = None;
+                FramePoll::Done(output)
+            }
+        }
+    }
+
+    /// Whether the walk of `key` is the one its frame is stepping, which
+    /// stops on its operands' demands instead of evaluating them in place.
+    pub(super) fn call_walk_suspends(&self, key: &crate::semantic_query::ResolveCallKey) -> bool {
+        self.call_seam
+            .borrow()
+            .as_ref()
+            .is_some_and(|seam| &seam.key == key)
+    }
+
+    /// The walk of `key` its frame suspended, to resume where it stopped.
+    pub(super) fn take_call_resume(
+        &self,
+        key: &crate::semantic_query::ResolveCallKey,
+    ) -> Option<Box<super::call_resolve::CallSuspension>> {
+        self.call_seam
+            .borrow_mut()
+            .as_mut()
+            .filter(|seam| &seam.key == key)
+            .and_then(|seam| seam.resume.take())
+    }
+
+    /// Demand what an argument relation over `operands` unwraps — as the
+    /// checker instantiates an argument's and its parameter's types before
+    /// relating them — at the walk's seam: an instantiation or a `typeof`
+    /// the frame's answers hold, or the memo serves warm, reads at once;
+    /// one that must be computed becomes one of the frame's needs. What the
+    /// demand observed is the relation's to observe, so it is dropped.
+    /// Whether the walk must stop for any.
+    pub(super) fn call_operands_wait(&self, operands: [SemanticNodeId; 2]) -> bool {
+        let (answers, depth) = {
+            let mut seam = self.call_seam.borrow_mut();
+            let seam = seam
+                .as_mut()
+                .expect("an operand demand runs inside its frame's walk");
+            (std::mem::take(&mut seam.answers), seam.depth)
+        };
+        let outer = self.decision_seam.replace(Some(DecisionSeam {
+            answers,
+            needs: Vec::new(),
+            depth,
+            nested: 0,
+        }));
+        let demanded = self.observe_read(|| {
+            for operand in operands {
+                let _ = self.unwrap_identity_carrier_for_relation(operand);
+            }
+        });
+        let _ = demanded.discard();
+        let DecisionSeam { answers, needs, .. } = self
+            .decision_seam
+            .replace(outer)
+            .expect("the operand demand's seam stays installed for its run");
+        let waits = !needs.is_empty();
+        let mut seam = self.call_seam.borrow_mut();
+        let seam = seam
+            .as_mut()
+            .expect("an operand demand runs inside its frame's walk");
+        seam.answers = answers;
+        seam.needs = needs;
+        waits
+    }
+}
+
+/// What a call frame's walk held when it suspended. Test-only.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone)]
+pub struct CallSuspensionForTests {
+    /// The demands the walk stopped on.
+    pub needs: Vec<SemanticQueryKey>,
+    /// The deposits its candidate's collector held.
+    pub collected_candidates: usize,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static CALL_SUSPENSIONS_FOR_TESTS: std::cell::RefCell<Vec<CallSuspensionForTests>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Take the suspensions call frames' walks made on this thread.
+#[cfg(any(test, feature = "test-support"))]
+pub fn take_call_suspensions_for_tests() -> Vec<CallSuspensionForTests> {
+    CALL_SUSPENSIONS_FOR_TESTS.with(|observed| std::mem::take(&mut *observed.borrow_mut()))
 }

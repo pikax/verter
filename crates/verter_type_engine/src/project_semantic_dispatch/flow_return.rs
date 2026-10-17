@@ -1848,7 +1848,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// value's `typeof` (`id(y)` reads `typeof y`) with that `typeof` as its
     /// need, and resumes with its value as `delivery`: a chain of values
     /// each initialized from a call over the one before is then a chain of
-    /// frames.
+    /// frames. A call whose resolution is a machinery root
+    /// ([`Self::call_resumes_on_the_runtime`]) is its need too, resolved by
+    /// a frame of its own, and the run resumes with its result.
     pub(super) fn drain_indexed_value(
         &self,
         canonical: &str,
@@ -1856,7 +1858,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         root: &verter_type_expr::IndexedValueExpression,
         run: &mut IndexedValueRun,
         suspend: bool,
-        delivery: Option<crate::semantic_query::SemanticNodeId>,
+        delivery: Option<super::query_frames::FrameDelivery>,
     ) -> IndexedValuePoll {
         use verter_type_expr::IndexedValueExpression;
         enum Phase {
@@ -1885,9 +1887,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 Phase::Enter
             }
             IndexedNext::AwaitReference => Phase::Deliver(Some(IndexedValue {
-                node: delivery.expect("a run waiting on a value resumes with it"),
+                node: self
+                    .consume_frame_delivery(
+                        delivery.expect("a run waiting on a value resumes with it"),
+                    )
+                    .node,
                 fresh: false,
             })),
+            IndexedNext::AwaitCall => Phase::Deliver(self.indexed_call_delivered(
+                delivery.expect("a run waiting on a call resumes with its resolution"),
+            )),
             IndexedNext::Finished => unreachable!("a finished run is not drained again"),
         };
         loop {
@@ -2030,16 +2039,56 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             else {
                 unreachable!("the call on top")
             };
+            let callee = callee.expect("a resolved call has a callee");
+            if suspend {
+                let Some(key) =
+                    self.indexed_call_key(canonical, owner, call, callee, receiver.flatten(), args)
+                else {
+                    phase = Phase::Deliver(None);
+                    continue;
+                };
+                if self.call_resumes_on_the_runtime(&key) {
+                    *next = IndexedNext::AwaitCall;
+                    return IndexedValuePoll::Need(
+                        crate::semantic_query::SemanticQueryKey::ResolveCall(Box::new(key)),
+                    );
+                }
+                phase = Phase::Deliver(self.resolve_indexed_call_key(key, hold_flow_result));
+                continue;
+            }
             phase = Phase::Deliver(self.resolve_indexed_call(
                 canonical,
                 owner,
                 call,
-                callee.expect("a resolved call has a callee"),
+                callee,
                 receiver.flatten(),
                 args,
                 hold_flow_result,
             ));
         }
+    }
+
+    /// The value a call's resolution, resolved by a frame of its own,
+    /// delivers to the indexed run waiting on it: exactly what
+    /// [`Self::resolve_indexed_call`] reads from the executor.
+    fn indexed_call_delivered(
+        &self,
+        delivery: super::query_frames::FrameDelivery,
+    ) -> Option<IndexedValue> {
+        let value = match self.read_frame_delivery(delivery).value {
+            QueryResult::Value(crate::semantic_query::SemanticQueryValue::ResolveCall(result)) => {
+                let return_type = super::return_equation::resolved_call_return_type(&result);
+                Some(IndexedValue {
+                    node: return_type,
+                    fresh: self.call_result_is_fresh_literal(&result, return_type),
+                })
+            }
+            _ => None,
+        };
+        if value.is_none() {
+            crate::request_context::mark_request_result_partial();
+        }
+        value
     }
 
     /// The `typeof` an indexed leaf that names a value reads (`y` in
@@ -2153,6 +2202,36 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         args: Vec<crate::semantic_query::CallArgKey>,
         hold_flow_result: bool,
     ) -> Option<IndexedValue> {
+        let key = self.indexed_call_key(canonical, owner, call, callee, receiver, args)?;
+        self.resolve_indexed_call_key(key, hold_flow_result)
+    }
+
+    /// Resolve one indexed call's key through the executor.
+    fn resolve_indexed_call_key(
+        &self,
+        key: crate::semantic_query::ResolveCallKey,
+        hold_flow_result: bool,
+    ) -> Option<IndexedValue> {
+        let (result, held) =
+            self.execute_indexed_resolve_call_with_flow_hold(key, hold_flow_result);
+        if result.is_none() && !held {
+            crate::request_context::mark_request_result_partial();
+        }
+        result
+    }
+
+    /// The executor key of one indexed call over its evaluated callee,
+    /// receiver and arguments; `None` when its explicit type arguments do
+    /// not lower.
+    fn indexed_call_key(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        call: &verter_type_expr::IndexedValueCall,
+        callee: crate::semantic_query::SemanticNodeId,
+        receiver: Option<crate::semantic_query::SemanticNodeId>,
+        args: Vec<crate::semantic_query::CallArgKey>,
+    ) -> Option<crate::semantic_query::ResolveCallKey> {
         use verter_type_expr::IndexedValueCallKind;
         let explicit_type_args = call
             .explicit_type_args
@@ -2171,29 +2250,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let callee = receiver.map_or(callee, |receiver| {
             self.bind_callee_receiver(callee, receiver)
         });
-        let (result, held) = self.execute_indexed_resolve_call_with_flow_hold(
-            crate::semantic_query::ResolveCallKey {
-                point: crate::semantic_query::ProgramPointId {
-                    canonical_id: verter_type_expr::OwnedStr::from(canonical),
-                    offset: call.point,
-                },
-                callee,
-                kind: match call.kind {
-                    IndexedValueCallKind::Call => crate::semantic_query::CallKind::Call,
-                    IndexedValueCallKind::Construct => crate::semantic_query::CallKind::Construct,
-                },
-                receiver,
-                args: Arc::from(args.into_boxed_slice()),
-                explicit_type_args: Arc::from(explicit_type_args.into_boxed_slice()),
-                flow: crate::semantic_query::FlowNarrowingKey::empty(),
-                context: self.resolve_call_context_for(canonical),
+        Some(crate::semantic_query::ResolveCallKey {
+            point: crate::semantic_query::ProgramPointId {
+                canonical_id: verter_type_expr::OwnedStr::from(canonical),
+                offset: call.point,
             },
-            hold_flow_result,
-        );
-        if result.is_none() && !held {
-            crate::request_context::mark_request_result_partial();
-        }
-        result
+            callee,
+            kind: match call.kind {
+                IndexedValueCallKind::Call => crate::semantic_query::CallKind::Call,
+                IndexedValueCallKind::Construct => crate::semantic_query::CallKind::Construct,
+            },
+            receiver,
+            args: Arc::from(args.into_boxed_slice()),
+            explicit_type_args: Arc::from(explicit_type_args.into_boxed_slice()),
+            flow: crate::semantic_query::FlowNarrowingKey::empty(),
+            context: self.resolve_call_context_for(canonical),
+        })
     }
 
     /// Consume an inferred declaration's indexed semantic expression source.
@@ -2223,7 +2295,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(observed) => observed.resume(self),
             None => self.begin_read_observation(),
         };
-        let mut delivered = delivery.map(|delivery| self.consume_frame_delivery(delivery).node);
+        let mut delivered = delivery;
         let owner = run.owner;
         let value = loop {
             let indexed = match &mut run.state {
@@ -9342,6 +9414,8 @@ enum IndexedNext {
     Enter { hold: bool, as_callee: bool },
     /// Take the delivered value as the leaf's at its position.
     AwaitReference,
+    /// Take the delivered resolution as the value of the call it resolves.
+    AwaitCall,
     /// Nothing: the run finished.
     Finished,
 }
