@@ -968,12 +968,18 @@ small list and leaves sorting to the one seal. A sealed traced set that
 already holds the build's fence and every observed self-root at its observed
 version is shared as the completed carrier rather than copied and sealed
 again. The reverse index is registered when it is READ, not at publish: a
-publish leaves its candidate unindexed (`MemoEntry::reverse_indexed`) and every
-read of `canonical_to_entries` — `invalidate_canonical` and the diagnostic
-counts — first registers every unindexed resident candidate under the same
-`entries` hold (`index_unregistered_candidates_locked`), so a read sees every
-resident candidate and a candidate displaced or FIFO-evicted before any read
-is dropped with nothing to prune. Registration and every drain go through ONE
+publish leaves its candidate unindexed (`MemoEntry::reverse_indexed`) and notes
+its family and admission sequence in `PendingRegistrations`; every read of
+`canonical_to_entries` — `invalidate_canonical` and the diagnostic counts —
+first registers exactly those pending candidates under the same `entries` hold
+(`index_unregistered_candidates_locked`), so a read sees every resident
+candidate, its registration work follows the publishes since the previous read
+rather than the memo's size, and a candidate displaced or FIFO-evicted before
+any read is dropped with nothing to prune. A pending list that reaches the
+resident family count is dropped for one walk of every resident family at the
+next read, so it never outgrows the memo it indexes. The work counter
+`test_reverse_index_registration_visits` guards that bound
+(`reverse_index_read_registers_only_candidates_published_since_the_last_read`). Registration and every drain go through ONE
 borrowed projection (`RegisteredCanonicals` over
 `ReadSetSignature::for_each_canonical_id` ∪ the dispatch-fence canonicals), so
 they stay symmetric without allocating a canonical per call; an existing shard

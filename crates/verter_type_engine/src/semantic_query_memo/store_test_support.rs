@@ -319,7 +319,7 @@ impl SemanticGraphStore {
             self.record_family_admission_locked(&mut entries, &family);
         }
         if !populated_slots.is_empty() {
-            self.defer_reverse_index_registration();
+            self.defer_reverse_index_registration(&family, admission_seq, entries.len());
         }
         drop(entries);
         populated_slots.len()

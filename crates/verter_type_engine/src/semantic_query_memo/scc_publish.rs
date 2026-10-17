@@ -650,6 +650,7 @@ impl SemanticGraphStore {
         }
         let cap = family.candidate_cap();
         let family_was_new = !entries.contains_key(family);
+        let admission_seq = entry.admission_seq;
         let outcome = entries.entry(family.clone()).or_default().publish(
             ModeSlot::Single,
             entry,
@@ -668,7 +669,7 @@ impl SemanticGraphStore {
         // The member enters the reverse index when the index is next read,
         // under the `entries` lock this publish holds.
         if !populated_slots.is_empty() {
-            self.defer_reverse_index_registration();
+            self.defer_reverse_index_registration(family, admission_seq, entries.len());
         }
         NewlyKeyedFamily(family_was_new && !populated_slots.is_empty())
     }

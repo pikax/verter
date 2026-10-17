@@ -9,13 +9,15 @@
 //! eviction, and single `(family, slot, seq)` removal during
 //! cross-canonical cleanup.
 //!
-//! **Registration on read.** Publishing a candidate leaves it unindexed;
-//! the store registers every unindexed candidate the first time the index
-//! is read, under the same `entries` lock hold as that read
-//! ([`SemanticGraphStore::index_unregistered_candidates_locked`](super::SemanticGraphStore)).
-//! An index read therefore always sees every resident candidate, and a
-//! candidate displaced or evicted before any read is dropped with nothing
-//! to prune.
+//! **Registration on read.** Publishing a candidate leaves it unindexed
+//! and notes its family and admission sequence in [`PendingRegistrations`];
+//! the next read of the index registers exactly those candidates, under
+//! the same `entries` lock hold as that read
+//! ([`SemanticGraphStore::index_unregistered_candidates_locked`](super::SemanticGraphStore)),
+//! so its work follows the publishes since the previous read, not the
+//! memo's size. An index read therefore always sees every resident
+//! candidate, and a candidate displaced or evicted before any read is
+//! dropped with nothing to prune.
 //!
 //! **Per-candidate keying.** Reverse-index entries identify
 //! `(FamilyKey, ModeSlot, admission_seq)` — per-candidate, not
@@ -44,6 +46,67 @@ use super::family::{FamilyKey, FamilySlots, MemoEntry, ModeSlot};
 use super::{CanonicalToEntries, RegisteredFacts};
 use crate::instant::Instant;
 use crate::semantic_query::DepSignature;
+
+/// The candidates published since the reverse index was last read, so the
+/// read registers exactly those instead of walking every resident family.
+/// Locked only while the family memo's `entries` lock is held
+/// (`entries → pending`), so it never contends.
+#[derive(Default)]
+pub(super) struct PendingRegistrations {
+    /// Each publish's family and admission sequence, in publish order. An
+    /// entry whose candidate was displaced or evicted before the read
+    /// finds nothing to register.
+    published: Vec<(FamilyKey, u64)>,
+    /// The list grew to the memo's resident family count (repeat publishes
+    /// into resident families, or candidates evicted unread) and was
+    /// dropped: the next read registers every unindexed resident candidate
+    /// in one walk. The list therefore never outgrows the memo it indexes,
+    /// and the walk costs no more per publish than the list it replaces.
+    overflowed: bool,
+}
+
+/// What a reverse-index read registers.
+pub(super) enum PendingWork {
+    /// Nothing was published since the previous read.
+    None,
+    /// These publishes' candidates.
+    Published(Vec<(FamilyKey, u64)>),
+    /// Every unindexed resident candidate.
+    All,
+}
+
+impl PendingRegistrations {
+    /// Note one published candidate; `resident_families` is the memo's
+    /// family count after the publish.
+    pub(super) fn note(
+        &mut self,
+        family: &FamilyKey,
+        admission_seq: u64,
+        resident_families: usize,
+    ) {
+        if self.overflowed {
+            return;
+        }
+        if self.published.len() >= resident_families {
+            self.published = Vec::new();
+            self.overflowed = true;
+            return;
+        }
+        self.published.push((family.clone(), admission_seq));
+    }
+
+    /// Take the registration work a read owes, leaving none pending.
+    pub(super) fn take(&mut self) -> PendingWork {
+        let pending = std::mem::take(self);
+        if pending.overflowed {
+            PendingWork::All
+        } else if pending.published.is_empty() {
+            PendingWork::None
+        } else {
+            PendingWork::Published(pending.published)
+        }
+    }
+}
 
 /// The canonicals one candidate registers under, borrowed from its own
 /// carriers: the UNION of the carrier's canonicals
