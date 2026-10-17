@@ -1024,6 +1024,22 @@ fn cross_product_at_the_checker_limit_is_its_ts2590_recovery_for_every_selector(
     });
     assert_object_spread_ts2590(&nested, "nested refusal");
 
+    // A refused nested construction is not shadowed by a later write of the
+    // selected key.
+    let shadowed = program(
+        graph,
+        [
+            ObjectConstructionEffect::Spread(refused),
+            property("x", number, false),
+        ],
+    );
+    let selected = dispatch.execute(SemanticQueryKey::ProjectObjectSpread {
+        program: shadowed,
+        selector: ObjectProjectionSelector::Key(key("x")),
+        context: context(ExactOptionalPropertyPolicy::Disabled),
+    });
+    assert_object_spread_ts2590(&selected, "shadowed nested refusal");
+
     // 99,999 constituents: below the limit, the factored product builds
     // completely, without building one of them.
     let below = program(

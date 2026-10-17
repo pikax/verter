@@ -130,6 +130,7 @@ impl From<NarrowFailure> for EvalFailure {
         match failure {
             NarrowFailure::Query(error) => Self::Operational(error),
             NarrowFailure::Recursive(node) => Self::Recursive(node),
+            NarrowFailure::Exhausted(reasons) => Self::Exhausted(reasons),
         }
     }
 }
@@ -269,6 +270,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let program = program.share();
         drop(data);
 
+        // Pay for the per-effect layers before allocating them.
+        let layer_bytes = program.effects.len().saturating_mul(
+            2 * std::mem::size_of::<ProductNode>()
+                + std::mem::size_of::<ProductFactor>()
+                + std::mem::size_of::<ProductLeaf>(),
+        );
+        if let Err(EvalFailure::Exhausted(reasons)) =
+            self.charge_spread_construction(program.effects.len(), layer_bytes)
+        {
+            return self.object_projection_exhausted(reasons);
+        }
+
         let start = selector_live_start(&program, selector);
         let mut factors = Vec::with_capacity(program.effects.len());
         let mut live = Vec::with_capacity(program.effects.len() - start);
@@ -279,6 +292,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         Ok(layer) => layer,
                         Err(EvalFailure::Exhausted(reasons)) => {
                             return self.object_projection_exhausted(reasons);
+                        }
+                        // A construction refusal or resource failure is
+                        // selector-independent and never shadowed.
+                        Err(EvalFailure::Operational(error)) if is_construction_refusal(&error) => {
+                            return self.object_projection_failure(error);
                         }
                         // A shadowed operand that cannot be classified
                         // contributes nothing the selector reads, and no
@@ -295,6 +313,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 _ => ProductNode::leaf(ProductLeaf::Direct {
                     program: program_id,
                     effect: index as u32,
+                    closed: self.direct_effect_is_closed(effect),
                 }),
             };
             factors.push(match layer.bounds().width {
@@ -312,14 +331,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
         let mut root = ProductNode::overlay(live);
         if let Some(reads) = FragmentReads::of(selector) {
-            root = match root.narrowed(&|fragment| reads.narrow(fragment), &mut |nested| {
-                self.narrowed_nested_product(nested, selector, context)
-            }) {
+            root = match root.narrowed(
+                &|fragment| reads.narrow(fragment),
+                &mut |nested| self.narrowed_nested_product(nested, selector, context),
+                &mut |units| {
+                    self.charge_spread_construction(units, 0)
+                        .map_err(|failure| match failure {
+                            EvalFailure::Exhausted(reasons) => NarrowFailure::Exhausted(reasons),
+                            _ => unreachable!("charging only exhausts"),
+                        })
+                },
+            ) {
                 Ok(root) => root,
                 Err(NarrowFailure::Recursive(node)) => {
                     return self.object_projection_recursive(node)
                 }
                 Err(NarrowFailure::Query(error)) => return self.object_projection_failure(error),
+                Err(NarrowFailure::Exhausted(reasons)) => {
+                    return self.object_projection_exhausted(reasons)
+                }
             };
         }
         let mut product =
@@ -488,8 +518,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let selector = &product.selector;
         let policy = product.policy;
         match leaf {
-            ProductLeaf::Direct { program, effect } => {
+            ProductLeaf::Direct {
+                program, effect, ..
+            } => {
                 let Some(program) = self.spread_program(*program) else {
+                    verter_debug_assert::verter_debug_assert!(
+                        false,
+                        "a direct leaf's program node is retained"
+                    );
                     return;
                 };
                 if let Some(effect) = program.effects.get(*effect as usize) {
@@ -503,6 +539,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // caller's prior state, so no intermediate surface is needed.
                 for program in programs.iter().rev() {
                     let Some(program) = self.spread_program(*program) else {
+                        verter_debug_assert::verter_debug_assert!(
+                            false,
+                            "a copied-writes program node is retained"
+                        );
                         continue;
                     };
                     for effect in program.effects.iter().skip(1) {
@@ -1387,6 +1427,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// Whether a direct effect leaves the key domain closed: only a
+    /// computed key that resolves to no literal opens it.
+    fn direct_effect_is_closed(&self, effect: &ObjectConstructionEffect) -> bool {
+        let key = match effect {
+            ObjectConstructionEffect::DirectProperty(effect) => &effect.key,
+            ObjectConstructionEffect::DirectMethod(effect) => &effect.key,
+            ObjectConstructionEffect::DirectGet(effect)
+            | ObjectConstructionEffect::DirectSet(effect) => &effect.key,
+            _ => return true,
+        };
+        self.resolve_authored_key(key).is_some()
+    }
+
     fn resolve_authored_key(&self, key: &AuthoredPropertyKey) -> Option<PropertyKey> {
         if let Some(known) = key.cloned_known() {
             return Some(known);
@@ -1426,6 +1479,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             _ => Vec::new(),
         }
     }
+}
+
+/// Failures that refuse the construction itself, whichever facts a
+/// selector reads.
+fn is_construction_refusal(error: &QueryError) -> bool {
+    matches!(
+        error,
+        QueryError::CheckerRecovery { .. }
+            | QueryError::BudgetExceeded(_)
+            | QueryError::Cancelled
+            | QueryError::ExecutionAborted(_)
+    )
 }
 
 fn selector_live_start(

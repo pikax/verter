@@ -459,6 +459,11 @@ pub struct ObjectProjectionAlternative {
 }
 
 impl ObjectProjectionAlternative {
+    /// How many member and index facts copying this alternative moves.
+    pub(crate) fn fact_count(&self) -> usize {
+        self.positive.len() + self.indices.len()
+    }
+
     /// Borrow the positive facts. Omission is not absence evidence.
     #[must_use]
     pub const fn positive(&self) -> PositiveAlternativeEvidence<'_> {

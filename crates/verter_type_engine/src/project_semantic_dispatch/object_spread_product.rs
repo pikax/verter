@@ -80,6 +80,9 @@ pub(super) enum ProductLeaf {
     Direct {
         program: SemanticNodeId,
         effect: u32,
+        /// False when the effect writes an unresolved computed key, which
+        /// leaves the alternative's key domain open.
+        closed: bool,
     },
     /// The copied facts of one closed object alternative.
     Spread(SpreadFragment),
@@ -245,7 +248,14 @@ impl ProductNode {
                     facts: inner.facts,
                 }
             }
-            Self::Finished(_) => ProductBounds::LEAF,
+            Self::Finished(alternative) => {
+                let facts = alternative.fact_count();
+                ProductBounds {
+                    width: 1,
+                    units: 1 + facts,
+                    facts,
+                }
+            }
         }
     }
 
@@ -257,7 +267,8 @@ impl ProductNode {
             Self::Leaf(leaf) => match leaf.as_ref() {
                 ProductLeaf::Spread(fragment) => !fragment.residual,
                 ProductLeaf::Residual { .. } => false,
-                ProductLeaf::Direct { .. } | ProductLeaf::CopiedWrites { .. } => true,
+                ProductLeaf::Direct { closed, .. } => *closed,
+                ProductLeaf::CopiedWrites { .. } => true,
             },
             Self::Choice(arms) | Self::Overlay(arms) => arms.nodes.iter().all(Self::closes),
             Self::Nested(nested) => nested.formula.all_alternatives_closed(),
@@ -301,6 +312,7 @@ impl ProductNode {
         &self,
         narrow: &impl Fn(&SpreadFragment) -> SpreadFragment,
         nested: &mut impl FnMut(&NestedProduct) -> Result<ProductNode, NarrowFailure>,
+        charge: &mut impl FnMut(usize) -> Result<(), NarrowFailure>,
     ) -> Result<Self, NarrowFailure> {
         Ok(match self {
             Self::Leaf(leaf) => match leaf.as_ref() {
@@ -310,7 +322,9 @@ impl ProductNode {
             Self::Choice(arms) => {
                 let mut distinct: Vec<ProductNode> = Vec::new();
                 for arm in arms.nodes.iter() {
-                    let arm = arm.narrowed(narrow, nested)?;
+                    let arm = arm.narrowed(narrow, nested, charge)?;
+                    // Deduplication compares against every kept arm.
+                    charge(1 + distinct.len())?;
                     if !distinct.contains(&arm) {
                         distinct.push(arm);
                     }
@@ -320,7 +334,7 @@ impl ProductNode {
             Self::Overlay(arms) => Self::overlay(
                 arms.nodes
                     .iter()
-                    .map(|layer| layer.narrowed(narrow, nested))
+                    .map(|layer| layer.narrowed(narrow, nested, charge))
                     .collect::<Result<_, _>>()?,
             ),
             Self::Nested(inner) => nested(inner)?,
@@ -370,6 +384,8 @@ pub(super) enum NarrowFailure {
     Query(crate::semantic_query::QueryError),
     /// A nested narrowed projection re-entered an in-flight query.
     Recursive(SemanticNodeId),
+    /// The connected demand could not pay for the narrowing work.
+    Exhausted(PartialReasonSet),
 }
 
 /// One step of an alternative's path.
@@ -526,7 +542,11 @@ impl OwnedHeap for NestedProduct {
 impl OwnedHeap for ProductLeaf {
     fn owned_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
         match self {
-            Self::Direct { program, effect } => copy_inline(program) + copy_inline(effect),
+            Self::Direct {
+                program,
+                effect,
+                closed,
+            } => copy_inline(program) + copy_inline(effect) + copy_inline(closed),
             Self::Spread(SpreadFragment {
                 members,
                 indices,
