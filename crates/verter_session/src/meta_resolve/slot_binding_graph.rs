@@ -239,10 +239,10 @@ fn build_owner_decl_identity(
         .map(|s| s.whole_hash)
         .unwrap_or_default();
     DeclIdentity {
-        canonical_id: Arc::from(owner_canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(owner_canonical),
         owner,
         whole_hash,
-        decl_name: Arc::from(SFC_SCRIPT_SETUP_DECL_NAME),
+        decl_name: verter_type_expr::OwnedStr::from(SFC_SCRIPT_SETUP_DECL_NAME),
     }
 }
 
@@ -374,14 +374,14 @@ fn accumulate_lowered_node_carrier_deps(
             SemanticNodeData::DeclRef { identity } => {
                 if identity.canonical_id.as_ref() != owner_canonical {
                     carriers
-                        .entry(Arc::clone(&identity.canonical_id))
+                        .entry(std::sync::Arc::<str>::from(identity.canonical_id.as_str()))
                         .or_insert(identity.whole_hash);
                 }
             }
             SemanticNodeData::InstantiationRef { base, args } => {
                 if base.canonical_id.as_ref() != owner_canonical {
                     carriers
-                        .entry(Arc::clone(&base.canonical_id))
+                        .entry(std::sync::Arc::<str>::from(base.canonical_id.as_str()))
                         .or_insert(base.whole_hash);
                 }
                 for arg in args.iter() {
@@ -639,9 +639,9 @@ pub(crate) fn resolve_slot_bindings_graph_native(
         }
         let macro_payload_read = dispatch.execute_read(SemanticQueryKey::ResolveMacroPayload {
             owner: dispatch.type_slot_for(
-                Arc::clone(&owner.canonical_id),
+                owner.canonical_id.clone(),
                 owner.owner,
-                Arc::clone(&owner.decl_name),
+                owner.decl_name.clone(),
             ),
             macro_index,
             macro_kind: AnalyzedMacroKind::DefineSlots,
@@ -807,7 +807,8 @@ pub(crate) fn compute_bindings_via_graph(
     synthesis_steps_executed: &mut u32,
 ) -> Vec<ResolvedSlotBinding> {
     let mut out = Vec::new();
-    let empty_path: Arc<[PathSegment]> = Arc::from(Vec::<PathSegment>::new().into_boxed_slice());
+    let empty_path: verter_type_expr::OwnedSlice<PathSegment> =
+        verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice());
     let consume_step = |steps: &mut u32| -> bool {
         *steps = steps.saturating_add(1);
         match synthesis_step_budget {
@@ -1483,12 +1484,12 @@ fn closed_member_path_route_source(
                         verter_type_expr::facts::IndexedAccessFact {
                             object: verter_type_expr::locators::TypeBodySlot {
                                 anchor: verter_type_expr::locators::AuthoredAnchor {
-                                    canonical_id: Arc::clone(&identity.canonical_id),
+                                    canonical_id: identity.canonical_id.clone(),
                                     owner: identity.owner,
-                                    symbol: Arc::clone(&identity.decl_name),
+                                    symbol: identity.decl_name.clone(),
                                     space: verter_type_expr::locators::LocatorSymbolSpace::Type,
                                 },
-                                path: Arc::from(Vec::new().into_boxed_slice()),
+                                path: verter_type_expr::OwnedSlice::default(),
                             },
                             index_path: Arc::from(index_path.into_boxed_slice()),
                         },

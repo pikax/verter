@@ -83,7 +83,7 @@ impl RegistryProducerScope {
             canonical_id: if anchor.canonical_id.is_empty() {
                 Arc::clone(&caller_scope.canonical_id)
             } else {
-                Arc::clone(&anchor.canonical_id)
+                std::sync::Arc::<str>::from(anchor.canonical_id.as_str())
             },
             owner: anchor.owner,
         }
@@ -1388,8 +1388,8 @@ pub(crate) fn component_meta_registry_node_instantiated_indexed_access_route(
     }
     let resolved_identity = match registry_node_data(dispatch, cursor).as_deref() {
         Some(SemanticNodeData::InstantiationRef { base, .. }) => Some((
-            std::sync::Arc::clone(&base.canonical_id),
-            std::sync::Arc::clone(&base.decl_name),
+            std::sync::Arc::<str>::from(&base.canonical_id),
+            std::sync::Arc::<str>::from(&base.decl_name),
         )),
         _ => None,
     };

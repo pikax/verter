@@ -769,7 +769,7 @@ impl InferenceSession {
             let bound = combine(candidates, variance);
             bindings.push(InferBinding {
                 param: info.param_node,
-                name: Arc::clone(&info.param_name),
+                name: verter_type_expr::OwnedStr::from(info.param_name.clone()),
                 bound,
             });
         }

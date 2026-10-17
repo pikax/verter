@@ -592,7 +592,7 @@ impl DeclBodyMemo {
         let body = self.deref_locator_body(&AuthoredBodyLocator::DeclBody(
             verter_type_expr::locators::TypeBodySlot {
                 anchor: locator.anchor.clone(),
-                path: Arc::clone(&locator.path),
+                path: locator.path.clone(),
             },
         ))?;
         let DerefedBodyShape::Single(expr) = body.shape else {
@@ -1053,7 +1053,7 @@ fn signature_lexical_root(
             )
             .with_predicate(signature.predicate.clone()),
         )),
-        path: Arc::from(rest.to_vec().into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::from(rest.to_vec().into_boxed_slice()),
     })
 }
 
@@ -1105,7 +1105,7 @@ fn navigate_expr_detecting(
         if lexical_root.is_none() && step_crosses_binder_scope(&position, step) {
             lexical_root = Some(DerefedLexicalRoot {
                 expr: lexical_ancestor_expr(&position, step)?,
-                path: Arc::from(path[index..].to_vec().into_boxed_slice()),
+                path: verter_type_expr::OwnedSlice::from(path[index..].to_vec().into_boxed_slice()),
             });
         }
         position =

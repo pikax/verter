@@ -1371,9 +1371,9 @@ fn unrootable_declaration_is_returned_to_the_winner_and_computed_once() {
     // CONTROL — a rootable compute admits, and the SECOND read is served warm
     // (its closure never runs).
     let control_key = (
-        Arc::<str>::from("/m6_refusal.ts"),
+        verter_type_expr::OwnedStr::from("/m6_refusal.ts"),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::<str>::from("Probe"),
+        verter_type_expr::OwnedStr::from("Probe"),
     );
     let control_computes = Cell::new(0usize);
     let control_before = db.live_count();
@@ -1414,9 +1414,9 @@ fn unrootable_declaration_is_returned_to_the_winner_and_computed_once() {
 
     // SUBJECT — the same funnel, an UNROOTABLE compute.
     let key = (
-        Arc::<str>::from("/m6_refusal.ts"),
+        verter_type_expr::OwnedStr::from("/m6_refusal.ts"),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::<str>::from("Unrootable"),
+        verter_type_expr::OwnedStr::from("Unrootable"),
     );
     let computes = Cell::new(0usize);
     let before = db.live_count();
@@ -1680,7 +1680,7 @@ fn shape_cache_close_drops_rooted_closed_subject_and_dependent_entries() {
     let build = graph.enter_node_root_scope();
 
     let file_scope = |canonical: &str, hash: u8| NodeScopeId::File {
-        canonical_id: Arc::from(canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [hash; 16],
         local_scope: None,
@@ -1971,12 +1971,12 @@ mod cached_result_footprint {
         SourcePosition::Present(SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(
             TypeBodySlot {
                 anchor: AuthoredAnchor {
-                    canonical_id,
+                    canonical_id: canonical_id.into(),
                     owner: TopLevelOwnerId::default(),
-                    symbol: Arc::from("Props"),
+                    symbol: verter_type_expr::OwnedStr::from("Props"),
                     space: LocatorSymbolSpace::Type,
                 },
-                path: Arc::from(Vec::new()),
+                path: verter_type_expr::OwnedSlice::from(Vec::new()),
             },
         )))
     }

@@ -438,7 +438,7 @@ fn evaluate_inner(
         return (Ok(None), false);
     };
     let scope_node = verter_type_engine::semantic_query::NodeScopeId::File {
-        canonical_id: Arc::clone(&scratch_canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(scratch_canonical.clone()),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: shallow.whole_hash,
         local_scope: None,
@@ -475,14 +475,14 @@ fn evaluate_inner(
             }
             let resolve_decl_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                 scope: ScopeId {
-                    canonical_id: Arc::clone(&scratch_canonical),
+                    canonical_id: verter_type_expr::OwnedStr::from(scratch_canonical.clone()),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     local_scope: None,
                     binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                         verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     ),
                 },
-                name: Arc::from(SCRATCH_ALIAS_NAME),
+                name: verter_type_expr::OwnedStr::from(SCRATCH_ALIAS_NAME),
             });
             match dispatch.execute_type_node(resolve_decl_key) {
                 QueryResult::Value(SemanticQueryOutput { value: n, .. }) => n,

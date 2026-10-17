@@ -262,6 +262,12 @@ impl SemanticGraphStore {
         //    backstop — but a backstop spelled as a `debug_assert!` is
         //    absent from the builds that ship, where the payload would
         //    proceed to publication. It refuses instead.
+        //
+        // 5. HELD VALUES. A member whose decided value named a node no
+        //    longer live when its component closed could not be held
+        //    ([`InlineMemberFlight::hold_value`]); its candidate cannot
+        //    root that node, so the component refuses. Staging below
+        //    refuses the same way for a node destroyed after the hold.
         // 4. AGGREGATE RETENTION BYTES. A component is charged ONCE,
         //    as a whole, against the project's aggregate retained-byte
         //    account: every member shares this batch's carrier and
@@ -283,7 +289,16 @@ impl SemanticGraphStore {
                     crate::semantic_query::RelationOutcome::Assignable
                         | crate::semantic_query::RelationOutcome::NotAssignable
                 )
-            });
+            })
+            || relation_members
+                .iter()
+                .any(|member| member.flight.hold_refused())
+            || flow_members
+                .iter()
+                .any(|member| member.flight.hold_refused())
+            || call_members
+                .iter()
+                .any(|member| member.flight.hold_refused());
         if inadmissible {
             for member in relation_members {
                 self.abort_inline_member_flight(&member.flight);
@@ -302,7 +317,14 @@ impl SemanticGraphStore {
         // second approximation in this publisher.
         let mut prepared: Vec<PreparedMember> =
             Vec::with_capacity(relation_members.len() + flow_members.len() + call_members.len());
+        // A member whose candidate cannot root its operands refuses the
+        // whole component; every later member is only collected to abort.
+        let mut refused: Vec<InlineMemberFlight> = Vec::new();
         for member in relation_members {
+            if !refused.is_empty() {
+                refused.push(member.flight);
+                continue;
+            }
             verter_debug_assert!(
                 member.flight.prepared.key() == &member.key.to_query_key(),
                 "an inline relation flight must publish its own exact full key"
@@ -313,23 +335,31 @@ impl SemanticGraphStore {
                     member.key,
                 ),
             };
-            let entry = self.stage_entry(
-                SemanticQueryValue::Relation(member.payload),
-                relation_satisfied_projection(),
-                carrier,
-                self_root_canonicals,
-                &dispatch_dep_signature,
-                validated_at_generation,
-                cost_receipt,
-            );
-            let entry = self.with_candidate_lease(&family, entry);
-            prepared.push(PreparedMember {
-                family,
-                entry,
-                flight: member.flight,
-            });
+            match self
+                .stage_entry(
+                    SemanticQueryValue::Relation(member.payload),
+                    relation_satisfied_projection(),
+                    carrier,
+                    self_root_canonicals,
+                    &dispatch_dep_signature,
+                    validated_at_generation,
+                    cost_receipt,
+                )
+                .and_then(|entry| self.with_candidate_lease(&family, entry))
+            {
+                Ok(entry) => prepared.push(PreparedMember {
+                    family,
+                    entry,
+                    flight: member.flight,
+                }),
+                Err(_) => refused.push(member.flight),
+            }
         }
         for member in flow_members {
+            if !refused.is_empty() {
+                refused.push(member.flight);
+                continue;
+            }
             verter_debug_assert!(
                 matches!(member.flight.prepared.key(), SemanticQueryKey::FlowReturn(k) if **k == member.key),
                 "an inline flow-return flight must publish its own exact full key"
@@ -339,25 +369,35 @@ impl SemanticGraphStore {
             };
             // The published payload is extracted from the proof token —
             // the member's value is admissible only as the proven one.
-            let entry = self.stage_entry(
-                SemanticQueryValue::FlowReturn(verter_session_query::retention::owned::Owned::new(
-                    member.result.value().clone(),
-                )),
-                member.materialized,
-                carrier,
-                self_root_canonicals,
-                &dispatch_dep_signature,
-                validated_at_generation,
-                cost_receipt,
-            );
-            let entry = self.with_candidate_lease(&family, entry);
-            prepared.push(PreparedMember {
-                family,
-                entry,
-                flight: member.flight,
-            });
+            match self
+                .stage_entry(
+                    SemanticQueryValue::FlowReturn(
+                        verter_session_query::retention::owned::Owned::new(
+                            member.result.value().clone(),
+                        ),
+                    ),
+                    member.materialized,
+                    carrier,
+                    self_root_canonicals,
+                    &dispatch_dep_signature,
+                    validated_at_generation,
+                    cost_receipt,
+                )
+                .and_then(|entry| self.with_candidate_lease(&family, entry))
+            {
+                Ok(entry) => prepared.push(PreparedMember {
+                    family,
+                    entry,
+                    flight: member.flight,
+                }),
+                Err(_) => refused.push(member.flight),
+            }
         }
         for member in call_members {
+            if !refused.is_empty() {
+                refused.push(member.flight);
+                continue;
+            }
             verter_debug_assert!(
                 matches!(member.flight.prepared.key(), SemanticQueryKey::ResolveCall(k) if **k == member.key),
                 "an inline ResolveCall flight must publish its own exact full key"
@@ -368,23 +408,38 @@ impl SemanticGraphStore {
                     member.key,
                 ),
             };
-            let entry = self.stage_entry(
-                SemanticQueryValue::ResolveCall(
-                    verter_session_query::retention::owned::Owned::new(member.result.into_inner()),
-                ),
-                resolve_call_satisfied_projection(),
-                carrier,
-                self_root_canonicals,
-                &dispatch_dep_signature,
-                validated_at_generation,
-                cost_receipt,
-            );
-            let entry = self.with_candidate_lease(&family, entry);
-            prepared.push(PreparedMember {
-                family,
-                entry,
-                flight: member.flight,
-            });
+            match self
+                .stage_entry(
+                    SemanticQueryValue::ResolveCall(
+                        verter_session_query::retention::owned::Owned::new(
+                            member.result.into_inner(),
+                        ),
+                    ),
+                    resolve_call_satisfied_projection(),
+                    carrier,
+                    self_root_canonicals,
+                    &dispatch_dep_signature,
+                    validated_at_generation,
+                    cost_receipt,
+                )
+                .and_then(|entry| self.with_candidate_lease(&family, entry))
+            {
+                Ok(entry) => prepared.push(PreparedMember {
+                    family,
+                    entry,
+                    flight: member.flight,
+                }),
+                Err(_) => refused.push(member.flight),
+            }
+        }
+        if !refused.is_empty() {
+            for flight in refused
+                .iter()
+                .chain(prepared.iter().map(|member| &member.flight))
+            {
+                self.abort_inline_member_flight(flight);
+            }
+            return false;
         }
 
         let staged_entries: Vec<_> = prepared
@@ -529,7 +584,8 @@ impl SemanticGraphStore {
     }
 
     /// Build one candidate for the batch. Pure construction — no lock,
-    /// no eviction planning.
+    /// no eviction planning. `Err` when the value names a node that is no
+    /// longer live: the candidate could not root it.
     pub(super) fn stage_entry(
         &self,
         value: SemanticQueryValue,
@@ -539,17 +595,15 @@ impl SemanticGraphStore {
         dispatch_dep_signature: &DepSignature,
         validated_at_generation: u64,
         cost_receipt: &Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
-    ) -> MemoEntry {
+    ) -> Result<MemoEntry, crate::semantic_query::QueryError> {
         let result = QueryResult::Value(value);
         let walker_diagnostics = super::empty_diagnostics();
-        MemoEntry {
-            lease: self
-                .lease_delivery(super::delivery_lease::DeliveredAllocations::read(
-                    &result,
-                    &walker_diagnostics,
-                    dispatch_dep_signature,
-                ))
-                .expect("staged component operands are live"),
+        Ok(MemoEntry {
+            lease: self.lease_delivery(super::delivery_lease::DeliveredAllocations::read(
+                &result,
+                &walker_diagnostics,
+                dispatch_dep_signature,
+            ))?,
             result,
             read_set_signature: carrier.clone(),
             dispatch_dep_signature: dispatch_dep_signature.clone(),
@@ -560,7 +614,7 @@ impl SemanticGraphStore {
             validated_at_generation,
             admission_seq: 0,
             cost_receipt: Arc::clone(cost_receipt),
-        }
+        })
     }
 
     /// Reserve the charges of a whole staged component, all or nothing.
@@ -606,10 +660,10 @@ impl SemanticGraphStore {
             })
             .collect::<Result<Vec<_>, _>>()
             .map_err(refuse)?;
-        let own: Vec<usize> = members
+        let own: Vec<verter_session_query::retention::Footprint> = members
             .iter()
             .map(|(family, entry)| {
-                super::retention::own_reservation_bytes(entry, family, 1, registered_canonicals)
+                super::retention::own_reservation(entry, family, 1, registered_canonicals)
             })
             .collect();
         // A shared carrier's evidence pages were claimed with the root; a
@@ -620,17 +674,24 @@ impl SemanticGraphStore {
             .collect();
         let mut batch = match verter_session_query::facts::receipt::reserve_retained_with_evidence(
             account,
-            own.iter().sum(),
+            own.iter().map(|footprint| footprint.bytes).sum(),
             &carriers,
         ) {
             RetentionAdmission::Admitted(charge) => charge,
             RetentionAdmission::Refused(refusal) => return Err(refuse(refusal)),
         };
-        Ok(shared
+        shared
             .into_iter()
             .zip(own)
-            .map(|(holds, bytes)| Arc::new(holds.with_own(batch.split_off(bytes))))
-            .collect())
+            .map(|(holds, own)| {
+                let charge = batch.split_off(own.bytes);
+                let charge = own
+                    .handles
+                    .retained_with(charge, self.charge_ctx())
+                    .map_err(refuse)?;
+                Ok(Arc::new(holds.with_own(charge)))
+            })
+            .collect()
     }
 
     /// Reserve the container charge of EVERY staged member's family, keyed
@@ -647,12 +708,9 @@ impl SemanticGraphStore {
         &self,
         staged: &mut [StagedMember],
     ) -> Result<(), verter_session_query::retention::RetentionRefusal> {
-        use verter_session_query::retention::{ChargeClass, RetentionAdmission};
+        use verter_session_query::retention::RetentionAdmission;
         for member in staged.iter_mut() {
-            match self.retention_account().reserve(
-                ChargeClass::Retained,
-                super::retention::family_container_bytes(&member.family),
-            ) {
+            match self.reserve_family_container(&member.family) {
                 RetentionAdmission::Admitted(charge) => member.family_charge = Some(charge),
                 RetentionAdmission::Refused(refusal) => {
                     crate::cache_runtime::admission::propagate_non_admission(
@@ -667,19 +725,22 @@ impl SemanticGraphStore {
 
     /// `entry` with its candidate delivery: the lease its warm reads will
     /// share, rooting the family key's operands. Minted before the batch is
-    /// charged, so the batch retains this lease's metadata.
-    fn with_candidate_lease(&self, family: &FamilyKey, mut entry: MemoEntry) -> MemoEntry {
-        entry.lease = self
-            .lease_candidate(
-                family,
-                super::delivery_lease::DeliveredAllocations::read(
-                    &entry.result,
-                    &entry.walker_diagnostics,
-                    &entry.dispatch_dep_signature,
-                ),
-            )
-            .expect("component candidate operands are live");
-        entry
+    /// charged, so the batch retains this lease's metadata. `Err` when an
+    /// operand is no longer live.
+    fn with_candidate_lease(
+        &self,
+        family: &FamilyKey,
+        mut entry: MemoEntry,
+    ) -> Result<MemoEntry, crate::semantic_query::QueryError> {
+        entry.lease = self.lease_candidate(
+            family,
+            super::delivery_lease::DeliveredAllocations::read(
+                &entry.result,
+                &entry.walker_diagnostics,
+                &entry.dispatch_dep_signature,
+            ),
+        )?;
+        Ok(entry)
     }
 
     /// Finish staging one member: allocate its admission token and plan
@@ -788,7 +849,8 @@ impl SemanticGraphStore {
         validated_at_generation: u64,
     ) {
         let dispatch_dep_signature = self.dep_signature_interner.intern(&empty_signature());
-        let entry = self.stage_entry(
+        // A seed over a node no longer live is not seeded.
+        let Ok(entry) = self.stage_entry(
             value,
             satisfied_projection,
             &carrier,
@@ -796,7 +858,9 @@ impl SemanticGraphStore {
             &dispatch_dep_signature,
             validated_at_generation,
             &fixture_receipt(&family),
-        );
+        ) else {
+            return;
+        };
         let admission_seq = self.alloc_candidate_admission_seq();
         let cap = family.candidate_cap();
         let eviction = match ctx {

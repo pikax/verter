@@ -97,8 +97,8 @@ fn walk_path_terminates_on_deeply_nested_acyclic_union() {
             other => panic!("ReduceUnion iteration {i} failed: {other:?}"),
         }
     }
-    let empty_path: std::sync::Arc<[verter_type_engine::semantic_query::PathSegment]> =
-        std::sync::Arc::from(Vec::new().into_boxed_slice());
+    let empty_path: verter_type_expr::OwnedSlice<verter_type_engine::semantic_query::PathSegment> =
+        verter_type_expr::OwnedSlice::default();
     let result = dispatch.execute_type_node(
         verter_type_engine::semantic_query::SemanticQueryKey::ProjectPath {
             base: current,
@@ -161,8 +161,8 @@ fn walk_path_terminates_on_self_referential_alias_chain() {
     for _ in 0..64 {
         current = graph.intern_node(SemanticNodeData::Alias(current));
     }
-    let path: std::sync::Arc<[verter_type_engine::semantic_query::PathSegment]> =
-        std::sync::Arc::from(
+    let path: verter_type_expr::OwnedSlice<verter_type_engine::semantic_query::PathSegment> =
+        verter_type_expr::OwnedSlice::from(
             vec![verter_type_engine::semantic_query::PathSegment::Member(
                 verter_type_engine::semantic_query::PropertyKey::identifier("name"),
             )]
@@ -251,7 +251,9 @@ fn relation_guard_returns_unknown_on_cyclic_reentry() {
     let object = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![])));
     let source = graph.intern_node(SemanticNodeData::IndexedAccess {
         object,
-        index: verter_type_engine::semantic_query::IndexKey::String(Arc::from("a")),
+        index: verter_type_engine::semantic_query::IndexKey::String(
+            verter_type_expr::OwnedStr::from("a"),
+        ),
     });
     // Deferred shell on source → Unknown.
     let before = graph.relation_memo_count();
@@ -1461,11 +1463,15 @@ fn relation_unknown_is_never_warm_admitted_and_decided_entries_replay() {
     ])));
     let source = graph.intern_node(SemanticNodeData::IndexedAccess {
         object,
-        index: verter_type_engine::semantic_query::IndexKey::String(Arc::from("a")),
+        index: verter_type_engine::semantic_query::IndexKey::String(
+            verter_type_expr::OwnedStr::from("a"),
+        ),
     });
     let target = graph.intern_node(SemanticNodeData::IndexedAccess {
         object,
-        index: verter_type_engine::semantic_query::IndexKey::String(Arc::from("b")),
+        index: verter_type_engine::semantic_query::IndexKey::String(
+            verter_type_expr::OwnedStr::from("b"),
+        ),
     });
 
     let before = graph.relation_memo_count();
@@ -1495,11 +1501,15 @@ fn relation_unknown_is_never_warm_admitted_and_decided_entries_replay() {
     // NEVER produce for this pair), then read through the warm path.
     let seed_source = graph.intern_node(SemanticNodeData::IndexedAccess {
         object,
-        index: verter_type_engine::semantic_query::IndexKey::String(Arc::from("c")),
+        index: verter_type_engine::semantic_query::IndexKey::String(
+            verter_type_expr::OwnedStr::from("c"),
+        ),
     });
     let seed_target = graph.intern_node(SemanticNodeData::IndexedAccess {
         object,
-        index: verter_type_engine::semantic_query::IndexKey::String(Arc::from("d")),
+        index: verter_type_engine::semantic_query::IndexKey::String(
+            verter_type_expr::OwnedStr::from("d"),
+        ),
     });
     let seed_key = dispatch.relate_key_for(seed_source, seed_target);
     // Empty carrier + empty self-roots validate trivially; stamp the live
@@ -1575,9 +1585,9 @@ fn relation_memo_fences_on_transitive_imported_fact_edit() {
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let source = graph.intern_node(SemanticNodeData::Opaque(
         verter_type_engine::semantic_query::QueryError::DeclPlaceholder {
-            canonical_id: Arc::from("/w/dep.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/w/dep.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            name: Arc::from("Dep"),
+            name: verter_type_expr::OwnedStr::from("Dep"),
             whole_hash: whole_hash_v1,
         },
     ));
@@ -2849,7 +2859,7 @@ fn migrate_owner_engine_project_expr_surface_as_type_expr_preserves_env() {
     // SemanticQueryKey admits ProjectPath with `ProjectionMode::Expanded`.
     let key = verter_type_engine::semantic_query::SemanticQueryKey::ProjectPath {
         base: verter_type_engine::semantic_query::SemanticNodeId(0),
-        path: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::default(),
         context: verter_type_engine::semantic_query::ProjectionReductionContext::published(mode),
     };
     match key {
@@ -2979,8 +2989,8 @@ fn type_eval_evaluate_removal_preserves_semantic_output() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let empty_path: std::sync::Arc<[verter_type_engine::semantic_query::PathSegment]> =
-        std::sync::Arc::from(Vec::new().into_boxed_slice());
+    let empty_path: verter_type_expr::OwnedSlice<verter_type_engine::semantic_query::PathSegment> =
+        verter_type_expr::OwnedSlice::default();
     let result = dispatch.execute_type_node(
         verter_type_engine::semantic_query::SemanticQueryKey::ProjectPath {
             base: string,
@@ -3015,8 +3025,8 @@ fn type_expand_expand_object_shape_removal_preserves_shape_output() {
     let object = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
         required_member("label", string),
     ])));
-    let empty_path: std::sync::Arc<[verter_type_engine::semantic_query::PathSegment]> =
-        std::sync::Arc::from(Vec::new().into_boxed_slice());
+    let empty_path: verter_type_expr::OwnedSlice<verter_type_engine::semantic_query::PathSegment> =
+        verter_type_expr::OwnedSlice::default();
     let result = dispatch.execute_type_node(
         verter_type_engine::semantic_query::SemanticQueryKey::ProjectPath {
             base: object,
@@ -3860,17 +3870,18 @@ fn coinductive_positive_scc_publishes_assignable() {
 }
 
 /// A `semantic-observe` build captures the cyclic discharge's explanation
-/// request-owned, and the explanation LEASES its operands: after the memo
-/// evicts the judgement and a document close tombstones the operand slots,
-/// the captured explanation still reads the operands' payloads. The answer
-/// and bindings are the uncaptured ones, and a warm re-ask captures nothing.
+/// request-owned, and the explanation ROOTS its operands: after the memo
+/// evicts the judgement and a document close evicts every cache owner of the
+/// closed content, the captured explanation still reads the operands'
+/// payloads, because it is now one of their owners. The answer and bindings
+/// are the uncaptured ones, and a warm re-ask captures nothing.
 ///
-/// DISCRIMINATES an id-only explanation (its operands would read the
-/// released `Opaque(Miss)` placeholder after the close) and a store-owned
-/// one (the close would drop it).
+/// DISCRIMINATES an id-only explanation (its operands would read nothing
+/// once the close evicted their owners) and a store-owned one (the close
+/// would drop it).
 #[cfg(feature = "semantic-observe")]
 #[test]
-fn captured_cycle_explanation_leases_operands_past_eviction_and_release() {
+fn captured_cycle_explanation_leases_operands_past_eviction_and_close() {
     use verter_type_engine::project_semantic_dispatch::relation_explanation::RelationExplanation;
 
     let host = host_for_relation_tests();
@@ -3895,7 +3906,7 @@ fn captured_cycle_explanation_leases_operands_past_eviction_and_release() {
         .iter()
         .find_map(|explanation| match explanation {
             RelationExplanation::CoinductiveCycle { pair, members }
-                if pair.source.id == a && pair.target.id == b =>
+                if pair.source.id() == a && pair.target.id() == b =>
             {
                 Some((pair.clone(), Arc::clone(members)))
             }
@@ -3907,16 +3918,16 @@ fn captured_cycle_explanation_leases_operands_past_eviction_and_release() {
     assert!(
         members
             .iter()
-            .any(|member| member.source.id == a && member.target.id == b),
+            .any(|member| member.source.id() == a && member.target.id() == b),
         "the cycle names every co-discharged pair, the root included: {members:?}"
     );
     let leased_source = pair
         .source
-        .payload
-        .clone()
+        .payload()
+        .cloned()
         .expect("the source operand is leased");
     assert!(
-        !matches!(leased_source.as_ref(), SemanticNodeData::Opaque(_)),
+        !matches!(&*leased_source, SemanticNodeData::Opaque(_)),
         "the lease holds the operand's real payload, got {leased_source:?}"
     );
 
@@ -3930,35 +3941,34 @@ fn captured_cycle_explanation_leases_operands_past_eviction_and_release() {
     let key = dispatch.relate_key_for(a, b);
     assert!(graph
         .get_relation_payload(&host, &key)
-        .map(|served| served.value)
+        .map(|served| served.value().clone())
         .is_some());
-    graph.release_canonical(canonical);
+    graph.close_canonical(canonical);
     assert!(
         graph
             .get_relation_payload(&host, &key)
-            .map(|served| served.value)
+            .map(|served| served.value().clone())
             .is_none(),
         "the close evicts the published judgement"
     );
-    assert!(!graph.node_is_live(a), "the close tombstones the operand");
     assert!(
-        matches!(
-            graph.node_data(a).as_deref(),
-            Some(SemanticNodeData::Opaque(_))
-        ),
-        "the store now reads the released placeholder"
+        graph.node_is_live(a),
+        "the explanation is an owner the close cannot revoke"
     );
-    assert_eq!(
-        pair.source.payload.as_deref(),
-        Some(leased_source.as_ref()),
+    assert!(
+        pair.source.payload().is_some_and(|payload| {
+            verter_type_engine::semantic_query_memo::node_data_lease::NodeDataLease::ptr_eq(
+                payload,
+                &leased_source,
+            )
+        }),
         "the captured explanation still reads the leased operand"
     );
     assert!(
         members.iter().all(|member| member
             .source
-            .payload
-            .as_deref()
-            .is_some_and(|payload| !matches!(payload, SemanticNodeData::Opaque(_)))),
+            .payload()
+            .is_some_and(|payload| !matches!(&**payload, SemanticNodeData::Opaque(_)))),
         "every cycle member keeps its leased source operand"
     );
 }
@@ -5401,9 +5411,9 @@ fn expanded_distribution_treats_infer_ref_check_as_open() {
     let placeholder = |name: &str| {
         graph.intern_node(SemanticNodeData::Opaque(
             verter_type_engine::semantic_query::QueryError::DeclPlaceholder {
-                canonical_id: Arc::from(canonical),
+                canonical_id: verter_type_expr::OwnedStr::from(canonical),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                name: Arc::from(name),
+                name: verter_type_expr::OwnedStr::from(name),
                 whole_hash,
             },
         ))
@@ -5432,7 +5442,7 @@ fn expanded_distribution_treats_infer_ref_check_as_open() {
 
     let projected = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: outer,
-        path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -6210,9 +6220,9 @@ fn signature_utilities_select_by_kind_over_direct_constructor() {
     let run = |name: &str| {
         let anchor =
             verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
-                Arc::from("/w/lib.ts"),
+                verter_type_expr::OwnedStr::from("/w/lib.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from(name),
+                verter_type_expr::OwnedStr::from(name),
             );
         dispatch.execute_type_node(SemanticQueryKey::Instantiate(
             verter_type_engine::semantic_query::InstantiateKey::new(
@@ -6780,7 +6790,7 @@ pub(crate) mod fresh_excess_property_checking {
             .shallow_file_state("/excess_object_skip.ts")
             .expect("fixture must index");
         let scope = NodeScopeId::File {
-            canonical_id: Arc::from("/excess_object_skip.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/excess_object_skip.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: shallow.whole_hash,
             local_scope: None,
@@ -6819,10 +6829,10 @@ pub(crate) mod fresh_excess_property_checking {
         // skip: never an excess rejection.
         let builtin_object = graph.intern_node(SemanticNodeData::DeclRef {
             identity: verter_type_engine::semantic_query::DeclIdentity {
-                canonical_id: Arc::from("__builtin__"),
+                canonical_id: verter_type_expr::OwnedStr::from("__builtin__"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: verter_type_engine::semantic_query::HashValue::default(),
-                decl_name: Arc::from("Object"),
+                decl_name: verter_type_expr::OwnedStr::from("Object"),
             },
         });
         assert!(
@@ -7040,10 +7050,10 @@ pub(crate) mod fresh_excess_property_checking {
         // value check against it is undecidable.
         let unresolved = graph.intern_node(SemanticNodeData::DeclRef {
             identity: verter_type_engine::semantic_query::DeclIdentity {
-                canonical_id: Arc::from("/missing-file.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/missing-file.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: verter_type_engine::semantic_query::HashValue::default(),
-                decl_name: Arc::from("MissingType"),
+                decl_name: verter_type_expr::OwnedStr::from("MissingType"),
             },
         });
 
@@ -7120,7 +7130,7 @@ pub(crate) mod fresh_excess_property_checking {
             .shallow_file_state("/excess_nested_exhaustion.ts")
             .expect("fixture must index");
         let scope = NodeScopeId::File {
-            canonical_id: Arc::from("/excess_nested_exhaustion.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/excess_nested_exhaustion.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: shallow.whole_hash,
             local_scope: None,
@@ -7280,7 +7290,7 @@ pub(crate) mod fresh_excess_property_checking {
             .shallow_file_state("/excess_named_target.ts")
             .expect("fixture must index");
         let scope = NodeScopeId::File {
-            canonical_id: Arc::from("/excess_named_target.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/excess_named_target.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: shallow.whole_hash,
             local_scope: None,
@@ -7332,10 +7342,10 @@ pub(crate) mod fresh_excess_property_checking {
         let one = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(1.0)));
         let unresolvable_kind = graph.intern_node(SemanticNodeData::DeclRef {
             identity: verter_type_engine::semantic_query::DeclIdentity {
-                canonical_id: Arc::from("/missing-kind.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/missing-kind.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: verter_type_engine::semantic_query::HashValue::default(),
-                decl_name: Arc::from("MissingKind"),
+                decl_name: verter_type_expr::OwnedStr::from("MissingKind"),
             },
         });
 

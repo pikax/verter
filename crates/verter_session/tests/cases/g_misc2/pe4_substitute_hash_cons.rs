@@ -93,9 +93,9 @@ fn lower_mapped(host: &Arc<VerterHost>) -> SemanticNodeId {
             let _ = whole_hash;
             let base =
                 verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
-                    Arc::clone(canonical_id),
+                    canonical_id.clone(),
                     *owner,
-                    Arc::clone(name),
+                    name.clone(),
                 );
             let key = verter_session::for_tests::instantiate_key_for_tests(
                 host,

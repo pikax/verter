@@ -40,9 +40,11 @@ use verter_type_expr::span_origins as so;
 
 use crate::component_meta_cached_result::{CachedComponentMetaResult, ResolutionTemplate};
 
-/// Heap one cached result keeps alive beyond its own inline bytes.
-#[must_use]
-pub(crate) fn cached_result_heap_bytes(result: &CachedComponentMetaResult) -> usize {
+/// Heap one cached result keeps alive beyond its own inline bytes, and the
+/// owned allocations it reaches (each charged by its own cell).
+pub(crate) fn cached_result_footprint(
+    result: &CachedComponentMetaResult,
+) -> verter_session_query::retention::Footprint {
     let CachedComponentMetaResult {
         analysis,
         resolution_template,
@@ -51,7 +53,12 @@ pub(crate) fn cached_result_heap_bytes(result: &CachedComponentMetaResult) -> us
     } = result;
     let mut meter = Meter::default();
     let m = &mut meter;
-    analysis.heap(m) + resolution_template.heap(m) + canonical_id.heap(m) + inline(whole_hash)
+    let bytes =
+        analysis.heap(m) + resolution_template.heap(m) + canonical_id.heap(m) + inline(whole_hash);
+    verter_session_query::retention::Footprint {
+        bytes,
+        handles: meter.aliases.take_handles(),
+    }
 }
 
 /// One measurement: the `Arc` allocations already counted, by handle and
@@ -129,6 +136,22 @@ impl PayloadHeap for String {
 impl PayloadHeap for Arc<str> {
     fn heap(&self, m: &mut Meter) -> usize {
         arc_str_bytes(self, &mut m.aliases)
+    }
+}
+
+impl PayloadHeap for verter_type_expr::OwnedStr {
+    /// An owned string: charged by its own cell.
+    fn heap(&self, m: &mut Meter) -> usize {
+        self.offer(&mut m.aliases)
+    }
+}
+
+impl<T: verter_session_query::retention::owned::Measured> PayloadHeap
+    for verter_type_expr::OwnedSlice<T>
+{
+    /// An owned slice: charged by its own cell.
+    fn heap(&self, m: &mut Meter) -> usize {
+        self.offer(&mut m.aliases)
     }
 }
 
