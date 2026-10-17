@@ -3891,9 +3891,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // reduction in `build.rs`, mapped-type `ProjectPath` member
         // projection). Idempotent per tag (sets one bit). No-op when no
         // `RequestContext` is installed on the calling thread.
-        if let Some(ctx) = crate::request_context::current_request_context() {
-            ctx.record_dispatched_query_tag(key.tag());
-        }
+        crate::request_context::with_current_request_context(|ctx| {
+            ctx.record_dispatched_query_tag(key.tag())
+        });
 
         // Admission-time canonicalisation:
         //   - `ProjectMember { base, member, mode }` rewrites to

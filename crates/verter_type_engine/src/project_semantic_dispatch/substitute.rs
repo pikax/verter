@@ -698,13 +698,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // structurally correct: visiting the binder twice in
         // `Foo<K, K>`-style fixtures IS the recursive memo's hit
         // case at the boundary.
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        crate::request_context::with_current_request_context(|ctx| {
             ctx.classify_recursive_substitute(RecursiveSubstituteIdentity {
                 node: node.0,
                 parameter_node: parameter_node.0,
                 arg: arg.0,
-            });
-        }
+            })
+        });
         // Trivial-identity short-circuit runs AFTER classification:
         // the per-request audit needs to see every entry, but the
         // identity branch returns `arg` without touching graph
