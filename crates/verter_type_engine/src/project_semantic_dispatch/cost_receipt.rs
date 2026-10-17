@@ -511,10 +511,15 @@ impl Drop for DemandCostReceipt {
     /// receipts of a chain as deep as the chain of computations it costs,
     /// and dropping them recursively would spend a native frame per level.
     fn drop(&mut self) {
+        if self.prerequisites.is_empty() {
+            return;
+        }
         let mut pending: Vec<CostDependency> = std::mem::take(&mut self.prerequisites).into_vec();
         while let Some(dependency) = pending.pop() {
             if let Some(mut last) = Arc::into_inner(dependency.receipt) {
-                pending.extend(std::mem::take(&mut last.prerequisites).into_vec());
+                if !last.prerequisites.is_empty() {
+                    pending.extend(std::mem::take(&mut last.prerequisites).into_vec());
+                }
             }
         }
     }
