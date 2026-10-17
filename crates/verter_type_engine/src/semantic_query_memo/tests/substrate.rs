@@ -1999,6 +1999,51 @@ fn derivation_store_bounds_signature_pool_growth() {
     );
 }
 
+/// An origin edge retains its fence's rail — the rail's own charge, held
+/// in the retained class while any edge shares the fence — and the store's
+/// clear lets go of it: the rail is then its remaining handle's, pinned,
+/// and released with that handle. The pool keeps no rail alive.
+#[test]
+fn an_origin_edge_retains_its_fence_until_its_store_lets_go() {
+    use verter_session_query::retention::{
+        ChargeClass, RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+    let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+    let store = SemanticGraphStore::with_account(StoreAccount::new(Arc::clone(&account)));
+    let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let result = store.intern_node(SemanticNodeData::Alias(source));
+    let fence = dep_sig_for("/w/fence.ts", 7);
+    store.record_origin_edge(
+        result,
+        OriginEdgeKind::Normalize,
+        Arc::from(vec![source].into_boxed_slice()),
+        crate::semantic_query::OriginMeta::None,
+        fence.clone(),
+    );
+    let charged = fence
+        .charge_bytes()
+        .expect("the edge store charged the rail");
+    let rail = fence.owned().expect("a nonempty rail");
+    assert_eq!(rail.charge_class(), Some(ChargeClass::Retained));
+    assert_eq!(store.derivation_signature_pool_size(), 1);
+
+    store.invalidate_all();
+    assert_eq!(
+        rail.charge_class(),
+        Some(ChargeClass::Pinned),
+        "the cleared store no longer retains the rail; this handle still holds it"
+    );
+    assert_eq!(store.derivation_signature_pool_size(), 0);
+    let before = account.snapshot().pinned_bytes;
+    drop(fence);
+    assert_eq!(
+        before - account.snapshot().pinned_bytes,
+        charged
+            + verter_session_query::retention::owned::OwnedStr::charge_for_len("/w/fence.ts".len()),
+        "the last handle releases the rail's charge and its canonical's"
+    );
+}
+
 /// ORIGIN-EDGE DEDUP DURABILITY — re-emitting an origin edge whose fence
 /// was driven out of the interning pool's reclamation reach by a flood of
 /// other distinct fences MUST still deduplicate. `record_origin_edge`

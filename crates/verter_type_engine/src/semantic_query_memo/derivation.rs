@@ -74,7 +74,7 @@ use std::sync::{Arc, Weak};
 use rustc_hash::FxHashMap;
 
 use crate::bounded_query_retention::{next_retention_seq, GlobalRetentionBudget};
-use crate::semantic_query::{DepSignature, OriginEdge, OriginEdgeKind, SemanticNodeId};
+use crate::semantic_query::{DepSignature, EdgeFence, OriginEdge, OriginEdgeKind, SemanticNodeId};
 
 /// Total cap on the number of distinct `(result, kind)` edge buckets the
 /// derivation store retains. A long-lived session that edits many owners
@@ -120,15 +120,19 @@ pub const DERIVATION_EDGES_PER_BUCKET_CAP: usize = 64;
 /// by [`DerivationStore::clear`] on a project-generation reset.
 pub(crate) struct DerivationStore {
     edges: FxHashMap<(SemanticNodeId, OriginEdgeKind), Vec<OriginEdge>>,
-    /// Dep-signature interner. Maps a signature value to a [`Weak`]
-    /// reference to the canonical `Arc<DepSignature>` handed to edges.
-    /// `intern_signature` upgrades the `Weak`: a live upgrade reuses the
-    /// `Arc` (an edge still holds it); a dead upgrade means every edge
-    /// referencing it was evicted, so a fresh `Arc` is allocated. This
-    /// ties pool reclamation to edge lifetime — an entry can never hand
-    /// back an `Arc` no live edge holds, so `record_origin_edge`'s
-    /// `Arc::ptr_eq` dedup probe stays sound (see module docs).
-    pub(super) signature_pool: FxHashMap<DepSignature, Weak<DepSignature>>,
+    /// Dep-signature interner. Maps a signature's content hash to
+    /// [`Weak`] references to the canonical `Arc<EdgeFence>`s handed to
+    /// edges. `intern_signature` upgrades the `Weak`s: a live upgrade of an
+    /// equal fence reuses that `Arc` (an edge still holds it); a dead
+    /// upgrade means every edge referencing it was evicted, so a fresh
+    /// `Arc` is allocated. This ties pool reclamation to edge lifetime — an
+    /// entry can never hand back an `Arc` no live edge holds, so
+    /// `record_origin_edge`'s `Arc::ptr_eq` dedup probe stays sound (see
+    /// module docs) — and the pool itself keeps no rail alive: only edges
+    /// do, through the fence's hold on the rail's own charge.
+    pub(super) signature_pool: FxHashMap<u64, Vec<Weak<EdgeFence>>>,
+    /// `Weak`s across every pool bucket.
+    pool_entries: usize,
     /// FIFO total-size budget bounding the `edges` bucket count.
     edge_budget: GlobalRetentionBudget<(SemanticNodeId, OriginEdgeKind)>,
     /// Running count of [`OriginEdge`]s resident across every bucket —
@@ -155,60 +159,68 @@ impl DerivationStore {
         Self {
             edges: FxHashMap::default(),
             signature_pool: FxHashMap::default(),
+            pool_entries: 0,
             edge_budget: GlobalRetentionBudget::new(DERIVATION_EDGE_BUCKET_CAP),
             total_edges: 0,
         }
     }
 
-    pub(super) fn intern_signature(&mut self, sig: DepSignature) -> Arc<DepSignature> {
+    /// The pooled fence for `sig`, sharing a live edge's when one holds an
+    /// equal fence. A fresh fence takes the store's hold on the rail's own
+    /// charge; `None` when the account refuses it, and the edge is then not
+    /// recorded — origin edges are best-effort provenance.
+    pub(super) fn intern_signature(
+        &mut self,
+        sig: DepSignature,
+        ctx: verter_session_query::retention::owned::ChargeCtx<'_>,
+    ) -> Option<Arc<EdgeFence>> {
         // Diagnosis: record one signature-intern call per
         // invocation, classified into `returned_existing` vs.
         // `allocated`. The capture-token hook is a no-op when no
-        // token is bound (zero-overhead production path). The
-        // `with_active_capture` body never panics so it is safe to
-        // run inside the `&mut self` borrow.
-        //
-        // The pool stores `Weak`s: an upgrade succeeds only while a
-        // live edge still holds the canonical `Arc`. A successful
-        // upgrade reuses that `Arc` so identical signatures keep
-        // sharing one allocation — which is what makes the
-        // `Arc::ptr_eq` dedup probe in `record_origin_edge` sound. A
-        // failed upgrade means every edge that referenced this
-        // signature has been evicted from `edges`, so there is no
-        // live `Arc` to dedup against and a fresh one is allocated.
-        if let Some(existing) = self.signature_pool.get(&sig) {
-            if let Some(arc) = existing.upgrade() {
-                #[cfg(any(test, feature = "test-support"))]
-                crate::capture_token::with_active_capture(|t| t.record_signature_intern(true));
-                return arc;
-            }
+        // token is bound (zero-overhead production path).
+        let hash = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = rustc_hash::FxHasher::default();
+            sig.hash(&mut hasher);
+            hasher.finish()
+        };
+        if let Some(existing) = self.signature_pool.get(&hash).and_then(|bucket| {
+            bucket
+                .iter()
+                .filter_map(Weak::upgrade)
+                .find(|fence| ***fence == sig)
+        }) {
+            #[cfg(any(test, feature = "test-support"))]
+            crate::capture_token::with_active_capture(|t| t.record_signature_intern(true));
+            return Some(existing);
         }
-        let arc = Arc::new(sig.clone());
-        self.signature_pool.insert(sig, Arc::downgrade(&arc));
+        let hold = match sig.owned() {
+            Some(rail) => Some(rail.hold(ctx).ok()?),
+            None => None,
+        };
+        let arc = Arc::new(EdgeFence::retained(sig, hold));
+        self.signature_pool
+            .entry(hash)
+            .or_default()
+            .push(Arc::downgrade(&arc));
+        self.pool_entries += 1;
         #[cfg(any(test, feature = "test-support"))]
         crate::capture_token::with_active_capture(|t| t.record_signature_intern(false));
         // Compact dead `Weak`s write-side. The pool's reclamation is
-        // tied to edge lifetime, so an evicted edge — whether a whole
-        // bucket FIFO-evicted past `edge_budget` or the oldest edge of a
-        // bucket evicted past the per-bucket cap — leaves a dead `Weak`
-        // behind. Each LIVE edge holds exactly one dep-signature `Arc`,
-        // so the count of distinct live-edge signatures is bounded above
-        // by `total_edges` (distinct fences may be shared across edges,
-        // so the true live-signature count is `<= total_edges`).
-        // `total_edges` is itself bounded — bucket count by `edge_budget`
-        // and each bucket by `DERIVATION_EDGES_PER_BUCKET_CAP` — so
-        // compacting once the pool grows past that live bound keeps the
-        // pool's map bounded too, without an independent FIFO cap. The
-        // threshold keys on `total_edges` (an O(1) running counter), not
-        // the bucket count: the bucket count would under-estimate the
-        // live-signature bound by the per-bucket fan-out factor and make
-        // the pool compact far more eagerly than its "grown past the
-        // live count" rationale intends.
-        if self.signature_pool.len() > 2 * self.total_edges + DERIVATION_EDGE_BUCKET_CAP {
-            self.signature_pool
-                .retain(|_, weak| weak.strong_count() > 0);
+        // tied to edge lifetime, so an evicted edge leaves a dead `Weak`
+        // behind. Each LIVE edge holds exactly one fence, so the count of
+        // distinct live-edge fences is bounded above by `total_edges`,
+        // itself bounded by `edge_budget` and the per-bucket cap; compacting
+        // once the pool grows past that live bound keeps the pool bounded
+        // too, without an independent FIFO cap.
+        if self.pool_entries > 2 * self.total_edges + DERIVATION_EDGE_BUCKET_CAP {
+            self.signature_pool.retain(|_, bucket| {
+                bucket.retain(|weak| weak.strong_count() > 0);
+                !bucket.is_empty()
+            });
+            self.pool_entries = self.signature_pool.values().map(Vec::len).sum();
         }
-        arc
+        Some(arc)
     }
 
     pub(super) fn record(
@@ -287,6 +299,7 @@ impl DerivationStore {
     pub(super) fn clear(&mut self) {
         self.edges.clear();
         self.signature_pool.clear();
+        self.pool_entries = 0;
         self.edge_budget.clear();
         self.total_edges = 0;
     }

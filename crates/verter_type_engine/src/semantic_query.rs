@@ -5936,7 +5936,45 @@ pub struct OriginEdge {
     /// edge was committed. Interned by [`crate::semantic_query_memo`] so
     /// builders that emit dozens of edges with identical fences share one
     /// `Arc` allocation.
-    pub edge_dep_signature: Arc<DepSignature>,
+    pub edge_dep_signature: Arc<EdgeFence>,
+}
+
+/// An origin edge's fence: the dependency rail, and the edge store's hold
+/// on it. The store retains the rail's own charge for as long as any edge
+/// shares this fence, and lets go of it with the last.
+#[derive(Debug)]
+pub struct EdgeFence {
+    signature: DepSignature,
+    _hold: Option<verter_session_query::retention::owned::OwnedHold>,
+}
+
+impl EdgeFence {
+    /// A fence no store retains: its rail is charged by its own handles.
+    #[must_use]
+    pub fn new(signature: DepSignature) -> Self {
+        Self {
+            signature,
+            _hold: None,
+        }
+    }
+
+    /// A fence the edge store retains through `hold`.
+    pub(crate) fn retained(
+        signature: DepSignature,
+        hold: Option<verter_session_query::retention::owned::OwnedHold>,
+    ) -> Self {
+        Self {
+            signature,
+            _hold: hold,
+        }
+    }
+}
+
+impl std::ops::Deref for EdgeFence {
+    type Target = DepSignature;
+    fn deref(&self) -> &DepSignature {
+        &self.signature
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────

@@ -284,9 +284,9 @@ fn accumulator_caps_derivation_edges_at_configured_limit() {
         let edge = OriginEdge {
             sources,
             meta: OriginMeta::None,
-            edge_dep_signature: Arc::new(
+            edge_dep_signature: Arc::new(verter_type_engine::semantic_query::EdgeFence::new(
                 verter_type_engine::semantic_query::DepSignature::default(),
-            ),
+            )),
         };
         acc.push_derivation_edge(SemanticNodeId(i), OriginEdgeKind::AliasResolve, edge);
     }

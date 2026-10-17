@@ -44,6 +44,7 @@ admission returns its complete value uncached.
 | Substitution memo entry (`SubstituteMemoEntry`) | key / value slot, root owner and operand list | `hash_cons_entry_bytes` | one per entry | released with the entry; refused → recomputed on demand | `a_substitution_answer_is_charged_while_its_memo_keeps_it` |
 | Memo family container (`FamilySlots::_retention`) | family key and slot lists in the map, control byte, budget-ledger record, the map key's heap and the ledger clone's boxes | `family_container_bytes(family)` over `family_footprint::family_key_heap_bytes` | one per keyed family | released when the family leaves the map; an SCC batch prepays every member's family before its lock, so keying under the lock never refuses | `family_footprint` suite, `an_scc_batch_never_publishes_without_a_member_whose_family_was_evicted_meanwhile` |
 | Reverse index (`CanonicalToEntries::storage`) | each shard's copy of its canonical's text, each shard table's unused buckets, the outer table's buckets | settled per insert / prune / shard removal | per index | given back as shards drain; record buckets are the candidates' | `a_reverse_index_shard_charges_its_canonical_text_until_it_drains` |
+| Origin-edge fences (`EdgeFence::_hold`, `DerivationStore::signature_pool`) | the edge store's hold on each interned fence's rail; the pool keeps `Weak`s only, keyed by content hash | the rail's own charge, retained while any edge shares the fence | one hold per pooled fence, shared by every edge naming it | released with the fence's last edge (eviction, close or clear); a refused hold records no edge | `an_origin_edge_retains_its_fence_until_its_store_lets_go` |
 | Shared-charge registry table (`RegistryTable::backing`) | table buckets by capacity | settled per registration | per registry | given back as registrations drain | `a_drained_registry_gives_back_its_table_and_its_charge` |
 | Dependency-rail interner (`DepSignatureInterner::storage`) | shard tables, entry lists, every entry's weakly held block | settled per intern / prune / sweep | per store | released when an entry is pruned | `dep_signature_interner_charges_the_rail_blocks_it_keeps_until_swept` |
 | Interned identity records and indexes (`InternRecord::_charge`, `IndexTable::backing`) | record block and value heap; digest table and spilled buckets | `InternDomain::value_heap_bytes`; settled per intern / forget | per record / per process-wide index | released with the record's last handle; backing given back as the index drains | `a_record_and_its_index_backing_are_charged_until_the_last_handle_drops`, `an_interned_relation_record_charges_itself_and_its_holders_pay_only_their_handles` |
@@ -111,4 +112,8 @@ this task, not optimization debt:
   uncharged from its slot's release (the arena's payload heap is the same
   identity / payload class);
 - a family key's names are measured with a non-collecting `AliasSet`, so a
-  name the key shares with a registered leaf is counted in both.
+  name the key shares with a registered leaf is counted in both;
+- the origin-edge store's own tables and edge lists, and the shape cache's
+  entries, carry no charge of their own; a delivered allocation they keep
+  stays charged by its own cell (retained for an origin edge's fence,
+  pinned for a shape-cache entry's rail).

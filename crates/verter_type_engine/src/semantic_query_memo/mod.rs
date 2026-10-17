@@ -1106,6 +1106,7 @@ impl SemanticGraphStore {
             .lock()
             .signature_pool
             .values()
+            .flatten()
             .filter(|weak| weak.strong_count() > 0)
             .count()
     }

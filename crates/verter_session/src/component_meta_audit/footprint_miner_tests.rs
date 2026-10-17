@@ -26,9 +26,9 @@ fn synth_edge(
         edge: OriginEdge {
             sources: sources.iter().copied().map(SemanticNodeId).collect(),
             meta,
-            edge_dep_signature: Arc::new(
+            edge_dep_signature: Arc::new(verter_type_engine::semantic_query::EdgeFence::new(
                 verter_type_engine::semantic_query::DepSignature::default(),
-            ),
+            )),
         },
     }
 }
@@ -712,9 +712,9 @@ fn mine_footprint_byte_identical_over_interned_carrier_nodes() {
             edge: OriginEdge {
                 sources: Arc::from(vec![child].into_boxed_slice()),
                 meta: OriginMeta::AliasName(Arc::from("Foo")),
-                edge_dep_signature: Arc::new(
+                edge_dep_signature: Arc::new(verter_type_engine::semantic_query::EdgeFence::new(
                     verter_type_engine::semantic_query::DepSignature::default(),
-                ),
+                )),
             },
         });
         state
