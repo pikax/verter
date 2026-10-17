@@ -3,12 +3,19 @@
 //! SipHash-1-3 under a per-process random 128-bit key, as the standard
 //! library's `RandomState` hashes, over a word encoding of the hashed
 //! value: every `Hasher` write is laid out as whole little-endian 64-bit
-//! words (an integer as one word, a byte slice zero-padded to its last
-//! word), and the message is the concatenation of those words. The value a
-//! `Hash` impl writes therefore keys the fingerprint exactly as it keys a
-//! `RandomState` hash: equal values write equal word streams, and a writer
-//! that cannot read the key cannot steer two distinct streams onto one
-//! fingerprint.
+//! words (an integer as one word; a byte slice as its length word, then its
+//! bytes zero-padded to their last word), and the message is the
+//! concatenation of those words. The length word keeps a slice's trailing
+//! zero bytes distinct from its padding, so the encoding of a value's writes
+//! is decodable: equal values write equal word streams, distinct values of
+//! one type write distinct streams, and a writer that cannot read the key
+//! cannot steer two distinct values onto one fingerprint.
+//!
+//! The initialization constants, `SipRound` and finalization follow
+//! J.-P. Aumasson and D. J. Bernstein, "SipHash: a fast short-input PRF"
+//! (INDOCRYPT 2012, <https://www.aumasson.jp/siphash/siphash.pdf>, §2);
+//! SipHash-c-d runs `c` rounds per message word and `d` finalization
+//! rounds, and the standard library's hasher is the 1-3 variant.
 //!
 //! The standard hasher folds each write into a byte buffer before it
 //! compresses whole words; a payload's `Hash` impl writes one field at a
@@ -84,6 +91,7 @@ impl FingerprintHasher {
 
 impl Hasher for FingerprintHasher {
     fn write(&mut self, bytes: &[u8]) {
+        self.word(bytes.len() as u64);
         let mut at = 0;
         while at < bytes.len() {
             let mut word = 0u64;
@@ -178,10 +186,12 @@ mod tests {
         words.iter().flat_map(|word| word.to_le_bytes()).collect()
     }
 
-    /// SipHash-1-3 over a byte message, from the reference definition, so
-    /// the word-at-a-time state is checked against an independent
-    /// byte-oriented one.
-    fn reference(k0: u64, k1: u64, message: &[u8]) -> u64 {
+    /// SipHash-c-d over a byte message, from the reference definition (the
+    /// module's cited paper, §2), so the word-at-a-time state is checked
+    /// against an independent byte-oriented one. Its constants and rounds
+    /// are themselves checked against the paper's published vector and the
+    /// standard library's SipHash-2-4.
+    fn reference(compression: usize, finalization: usize, k0: u64, k1: u64, message: &[u8]) -> u64 {
         let mut v = [
             k0 ^ 0x736f_6d65_7073_6575,
             k1 ^ 0x646f_7261_6e64_6f6d,
@@ -204,7 +214,9 @@ mod tests {
         for block in &mut blocks {
             let m = u64::from_le_bytes(block.try_into().unwrap());
             v[3] ^= m;
-            round(&mut v);
+            for _ in 0..compression {
+                round(&mut v);
+            }
             v[0] ^= m;
         }
         let mut last = (message.len() as u64 & 0xff) << 56;
@@ -212,13 +224,39 @@ mod tests {
             last |= u64::from(*byte) << (8 * index);
         }
         v[3] ^= last;
-        round(&mut v);
+        for _ in 0..compression {
+            round(&mut v);
+        }
         v[0] ^= last;
         v[2] ^= 0xff;
-        for _ in 0..3 {
+        for _ in 0..finalization {
             round(&mut v);
         }
         v[0] ^ v[1] ^ v[2] ^ v[3]
+    }
+
+    /// SipHash-1-3 as the arena fingerprints with it.
+    fn siphash_1_3(k0: u64, k1: u64, message: &[u8]) -> u64 {
+        reference(1, 3, k0, k1, message)
+    }
+
+    #[test]
+    #[allow(deprecated)] // `SipHasher` is std's stable SipHash-2-4.
+    fn the_reference_definition_matches_published_siphash_2_4() {
+        let (k0, k1) = (0x0706_0504_0302_0100, 0x0f0e_0d0c_0b0a_0908);
+        let message: Vec<u8> = (0..15).collect();
+        // The paper's Appendix A vector: key 00..0f, message 00..0e.
+        assert_eq!(reference(2, 4, k0, k1, &message), 0xa129_ca61_49be_45e5);
+        for length in 0..=24 {
+            let message: Vec<u8> = (0..length).map(|byte| byte * 7 + 1).collect();
+            let mut std_hasher = std::hash::SipHasher::new_with_keys(k0, k1);
+            std_hasher.write(&message);
+            assert_eq!(
+                reference(2, 4, k0, k1, &message),
+                std_hasher.finish(),
+                "length {length}"
+            );
+        }
     }
 
     #[test]
@@ -233,16 +271,17 @@ mod tests {
         let words = [
             7,
             3,
+            10,
             u64::from_le_bytes(*b"abcdefgh"),
             u64::from(u16::from_le_bytes(*b"ij")),
             u64::from(u32::MAX),
             u64::MAX - 1,
             u64::MAX,
         ];
-        assert_eq!(hasher.finish(), reference(k0, k1, &message(&words)));
+        assert_eq!(hasher.finish(), siphash_1_3(k0, k1, &message(&words)));
         assert_eq!(
             FingerprintHasher::with_keys(k0, k1).finish(),
-            reference(k0, k1, &[])
+            siphash_1_3(k0, k1, &[])
         );
     }
 
@@ -260,5 +299,34 @@ mod tests {
         };
         assert_ne!(hash(0, &joined), hash(0, &split));
         assert_ne!(hash(0, &joined), hash(2, &joined));
+    }
+
+    /// Trailing NUL bytes are content, not word padding: under one key,
+    /// strings that differ only in trailing NULs (as cooked template quasis
+    /// can) never share a fingerprint, alone or inside a string list.
+    #[test]
+    fn trailing_nul_bytes_reach_the_fingerprint() {
+        use std::hash::Hash;
+        use std::sync::Arc;
+        let fingerprint = |value: &dyn Fn(&mut FingerprintHasher)| {
+            let mut hasher = FingerprintHasher::with_keys(3, 5);
+            value(&mut hasher);
+            hasher.finish()
+        };
+        assert_ne!(
+            fingerprint(&|hasher| "a".hash(hasher)),
+            fingerprint(&|hasher| "a\0".hash(hasher))
+        );
+        let mut fingerprints = std::collections::HashSet::new();
+        for first in 0..8 {
+            for second in 0..8 {
+                let quasis: Arc<[Arc<str>]> = Arc::from(vec![
+                    Arc::<str>::from(format!("a{}", "\0".repeat(first))),
+                    Arc::<str>::from(format!("b{}", "\0".repeat(second))),
+                ]);
+                fingerprints.insert(fingerprint(&|hasher| quasis.hash(hasher)));
+            }
+        }
+        assert_eq!(fingerprints.len(), 64);
     }
 }
