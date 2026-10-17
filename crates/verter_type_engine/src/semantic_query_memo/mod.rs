@@ -2268,20 +2268,6 @@ impl SemanticGraphStore {
         );
     }
 
-    /// The observations of a lookup of `key` a dispatcher answers from a
-    /// result it already holds, in place of a family-memo lookup: the
-    /// lookup entry, then the warm hit a lookup of a result the memo holds
-    /// (`resident`) makes, else the miss a lookup of a result completed for
-    /// one request alone makes.
-    pub(crate) fn note_replayed_lookup(&self, key: &SemanticQueryKey, resident: bool) {
-        self.note_lookup_entry();
-        if resident {
-            self.note_warm_hit(key);
-        } else {
-            self.note_lookup_miss(key);
-        }
-    }
-
     /// The observations a family-memo lookup answered warm for `key` makes.
     fn note_warm_hit(&self, key: &SemanticQueryKey) {
         // Instrumentation — fast-path attribution.
