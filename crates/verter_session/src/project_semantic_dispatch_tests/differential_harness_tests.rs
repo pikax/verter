@@ -393,7 +393,16 @@ impl<'a> Matrix<'a> {
 
     /// Each row's verdict in each setting, in row then setting order.
     pub(super) fn verdicts(&self, rows: &[(Read<'_>, Vec<&str>)]) -> Vec<Vec<Verdict>> {
-        let host = self.host(rows);
+        self.verdicts_on(&self.host(rows), rows)
+    }
+
+    /// [`Self::verdicts`] read from `host`, a host [`Self::host`] built for
+    /// the same rows.
+    pub(super) fn verdicts_on(
+        &self,
+        host: &Arc<VerterHost>,
+        rows: &[(Read<'_>, Vec<&str>)],
+    ) -> Vec<Vec<Verdict>> {
         rows.iter()
             .enumerate()
             .map(|(index, (read, answers))| {
@@ -407,7 +416,7 @@ impl<'a> Matrix<'a> {
                     .map(|(setting, expected)| {
                         let canonical = format!("{}/probe.ts", setting.root);
                         let (observed, diagnostics) =
-                            observe_with_deadline(&host, &canonical, &symbol, self.lib.is_some());
+                            observe_with_deadline(host, &canonical, &symbol, self.lib.is_some());
                         let matched = match &observed {
                             Observed::Clean(text) => {
                                 canonical_text(text) == canonical_text(expected)

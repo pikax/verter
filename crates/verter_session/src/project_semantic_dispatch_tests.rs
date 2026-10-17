@@ -117,6 +117,7 @@ mod node_domain_tests;
 mod object_literal_accessor_tests;
 mod object_literal_key_tests;
 mod object_spread_projection_eval_tests;
+mod overload_scale_tests;
 mod projected_terminal_surface_tests;
 mod projection_stack_safety_tests;
 mod raise_tests;
