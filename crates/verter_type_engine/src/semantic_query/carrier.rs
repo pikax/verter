@@ -61,7 +61,10 @@ use verter_type_expr::facts::ValueDeclIdentityPart;
 /// [`SemanticNodeData::TypeOfNominal`] carrier — `(value_root, path)`,
 /// NEVER the deferred carrier's `type_args` (descend those through
 /// [`SemanticNodeData::carrier_type_args`]).
-pub(crate) type TypeOfHead<'a> = (&'a ValueRootKey, &'a Arc<[Arc<str>]>);
+pub(crate) type TypeOfHead<'a> = (
+    &'a ValueRootKey,
+    &'a verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
+);
 
 /// Borrowed head view of a [`SemanticNodeData::BareRef`] carrier —
 /// `(name, scope)`, NEVER its `type_args`.
@@ -69,7 +72,11 @@ pub(crate) type BareRefHead<'a> = (&'a Arc<str>, &'a NodeScopeId);
 
 /// Borrowed head view of a [`SemanticNodeData::ImportType`] carrier —
 /// `(specifier, qualifier, typeof_query)`, NEVER its `type_args`.
-pub(crate) type ImportTypeHead<'a> = (&'a Arc<str>, &'a Arc<[Arc<str>]>, bool);
+pub(crate) type ImportTypeHead<'a> = (
+    &'a Arc<str>,
+    &'a verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
+    bool,
+);
 
 /// Deferred `typeof value.path<args>` carrier payload.
 ///
@@ -82,14 +89,14 @@ pub(crate) type ImportTypeHead<'a> = (&'a Arc<str>, &'a Arc<[Arc<str>]>, bool);
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct TypeOfCarrier {
     value_root: ValueRootKey,
-    path: Arc<[Arc<str>]>,
+    path: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
     type_args: Arc<[SemanticNodeId]>,
 }
 
 impl TypeOfCarrier {
     fn new(
         value_root: ValueRootKey,
-        path: Arc<[Arc<str>]>,
+        path: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
         type_args: Arc<[SemanticNodeId]>,
     ) -> Self {
         Self {
@@ -103,7 +110,7 @@ impl TypeOfCarrier {
         &self.value_root
     }
 
-    fn path(&self) -> &Arc<[Arc<str>]> {
+    fn path(&self) -> &verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr> {
         &self.path
     }
 
@@ -146,14 +153,14 @@ impl TypeOfCarrier {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct TypeOfNominalCarrier {
     value_root: ValueRootKey,
-    path: Arc<[Arc<str>]>,
+    path: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
     identity: ValueDeclIdentityPart,
 }
 
 impl TypeOfNominalCarrier {
     fn new(
         value_root: ValueRootKey,
-        path: Arc<[Arc<str>]>,
+        path: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
         identity: ValueDeclIdentityPart,
     ) -> Self {
         Self {
@@ -167,7 +174,7 @@ impl TypeOfNominalCarrier {
         &self.value_root
     }
 
-    fn path(&self) -> &Arc<[Arc<str>]> {
+    fn path(&self) -> &verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr> {
         &self.path
     }
 
@@ -237,7 +244,7 @@ impl BareRefCarrier {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct ImportTypeCarrier {
     specifier: Arc<str>,
-    qualifier: Arc<[Arc<str>]>,
+    qualifier: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
     type_args: Arc<[SemanticNodeId]>,
     typeof_query: bool,
 }
@@ -245,7 +252,7 @@ pub struct ImportTypeCarrier {
 impl ImportTypeCarrier {
     fn new(
         specifier: Arc<str>,
-        qualifier: Arc<[Arc<str>]>,
+        qualifier: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
         type_args: Arc<[SemanticNodeId]>,
         typeof_query: bool,
     ) -> Self {
@@ -261,7 +268,7 @@ impl ImportTypeCarrier {
         &self.specifier
     }
 
-    fn qualifier(&self) -> &Arc<[Arc<str>]> {
+    fn qualifier(&self) -> &verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr> {
         &self.qualifier
     }
 
@@ -276,7 +283,7 @@ impl ImportTypeCarrier {
     fn with_type_args(&self, type_args: Arc<[SemanticNodeId]>) -> Self {
         Self {
             specifier: Arc::clone(&self.specifier),
-            qualifier: Arc::clone(&self.qualifier),
+            qualifier: self.qualifier.clone(),
             type_args,
             typeof_query: self.typeof_query,
         }
@@ -367,7 +374,7 @@ impl SemanticNodeData {
     #[must_use]
     pub fn new_typeof(
         value_root: ValueRootKey,
-        path: Arc<[Arc<str>]>,
+        path: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
         type_args: Arc<[SemanticNodeId]>,
     ) -> Self {
         Self::TypeOf(TypeOfCarrier::new(value_root, path, type_args))
@@ -380,7 +387,7 @@ impl SemanticNodeData {
     #[must_use]
     pub(crate) fn new_nominal_typeof(
         value_root: ValueRootKey,
-        path: Arc<[Arc<str>]>,
+        path: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
         nominal_identity: ValueDeclIdentityPart,
     ) -> Self {
         Self::TypeOfNominal(TypeOfNominalCarrier::new(
@@ -405,7 +412,7 @@ impl SemanticNodeData {
     #[must_use]
     pub fn new_import_type(
         specifier: Arc<str>,
-        qualifier: Arc<[Arc<str>]>,
+        qualifier: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
         type_args: Arc<[SemanticNodeId]>,
         typeof_query: bool,
     ) -> Self {

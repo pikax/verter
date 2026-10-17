@@ -8,7 +8,7 @@ use verter_type_expr::TopLevelOwnerId;
 
 fn scope(canonical: &str) -> ScopeId {
     ScopeId {
-        canonical_id: Arc::from(canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical),
         owner: TopLevelOwnerId::ordinary_file(),
         local_scope: None,
         binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
@@ -38,8 +38,8 @@ fn carrier_naming(
 // Family-memo backfill matrix
 // ──────────────────────────────────────────────────────────────────
 
-fn family_test_path() -> Arc<[PathSegment]> {
-    Arc::from(
+fn family_test_path() -> verter_type_expr::OwnedSlice<PathSegment> {
+    verter_type_expr::OwnedSlice::from(
         vec![PathSegment::Member(
             crate::semantic_query::PropertyKey::identifier("foo"),
         )]
@@ -67,7 +67,7 @@ fn dep_sig_for(canonical: &str, hash: u8) -> DepSignature {
 
 fn release_file_scope(canonical: &str, hash: u8) -> NodeScopeId {
     NodeScopeId::File {
-        canonical_id: Arc::from(canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: [hash; 16],
         local_scope: None,
@@ -77,10 +77,10 @@ fn release_file_scope(canonical: &str, hash: u8) -> NodeScopeId {
 fn release_type_param(canonical: &str, hash: u8, name: &str) -> SemanticNodeData {
     SemanticNodeData::TypeParam {
         decl: DeclIdentity {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner: TopLevelOwnerId::ordinary_file(),
             whole_hash: [hash; 16],
-            decl_name: Arc::from(name),
+            decl_name: verter_type_expr::OwnedStr::from(name),
         },
         param_index: 0,
         constraint: None,
@@ -151,7 +151,7 @@ fn release_intern_document(
 fn release_decl_key(canonical: &str, name: &str) -> SemanticQueryKey {
     SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope(canonical),
-        name: Arc::from(name),
+        name: verter_type_expr::OwnedStr::from(name),
     })
 }
 
@@ -236,7 +236,7 @@ fn intern_dedups_structural_values_across_contexts() {
     let scoped = store.intern_node_with_scope(
         SemanticNodeData::Primitive(PrimitiveKind::Number),
         NodeScopeId::File {
-            canonical_id: Arc::from("/w/a.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/w/a.ts"),
             owner: TopLevelOwnerId::ordinary_file(),
             whole_hash: [0u8; 16],
             local_scope: None,
@@ -258,7 +258,7 @@ fn intern_identity_discriminates_top_level_owner() {
     let store = SemanticGraphStore::new();
     let _scope = store.enter_node_root_scope();
     let scope = |owner| NodeScopeId::File {
-        canonical_id: Arc::from("/w/Component.vue"),
+        canonical_id: verter_type_expr::OwnedStr::from("/w/Component.vue"),
         owner,
         whole_hash: [7u8; 16],
         local_scope: None,
@@ -291,10 +291,10 @@ fn intern_identity_discriminates_top_level_owner() {
 #[test]
 fn declaration_and_slot_identity_discriminate_top_level_owner() {
     let decl = |owner| DeclIdentity {
-        canonical_id: Arc::from("/w/Component.vue"),
+        canonical_id: verter_type_expr::OwnedStr::from("/w/Component.vue"),
         owner,
         whole_hash: [9u8; 16],
-        decl_name: Arc::from("Shared"),
+        decl_name: verter_type_expr::OwnedStr::from("Shared"),
     };
     let module_decl = decl(TopLevelOwnerId::module(0));
     let instance_decl = decl(TopLevelOwnerId::instance(0));
@@ -302,9 +302,9 @@ fn declaration_and_slot_identity_discriminate_top_level_owner() {
 
     let slot = |owner| {
         ResolvedDeclSlotIdentity::type_slot(
-            Arc::from("/w/Component.vue"),
+            verter_type_expr::OwnedStr::from("/w/Component.vue"),
             owner,
-            Arc::from("Shared"),
+            verter_type_expr::OwnedStr::from("Shared"),
             3,
             [4u8; 16],
             [5u8; 16],
@@ -418,10 +418,10 @@ fn intern_typeparam_display_name_excluded_from_identity() {
     let _scope = store.enter_node_root_scope();
     let mk = |display: &str| SemanticNodeData::TypeParam {
         decl: DeclIdentity {
-            canonical_id: Arc::from("/w/a.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/w/a.ts"),
             owner: TopLevelOwnerId::ordinary_file(),
             whole_hash: [3u8; 16],
-            decl_name: Arc::from("T"),
+            decl_name: verter_type_expr::OwnedStr::from("T"),
         },
         param_index: 0,
         constraint: None,
@@ -449,7 +449,7 @@ fn shard_routing_is_deterministic_per_payload_and_scope() {
     let data_b = SemanticNodeData::Primitive(PrimitiveKind::String);
     let scope_global = NodeScopeId::Global;
     let scope_file = NodeScopeId::File {
-        canonical_id: Arc::from("/w/x.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/w/x.ts"),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: [0u8; 16],
         local_scope: None,
@@ -606,13 +606,13 @@ fn node_arena_invalidation_preserves_global_scope() {
     let whole_a: Hash16 = [1u8; 16];
     let whole_b: Hash16 = [2u8; 16];
     let scope_a = NodeScopeId::File {
-        canonical_id: Arc::clone(&canonical_a),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical_a.clone()),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: whole_a,
         local_scope: None,
     };
     let scope_b = NodeScopeId::File {
-        canonical_id: Arc::clone(&canonical_b),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical_b.clone()),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: whole_b,
         local_scope: None,
@@ -623,10 +623,10 @@ fn node_arena_invalidation_preserves_global_scope() {
     // shard entries.
     let file_a_payload = SemanticNodeData::TypeParam {
         decl: DeclIdentity {
-            canonical_id: Arc::clone(&canonical_a),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical_a.clone()),
             owner: TopLevelOwnerId::ordinary_file(),
             whole_hash: whole_a,
-            decl_name: Arc::from("Param_A"),
+            decl_name: verter_type_expr::OwnedStr::from("Param_A"),
         },
         param_index: 0,
         constraint: None,
@@ -635,10 +635,10 @@ fn node_arena_invalidation_preserves_global_scope() {
     };
     let file_b_payload = SemanticNodeData::TypeParam {
         decl: DeclIdentity {
-            canonical_id: Arc::clone(&canonical_b),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical_b.clone()),
             owner: TopLevelOwnerId::ordinary_file(),
             whole_hash: whole_b,
-            decl_name: Arc::from("Param_B"),
+            decl_name: verter_type_expr::OwnedStr::from("Param_B"),
         },
         param_index: 0,
         constraint: None,
@@ -809,10 +809,10 @@ fn many_distinct_relations_under_tiny_retention_keep_operand_only_residency() {
     let _scope = store.enter_node_root_scope();
     let operand = |name: String| SemanticNodeData::TypeParam {
         decl: DeclIdentity {
-            canonical_id: Arc::from("/w/operands.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/w/operands.ts"),
             owner: TopLevelOwnerId::ordinary_file(),
             whole_hash: [7u8; 16],
-            decl_name: Arc::from(name.as_str()),
+            decl_name: verter_type_expr::OwnedStr::from(name.as_str()),
         },
         param_index: 0,
         constraint: None,
@@ -968,7 +968,7 @@ fn invalidate_all_clears_memo_budget_under_entries_lock() {
     store.publish_with_carrier_for_tests(
         SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: scope("/w/seed.ts"),
-            name: Arc::from("Seed"),
+            name: verter_type_expr::OwnedStr::from("Seed"),
         }),
         QueryResult::Value(node),
         verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
@@ -1055,7 +1055,7 @@ fn warm_publish_records_memo_budget_under_entries_lock() {
         store_p.publish_with_carrier_for_tests(
             SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                 scope: scope("/w/publish.ts"),
-                name: Arc::from("Pub"),
+                name: verter_type_expr::OwnedStr::from("Pub"),
             }),
             QueryResult::Value(node),
             verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
@@ -1134,7 +1134,7 @@ fn invalidate_all_clears_reverse_index_under_entries_lock() {
     store.publish_with_carrier_for_tests(
         SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: scope("/w/seed.ts"),
-            name: Arc::from("Seed"),
+            name: verter_type_expr::OwnedStr::from("Seed"),
         }),
         QueryResult::Value(node),
         carrier_naming("/w/seed.ts", 1),
@@ -1251,7 +1251,7 @@ fn budget_eviction_prunes_reverse_index_under_entries_lock() {
         store.publish_with_carrier_for_tests(
             SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                 scope: scope(canonical),
-                name: Arc::from(name),
+                name: verter_type_expr::OwnedStr::from(name),
             }),
             QueryResult::Value(node),
             carrier_naming(canonical, hash),
@@ -1285,7 +1285,7 @@ fn budget_eviction_prunes_reverse_index_under_entries_lock() {
         store_p.publish_with_carrier_for_tests(
             SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                 scope: scope("/w/c.ts"),
-                name: Arc::from("C"),
+                name: verter_type_expr::OwnedStr::from("C"),
             }),
             QueryResult::Value(node),
             carrier_naming("/w/c.ts", 3),
@@ -1397,7 +1397,7 @@ fn fifo_eviction_prunes_dispatch_only_reverse_index_registration() {
     let node_a = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let key_a = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/a.ts"),
-        name: Arc::from("A"),
+        name: verter_type_expr::OwnedStr::from("A"),
     });
     let carrier_a =
         verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
@@ -1419,7 +1419,7 @@ fn fifo_eviction_prunes_dispatch_only_reverse_index_registration() {
     let node_b = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let key_b = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/b.ts"),
-        name: Arc::from("B"),
+        name: verter_type_expr::OwnedStr::from("B"),
     });
     let carrier_b =
         verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
@@ -1467,7 +1467,7 @@ fn fifo_eviction_prunes_dispatch_only_reverse_index_registration() {
     let node_c = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let key_c = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/c.ts"),
-        name: Arc::from("C"),
+        name: verter_type_expr::OwnedStr::from("C"),
     });
     let carrier_c =
         verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
@@ -1599,7 +1599,7 @@ fn alias_resolve_edge_walk_returns_declaration_identity() {
         target,
         OriginEdgeKind::AliasResolve,
         Arc::from(vec![alias_decl].into_boxed_slice()),
-        crate::semantic_query::OriginMeta::AliasName(Arc::from("AliasName")),
+        crate::semantic_query::OriginMeta::AliasName(verter_type_expr::OwnedStr::from("AliasName")),
         dep_sig_for("/w/a.ts", 1),
     );
 
@@ -2303,7 +2303,7 @@ fn node_scope_sidecar_populated_at_intern_time_for_every_decl_origin_node() {
     // Non-exempt scope-bound origin (e.g. `build_resolve_decl` /
     // `build_instantiate` result).
     let scope = NodeScopeId::File {
-        canonical_id: Arc::from("/w/decl.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/w/decl.ts"),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: [7u8; 16],
         local_scope: None,
@@ -2328,7 +2328,7 @@ fn node_scope_sidecar_populated_at_intern_time_for_every_decl_origin_node() {
 
     // Multiple non-exempt nodes get independent sidecar slots.
     let scope_b = NodeScopeId::File {
-        canonical_id: Arc::from("/w/other.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/w/other.ts"),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: [8u8; 16],
         local_scope: Some(3),
@@ -2351,13 +2351,13 @@ fn node_scope_returns_origin_not_reader_scope() {
     let store = SemanticGraphStore::new();
     let _scope = store.enter_node_root_scope();
     let scope_a = NodeScopeId::File {
-        canonical_id: Arc::from("/w/a.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/w/a.ts"),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: [1u8; 16],
         local_scope: None,
     };
     let scope_b = NodeScopeId::File {
-        canonical_id: Arc::from("/w/b.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/w/b.ts"),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: [2u8; 16],
         local_scope: None,
@@ -2762,19 +2762,19 @@ fn close_canonical_drops_content_bound_nodes_and_compacted_candidates() {
     let decl_ref_in_consumer = store.intern_node_with_scope(
         SemanticNodeData::DeclRef {
             identity: DeclIdentity {
-                canonical_id: Arc::from("/w/a.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/w/a.ts"),
                 owner: TopLevelOwnerId::ordinary_file(),
                 whole_hash: [1u8; 16],
-                decl_name: Arc::from("T"),
+                decl_name: verter_type_expr::OwnedStr::from("T"),
             },
         },
         scope_c.clone(),
     );
     let placeholder_in_consumer = store.intern_node_with_scope(
         SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
-            canonical_id: Arc::from("/w/a.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/w/a.ts"),
             owner: TopLevelOwnerId::ordinary_file(),
-            name: Arc::from("T"),
+            name: verter_type_expr::OwnedStr::from("T"),
             whole_hash: [1u8; 16],
         }),
         scope_c,
@@ -2998,7 +2998,6 @@ fn display_and_union_by_ordinal_answer_only_inside_a_construction_lane() {
 #[test]
 fn dep_signature_interner_charges_the_rail_blocks_it_keeps_until_swept() {
     use verter_session_query::retention::owned::{ChargeCtx, Owned};
-    use verter_session_query::retention::shared::AliasCharges;
     use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
 
     const RAILS: usize = 64;
@@ -3030,11 +3029,10 @@ fn dep_signature_interner_charges_the_rail_blocks_it_keeps_until_swept() {
     );
 
     // A caller keeping a rail pays for its entries, never its block again.
-    let registry = AliasCharges::new();
     rails[0]
         .owned()
         .expect("a nonempty rail")
-        .pin(ChargeCtx::new(&account, &registry));
+        .pin(ChargeCtx::new(&account));
     let entries = verter_session_query::retention::allocation::heap_block_bytes(
         WIDTH * std::mem::size_of::<crate::semantic_query::DepEntry>(),
     );

@@ -935,7 +935,9 @@ pub fn semantic_operand_evidence(
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                 canonical_id,
                 hash,
-            } if canonical_id == canonical.as_ref() => Some((Arc::clone(canonical), *hash)),
+            } if canonical_id == canonical.as_ref() => {
+                Some((verter_type_expr::OwnedStr::from(canonical), *hash))
+            }
             _ => None,
         });
         let root = found?;
@@ -1503,9 +1505,9 @@ impl SemanticGraphStore {
                     let mut state = inflight.state.lock();
                     state.aborted = true;
                     if state.completed.is_none() {
-                        state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
-                            "aborted by canonical invalidation",
-                        ))));
+                        state.completed = Some(QueryResult::Error(QueryError::Other(
+                            verter_type_expr::OwnedStr::from("aborted by canonical invalidation"),
+                        )));
                         state.dep_signature = Some(empty_signature());
                     }
                 }
@@ -1693,9 +1695,9 @@ impl SemanticGraphStore {
                     let mut state = inflight.state.lock();
                     state.aborted = true;
                     if state.completed.is_none() {
-                        state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
-                            "aborted by project-generation reset",
-                        ))));
+                        state.completed = Some(QueryResult::Error(QueryError::Other(
+                            verter_type_expr::OwnedStr::from("aborted by project-generation reset"),
+                        )));
                         state.dep_signature = Some(empty_signature());
                     }
                 }
@@ -2887,7 +2889,10 @@ impl SemanticGraphStore {
 /// current content inside the signature builder would reopen the publish
 /// race a concurrent `upsert` between value-compute and signature-build
 /// otherwise creates.
-pub type ObservedGraphSelfRoot = (Arc<str>, verter_session_query::analysis::types::Hash16);
+pub type ObservedGraphSelfRoot = (
+    verter_type_expr::OwnedStr,
+    verter_session_query::analysis::types::Hash16,
+);
 
 /// Build the [`ReadSetSignature`](verter_session_query::facts::fact_cache::ReadSetSignature)
 /// carrier for a [`SemanticGraphStore`] query-identity memo entry —
@@ -2965,7 +2970,10 @@ pub fn semantic_graph_carrier(
     // of roots, so they are compared linearly, in plain loops: this runs
     // once per cold build.
     let mut self_root_hashes: smallvec::SmallVec<
-        [(&Arc<str>, verter_session_query::analysis::types::Hash16); 4],
+        [(
+            &verter_type_expr::OwnedStr,
+            verter_session_query::analysis::types::Hash16,
+        ); 4],
     > = smallvec::SmallVec::new();
     for (canonical, observed_hash) in observed_self_roots {
         match root_position(&self_root_hashes, canonical) {
@@ -3020,7 +3028,7 @@ pub fn semantic_graph_carrier(
                 hash: *observed_hash,
             });
         }
-        self_root_canonicals.push(Arc::clone(canonical));
+        self_root_canonicals.push(Arc::<str>::from(*canonical));
     }
     crate::fact_signature_helpers::bound_completed_structural_carrier(
         view,
@@ -3035,7 +3043,10 @@ pub fn semantic_graph_carrier(
 
 /// The position of `canonical` among collapsed self-roots.
 fn root_position(
-    roots: &[(&Arc<str>, verter_session_query::analysis::types::Hash16)],
+    roots: &[(
+        &verter_type_expr::OwnedStr,
+        verter_session_query::analysis::types::Hash16,
+    )],
     canonical: &str,
 ) -> Option<usize> {
     for (index, (root, _)) in roots.iter().enumerate() {

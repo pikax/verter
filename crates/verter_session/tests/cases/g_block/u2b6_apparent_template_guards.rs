@@ -110,7 +110,7 @@ fn rootless_apparent_type_key(base: SemanticNodeId, demand_canonical: &str) -> S
             lib_env_hash: hash16(0),
             project_identity: 0,
             demand_scope: ApparentDemandScope::Rootless {
-                canonical: Arc::from(demand_canonical),
+                canonical: verter_type_expr::OwnedStr::from(demand_canonical),
             },
         },
     }
@@ -331,7 +331,12 @@ fn call_member_origins(host: &VerterHost, node: SemanticNodeId) -> Vec<Option<Ar
                     if name.as_ref() == "call"
             )
         })
-        .map(|member| member.declaration_origin.clone())
+        .map(|member| {
+            member
+                .declaration_origin
+                .as_ref()
+                .map(|origin| Arc::from(origin.as_str()))
+        })
         .collect()
 }
 

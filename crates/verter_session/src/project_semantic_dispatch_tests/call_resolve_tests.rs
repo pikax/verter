@@ -47,9 +47,9 @@ pub(super) fn occurrence(name: &str, ordinal: u32) -> SignatureNodeOccurrence {
     SignatureNodeOccurrence {
         function: FlowFunctionReturnIdentity {
             anchor: AuthoredAnchor {
-                canonical_id: Arc::from(CANONICAL),
+                canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from(name),
+                symbol: verter_type_expr::OwnedStr::from(name),
                 space: LocatorSymbolSpace::Value,
             },
             function_part: FunctionPartIdentity::DeclarationBody,
@@ -350,7 +350,7 @@ pub(super) fn call_key_at(
     } = dispatch.resolve_call_context_for(canonical);
     ResolveCallKey {
         point: ProgramPointId {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             offset: 41,
         },
         callee,
@@ -1525,7 +1525,7 @@ fn unrootable_call_is_served_but_never_admitted() {
     // (1) The call site is not a servable file.
     let mut unservable = call_key(&dispatch, callee, CallKind::Call, None, vec![eager(string)]);
     unservable.point = ProgramPointId {
-        canonical_id: Arc::from("/ws/never-upserted.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/ws/never-upserted.ts"),
         offset: 0,
     };
     let result = selected_query(&dispatch, unservable.clone());
@@ -2379,7 +2379,7 @@ fn overload_call_key(
     } = dispatch.resolve_call_context_for(OVERLOAD_CANONICAL);
     ResolveCallKey {
         point: ProgramPointId {
-            canonical_id: Arc::from(OVERLOAD_CANONICAL),
+            canonical_id: verter_type_expr::OwnedStr::from(OVERLOAD_CANONICAL),
             offset: 0,
         },
         callee,
@@ -2388,7 +2388,7 @@ fn overload_call_key(
         args: Arc::from(
             vec![CallArgKey::ProgramExpression {
                 point: ProgramPointId {
-                    canonical_id: Arc::from(OVERLOAD_CANONICAL),
+                    canonical_id: verter_type_expr::OwnedStr::from(OVERLOAD_CANONICAL),
                     offset,
                 },
                 spread: false,
@@ -2537,13 +2537,13 @@ fn source_flow_type(
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let key = verter_type_engine::semantic_query::FlowReturnKey {
         function: dispatch.flow_function_slot_for(
-            Arc::from(canonical),
+            verter_type_expr::OwnedStr::from(canonical),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(name),
+            verter_type_expr::OwnedStr::from(name),
             FunctionPartIdentity::DeclarationBody,
             0,
         ),
-        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(canonical),
         demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
         input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -3636,7 +3636,7 @@ fn unresolved_argument_mapping_degrades_and_admits_nothing() {
     let callee = callable(&dispatch, vec![first, second], Vec::new());
     let unresolved = CallArgKey::ProgramExpression {
         point: ProgramPointId {
-            canonical_id: Arc::from("/ws/definitely-not-indexed.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/ws/definitely-not-indexed.ts"),
             offset: 999,
         },
         spread: false,
@@ -3995,7 +3995,9 @@ fn incomplete_opaque_callee_is_not_classified_not_callable() {
     );
     for incomplete in [
         verter_type_engine::semantic_query::QueryError::Cancelled,
-        verter_type_engine::semantic_query::QueryError::Other(Arc::from("unsettled")),
+        verter_type_engine::semantic_query::QueryError::Other(verter_type_expr::OwnedStr::from(
+            "unsettled",
+        )),
     ] {
         let callee = graph.intern_node(SemanticNodeData::Opaque(incomplete.clone()));
         let step = dispatch.execute_resolve_call(call_key(
@@ -4322,7 +4324,7 @@ fn typeof_value_node(
                 Arc::from(canonical),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
-            name: Arc::from(name),
+            name: verter_type_expr::OwnedStr::from(name),
         },
         verter_type_engine::semantic_query::ProjectionReductionContext::published(
             verter_type_engine::semantic_query::ProjectionMode::Expanded,
@@ -4342,7 +4344,7 @@ fn declaring_file(
 ) -> Option<Arc<str>> {
     match dispatch.graph().node_scope(node) {
         Some(verter_type_engine::semantic_query::NodeScopeId::File { canonical_id, .. }) => {
-            Some(canonical_id)
+            Some(std::sync::Arc::<str>::from(canonical_id))
         }
         _ => None,
     }
@@ -4895,10 +4897,10 @@ fn binder_reach_through_an_alias_chain(query_depth: u16) -> super::call_resolve:
     });
     let chain = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: verter_type_engine::semantic_query::DeclIdentity {
-            canonical_id: Arc::from(CANONICAL),
+            canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: verter_type_engine::semantic_query::HashValue::default(),
-            decl_name: Arc::from("A2"),
+            decl_name: verter_type_expr::OwnedStr::from("A2"),
         },
         args: verter_type_engine::semantic_query::PayloadArray::from(vec![t].into_boxed_slice()),
     });

@@ -100,7 +100,14 @@ fn an_scc_member_shares_the_carrier_charge_and_keeps_it_after_the_root_drains() 
     let members = store
         .reserve_scc_batch(&[(&member_family, &member)], 1)
         .expect("the member's incremental footprint is admitted");
-    let member_own = super::retention::own_reservation_bytes(&member, &member_family, 1, 1);
+    let verter_session_query::retention::Footprint {
+        bytes: member_own,
+        handles,
+    } = super::retention::own_reservation(&member, &member_family, 1, 1);
+    // The owned allocations its bookkeeping reaches (its satisfied point's
+    // path) are charged by their own cells, retained with it.
+    let member_own_handles = handles.charged_bytes();
+    drop(handles);
     // What the member newly retains, from its allocations alone: its own
     // bookkeeping and its own (empty) relation-binding value, an owned cell
     // charged by itself. The carrier and self-root list are the root's
@@ -114,7 +121,7 @@ fn an_scc_member_shares_the_carrier_charge_and_keeps_it_after_the_root_drains() 
     let delta = account.snapshot().retained_bytes - after_root;
     assert_eq!(
         delta,
-        member_own + member_value + member_metadata,
+        member_own + member_own_handles + member_value + member_metadata,
         "the member pays its own bookkeeping and its own value — never the shared \
          carrier or self-root list a second time"
     );

@@ -70,7 +70,7 @@ fn distinct_flow_keys(count: usize) -> Vec<FlowReturnKey> {
                 function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
                 overload_ordinal: 0,
             },
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: FlowReturnContext {
                 parse_env_hash: [0u8; 16],
                 resolve_env_hash: [0u8; 16],
@@ -137,11 +137,15 @@ fn flow_demand_basis_for_member(
     FlowDemandBasis {
         ancestry: Default::default(),
         graph_body: verter_session_query::flow::bundle::FlowSliceFunctionKey {
-            canonical_id: Arc::clone(&key.function.declaration_slot.defining_canonical),
+            canonical_id: std::sync::Arc::<str>::from(
+                key.function.declaration_slot.defining_canonical.as_str(),
+            ),
             function: verter_session_query::function_program::FunctionProgramKey {
                 declaration: verter_session_query::function_program::FunctionDeclarationRef {
                     owner: key.function.declaration_slot.owner,
-                    name: Arc::clone(&key.function.declaration_slot.merged_symbol_name),
+                    name: std::sync::Arc::<str>::from(
+                        key.function.declaration_slot.merged_symbol_name.as_str(),
+                    ),
                     space: verter_session_query::facts::SymbolSpace::Value,
                 },
                 part: key.function.function_part.clone(),
@@ -233,7 +237,7 @@ fn counted_component_candidates_and_subscribers_own_flow_operands() {
                 "flow returned operand".into(),
             )));
             let mut flow_key = distinct_flow_keys(1).remove(0);
-            flow_key.normalized_type_args = Arc::from([key_node]);
+            flow_key.normalized_type_args = verter_type_expr::OwnedSlice::from([key_node]);
             let flight = store.begin_inline_flow_return_flight(&flow_key).unwrap();
             let subscriber = if subscribe {
                 let mut capture = ReadCapture::default();

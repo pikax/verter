@@ -133,9 +133,10 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
                         crate::semantic_query::PrintedUnionArm::Node(member) => {
                             fold_node(alg, dispatch, member, active)
                         }
-                        crate::semantic_query::PrintedUnionArm::Enum(decl) => {
-                            Some(alg.reference(Arc::clone(&decl.decl_name), Vec::new()))
-                        }
+                        crate::semantic_query::PrintedUnionArm::Enum(decl) => Some(alg.reference(
+                            std::sync::Arc::<str>::from(decl.decl_name.as_str()),
+                            Vec::new(),
+                        )),
                     })
                     .collect::<Option<_>>()?;
             alg.union(folded)
@@ -207,7 +208,7 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
             return fold_node(alg, dispatch, merged, active);
         }
         SemanticNodeData::Opaque(QueryError::DeclPlaceholder { name, .. }) => {
-            alg.reference(Arc::clone(name), Vec::new())
+            alg.reference(std::sync::Arc::<str>::from(name.as_str()), Vec::new())
         }
         SemanticNodeData::Conditional {
             check,
@@ -346,7 +347,7 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
                         })
                     })
                     .collect();
-                alg.recursive_ref(Arc::clone(name), raised_args)
+                alg.recursive_ref(std::sync::Arc::<str>::from(name.as_str()), raised_args)
             }
             // The checker's recovered error type raises as the recovery the
             // diagnostic defines.
@@ -394,9 +395,10 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
                 crate::semantic_query::SignatureKind::Construct => alg.constructor_to_out(function),
             }
         }
-        SemanticNodeData::DeclRef { identity } => {
-            alg.reference(Arc::clone(&identity.decl_name), Vec::new())
-        }
+        SemanticNodeData::DeclRef { identity } => alg.reference(
+            std::sync::Arc::<str>::from(identity.decl_name.as_str()),
+            Vec::new(),
+        ),
         // Raised as a FIRST-CLASS operation over its raised operands. NOT
         // `alg.reference(...)`: an intrinsic names no declaration, and
         // raising it as one would conflate it with a userland type spelled
@@ -421,7 +423,10 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
                     })
                 })
                 .collect();
-            alg.reference(Arc::clone(&base.decl_name), raised_args)
+            alg.reference(
+                std::sync::Arc::<str>::from(base.decl_name.as_str()),
+                raised_args,
+            )
         }
         SemanticNodeData::BareRef(_) => {
             let (name, _scope) = data.bare_ref_head().expect("BareRef carrier head");
@@ -450,7 +455,7 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
                 .collect();
             alg.import_type(
                 Arc::clone(specifier),
-                Arc::clone(qualifier),
+                std::sync::Arc::<[std::sync::Arc<str>]>::from(qualifier.clone()),
                 typeof_query,
                 raised_args,
             )
@@ -679,7 +684,7 @@ fn fold_object_spread_program<
             fold_open_object_spread_program(alg, dispatch, program)
         }
         QueryResult::Recursive(_) => alg.opaque_sentinel(&QueryError::RecursiveRef {
-            name: Arc::from("object-spread-projection"),
+            name: verter_type_expr::OwnedStr::from("object-spread-projection"),
             args: Default::default(),
         }),
         QueryResult::Error(error) => alg.opaque_sentinel(&error),

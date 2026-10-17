@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_type_expr::{ExcessPropertyOrigin, MemberVisibility, ObjectMethodKind};
 
@@ -30,7 +28,9 @@ struct CollisionKey(PropertyKey);
 impl CollisionKey {
     fn new(key: &PropertyKey) -> Self {
         Self(match key {
-            PropertyKey::Number(number) => PropertyKey::String(Arc::from(number.to_string())),
+            PropertyKey::Number(number) => {
+                PropertyKey::String(verter_type_expr::OwnedStr::from(number.to_string()))
+            }
             _ => key.clone(),
         })
     }
@@ -192,7 +192,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .graph()
             .node_scope(program)
             .and_then(|scope| scope.canonical_file())
-            .unwrap_or_else(|| Arc::from(""));
+            .unwrap_or_else(|| verter_type_expr::OwnedStr::from(""));
         let policy = if self.relation_strict_config().exact_optional_property_types {
             ExactOptionalPropertyPolicy::Enabled
         } else {
@@ -344,17 +344,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ExcessEligibility::Indeterminate
         } else {
             ExcessEligibility::Eligible {
-                direct_candidates: Arc::from(state.direct_excess_candidates),
+                direct_candidates: verter_type_expr::OwnedSlice::from(
+                    state.direct_excess_candidates,
+                ),
             }
         };
         evaluator_support::alternative(evaluator_support::AlternativeInput {
-            positive: Arc::from(positive),
+            positive: verter_type_expr::OwnedSlice::from(positive),
             selector: selector.clone(),
             closed: state.residual_operands.is_empty(),
-            residual_operands: Arc::from(state.residual_operands),
-            indeterminate_possible_writes: Arc::from(state.possible_writes),
-            indices: Arc::from(indices),
-            signatures: Arc::from(signatures),
+            residual_operands: verter_type_expr::OwnedSlice::from(state.residual_operands),
+            indeterminate_possible_writes: verter_type_expr::OwnedSlice::from(
+                state.possible_writes,
+            ),
+            indices: verter_type_expr::OwnedSlice::from(indices),
+            signatures: verter_type_expr::OwnedSlice::from(signatures),
             excess,
         })
     }

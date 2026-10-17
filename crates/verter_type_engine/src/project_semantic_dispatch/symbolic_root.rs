@@ -123,8 +123,10 @@ fn slot_param_root_step<C: crate::resolver_core::ResolverCapabilities>(
                 return SlotRootStep::Symbolic(true);
             }
             // Concrete check → reduce the conditional and classify the result.
-            let empty_path: Arc<[crate::semantic_query::PathSegment]> =
-                Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice());
+            let empty_path: verter_type_expr::OwnedSlice<crate::semantic_query::PathSegment> =
+                verter_type_expr::OwnedSlice::from(
+                    Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice(),
+                );
             let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
                 base: node,
                 path: empty_path,
@@ -175,9 +177,9 @@ fn slot_param_root_step<C: crate::resolver_core::ResolverCapabilities>(
             use crate::semantic_query::{ProjectionMode, QueryResult, SemanticQueryKey};
             let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
                 dispatch.type_slot_for(
-                    Arc::clone(&base.canonical_id),
+                    base.canonical_id.clone(),
                     base.owner,
-                    Arc::clone(&base.decl_name),
+                    base.decl_name.clone(),
                 ),
                 Arc::clone(args.as_arc()),
                 dispatch.instantiate_context_for(

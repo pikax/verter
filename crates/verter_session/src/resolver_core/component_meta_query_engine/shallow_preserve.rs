@@ -238,7 +238,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     if is_package_canonical(self.ctx, &root_identity.canonical_id) {
                         return symbolic_preserve(field_value);
                     }
-                    let member_name = std::sync::Arc::clone(member_name);
+                    let member_name = member_name.clone();
                     let prepared = self.prepared_type_decl(
                         &root_identity.canonical_id,
                         root_identity.owner,

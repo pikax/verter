@@ -1516,7 +1516,7 @@ fn static_class_method_return_inference_normal_control_is_exact() {
     assert_eq!(
         identity.function_part,
         FunctionPartIdentity::Member {
-            member_path: Arc::from(vec![0].into_boxed_slice()),
+            member_path: verter_type_expr::OwnedSlice::from(vec![0].into_boxed_slice()),
         },
         "the served member path is the raw ClassBody ordinal"
     );
@@ -1592,7 +1592,7 @@ fn static_class_method_return_inference_same_name_instance_collision_stays_surfa
     assert_eq!(
         identity.function_part,
         FunctionPartIdentity::Member {
-            member_path: Arc::from(vec![2].into_boxed_slice()),
+            member_path: verter_type_expr::OwnedSlice::from(vec![2].into_boxed_slice()),
         }
     );
     assert_eq!(identity.overload_ordinal, 0);
@@ -3642,9 +3642,9 @@ fn passthrough_expander() -> impl FnMut(
 fn synth_payload(field_index: u32) -> verter_type_expr::locators::MacroPayloadLocator {
     verter_type_expr::locators::MacroPayloadLocator {
         anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: std::sync::Arc::from(""),
+            canonical_id: OwnedStr::from(""),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: std::sync::Arc::from("default"),
+            symbol: OwnedStr::from("default"),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
         macro_index: 0,

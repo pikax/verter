@@ -2661,10 +2661,12 @@ mod tests {
                 is_unique_symbol: false,
                 unique_symbol_members: std::sync::Arc::from([]),
                 typeof_alias_target: Some(ValueDeclIdentityPart {
-                    canonical_id: std::sync::Arc::from("/source"),
+                    canonical_id: verter_type_expr::OwnedStr::from("/source"),
                     owner: target_owner,
-                    symbol: std::sync::Arc::from(target),
-                    member_path: std::sync::Arc::from(Vec::<String>::new().into_boxed_slice()),
+                    symbol: verter_type_expr::OwnedStr::from(target),
+                    member_path: verter_type_expr::OwnedSlice::from(
+                        Vec::<String>::new().into_boxed_slice(),
+                    ),
                 }),
                 classification: ValueAnnotationClass::TypeOfAlias,
                 annotation: None,
@@ -2733,10 +2735,12 @@ mod tests {
                 is_unique_symbol: false,
                 unique_symbol_members: std::sync::Arc::from([]),
                 typeof_alias_target: Some(ValueDeclIdentityPart {
-                    canonical_id: std::sync::Arc::from("/App.vue"),
+                    canonical_id: verter_type_expr::OwnedStr::from("/App.vue"),
                     owner: verter_type_expr::TopLevelOwnerId::instance(0),
-                    symbol: std::sync::Arc::from("target"),
-                    member_path: std::sync::Arc::from(Vec::<String>::new().into_boxed_slice()),
+                    symbol: verter_type_expr::OwnedStr::from("target"),
+                    member_path: verter_type_expr::OwnedSlice::from(
+                        Vec::<String>::new().into_boxed_slice(),
+                    ),
                 }),
                 classification: ValueAnnotationClass::TypeOfAlias,
                 annotation: None,
@@ -2848,12 +2852,12 @@ mod tests {
                 annotation: Some(SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(
                     TypeBodySlot {
                         anchor: AuthoredAnchor {
-                            canonical_id: std::sync::Arc::from("/routes.ts"),
+                            canonical_id: verter_type_expr::OwnedStr::from("/routes.ts"),
                             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                            symbol: std::sync::Arc::from("routes"),
+                            symbol: verter_type_expr::OwnedStr::from("routes"),
                             space: LocatorSymbolSpace::Value,
                         },
-                        path: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+                        path: verter_type_expr::OwnedSlice::default(),
                     },
                 ))),
                 reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
@@ -3026,12 +3030,12 @@ mod tests {
         let producer_local =
             SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(TypeBodySlot {
                 anchor: AuthoredAnchor {
-                    canonical_id: Arc::from(""),
+                    canonical_id: verter_type_expr::OwnedStr::from(""),
                     owner: verter_type_expr::TopLevelOwnerId::instance(0),
-                    symbol: Arc::from("ChildLocal"),
+                    symbol: verter_type_expr::OwnedStr::from("ChildLocal"),
                     space: LocatorSymbolSpace::Type,
                 },
-                path: Arc::from(Vec::new().into_boxed_slice()),
+                path: verter_type_expr::OwnedSlice::default(),
             }));
         let child_props = vec![AcceptedPropAnalysis {
             name: "inherited".to_string(),
@@ -3083,12 +3087,12 @@ mod tests {
         let producer_local = || {
             SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(TypeBodySlot {
                 anchor: AuthoredAnchor {
-                    canonical_id: Arc::from(""),
+                    canonical_id: verter_type_expr::OwnedStr::from(""),
                     owner: verter_type_expr::TopLevelOwnerId::instance(0),
-                    symbol: Arc::from("ChildLocal"),
+                    symbol: verter_type_expr::OwnedStr::from("ChildLocal"),
                     space: LocatorSymbolSpace::Type,
                 },
-                path: Arc::from(Vec::new().into_boxed_slice()),
+                path: verter_type_expr::OwnedSlice::default(),
             }))
         };
         let child_props = |source: SemanticTypeSource| {
@@ -3247,12 +3251,12 @@ mod tests {
         };
         SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(TypeBodySlot {
             anchor: AuthoredAnchor {
-                canonical_id: Arc::from(canonical),
+                canonical_id: verter_type_expr::OwnedStr::from(canonical),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from(symbol),
+                symbol: verter_type_expr::OwnedStr::from(symbol),
                 space: LocatorSymbolSpace::Type,
             },
-            path: Arc::from(Vec::new().into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::default(),
         }))
     }
 
@@ -3700,12 +3704,12 @@ mod tests {
             };
             SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(TypeBodySlot {
                 anchor: AuthoredAnchor {
-                    canonical_id: Arc::from(""),
+                    canonical_id: verter_type_expr::OwnedStr::from(""),
                     owner: verter_type_expr::TopLevelOwnerId::instance(0),
-                    symbol: Arc::from("ChildLocal"),
+                    symbol: verter_type_expr::OwnedStr::from("ChildLocal"),
                     space: LocatorSymbolSpace::Type,
                 },
-                path: Arc::from(Vec::new().into_boxed_slice()),
+                path: verter_type_expr::OwnedSlice::default(),
             }))
         };
         let local_rows = inherited_component_props(

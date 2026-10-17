@@ -184,7 +184,7 @@ impl ResolvedPayloadSurface {
 
     /// The owner canonical id (the SFC scope file) — equal to the `file`
     /// argument the projectors thread into the sink as `scope_canonical_id`.
-    pub(crate) fn owner_canonical(&self) -> &Arc<str> {
+    pub(crate) fn owner_canonical(&self) -> &verter_type_expr::OwnedStr {
         &self.owner.canonical_id
     }
 }
@@ -489,7 +489,7 @@ pub(crate) fn admit_published_member<'a>(
     // publishes verbatim, a numeric literal key publishes under its
     // canonical ECMAScript spelling (`{ 1: x }` IS the property `"1"`),
     // and a symbol / computed key has no published name — not admitted.
-    let member_name: Arc<str> = candidate.member.published_name()?;
+    let member_name: Arc<str> = std::sync::Arc::<str>::from(candidate.member.published_name()?);
     // (2) Derived-kind / cursor match: the descending cursor must address the
     // SAME published surface the candidate was enumerated from. The cursor
     // carries `surface: &PublishedSurfaceKind`; compare it against the
@@ -625,10 +625,10 @@ mod tests {
     /// A minimal synthetic owner identity for the candidate.
     fn synthetic_owner() -> DeclIdentity {
         DeclIdentity {
-            canonical_id: Arc::from("/Test.vue"),
+            canonical_id: verter_type_expr::OwnedStr::from("/Test.vue"),
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
             whole_hash: Default::default(),
-            decl_name: Arc::from("Test"),
+            decl_name: verter_type_expr::OwnedStr::from("Test"),
         }
     }
 

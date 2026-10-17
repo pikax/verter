@@ -57,9 +57,9 @@ fn instantiate_identity_key(host: &VerterHost, canonical: &str, symbol: &str) ->
     verter_session::for_tests::instantiate_key_for_tests(
         host,
         verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
-            Arc::from(canonical),
+            verter_type_expr::OwnedStr::from(canonical),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(symbol),
+            verter_type_expr::OwnedStr::from(symbol),
         ),
         Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
         ProjectionReductionContext::published(ProjectionMode::Identity),

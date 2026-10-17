@@ -2,8 +2,6 @@
 //! footprint miner. Extracted from the miner so the encoder (variant tags,
 //! cycle/depth sentinels, recursive child fingerprints) is one focused unit.
 
-use std::sync::Arc;
-
 use xxhash_rust::xxh3::xxh3_128;
 
 use verter_session_query::analysis::types::Hash16;
@@ -107,11 +105,11 @@ impl StructuralEncoder<'_> {
     }
 
     /// Push a length-prefixed list of strings (order-preserving).
-    fn push_str_slice(&mut self, items: &[Arc<str>]) {
+    fn push_str_slice<S: AsRef<str>>(&mut self, items: &[S]) {
         self.buf
             .extend_from_slice(&(items.len() as u64).to_le_bytes());
         for item in items {
-            self.push_str(item);
+            self.push_str(item.as_ref());
         }
     }
 

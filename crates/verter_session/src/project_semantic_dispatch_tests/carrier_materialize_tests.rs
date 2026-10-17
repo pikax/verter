@@ -171,16 +171,18 @@ fn materialize_typeof_round_trips_type_args() {
     let node = graph.intern_node(SemanticNodeData::new_typeof(
         ValueRootKey {
             scope: ScopeId {
-                canonical_id: Arc::from("/m.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/m.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
                 binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
             },
-            name: Arc::from("factory"),
+            name: verter_type_expr::OwnedStr::from("factory"),
         },
-        Arc::from(vec![Arc::<str>::from("make")].into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(
+            vec![verter_type_expr::OwnedStr::from("make")].into_boxed_slice(),
+        ),
         Arc::from(vec![arg].into_boxed_slice()),
     ));
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -219,7 +221,13 @@ fn materialize_import_type_round_trips() {
     let arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let node = graph.intern_node(SemanticNodeData::new_import_type(
         Arc::from("./module"),
-        Arc::from(vec![Arc::<str>::from("A"), Arc::<str>::from("B")].into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(
+            vec![
+                verter_type_expr::OwnedStr::from("A"),
+                verter_type_expr::OwnedStr::from("B"),
+            ]
+            .into_boxed_slice(),
+        ),
         Arc::from(vec![arg].into_boxed_slice()),
         true,
     ));
@@ -380,10 +388,10 @@ fn materialize_synthetic_binding_round_trips_with_value_node() {
         .semantic_graph()
         .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let id = SyntheticBindingId {
-        scope_canonical_id: Arc::from("/Comp.vue"),
+        scope_canonical_id: verter_type_expr::OwnedStr::from("/Comp.vue"),
         surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
-        slot_name: Some(Arc::from("default")),
-        binding_name: Arc::from("row"),
+        slot_name: Some(verter_type_expr::OwnedStr::from("default")),
+        binding_name: verter_type_expr::OwnedStr::from("row"),
     };
     let expr = materialize(
         &host,
@@ -421,7 +429,7 @@ fn materialize_recursive_ref_back_edge_round_trips() {
     let expr = materialize(
         &host,
         SemanticNodeData::Opaque(QueryError::RecursiveRef {
-            name: Arc::from("Tree"),
+            name: verter_type_expr::OwnedStr::from("Tree"),
             args: Default::default(),
         }),
     );

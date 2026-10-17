@@ -613,6 +613,9 @@ const SHARED_HEAP_BUCKET_BYTES: usize = std::mem::size_of::<(usize, usize)>() + 
 struct ChargeHeap<'a> {
     shared: &'a mut rustc_hash::FxHashMap<usize, usize>,
     bytes: usize,
+    /// The owned allocations the payload reaches: charged by their own
+    /// cells, which the payload's handles keep alive.
+    handles: verter_session_query::retention::allocation::AliasSet,
 }
 
 impl crate::semantic_query::node_payload_footprint::PayloadHeapVisitor for ChargeHeap<'_> {
@@ -628,6 +631,14 @@ impl crate::semantic_query::node_payload_footprint::PayloadHeapVisitor for Charg
             self.bytes += bytes;
         }
         first
+    }
+
+    fn handle(
+        &mut self,
+        offer: &mut dyn FnMut(&mut verter_session_query::retention::allocation::AliasSet) -> usize,
+    ) {
+        let counted = offer(&mut self.handles);
+        verter_debug_assert::verter_debug_assert_eq!(counted, 0, "an owned handle is collected");
     }
 }
 
@@ -656,6 +667,13 @@ impl crate::semantic_query::node_payload_footprint::PayloadHeapVisitor for Relea
         }
         last
     }
+
+    /// An owned allocation releases its own charge with its last handle.
+    fn handle(
+        &mut self,
+        _offer: &mut dyn FnMut(&mut verter_session_query::retention::allocation::AliasSet) -> usize,
+    ) {
+    }
 }
 
 impl ArenaInner {
@@ -666,16 +684,31 @@ impl ArenaInner {
 
     /// The heap `payload` and `scope` reach that is not charged yet, now
     /// owned by one more live slot, plus the table growth recording it.
-    fn charge_payload_heap(&mut self, payload: &SemanticNodeData, scope: &NodeScopeId) -> usize {
+    fn charge_payload_heap(
+        &mut self,
+        payload: &SemanticNodeData,
+        scope: &NodeScopeId,
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) -> usize {
         use crate::semantic_query::node_payload_footprint::PayloadHeap as _;
         let table_before = self.shared_heap_table_bytes();
         let mut visitor = ChargeHeap {
             shared: &mut self.shared_heap,
             bytes: 0,
+            handles: verter_session_query::retention::allocation::AliasSet::new(),
         };
         payload.visit_payload_heap(&mut visitor);
         scope.visit_payload_heap(&mut visitor);
         let bytes = visitor.bytes;
+        // The payload's owned allocations are charged by their own cells —
+        // pinned, like the graph storage that keeps them — and shared with
+        // every other holder of the same allocation.
+        visitor
+            .handles
+            .take_handles()
+            .pin(verter_session_query::retention::owned::ChargeCtx::new(
+                account,
+            ));
         bytes + (self.shared_heap_table_bytes() - table_before)
     }
 
@@ -734,7 +767,7 @@ impl ArenaInner {
             storage.add(chunk_storage_bytes());
         }
         storage.add(payload_block_bytes());
-        let heap = self.charge_payload_heap(&payload, &scope);
+        let heap = self.charge_payload_heap(&payload, &scope, account);
         self.storage
             .as_mut()
             .expect("the storage pin was created above")
@@ -829,8 +862,9 @@ fn payload_binds_canonical(data: &SemanticNodeData, canonical_id: &str) -> bool 
     use crate::semantic_query::{ObjectConstructionEffect, QueryError, SignatureReturnCarrier};
     use verter_type_expr::facts::FunctionReturnSource;
 
-    let names = |canonical: &Arc<str>| canonical.as_ref() == canonical_id;
-    let declared_in = |origin: &Option<Arc<str>>| origin.as_deref() == Some(canonical_id);
+    let names = |canonical: &str| canonical == canonical_id;
+    let declared_in =
+        |origin: &Option<verter_type_expr::OwnedStr>| origin.as_deref() == Some(canonical_id);
     match data {
         SemanticNodeData::DeclRef { identity } => names(&identity.canonical_id),
         SemanticNodeData::InstantiationRef { base, .. } => names(&base.canonical_id),
@@ -1778,7 +1812,7 @@ mod arena_intern_tests {
         let recursive_over = |arg: SemanticNodeId| {
             arena.intern_owned(
                 SemanticNodeData::Opaque(QueryError::RecursiveRef {
-                    name: Arc::from("Tree"),
+                    name: verter_type_expr::OwnedStr::from("Tree"),
                     args: [arg].into(),
                 }),
                 NodeScopeId::Global,
@@ -1835,9 +1869,9 @@ mod arena_intern_tests {
         let occurrence = SignatureNodeOccurrence {
             function: FlowFunctionReturnIdentity {
                 anchor: AuthoredAnchor {
-                    canonical_id: Arc::from("/declaring.ts"),
+                    canonical_id: verter_type_expr::OwnedStr::from("/declaring.ts"),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    symbol: Arc::from("f"),
+                    symbol: verter_type_expr::OwnedStr::from("f"),
                     space: LocatorSymbolSpace::Value,
                 },
                 function_part: FunctionPartIdentity::DeclarationBody,
@@ -1968,11 +2002,11 @@ mod arena_intern_tests {
             arena.intern_owned(
                 SemanticNodeData::ClassExpressionInstance {
                     identity: Arc::new(ClassExpressionIdentity {
-                        canonical_id: Arc::from("/kept.ts"),
+                        canonical_id: verter_type_expr::OwnedStr::from("/kept.ts"),
                         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         offset: 0,
-                        name: Arc::from("C"),
-                        outer_clauses: Arc::from([]),
+                        name: verter_type_expr::OwnedStr::from("C"),
+                        outer_clauses: verter_type_expr::OwnedSlice::from([]),
                         own_arity: 0,
                         constructor_visibility: None,
                         prototype: Some(prototype),
@@ -1996,7 +2030,7 @@ mod arena_intern_tests {
 
     fn file_scope(canonical: &str) -> NodeScopeId {
         NodeScopeId::File {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: [7u8; 16],
             local_scope: None,

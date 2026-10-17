@@ -106,7 +106,7 @@ fn evaluate_alias(
 
     let project_query = SemanticQueryKey::ProjectPath {
         base: carrier,
-        path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     };
     match for_tests::dispatch_execute_type_node_for_tests(host, project_query) {

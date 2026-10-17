@@ -221,9 +221,9 @@ impl<'a> Drop for InflightPanicGuard<'a> {
         {
             let mut state = self.inflight.state.lock();
             if state.completed.is_none() {
-                state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
-                    "cold build aborted (panic or early return)",
-                ))));
+                state.completed = Some(QueryResult::Error(QueryError::Other(
+                    verter_type_expr::OwnedStr::from("cold build aborted (panic or early return)"),
+                )));
                 state.dep_signature = Some(empty_signature());
             }
             state.aborted = true;
@@ -402,9 +402,9 @@ impl super::SemanticGraphStore {
             let mut state = flight.inflight.state.lock();
             state.aborted = true;
             if state.completed.is_none() {
-                state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
-                    "inline member flight abandoned",
-                ))));
+                state.completed = Some(QueryResult::Error(QueryError::Other(
+                    verter_type_expr::OwnedStr::from("inline member flight abandoned"),
+                )));
                 state.dep_signature = Some(empty_signature());
             }
             state.graph_carrier = None;

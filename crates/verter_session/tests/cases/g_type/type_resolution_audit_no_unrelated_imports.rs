@@ -60,14 +60,14 @@ fn type_resolution_audit_does_not_visit_unreferenced_imports() {
     // into `C` even though `/a.ts` imports it.
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::from("/a.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/a.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
-        name: Arc::from("UseB"),
+        name: verter_type_expr::OwnedStr::from("UseB"),
     });
 
     let (resolved, record) = host.resolve_type_with_audit(key, "/a.ts").into_parts();
@@ -123,14 +123,14 @@ fn type_resolution_audit_does_not_visit_unreferenced_imports() {
     // produces a non-empty resolution that was NOT pre-warmed.
     let key_c = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::from("/c.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/c.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
-        name: Arc::from("C"),
+        name: verter_type_expr::OwnedStr::from("C"),
     });
     let (resolved_c, record_c) = host.resolve_type_with_audit(key_c, "/c.ts").into_parts();
     assert!(
