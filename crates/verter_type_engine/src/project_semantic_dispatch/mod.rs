@@ -562,6 +562,11 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// The facts the root frame of the running drive traced soundly, left
     /// by its completion for the drive's entry to seal a refusal on.
     driven_root_traced: std::cell::RefCell<Option<TracedFacts>>,
+    /// The binder the running substitution walk replaces, classified once
+    /// for every node the walk visits ([`Self::substitution_binder`]).
+    /// Emptied at each walk's entry, so it never outlives the hold the
+    /// walk's caller keeps on the binder.
+    substitution_binder: std::cell::RefCell<Option<(SemanticNodeId, substitute::BinderKind)>>,
     /// The dispatch's share of its graph's construction owner on this
     /// thread: every ordinal a live dispatcher of the graph interns or reads
     /// is owned until the last of them drops, so a producer reading a
@@ -911,6 +916,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             request_local_open: std::cell::RefCell::new(rustc_hash::FxHashSet::default()),
             self_evaluation_receipts: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             driven_root_traced: std::cell::RefCell::new(None),
+            substitution_binder: std::cell::RefCell::new(None),
             _construction: binding_graph_scope,
         }
     }
