@@ -138,35 +138,52 @@ impl SharedCharge {
 
     /// One more cache hold: shares a retained charge, or adopts a charge
     /// only callers hold back into retention. `Err` leaves every holder and
-    /// the class unchanged. Called with `state` locked.
+    /// the class unchanged. Called with `state` locked — possibly under the
+    /// registry lock, so it never drops a hold whose release could take it.
     fn add_cache_hold(state: &mut SharedState) -> Result<(), RetentionRefusal> {
         if state.cache_holds == 0 {
-            // The leaves are adopted first; a refusal of any of them, or of
-            // the allocation itself, drops the adopted leaf holds, which
-            // hand those leaves straight back to the callers still holding
-            // them through this allocation.
-            let adopted = match &state.leaves {
-                LeafHolds::Caller(callers) => callers
+            if let LeafHolds::Caller(callers) = &state.leaves {
+                // The leaves are adopted first; a refusal of any of them, or
+                // of the allocation itself, drops the adopted leaf holds,
+                // which hand those leaves straight back to the callers still
+                // holding them through this allocation — none is released.
+                let adopted = callers
                     .iter()
                     .map(CallerHold::adopt)
-                    .collect::<Result<Box<[CacheHold]>, _>>()?,
-                LeafHolds::Cache(caches) => {
-                    verter_debug_assert::verter_debug_assert!(
-                        caches.is_empty(),
-                        "an allocation only callers hold holds its leaves as a caller"
-                    );
-                    Box::new([])
-                }
-            };
+                    .collect::<Result<Box<[CacheHold]>, _>>()?;
+                state
+                    .charge
+                    .as_mut()
+                    .expect("a reachable charge is not yet released")
+                    .try_adopt_retained()?;
+                // The callers' leaf holds drop after their leaves gained a
+                // cache hold: nothing is released.
+                state.leaves = LeafHolds::Cache(adopted);
+            }
+            // Otherwise the last cache hold is releasing an allocation no
+            // caller took: its charge is still retained and its leaves are
+            // still held as a cache's, so the revival keeps both.
+        }
+        state.cache_holds += 1;
+        Ok(())
+    }
+
+    /// One more caller hold. A revival of an allocation whose last cache
+    /// hold is releasing it with no caller left hands its charge and its
+    /// leaves to the reviving caller, exactly as a cache hold dropping
+    /// beside a live caller would. Called with `state` locked — possibly
+    /// under the registry lock: the leaf cache holds it drops each keep the
+    /// caller hold just taken, so none is released.
+    fn add_caller_hold(state: &mut SharedState) {
+        state.caller_holds += 1;
+        if state.cache_holds == 0 {
             state
                 .charge
                 .as_mut()
                 .expect("a reachable charge is not yet released")
-                .try_adopt_retained()?;
-            state.leaves = LeafHolds::Cache(adopted);
+                .transfer_to_pinned();
+            Self::hand_leaves_to_callers(state);
         }
-        state.cache_holds += 1;
-        Ok(())
     }
 
     /// Move this allocation's leaf holds to its callers, before its last
@@ -591,7 +608,7 @@ impl AliasCharges {
     {
         let key = Arc::as_ptr(allocation).cast::<()>() as usize;
         if let Some(existing) = table.entries.get(&key) {
-            existing.state.lock().caller_holds += 1;
+            SharedCharge::add_caller_hold(&mut existing.state.lock());
             return CallerHold(Arc::clone(existing));
         }
         let mut aliases = AliasSet::collecting();
@@ -644,7 +661,7 @@ impl AliasCharges {
     ) -> CallerHold {
         let key = Arc::as_ptr(leaf).cast::<()>() as usize;
         if let Some(existing) = table.entries.get(&key) {
-            existing.state.lock().caller_holds += 1;
+            SharedCharge::add_caller_hold(&mut existing.state.lock());
             return CallerHold(Arc::clone(existing));
         }
         let charge = account.pin(arc_block_bytes(leaf.len()) + registration_bytes());

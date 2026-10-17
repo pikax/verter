@@ -417,3 +417,87 @@ fn a_carriers_leaves_move_with_its_class_and_adopt_all_or_nothing() {
     drop(readopted);
     assert_eq!(occupancy(&account), (0, 0));
 }
+
+/// A holder can find a carrier in the registry after its last holder gave
+/// it up but before that holder's release took the registry lock. Reviving
+/// it there — as a cache or as a caller — keeps the carrier and the leaf
+/// only it holds charged exactly once, in the reviver's class, and neither
+/// thread blocks on the other.
+#[test]
+fn a_carrier_revived_while_its_last_holder_releases_keeps_its_sole_leaf_charged_once() {
+    use crate::retention::allocation::arc_str_list_bytes;
+    const LEAF: usize = 20_000;
+    for revive_as_caller in [false, true] {
+        let account = account(1 << 20);
+        let registry = AliasCharges::new();
+        let carrier: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from("r".repeat(LEAF))]);
+        let total = arc_block_bytes(std::mem::size_of_val::<[Arc<str>]>(&carrier))
+            + arc_block_bytes(LEAF)
+            + 2 * registration_bytes();
+        let last = registry
+            .hold(&account, &carrier, |aliases| {
+                arc_str_list_bytes(&carrier, aliases)
+            })
+            .expect("admitted");
+        let table_bytes = registry.table_charged_bytes();
+        assert_eq!(occupancy(&account), (total, table_bytes));
+
+        // Park the releaser: it gives its hold up, then waits on the
+        // registry lock this thread holds.
+        let mut table = registry.0.table.lock();
+        let key = Arc::as_ptr(&carrier).cast::<()>() as usize;
+        let entry = Arc::clone(table.entries.get(&key).expect("registered"));
+        let releaser = std::thread::spawn(move || drop(last));
+        while {
+            let state = entry.state.lock();
+            state.cache_holds + state.caller_holds != 0
+        } {
+            std::thread::yield_now();
+        }
+
+        // Revive it the way a concurrent holder would, under the same lock.
+        let mut deferred = Vec::new();
+        let revived: (Option<CacheHold>, Option<CallerHold>) = if revive_as_caller {
+            (
+                None,
+                Some(registry.pin_in(&mut table, &account, &carrier, |_| {
+                    panic!("the carrier is registered")
+                })),
+            )
+        } else {
+            (
+                Some(
+                    registry
+                        .hold_in(
+                            &mut table,
+                            &account,
+                            &carrier,
+                            |_| panic!("the carrier is registered"),
+                            &mut deferred,
+                        )
+                        .expect("a retained charge is shared, never refused"),
+                ),
+                None,
+            )
+        };
+        drop(entry);
+        drop(table);
+        releaser.join().expect("the releaser finishes");
+        assert!(deferred.is_empty());
+
+        assert_eq!(registry.len(), 2, "the carrier and its leaf, once each");
+        let expected = if revive_as_caller {
+            (0, total + table_bytes)
+        } else {
+            (total, table_bytes)
+        };
+        assert_eq!(
+            occupancy(&account),
+            expected,
+            "the revived carrier and its leaf are charged once, in the reviver's class"
+        );
+        drop(revived);
+        assert!(registry.is_empty());
+        assert_eq!(occupancy(&account), (0, 0));
+    }
+}
