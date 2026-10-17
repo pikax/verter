@@ -785,3 +785,140 @@ fn raw_template_slot_claims_wide_signature_pages() {
         assert_eq!(account.snapshot().retained_bytes, 0);
     }
 }
+
+/// A value whose products carry `len` bytes of generated code.
+fn value_with_code(semantic_hash: Hash16, len: usize) -> CompileOutputValue {
+    let mut outputs = FxHashMap::default();
+    outputs.insert(
+        VirtualNodeKind::Main,
+        CachedVirtualFile {
+            code: Arc::from("c".repeat(len)),
+            source_map: None,
+            lang: None,
+            meta: Default::default(),
+        },
+    );
+    CompileOutputValue::from_compile_record(
+        semantic_hash,
+        0u64,
+        None,
+        crate::types::CompileProducts::Produced {
+            outputs,
+            last_good_outputs: None,
+            tsx: None,
+            template_analysis: None,
+        },
+        DiagnosticsSnapshot::default(),
+    )
+}
+
+/// A content-addressed compile entry charges itself and its compiled value:
+/// the value is one self-charged allocation every peek shares, so a peek
+/// that outlives the entry keeps exactly the value charged until its own
+/// drop, in either release order; a refused admission publishes nothing.
+#[test]
+fn a_pure_content_entry_charges_its_products_and_a_peek_keeps_them_past_eviction() {
+    use verter_session_query::retention::{
+        ChargeClass, RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+    const CODE: usize = 200_000;
+    for peek_first in [false, true] {
+        let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+        let node = CompileOutputNodePureContent::with_retention_account(StoreAccount::new(
+            Arc::clone(&account),
+        ));
+        let key = k("/a.vue", [7u8; 16]);
+        node.publish_content(key.clone(), value_with_code([1; 16], CODE), 0);
+        let peek = node.peek(&key).expect("published");
+        // The value and its products are two owned allocations, each
+        // charged by its own cell.
+        let products = peek
+            .products
+            .charge_bytes()
+            .expect("the products are charged");
+        assert!(products > CODE, "the generated code is charged: {products}");
+        let value = peek.charge_bytes().expect("the value is charged") + products;
+        assert_eq!(peek.charge_class(), Some(ChargeClass::Retained));
+        assert_eq!(peek.products.charge_class(), Some(ChargeClass::Retained));
+        let retained = account.snapshot().retained_bytes;
+        assert!(
+            retained > value,
+            "the entry charges its own allocations too"
+        );
+        if peek_first {
+            drop(peek);
+            assert_eq!(account.snapshot().retained_bytes, retained);
+            node.remove(&key);
+        } else {
+            node.remove(&key);
+            let snapshot = account.snapshot();
+            assert_eq!(
+                (snapshot.retained_bytes, snapshot.pinned_bytes),
+                (0, value),
+                "the peek alone keeps the products charged"
+            );
+            drop(peek);
+        }
+        assert_eq!(account.snapshot().total_bytes(), 0);
+    }
+
+    let tight = SemanticRetentionAccount::new(RetentionLimits {
+        max_entry_bytes: 1,
+        ..RetentionLimits::defaults()
+    });
+    let node =
+        CompileOutputNodePureContent::with_retention_account(StoreAccount::new(Arc::clone(&tight)));
+    node.publish_content(k("/a.vue", [8u8; 16]), value_with_code([1; 16], CODE), 0);
+    assert_eq!(node.entry_count(), 0, "a refused entry is not published");
+    assert_eq!(tight.snapshot().total_bytes(), 0);
+}
+
+/// A session compile slot charges its own allocations and its products: a
+/// warm hit shares the slot's products, and keeps them charged after the
+/// slot is removed until the hit's own drop.
+#[test]
+fn a_session_slot_charges_its_products_and_a_warm_hit_keeps_them_past_removal() {
+    use verter_session_query::retention::{
+        ChargeClass, RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+    const CODE: usize = 150_000;
+    let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+    let node = CompileOutputNodeFactValidatedSession::with_retention_account(StoreAccount::new(
+        Arc::clone(&account),
+    ));
+    let mut state = ProfileState::default();
+    let semantic = [3u8; 16];
+    assert_eq!(
+        node.publish(
+            &mut state,
+            42,
+            SignatureAdmission::Cacheable(ReadSetSignature::new(empty_fact_signature())),
+            value_with_code(semantic, CODE),
+            0,
+        ),
+        SessionPublishOutcome::Admitted
+    );
+    let hit = node
+        .lookup(&state, 42, &semantic, 0, None, || Some(()), |_, _| true)
+        .expect("warm hit");
+    let products = hit
+        .products
+        .charge_bytes()
+        .expect("the products are charged");
+    assert!(products > CODE, "the generated code is charged: {products}");
+    assert_eq!(hit.products.charge_class(), Some(ChargeClass::Retained));
+    let retained = account.snapshot().retained_bytes;
+    assert!(
+        retained > products,
+        "the slot charges its own allocations too"
+    );
+    node.remove(&mut state, 42);
+    let snapshot = account.snapshot();
+    assert_eq!(
+        (snapshot.retained_bytes, snapshot.pinned_bytes),
+        (0, products),
+        "the hit alone keeps the products charged"
+    );
+    drop(hit);
+    assert_eq!(account.snapshot().total_bytes(), 0);
+}

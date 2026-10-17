@@ -1600,3 +1600,47 @@ impl crate::invalidation_domain::InvalidationByCanonical for ShapeCacheDb {
         before.saturating_sub(after)
     }
 }
+
+#[cfg(test)]
+mod retention_tests {
+    use std::sync::Arc;
+
+    use verter_session_query::retention::{
+        RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+    use verter_type_expr::{
+        LiteralValue, SyntheticCarrierKey, SyntheticCarrierSurfaceKind, TypeExpr,
+    };
+
+    use super::ShapeCacheDb;
+    use crate::semantic_query::ProjectionMode;
+
+    /// A shape entry charges the whole materialized type tree it keeps — a
+    /// long literal costs its text, not a per-entry figure — and gives it
+    /// back when the entry goes.
+    #[test]
+    fn a_shape_entry_charges_its_type_tree_and_releases_it_with_the_entry() {
+        const TEXT: usize = 120_000;
+        let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+        let db = ShapeCacheDb::new().charged_to(StoreAccount::new(Arc::clone(&account)));
+        let carrier = SyntheticCarrierKey {
+            scope_canonical_id: Arc::from("/c.vue"),
+            surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
+            slot_name: Some(Arc::from("default")),
+            binding_name: Arc::from("item"),
+            value_node: 1,
+        };
+        let deep = TypeExpr::Union(Arc::from(vec![
+            TypeExpr::Literal(LiteralValue::String("l".repeat(TEXT))),
+            TypeExpr::Literal(LiteralValue::String("small".into())),
+        ]));
+        db.insert_synthetic_carrier_deep_for_test(&carrier, ProjectionMode::Shallow, deep);
+        let retained = account.snapshot().retained_bytes;
+        assert!(
+            retained > TEXT,
+            "the entry and its type tree are charged: {retained}"
+        );
+        db.invalidate_all();
+        assert_eq!(account.snapshot().total_bytes(), 0);
+    }
+}
