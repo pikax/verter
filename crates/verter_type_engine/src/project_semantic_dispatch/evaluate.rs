@@ -2541,7 +2541,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.graph()
                 .evaluate_deferred_memo_get(node, reduction_context, demand, self.ctx)
         {
-            if self.admits_served(&served.receipt) {
+            if self.admits_served_in_place(&served.receipt) {
                 return EvaluateDeferredOutcome::complete(served.value);
             }
         }
@@ -2692,7 +2692,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let memo_hit = if check_memo {
                     self.graph()
                         .evaluate_deferred_memo_get(entry_node, context, demand, self.ctx)
-                        .filter(|served| self.admits_served(&served.receipt))
+                        .filter(|served| self.admits_served_in_place(&served.receipt))
                         .map(|served| served.value)
                 } else {
                     None

@@ -256,6 +256,50 @@ fn signature_chains_500_deep_answer_cold_and_warm_on_a_one_mebibyte_stack() {
     });
 }
 
+/// A chain of `length` non-generic aliases, each a conditional over the one
+/// before whose true branch is `branch` of the one before:
+/// `C<i> = C<i-1> extends string ? branch(i-1) : never`.
+fn conditional_chain(length: usize, branch: impl Fn(usize) -> String) -> String {
+    let mut source = String::from("type C0 = \"ok\";\n");
+    for level in 1..=length {
+        let p = level - 1;
+        source.push_str(&format!(
+            "type C{level} = C{p} extends string ? {} : never;\n",
+            branch(p)
+        ));
+    }
+    source
+}
+
+/// Chains of non-generic conditional aliases, each deciding over the one
+/// before, evaluate on a 1 MiB thread, cold and warm alike: deciding a
+/// conditional needs its operands' instantiations from the runtime instead
+/// of normalizing them in place one native level deeper. Five hundred
+/// levels whose branch is a literal; a hundred whose branch selects the
+/// alias before, which a decided branch keeps as a carrier, so each level's
+/// decision walks the carriers below it — that walk, not the runtime, bounds
+/// its length here.
+///
+/// TypeScript 7.0.2, `--strict` and with `strictNullChecks` and
+/// `noImplicitAny` off: `C500` over the literal branches and `C100` over the
+/// alias branches are `"ok"`.
+#[test]
+fn conditional_chains_decide_cold_and_warm_on_a_one_mebibyte_stack() {
+    in_a_fresh_process(test_path!(), || {
+        let displays = on_a_one_mebibyte_stack(|| {
+            [
+                (conditional_chain(500, |_| "\"ok\"".to_owned()), "C500"),
+                (conditional_chain(100, |p| format!("C{p}")), "C100"),
+            ]
+            .map(|(source, probe)| (probe, cold_and_warm_displays(&source, probe)))
+        });
+        for (probe, [cold, warm]) in displays {
+            assert_eq!(cold, "\"ok\"", "{probe} decides cold");
+            assert_eq!(warm, cold, "{probe} decides warm as it does cold");
+        }
+    });
+}
+
 /// A chain alternating a member projection, an instantiation, a flow return
 /// and a call at every level — `g<i>` returns `id(b["v"])` over
 /// `b: B<i-1>`, and `B<i>` projects `ReturnType<typeof g<i>>` — answers on
