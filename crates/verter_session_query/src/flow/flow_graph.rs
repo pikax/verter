@@ -44,7 +44,9 @@ use crate::flow::{
 /// kind today; other executable region kinds (module top-level, static
 /// blocks, field / parameter initializers, decorator expressions) enter
 /// through this discriminant without reshaping the demand planner.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub enum ExecutableRegionKind {
     /// An authored function body.
     Function,
@@ -97,7 +99,7 @@ impl FlowCapturedBindingId {
 }
 
 /// The typed dependence class of one edge.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub enum FlowEdgeKind {
     /// The source node's value is provided by the target: a return site's
     /// argument, a binding's initializer / whole-slot definite write
@@ -136,7 +138,7 @@ pub enum FlowEdgeKind {
 }
 
 /// The structural authority of a path write's ordering semantics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub enum PathWriteSource {
     /// Entries in one object literal execute in authored order.
     ObjectLiteralEntry,
@@ -176,7 +178,7 @@ impl FlowEdgeKind {
 }
 
 /// One typed edge.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct FlowEdge {
     /// The depending node.
     pub from: FlowNodeId,
@@ -192,7 +194,7 @@ pub struct FlowEdge {
 /// (`Send + Sync + 'static`), compact interned ids throughout, no stored
 /// lowered type (`NoTypeExpr`-certified); every type along an edge resolves
 /// on demand only when a demand slice traverses it.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct FunctionFlowGraph {
     /// The executable-region kind this graph covers.
     pub region_kind: ExecutableRegionKind,

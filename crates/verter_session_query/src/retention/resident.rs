@@ -20,7 +20,7 @@ use verter_no_typeexpr::NoTypeExpr;
 pub(crate) const RESIDENT_SLOTS: usize = 6;
 
 /// The kinds of shared storage counted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub(crate) enum ResidentKind {
     /// A file's frozen closure-capture summary.
     CaptureSummary,
@@ -66,7 +66,7 @@ static LEDGERS: [Ledger; ResidentKind::COUNT] = [const { Ledger::new() }; Reside
 
 /// One allocation's contribution to the resident totals, released exactly
 /// once when the allocation drops. The default charges nothing.
-#[derive(Debug, Default, NoTypeExpr)]
+#[derive(Debug, Default, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub(crate) struct ResidentCharge {
     charged: Option<(ResidentKind, [usize; RESIDENT_SLOTS])>,
 }

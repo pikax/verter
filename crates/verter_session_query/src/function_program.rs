@@ -289,7 +289,16 @@ pub struct FunctionParamRecord {
 }
 
 /// The kind of one local binding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_no_typeexpr::NoTypeExpr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum FunctionBindingKind {
     /// A formal parameter.
     Param,
@@ -595,7 +604,7 @@ pub struct ProgramExpressionRecord {
 /// per-capture-list ordinal) can distinguish. NEVER a node id, a type, a
 /// content hash, or a span — capture types rehydrate from indexed binding /
 /// reaching-definition facts under the final type substitution.
-#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct FlowBindingIdentity {
     /// The binding name.
     pub name: Arc<str>,

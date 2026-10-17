@@ -121,8 +121,43 @@ pub struct FlowSliceLoweredKey {
 /// graph. Memory-side; evicted per canonical through
 /// [`Self::remove_canonical`].
 pub struct FunctionFlowGraphStore {
-    entries: DashMap<FlowSliceFunctionKey, Arc<FlowGraphBundle>>,
+    entries: DashMap<FlowSliceFunctionKey, GraphEntry>,
     builds: AtomicU64,
+    /// The account a retained bundle is charged to.
+    retention: verter_session_query::retention::StoreAccount,
+}
+
+/// One retained bundle and the charge for keeping it: its map slot, its key
+/// and the whole bundle — skeleton, binding map and graph — on one refusable
+/// reservation released with the entry.
+struct GraphEntry {
+    bundle: Arc<FlowGraphBundle>,
+    _retention: verter_session_query::retention::RetentionCharge,
+}
+
+impl GraphEntry {
+    /// Charge an entry for keeping `bundle`; `None` when the account
+    /// refuses it, so the bundle serves its builder uncached.
+    fn admit(
+        bundle: &Arc<FlowGraphBundle>,
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) -> Option<Self> {
+        use verter_session_query::retention::allocation::arc_block_bytes;
+        let footprint = verter_session_query::retention::heap_size::footprint(&**bundle);
+        let ctx = verter_session_query::retention::owned::ChargeCtx::new(account);
+        let holds = footprint.handles.hold_or_pin(ctx).ok()?;
+        let own = verter_session_query::retention::ENTRY_OVERHEAD_BYTES
+            + std::mem::size_of::<(FlowSliceFunctionKey, GraphEntry)>()
+            + arc_block_bytes(std::mem::size_of::<FlowGraphBundle>())
+            + footprint.bytes;
+        let charge = account
+            .reserve(verter_session_query::retention::ChargeClass::Retained, own)
+            .admitted()?;
+        Some(Self {
+            bundle: Arc::clone(bundle),
+            _retention: charge.holding(holds),
+        })
+    }
 }
 
 /// A storage claim; the producer retains the existing shard lock until it
@@ -135,8 +170,9 @@ pub enum GraphClaim<'a> {
 }
 
 pub struct GraphPublish<'a> {
-    slot: dashmap::mapref::entry::VacantEntry<'a, FlowSliceFunctionKey, Arc<FlowGraphBundle>>,
+    slot: dashmap::mapref::entry::VacantEntry<'a, FlowSliceFunctionKey, GraphEntry>,
     builds: &'a AtomicU64,
+    account: &'a Arc<verter_session_query::retention::SemanticRetentionAccount>,
 }
 
 impl GraphPublish<'_> {
@@ -149,7 +185,11 @@ impl GraphPublish<'_> {
         }
         self.builds.fetch_add(1, Ordering::Relaxed);
         let bundle = Arc::new(bundle);
-        self.slot.insert(Arc::clone(&bundle));
+        // A refused charge leaves the slot vacant: the bundle serves its
+        // builder uncached.
+        if let Some(entry) = GraphEntry::admit(&bundle, self.account) {
+            self.slot.insert(entry);
+        }
         Some(bundle)
     }
 }
@@ -161,6 +201,18 @@ impl FunctionFlowGraphStore {
         Self {
             entries: DashMap::new(),
             builds: AtomicU64::new(0),
+            retention: verter_session_query::retention::StoreAccount::default(),
+        }
+    }
+
+    /// An empty store whose retained bundles are charged to `account`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn charged_to_for_test(
+        account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) -> Self {
+        Self {
+            retention: verter_session_query::retention::StoreAccount::new(account),
+            ..Self::new()
         }
     }
 
@@ -170,15 +222,16 @@ impl FunctionFlowGraphStore {
     /// source product abandons it without publishing an absence.
     pub fn claim(&self, key: &FlowSliceFunctionKey) -> GraphClaim<'_> {
         if let Some(hit) = self.entries.get(key) {
-            return GraphClaim::Read(Arc::clone(hit.value()));
+            return GraphClaim::Read(Arc::clone(&hit.value().bundle));
         }
         match self.entries.entry(key.clone()) {
             dashmap::mapref::entry::Entry::Occupied(occupied) => {
-                GraphClaim::Read(Arc::clone(occupied.get()))
+                GraphClaim::Read(Arc::clone(&occupied.get().bundle))
             }
             dashmap::mapref::entry::Entry::Vacant(slot) => GraphClaim::Produce(GraphPublish {
                 slot,
                 builds: &self.builds,
+                account: self.retention.get(),
             }),
         }
     }
@@ -202,11 +255,13 @@ impl FunctionFlowGraphStore {
     ) -> BoundFlowGraph {
         let structure = KeyedFunctionStructure::bind_fixture(key.clone(), prepared);
         let bundle = match self.entries.entry(key) {
-            dashmap::mapref::entry::Entry::Occupied(occupied) => Arc::clone(occupied.get()),
+            dashmap::mapref::entry::Entry::Occupied(occupied) => Arc::clone(&occupied.get().bundle),
             dashmap::mapref::entry::Entry::Vacant(vacant) => {
                 let bundle = Arc::new(FlowGraphBundle::build(structure));
                 self.builds.fetch_add(1, Ordering::Relaxed);
-                vacant.insert(Arc::clone(&bundle));
+                if let Some(entry) = GraphEntry::admit(&bundle, self.retention.get()) {
+                    vacant.insert(entry);
+                }
                 bundle
             }
         };
@@ -223,7 +278,9 @@ impl FunctionFlowGraphStore {
     /// the engine driver's blocking build to resolve it. Unavailable source
     /// versions and correspondence errors never enter this store.
     pub fn peek(&self, key: &FlowSliceFunctionKey) -> Option<Arc<FlowGraphBundle>> {
-        self.entries.get(key).map(|hit| Arc::clone(hit.value()))
+        self.entries
+            .get(key)
+            .map(|hit| Arc::clone(&hit.value().bundle))
     }
 
     /// Number of retained graph bundles (retention observability).
@@ -237,7 +294,7 @@ impl FunctionFlowGraphStore {
     pub fn retained_bundles_for_test(&self) -> Vec<Arc<FlowGraphBundle>> {
         self.entries
             .iter()
-            .map(|entry| Arc::clone(entry.value()))
+            .map(|entry| Arc::clone(&entry.value().bundle))
             .collect()
     }
 
@@ -452,6 +509,9 @@ impl FlowSliceStores {
         mut self,
         account: verter_session_query::retention::StoreAccount,
     ) -> Self {
+        if let Some(graphs) = Arc::get_mut(&mut self.graphs) {
+            graphs.retention = account.clone();
+        }
         self.retention = account;
         self
     }

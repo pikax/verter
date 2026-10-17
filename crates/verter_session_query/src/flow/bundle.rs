@@ -191,6 +191,7 @@ impl KeyedFunctionStructure {
 /// constructor: it takes a [`KeyedFunctionStructure`] and derives the graph
 /// and the binding map from that one prepared structure, so a bundle's key,
 /// graph and binding map always describe the same structure.
+#[derive(verter_retention::heap_size::HeapSize)]
 pub struct FlowGraphBundle {
     key: FlowSliceFunctionKey,
     skeleton: Arc<FunctionBodySkeleton>,

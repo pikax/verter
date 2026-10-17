@@ -45,7 +45,9 @@ impl SkeletonBindingId {
 }
 
 /// One control region of the statement skeleton.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub struct SkeletonRegionId(pub u32);
 
 impl SkeletonRegionId {
@@ -123,7 +125,9 @@ impl SkeletonReturnSiteId {
 }
 
 /// The kind of one control region.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub enum SkeletonRegionKind {
     /// The function body itself — the root region.
     FunctionBody,
@@ -153,7 +157,7 @@ pub enum SkeletonRegionKind {
 /// site (an `if` / loop condition or `switch` discriminant), whether the
 /// region's statement subtree returns from the indexed function, and the
 /// region's span.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct SkeletonRegion {
     /// The region kind.
     pub kind: SkeletonRegionKind,
@@ -276,7 +280,7 @@ impl SkeletonBindingKind {
 }
 
 /// One entry of the lexical binding index.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct SkeletonBinding {
     /// The binding name.
     pub name: FlowNameId,
@@ -325,7 +329,7 @@ pub struct SkeletonBinding {
 
 /// One identifier read inside a site (child sites and nested function
 /// bodies excluded — their reads belong to their own site / frame).
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct SkeletonRead {
     /// The read name (a local slot when the name binds in this frame,
     /// otherwise a free / captured name).
@@ -344,14 +348,16 @@ pub struct SkeletonRead {
 
 /// A type-query dependency of an indexed call input, independent of runtime
 /// operand reads, effects and closure capture receipts.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct SkeletonSourceTypeQuery {
     pub span: FrameSpan,
     pub binding: Option<FlowBindingRef>,
 }
 
 /// How a read depends on a demand for the containing expression result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub enum FlowReadKind {
     /// The read provides the result; append the demanded suffix to its path.
     Result,
@@ -360,7 +366,7 @@ pub enum FlowReadKind {
 }
 
 /// The callee shape of one call / construct site.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub enum SkeletonCallee {
     /// A bare identifier callee (`g()`).
     Named(FlowNameId),
@@ -372,7 +378,7 @@ pub enum SkeletonCallee {
 }
 
 /// One call / construct footprint entry.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct SkeletonCall {
     /// The callee shape.
     pub callee: SkeletonCallee,
@@ -387,7 +393,7 @@ pub struct SkeletonCall {
 }
 
 /// The key of one object-literal property entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub enum SkeletonObjectKey {
     /// A statically-known property key.
     Static(FlowNameId),
@@ -397,7 +403,9 @@ pub enum SkeletonObjectKey {
 }
 
 /// The authored kind of one object-literal property.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub enum SkeletonPropertyKind {
     /// A plain `key: value` initializer.
     Init,
@@ -408,7 +416,7 @@ pub enum SkeletonPropertyKind {
 }
 
 /// One object-literal entry of a site's shape footprint.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub enum SkeletonObjectEntry {
     /// A property provisioning one key.
     Property {
@@ -435,7 +443,7 @@ pub enum SkeletonObjectEntry {
 /// each one records the child sites the flow graph turns into
 /// value-provider edges, so the demand planner reaches every
 /// sub-expression the content half lowers.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub enum SkeletonExprShape {
     /// An object literal with its property footprint, in authored order.
     ObjectLiteral {
@@ -467,7 +475,9 @@ pub enum SkeletonExprShape {
 /// with no correlated index record asserts NOTHING about what it captures,
 /// and a consumer must fail closed on it rather than read its empty
 /// capture list as "captures nothing".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub enum SkeletonClosureCorrelation {
     /// The indexed program named this callable, so
     /// [`SkeletonClosure::captures`] is its EXACT and EXHAUSTIVE capture
@@ -496,7 +506,7 @@ pub enum SkeletonClosureCorrelation {
 /// is the per-callback partition of that union, so a consumer can carry
 /// one obligation per (callback, captured binding) and can tell a
 /// capture-free callback from an absent one.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct SkeletonClosure {
     /// The callable's own span — its identity within the frame.
     pub span: FrameSpan,
@@ -525,7 +535,7 @@ pub struct SkeletonClosure {
 /// One tracked expression site: span, region membership, containment
 /// parent, shape, and the read / call footprint attributed to this site
 /// (child sites carry their own).
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct SkeletonExprSite {
     /// The expression's span.
     pub span: FrameSpan,
@@ -559,7 +569,7 @@ pub struct SkeletonExprSite {
 }
 
 /// The root target of one write.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub enum SkeletonWriteTarget {
     /// A named root (a local slot when the name binds in this frame,
     /// otherwise a free name).
@@ -569,7 +579,9 @@ pub enum SkeletonWriteTarget {
 }
 
 /// One segment of a write's projection path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub enum SkeletonPathSegment {
     /// A statically-known property key.
     Static(FlowNameId),
@@ -590,7 +602,7 @@ pub enum SkeletonWriteCertainty {
 }
 
 /// One write of the assignment / kill summary, in source order.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct SkeletonWrite {
     /// The write's root target.
     pub target: SkeletonWriteTarget,
@@ -614,7 +626,7 @@ pub struct SkeletonWrite {
 }
 
 /// One `return` site of the indexed function, in source order.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct SkeletonReturnSite {
     /// Source-order ordinal.
     pub ordinal: u32,
@@ -646,7 +658,7 @@ pub struct SkeletonReturnSite {
 /// above the function moves all of them while changing nothing the key can
 /// see. Consumers rebase a live position through [`FrameSpan::rebase`]
 /// before comparing.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct FunctionBodySkeleton {
     /// The interned name table.
     pub names: Arc<[Arc<str>]>,
@@ -689,7 +701,9 @@ pub struct FunctionBodySkeleton {
 
 /// Each interned name's id and the bindings that declare it, so a name
 /// resolves by lookup rather than by a scan of the name or binding table.
-#[derive(Debug, Clone, Default, PartialEq, Eq, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub struct SkeletonNameIndex {
     ids: Arc<NameIds>,
     tables: Arc<NameTables>,
@@ -697,7 +711,7 @@ pub struct SkeletonNameIndex {
 
 /// The name map of a [`SkeletonNameIndex`], one allocation shared by the
 /// index's clones until one of them interns a name.
-#[derive(Debug, Default, NoTypeExpr)]
+#[derive(Debug, Default, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 struct NameIds {
     map: rustc_hash::FxHashMap<Arc<str>, FlowNameId>,
     resident: ResidentCharge,
@@ -743,7 +757,7 @@ impl Eq for NameIds {}
 /// The bindings of each name, in declaration order: those of name `n` are
 /// `bindings[offsets[n]..offsets[n + 1]]`. A name interned after the index
 /// was built declares none.
-#[derive(Debug, Default, NoTypeExpr)]
+#[derive(Debug, Default, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 struct NameTables {
     offsets: Box<[u32]>,
     bindings: Box<[SkeletonBindingId]>,
@@ -886,7 +900,9 @@ impl SkeletonNameIndexOccupancy {
 /// The authored kind of one function body — the `async` and `generator`
 /// flags the language's return-type rule keys on. A plain function or
 /// arrow is [`Self::Plain`]; an arrow can never be a generator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub enum FunctionBodyKind {
     Plain,
     Async,
