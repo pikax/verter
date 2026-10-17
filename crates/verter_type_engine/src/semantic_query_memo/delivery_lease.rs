@@ -109,16 +109,16 @@ impl SemanticDeliveryLease {
             .as_ref()
             .map(|owner| std::sync::Arc::as_ptr(owner) as usize)
     }
-    /// The bytes this delivery's own metadata is pinned for.
+    /// The bytes this delivery's own metadata is charged for: its owner's
+    /// block and the root owners it names, each by its own cell.
     #[cfg(any(test, feature = "test-support"))]
     pub fn own_charge_bytes_for_tests(&self) -> usize {
-        self.0
-            .as_ref()
-            .and_then(|owner| owner._own.as_ref())
-            .map_or(
+        self.0.as_ref().map_or(0, |owner| {
+            owner._own.as_ref().map_or(
                 0,
                 verter_session_query::retention::shared::CallerHold::bytes,
-            )
+            ) + owner.own_footprint().handles.charged_bytes()
+        })
     }
 
     /// A cache's hold on this delivery's metadata charge, for a cache that
