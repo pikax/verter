@@ -11019,7 +11019,11 @@ impl SemanticNodeData {
                 source: source.clone(),
                 mapper: mapper.clone(),
             },
-            Self::TypeOf(v0) => Self::TypeOf(v0.clone()),
+            // A carrier lends its arguments only by borrow, so its copy is
+            // rebuilt through the one carrier reconstruction channel.
+            Self::TypeOf(_) => self
+                .map_carrier_type_args(Arc::from(self.carrier_type_args()))
+                .expect("a carrier rebuilds with its own arguments"),
             Self::TypeOfNominal(v0) => Self::TypeOfNominal(v0.clone()),
             Self::TypeParam {
                 decl,
@@ -11105,8 +11109,9 @@ impl SemanticNodeData {
             Self::MergedDecl { contributors } => Self::MergedDecl {
                 contributors: contributors.share(),
             },
-            Self::BareRef(v0) => Self::BareRef(v0.clone()),
-            Self::ImportType(v0) => Self::ImportType(v0.clone()),
+            Self::BareRef(_) | Self::ImportType(_) => self
+                .map_carrier_type_args(Arc::from(self.carrier_type_args()))
+                .expect("a carrier rebuilds with its own arguments"),
             Self::RawFallback { value } => Self::RawFallback {
                 value: value.clone(),
             },

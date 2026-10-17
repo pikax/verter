@@ -666,7 +666,16 @@ fn session_publish_claims_wide_signature_pages_and_is_refused_for_them() {
         .iter()
         .all(|page| page.retained_charge_class() == Some(ChargeClass::Retained)));
     let page_bytes: usize = pages.iter().map(|page| page.retained_charge_bytes()).sum();
-    assert_eq!(account.snapshot().retained_bytes, page_bytes);
+    let slot = state
+        .compile_slot_for_node(42)
+        .expect("the slot is published");
+    let slot_bytes = slot._retention.bytes() + slot.products.charge_bytes().unwrap_or(0);
+    assert!(slot_bytes > 0, "the slot charges its own allocations");
+    assert_eq!(
+        account.snapshot().retained_bytes,
+        page_bytes + slot_bytes,
+        "the pages, the slot's own allocations and its products are retained"
+    );
     drop((pages, signature, state));
     assert_eq!(
         account.snapshot().retained_bytes,

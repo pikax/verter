@@ -74,6 +74,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use verter_session_query::retention::heap_size::OwnedTree;
 
 use dashmap::DashMap;
 #[cfg(any(test, feature = "test-support"))]
@@ -399,14 +400,7 @@ pub type DeclarationLookupKey = (
 );
 
 pub struct DeclarationLookupDb {
-    entries: DashMap<
-        DeclarationLookupKey,
-        Arc<
-            CacheEntry<
-                verter_session_query::retention::heap_size::OwnedTree<ResolvedTypeDeclaration>,
-            >,
-        >,
-    >,
+    entries: DashMap<DeclarationLookupKey, Arc<CacheEntry<OwnedTree<ResolvedTypeDeclaration>>>>,
     inflight: InflightTable<QueryFlightKey<DeclarationLookupKey>>,
     live_counter: Arc<AtomicU64>,
     /// The account this cache's entries are charged to.
@@ -419,7 +413,7 @@ impl DeclarationLookupDb {
     ) -> crate::project_semantic_dispatch::memo::SingleEntryAttachment<
         '_,
         DeclarationLookupKey,
-        verter_session_query::retention::heap_size::OwnedTree<ResolvedTypeDeclaration>,
+        OwnedTree<ResolvedTypeDeclaration>,
     > {
         crate::project_semantic_dispatch::memo::SingleEntryAttachment::new(
             &self.entries,
