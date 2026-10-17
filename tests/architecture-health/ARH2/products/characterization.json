@@ -797,7 +797,8 @@
           "crates/verter_session/tests/cases/g_type/type_resolution_audit_tls_propagation.rs",
           "crates/verter_session/tests/cases/relation_nominal_authority.rs",
           "crates/verter_session/tests/cases/typeinfo_ignored_test_manifest.rs",
-          "crates/verter_type_engine/tests/allocation_cases/flow_literal_provenance.rs"
+          "crates/verter_type_engine/tests/allocation_cases/flow_literal_provenance.rs",
+          "crates/verter_type_engine/tests/allocator_canaries.rs"
         ]
       },
       "pins": [

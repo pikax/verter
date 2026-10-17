@@ -1468,6 +1468,7 @@
           "crates/verter_session/src/u6_flow_expect_tests.rs",
           "crates/verter_session/src/u6_flow_shape_corpus_tests.rs",
           "crates/verter_session/tests/allocation_cases/flow_products.rs",
+          "crates/verter_session/tests/allocation_cases/recursive_paths.rs",
           "crates/verter_session/tests/allocator_canaries.rs",
           "crates/verter_session/tests/cases/compile-fail/composite_mint_unforgeable.rs",
           "crates/verter_session/tests/cases/compile-fail/composite_replay_cross_kind.rs",
@@ -1556,6 +1557,7 @@
           "crates/verter_session/tests/cases/typeinfo_ignored_test_manifest.rs",
           "crates/verter_source_policy_gate/tests/cases/semantic_capability_witnesses.rs",
           "crates/verter_type_engine/tests/allocation_cases/flow_literal_provenance.rs",
+          "crates/verter_type_engine/tests/allocator_canaries.rs",
           "crates/verter_wasm/src/feasibility_probe_tests.rs",
           "crates/verter_wasm/src/lib.rs",
           "crates/verter_wasm/src/typeinfo.rs"
@@ -1945,7 +1947,8 @@
               "crates/verter_session/tests/cases/g_type/type_resolution_audit_tls_propagation.rs",
               "crates/verter_session/tests/cases/relation_nominal_authority.rs",
               "crates/verter_session/tests/cases/typeinfo_ignored_test_manifest.rs",
-              "crates/verter_type_engine/tests/allocation_cases/flow_literal_provenance.rs"
+              "crates/verter_type_engine/tests/allocation_cases/flow_literal_provenance.rs",
+              "crates/verter_type_engine/tests/allocator_canaries.rs"
             ],
             "note": "the cross-crate population outside verter_session imports only the retained ten types; retaining a type alone does not retain its methods, so PartialReasonSet::{empty,is_empty,iter,PROPAGATED,SEMANTIC_QUERY_FAULT}, ResultCompleteness::partial and ScopeId::file stay pub for the ffi/napi/wasm production consumers, and PartialReasonSet::{contains,CONNECTED_MEMORY_LIMIT,UNDECIDED_CONDITIONAL} and ResultCompleteness::is_partial stay pub for the verter_session files that import only retained types; the recorded consumer files each import at least one narrowed name (the verter_session sources reach the engine across the crate boundary, and its integration tests, benches and examples compile as separate crates); the test files migrate to the existing for_tests test-support surface pattern in the same change as the narrowing, and the verter_session production sources need a retained session-facing surface rather than pub(crate)"
           }

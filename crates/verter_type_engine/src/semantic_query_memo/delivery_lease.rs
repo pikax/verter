@@ -313,8 +313,18 @@ impl SemanticGraphStore {
         }
         let roots = owner.roots.operands();
         let mut covered = true;
+        // A lease delivered from this result roots its nodes in the order the
+        // result visits them, so the next unmatched operand is checked first
+        // and a covering lease is confirmed in one pass; any other order
+        // falls back to a search of the whole set.
+        let mut next = 0;
         let mut check = |node: crate::semantic_query::SemanticNodeId| {
-            if node.0 < super::UNALLOCATABLE_ID_FLOOR && !roots.contains(&node) {
+            if node.0 >= super::UNALLOCATABLE_ID_FLOOR {
+                return;
+            }
+            if roots.get(next) == Some(&node) {
+                next += 1;
+            } else if !roots.contains(&node) {
                 covered = false;
             }
         };

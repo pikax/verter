@@ -76,6 +76,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if let Some(observer) = verter_audit::current_observer() {
             observer.record_event(verter_audit::AuditEvent::SubstituteTopLevelCall);
         }
+        self.enter_substitution_walk();
         if node != parameter_node && self.binder_dependency_proves_absent(node, parameter_node) {
             return node;
         }
@@ -194,15 +195,39 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
         target: SemanticNodeId,
     ) -> bool {
-        self.graph().node_data(target).is_some_and(|data| {
-            matches!(
-                data.as_ref(),
-                SemanticNodeData::TypeParam { .. } | SemanticNodeData::Infer { .. }
-            ) && self
+        match self.substitution_binder(target) {
+            BinderKind::TypeParam => self
                 .graph()
                 .binder_dependencies_for(node)
-                .proves_absent(&data, target)
-        })
+                .proves_type_param_absent(target),
+            BinderKind::Infer(binder) => self
+                .graph()
+                .binder_dependencies_for(node)
+                .proves_infer_absent(&binder),
+            BinderKind::Other => false,
+        }
+    }
+
+    /// What `binder` is, as a substitution walk reads it at every node it
+    /// visits: read from the graph once per walk.
+    pub(super) fn substitution_binder(&self, binder: SemanticNodeId) -> BinderKind {
+        if let Some((held, kind)) = &*self.substitution_binder.borrow() {
+            if *held == binder {
+                return kind.clone();
+            }
+        }
+        let kind = match self.graph().node_data(binder).as_deref() {
+            Some(SemanticNodeData::TypeParam { .. }) => BinderKind::TypeParam,
+            Some(SemanticNodeData::Infer { binder, .. }) => BinderKind::Infer(binder.clone()),
+            _ => BinderKind::Other,
+        };
+        *self.substitution_binder.borrow_mut() = Some((binder, kind.clone()));
+        kind
+    }
+
+    /// Begin a substitution walk: its binder is classified afresh.
+    fn enter_substitution_walk(&self) {
+        *self.substitution_binder.borrow_mut() = None;
     }
 
     /// Whether a member read off `node` binds a polymorphic `this`: a
@@ -671,13 +696,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // structurally correct: visiting the binder twice in
         // `Foo<K, K>`-style fixtures IS the recursive memo's hit
         // case at the boundary.
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        crate::request_context::with_current_request_context(|ctx| {
             ctx.classify_recursive_substitute(RecursiveSubstituteIdentity {
                 node: node.0,
                 parameter_node: parameter_node.0,
                 arg: arg.0,
-            });
-        }
+            })
+        });
         // Trivial-identity short-circuit runs AFTER classification:
         // the per-request audit needs to see every entry, but the
         // identity branch returns `arg` without touching graph
@@ -740,8 +765,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // Infer substitution is exact-binder-only. A legitimate reference is
         // an `InferRef` carrying the same opaque binder identity; a same-name
         // `TypeParam` is an unrelated declaration and is never rewritten.
-        let parameter_infer_binder = match self.graph().node_data(parameter_node).as_deref() {
-            Some(SemanticNodeData::Infer { binder, .. }) => Some(binder.clone()),
+        let parameter_infer_binder = match self.substitution_binder(parameter_node) {
+            BinderKind::Infer(binder) => Some(binder),
             _ => None,
         };
         let parameter_is_infer = parameter_infer_binder.is_some();
@@ -1980,11 +2005,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// `InferRef` nodes carrying the target declaration's opaque binder count.
     /// Display names never participate.
     pub fn subtree_references_node(&self, root: SemanticNodeId, target: SemanticNodeId) -> bool {
+        self.enter_substitution_walk();
         if root != target && self.binder_dependency_proves_absent(root, target) {
             return false;
         }
-        let target_infer_binder = match self.graph().node_data(target).as_deref() {
-            Some(SemanticNodeData::Infer { binder, .. }) => Some(binder.clone()),
+        let target_infer_binder = match self.substitution_binder(target) {
+            BinderKind::Infer(binder) => Some(binder),
             _ => None,
         };
 
@@ -2184,4 +2210,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         }
     }
+}
+
+/// What a substitution walk's binder is: a declared type parameter, an
+/// `infer` declaration with its opaque identity, or neither (a binder that
+/// matches only itself).
+#[derive(Clone)]
+pub(super) enum BinderKind {
+    TypeParam,
+    Infer(crate::semantic_query::InferBinderId),
+    Other,
 }
