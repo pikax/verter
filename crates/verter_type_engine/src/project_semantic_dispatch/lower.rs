@@ -33,7 +33,7 @@ use crate::resolver_core::bare_name_resolve::{
 use crate::resolver_core::scope_shadowing::ScopeShadowing;
 use crate::semantic_query::{
     DeclIdentity, HashValue, IndexSignature, NodeScopeId, PrimitiveKind, ProjectionMode,
-    ProjectionReductionContext, QueryError, QueryResult, ScopeId, SemanticNodeData, SemanticNodeId,
+    ProjectionReductionContext, QueryError, QueryResult, SemanticNodeData, SemanticNodeId,
     SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SurfaceEntry, SurfaceMember,
     SurfaceView, TupleElement, ValueRootKey,
 };
@@ -2726,44 +2726,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
 
             TypeExpr::TypeOf(value_ref) => {
-                if value_ref.path.is_empty() {
+                let NodeScopeId::File {
+                    canonical_id,
+                    owner,
+                    ..
+                } = scope
+                else {
                     return self.opaque(QueryError::Miss);
-                }
-                let (scope_canonical_id, scope_owner) = match scope {
-                    NodeScopeId::File {
-                        canonical_id,
-                        owner,
-                        ..
-                    } => (Arc::clone(canonical_id), *owner),
-                    NodeScopeId::Global => return self.opaque(QueryError::Miss),
                 };
-                // One root-and-path demand owns namespace and value-member
-                // resolution. A failed member lookup cannot be retried under
-                // a joined name that bypasses the module's export domain.
-                let single_root: Arc<str> = Arc::from(value_ref.path[0].as_str());
-                let remaining: Arc<[Arc<str>]> = Arc::from(
-                    value_ref.path[1..]
-                        .iter()
-                        .map(|segment| Arc::<str>::from(segment.as_str()))
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                );
-                let root_key = ValueRootKey {
-                    scope: ScopeId {
-                        canonical_id: Arc::clone(&scope_canonical_id),
-                        owner: scope_owner,
-                        local_scope: None,
-                        binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
-                            scope_owner,
-                        ),
-                    },
-                    name: Arc::clone(&single_root),
+                let Some(key) =
+                    self.typeof_reference_key(canonical_id, *owner, value_ref, reduction_context)
+                else {
+                    return self.opaque(QueryError::Miss);
                 };
-                let mut result = match self.execute_type_node(self.typeof_key_with_path(
-                    root_key,
-                    Arc::clone(&remaining),
-                    reduction_context,
-                )) {
+                let mut result = match self.execute_type_node(key) {
                     QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                     _ => return self.opaque(QueryError::Miss),
                 };

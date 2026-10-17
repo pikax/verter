@@ -2453,6 +2453,38 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// The `typeof` query an authored `typeof a.b` written in `canonical`'s
+    /// `owner` scope names: its first segment's value root, read for the
+    /// rest of the path. One root-and-path demand owns namespace and
+    /// value-member resolution: a failed member lookup cannot be retried
+    /// under a joined name that bypasses the module's export domain. `None`
+    /// for an empty path.
+    pub(super) fn typeof_reference_key(
+        &self,
+        canonical: &Arc<str>,
+        owner: verter_type_expr::TopLevelOwnerId,
+        value_ref: &verter_type_expr::ValueRef,
+        prc: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<SemanticQueryKey> {
+        let (root, rest) = value_ref.path.split_first()?;
+        let root_key = crate::semantic_query::ValueRootKey {
+            scope: crate::semantic_query::ScopeId {
+                canonical_id: Arc::clone(canonical),
+                owner,
+                local_scope: None,
+                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(owner),
+            },
+            name: Arc::from(root.as_str()),
+        };
+        let rest: Arc<[Arc<str>]> = Arc::from(
+            rest.iter()
+                .map(|segment| Arc::<str>::from(segment.as_str()))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        Some(self.typeof_key_with_path(root_key, rest, prc))
+    }
+
     /// Push `identity` over `args` onto the active-instantiation stack.
     /// Returns `true` when that same instantiation was not already present
     /// (caller MUST pair with `pop_instantiate_active`). Returns `false`

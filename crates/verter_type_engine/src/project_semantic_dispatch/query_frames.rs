@@ -615,7 +615,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// carrier into the frame's tracer, fold its rails into the frame's
     /// taint, and read the instantiated node as a synchronous
     /// instantiation's reader does.
-    fn consume_delivery(&self, delivery: QueryDelivery, depth: u32) -> SemanticNodeId {
+    pub(super) fn consume_delivery(&self, delivery: QueryDelivery, depth: u32) -> SemanticNodeId {
         let QueryDelivery { read, carrier } = delivery;
         if let Some(carrier) = carrier {
             carrier.bubble_via_tls();
@@ -663,13 +663,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         });
         let taint = super::StepTaint::install(&self.build_local_taint, &mut frame.taint);
         let installed = tracer.install();
-        let delivered = delivery.map(|outcome| match outcome {
-            Ok(delivery) => self.consume_delivery(delivery, frame.depth + 1),
+        let delivery = delivery.map(|outcome| match outcome {
+            Ok(delivery) => delivery,
             Err(()) => unreachable!("a stopped drive delivers nothing"),
         });
         let poll = match frame.build.as_mut() {
-            Some(FrameBuild::Instantiate(build)) => self.drain_instantiate(build, delivered),
-            Some(FrameBuild::Typeof(build)) => self.drain_typeof(build, delivered),
+            Some(FrameBuild::Instantiate(build)) => self.drain_instantiate(
+                build,
+                delivery.map(|delivery| self.consume_delivery(delivery, frame.depth + 1)),
+            ),
+            // A typeof build consumes its delivery where its evaluation
+            // reads it.
+            Some(FrameBuild::Typeof(build)) => self.drain_typeof(build, delivery, frame.depth),
             None => {
                 self.open_cold_build(None);
                 match &frame.key {
@@ -722,7 +727,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 else {
                                     unreachable!("the build was just inserted")
                                 };
-                                self.drain_typeof(build, None)
+                                self.drain_typeof(build, None, frame.depth)
                             }
                         }
                     }

@@ -931,3 +931,54 @@ fn circular_type_aliases_are_the_checkers_ts2456_and_tail_runs_its_ts2589() {
         );
     }
 }
+
+#[test]
+#[ignore = "probe"]
+fn zz_probe_families() {
+    let depth: usize = std::env::var("ZZ_DEPTH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
+    let fam = std::env::var("ZZ_FAM").unwrap_or_default();
+    let (source, probe) = match fam.as_str() {
+        "expr" => {
+            let mut s =
+                String::from("declare function id<T>(x: T): T;\nconst y0 = \"ok\" as const;\n");
+            for i in 1..=depth {
+                s.push_str(&format!("const y{i} = id(y{});\n", i - 1));
+            }
+            (s, format!("typeof y{depth}"))
+        }
+        "sig" => {
+            let mut s = String::from("function h0(): \"ok\" { return \"ok\"; }\n");
+            for i in 1..=depth {
+                s.push_str(&format!(
+                    "declare function h{i}(): ReturnType<typeof h{}>;\n",
+                    i - 1
+                ));
+            }
+            (s, format!("ReturnType<typeof h{depth}>"))
+        }
+        _ => {
+            let mut s = String::from("type C0 = \"ok\";\n");
+            for i in 1..=depth {
+                s.push_str(&format!(
+                    "type C{i} = C{p} extends string ? C{p} : never;\n",
+                    p = i - 1
+                ));
+            }
+            (s, format!("C{depth}"))
+        }
+    };
+    let stack: usize = std::env::var("ZZ_STACK")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1 << 20);
+    let m = std::thread::Builder::new()
+        .stack_size(stack)
+        .spawn(move || evaluated_mismatches(&source, &[(probe.as_str(), "\"ok\"")]))
+        .unwrap()
+        .join()
+        .unwrap();
+    assert_eq!(m, Vec::<String>::new());
+}
