@@ -103,6 +103,9 @@ pub struct AliasSet {
     /// When collecting, the distinct leaf names the measurement reached,
     /// which it then does not count.
     leaves: Option<Vec<Arc<str>>>,
+    /// When collecting, the distinct owned allocations the measurement
+    /// reached, each charged by its own cell and not counted here.
+    children: Option<Vec<Arc<dyn super::owned::Node>>>,
 }
 
 /// Allocations an [`AliasSet`] tracks before it spills to a hash set.
@@ -122,8 +125,29 @@ impl AliasSet {
     pub fn collecting() -> Self {
         Self {
             leaves: Some(Vec::new()),
+            children: Some(Vec::new()),
             ..Self::default()
         }
+    }
+
+    /// Record an owned child when collecting; `false` when this
+    /// measurement counts children in full instead.
+    pub(crate) fn collect_child(
+        &mut self,
+        child: impl FnOnce() -> Arc<dyn super::owned::Node>,
+    ) -> bool {
+        match self.children.as_mut() {
+            Some(children) => {
+                children.push(child());
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The owned children a collecting measurement reached, each once.
+    pub(crate) fn take_children(&mut self) -> Box<[Arc<dyn super::owned::Node>]> {
+        self.children.take().unwrap_or_default().into_boxed_slice()
     }
 
     /// The leaf names a collecting measurement reached, each once.

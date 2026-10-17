@@ -87,6 +87,7 @@
 
 pub mod allocation;
 pub mod granular;
+pub mod owned;
 pub(crate) mod resident;
 pub mod resolution_charge;
 pub mod shared;

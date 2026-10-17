@@ -674,6 +674,29 @@ impl AliasCharges {
         ))
     }
 
+    /// A cache hold on one leaf name's own registered charge, shared with
+    /// every other holder of the same allocation.
+    ///
+    /// # Errors
+    ///
+    /// The account's refusal of the reservation or adoption.
+    pub fn hold_leaf(
+        &self,
+        account: &Arc<SemanticRetentionAccount>,
+        leaf: &Arc<str>,
+    ) -> Result<CacheHold, RetentionRefusal> {
+        let mut table = self.0.table.lock();
+        self.hold_leaf_in(&mut table, account, leaf)
+    }
+
+    /// A caller hold on one leaf name's own registered charge; never
+    /// refused.
+    #[must_use]
+    pub fn pin_leaf(&self, account: &Arc<SemanticRetentionAccount>, leaf: &Arc<str>) -> CallerHold {
+        let mut table = self.0.table.lock();
+        self.pin_leaf_in(&mut table, account, leaf)
+    }
+
     /// Key `shared` by `allocation` and settle the table's backing charge.
     /// Called with the registry lock held.
     fn register<T>(
