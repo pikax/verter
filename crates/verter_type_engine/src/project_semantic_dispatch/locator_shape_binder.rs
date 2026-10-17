@@ -954,20 +954,20 @@ fn locator_with_path_step(
         AuthoredBodyLocator::DeclBody(slot) => {
             AuthoredBodyLocator::DeclBody(verter_type_expr::locators::TypeBodySlot {
                 anchor: slot.anchor.clone(),
-                path: append(&slot.path).into(),
+                path: append(&slot.path),
             })
         }
         AuthoredBodyLocator::AugmentationBody(body) => AuthoredBodyLocator::AugmentationBody(
             verter_type_expr::locators::AugmentationBodyLocator {
                 anchor: body.anchor.clone(),
                 scope: body.scope.clone(),
-                path: append(&body.path).into(),
+                path: append(&body.path),
             },
         ),
         AuthoredBodyLocator::JsdocTypedefBody(body) => AuthoredBodyLocator::JsdocTypedefBody(
             verter_type_expr::locators::JsdocTypedefBodyLocator {
                 anchor: body.anchor.clone(),
-                path: append(&body.path).into(),
+                path: append(&body.path),
             },
         ),
         AuthoredBodyLocator::MacroPayload(payload) => {

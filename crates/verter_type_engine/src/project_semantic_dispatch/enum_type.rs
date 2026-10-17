@@ -878,12 +878,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let path: Arc<[Arc<str>]> = Arc::from(Vec::new().into_boxed_slice());
         let value_root = ValueRootKey {
             scope: crate::semantic_query::ScopeId {
-                canonical_id: verter_type_expr::OwnedStr::from(canonical),
+                canonical_id: canonical,
                 owner,
                 local_scope: None,
                 binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(owner),
             },
-            name: verter_type_expr::OwnedStr::from(symbol),
+            name: symbol,
         };
         let QueryResult::Value(crate::semantic_query::SemanticQueryOutput { value, .. }) = self
             .execute_type_node(self.typeof_key_with_path(
@@ -975,9 +975,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
                     readonly: true,
                     spans: verter_type_expr::IndexSignatureSpans::default(),
-                    declaration_origin: Some(verter_type_expr::OwnedStr::from(
-                        enumeration.decl.canonical_id.clone(),
-                    )),
+                    declaration_origin: Some(enumeration.decl.canonical_id.clone()),
                 },
             )
         });
@@ -997,9 +995,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                 // The member inventory carries no per-member source span.
                 spans: verter_type_expr::MemberSpans::default(),
-                declaration_origin: Some(verter_type_expr::OwnedStr::from(
-                    enumeration.decl.canonical_id.clone(),
-                )),
+                declaration_origin: Some(enumeration.decl.canonical_id.clone()),
                 declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
                 merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
             })
@@ -1088,7 +1084,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     fn enum_scope(&self, enumeration: &EnumDeclaration) -> NodeScopeId {
         NodeScopeId::File {
-            canonical_id: verter_type_expr::OwnedStr::from(enumeration.decl.canonical_id.clone()),
+            canonical_id: enumeration.decl.canonical_id.clone(),
             owner: enumeration.decl.owner,
             whole_hash: enumeration.decl.whole_hash,
             local_scope: None,
@@ -1295,9 +1291,9 @@ impl EnumEvaluation {
         ENUM_ASSEMBLY_WORK.with(|count| count.set(count.get() + 1));
         self.declared_at
             .get(&(
-                verter_type_expr::OwnedStr::from(identity.canonical_id.clone()),
+                identity.canonical_id.clone(),
                 identity.owner,
-                verter_type_expr::OwnedStr::from(identity.symbol_name.clone()),
+                identity.symbol_name.clone(),
             ))
             .cloned()
     }

@@ -1130,8 +1130,6 @@ pub fn dispatch_resolve_type_decl_for_tests(
     canonical: &str,
     name: &str,
 ) -> verter_type_engine::semantic_query::SemanticNodeId {
-    use std::sync::Arc;
-
     use verter_type_engine::semantic_query::{
         BinderScopeId, QueryResult, ResolveDeclKey, ScopeId, SemanticQueryApi, SemanticQueryKey,
         SemanticQueryOutput,

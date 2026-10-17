@@ -12,8 +12,6 @@
 //! payload, the typed error channel, or the admission signal on either
 //! arm fails the assertions (or fails to compile).
 
-use std::sync::Arc;
-
 use verter_session_query::{
     AuthoredBodyLowering, AuthoredBodyShape, QueryHostAdmission, QueryHostError, QueryHostPort,
     QueryHostServe,

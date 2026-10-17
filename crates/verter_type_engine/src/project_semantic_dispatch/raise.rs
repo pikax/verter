@@ -179,7 +179,6 @@ fn canonicalise_for_digest(
     key: &crate::semantic_query::SemanticQueryKey,
 ) -> std::borrow::Cow<'_, crate::semantic_query::SemanticQueryKey> {
     use std::borrow::Cow;
-    use std::sync::Arc;
 
     use crate::semantic_query::{PathSegment, SemanticQueryKey};
     match key {
@@ -1394,14 +1393,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // semantically transparent. Dispatch and recurse — same
                 // as Expanded for DeclRef.
                 let scope = ScopeId {
-                    canonical_id: verter_type_expr::OwnedStr::from(identity.canonical_id.clone()),
+                    canonical_id: identity.canonical_id.clone(),
                     owner: identity.owner,
                     local_scope: None,
                     binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(identity.owner),
                 };
                 let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                     scope,
-                    name: verter_type_expr::OwnedStr::from(identity.decl_name.clone()),
+                    name: identity.decl_name.clone(),
                 });
                 self.dispatch_operator_with_recurse(node, key, context, state)
             }
@@ -2797,12 +2796,10 @@ fn type_param_shell_node<C: crate::resolver_core::ResolverCapabilities>(
 ) -> SemanticNodeId {
     dispatch.graph().intern_node(SemanticNodeData::TypeParam {
         decl: crate::semantic_query::DeclIdentity {
-            canonical_id: verter_type_expr::OwnedStr::from(
-                prepared.root_identity.canonical_id.clone(),
-            ),
+            canonical_id: prepared.root_identity.canonical_id.clone(),
             owner: prepared.root_identity.owner,
             whole_hash: crate::semantic_query::HashValue::default(),
-            decl_name: verter_type_expr::OwnedStr::from(prepared.root_identity.symbol_name.clone()),
+            decl_name: prepared.root_identity.symbol_name.clone(),
         },
         param_index: u16::try_from(param.ordinal).unwrap_or(u16::MAX),
         constraint: None,
@@ -2822,7 +2819,7 @@ fn lower_body_under_env<C: crate::resolver_core::ResolverCapabilities>(
     env: &FxHashMap<String, SemanticNodeId>,
 ) -> SemanticNodeId {
     let scope = crate::semantic_query::NodeScopeId::File {
-        canonical_id: verter_type_expr::OwnedStr::from(prepared.root_identity.canonical_id.clone()),
+        canonical_id: prepared.root_identity.canonical_id.clone(),
         owner: prepared.root_identity.owner,
         whole_hash: crate::semantic_query::HashValue::default(),
         local_scope: None,
@@ -2985,12 +2982,10 @@ fn prepared_instantiation_key_domain_is_closed_unguarded<
                         || resolved.symbol_name.as_ref() != base.decl_name.as_ref()
                 }) {
                     let resolved = crate::semantic_query::DeclIdentity {
-                        canonical_id: verter_type_expr::OwnedStr::from(
-                            resolved.canonical_id.clone(),
-                        ),
+                        canonical_id: resolved.canonical_id.clone(),
                         owner: resolved.owner,
                         whole_hash: crate::semantic_query::HashValue::default(),
-                        decl_name: verter_type_expr::OwnedStr::from(resolved.symbol_name.clone()),
+                        decl_name: resolved.symbol_name.clone(),
                     };
                     return prepared_instantiation_key_domain_is_closed(
                         dispatch, &resolved, args, budget,

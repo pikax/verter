@@ -11,7 +11,7 @@
 
 use verter_session_query::retention::allocation::AliasSet;
 
-use super::super::allocation_footprint::{arc_value_bytes, copy_inline, OwnedHeap};
+use super::super::allocation_footprint::{copy_inline, OwnedHeap};
 use super::super::{
     BroadRuntimeClassification, CanonicalTypeSubstitution, FlowFunctionSlotIdentity,
     FlowInputContext, FlowReturnContext, FlowReturnKey, MaterializationCycleGateFallbackReasons,

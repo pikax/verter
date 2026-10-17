@@ -3,8 +3,6 @@
 
 use crate::semantic_query::{ResultEvaluationContextId, SemanticContextId};
 
-use std::sync::Arc;
-
 use crate::semantic_query::SemanticNodeId;
 
 use super::records::{AppliedResultId, CallSubstitutionId, SignatureDescriptorId, SignatureSetRef};

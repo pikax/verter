@@ -10,8 +10,6 @@
 //! the session-side lowered-body memo (the keying is [`crate::locators`]-neutral;
 //! the memo itself lives in `verter_session`).
 
-use std::sync::Arc;
-
 use crate::{OwnedSlice, OwnedStr};
 use verter_no_storedspan::NoStoredSpan;
 use verter_no_typeexpr::NoTypeExpr;

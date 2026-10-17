@@ -2044,6 +2044,49 @@ fn an_origin_edge_retains_its_fence_until_its_store_lets_go() {
     );
 }
 
+/// The origin-edge store's own storage — its tables, edge lists, source
+/// lists and pooled fence blocks — is charged while it holds them and
+/// given back as it drops them; the store's teardown restores the baseline.
+#[test]
+fn the_origin_edge_store_charges_its_own_storage_until_it_drops_it() {
+    use verter_session_query::retention::allocation::arc_block_bytes;
+    use verter_session_query::retention::{
+        RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+    const EDGES: usize = 200;
+    const SOURCES: usize = 32;
+    let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+    let store = SemanticGraphStore::with_account(StoreAccount::new(Arc::clone(&account)));
+    let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let before = store.bookkeeping_storage_charge_bytes();
+    for index in 0..EDGES {
+        let result = store.intern_node(SemanticNodeData::Literal(
+            crate::semantic_query::LiteralValue::String(format!("edge-{index}")),
+        ));
+        store.record_origin_edge(
+            result,
+            OriginEdgeKind::Normalize,
+            Arc::from(vec![source; SOURCES].into_boxed_slice()),
+            crate::semantic_query::OriginMeta::None,
+            dep_sig_for(&format!("/w/edge-{index}.ts"), index as u8),
+        );
+    }
+    let source_lists = EDGES * arc_block_bytes(SOURCES * std::mem::size_of::<SemanticNodeId>());
+    let grown = store.bookkeeping_storage_charge_bytes() - before;
+    assert!(
+        grown >= source_lists,
+        "every edge's source list is charged with the store: {grown} < {source_lists}"
+    );
+    store.invalidate_all();
+    let cleared = store.bookkeeping_storage_charge_bytes();
+    assert!(
+        cleared + source_lists <= before + grown,
+        "cleared edges give their lists back; only retained table capacity stays: {cleared}"
+    );
+    drop(store);
+    assert_eq!(account.snapshot().total_bytes(), 0);
+}
+
 /// ORIGIN-EDGE DEDUP DURABILITY — re-emitting an origin edge whose fence
 /// was driven out of the interning pool's reclamation reach by a flood of
 /// other distinct fences MUST still deduplicate. `record_origin_edge`

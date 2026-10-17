@@ -246,7 +246,6 @@ mod object_spread_program_contract_tests {
         ObjectConstructionEffect, ObjectSpreadProgram, SemanticNodeData, SemanticNodeId,
     };
     use std::hash::{DefaultHasher, Hash, Hasher};
-    use std::sync::Arc;
 
     fn hash_of(value: &SemanticNodeData) -> u64 {
         let mut hasher = DefaultHasher::new();
@@ -1590,9 +1589,9 @@ impl ResolvedDeclSlotIdentity {
         lib_env_hash: HashValue,
     ) -> Self {
         Self {
-            defining_canonical: OwnedStr::from(identity.canonical_id.clone()),
+            defining_canonical: identity.canonical_id.clone(),
             owner: identity.owner,
-            merged_symbol_name: OwnedStr::from(identity.decl_name.clone()),
+            merged_symbol_name: identity.decl_name.clone(),
             symbol_space,
             env: SlotEnvIdentity::from_raw(project_identity, type_env_hash, lib_env_hash),
         }

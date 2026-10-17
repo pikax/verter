@@ -802,7 +802,7 @@ impl SemanticGraphStore {
             inflight: Default::default(),
             task_registry: Default::default(),
             independent_inflight: Default::default(),
-            derivation: Default::default(),
+            derivation: parking_lot::Mutex::new(DerivationStore::charged(retention_account.get())),
             stats: Default::default(),
             provenance: Default::default(),
             retention_account,

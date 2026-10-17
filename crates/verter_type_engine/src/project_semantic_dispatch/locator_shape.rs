@@ -2632,10 +2632,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         use crate::project_semantic_dispatch::carrier::RefHeadResolution;
         if let Some((ri, whole_hash)) = resolved {
             let identity = DeclIdentity {
-                canonical_id: verter_type_expr::OwnedStr::from(ri.canonical_id.clone()),
+                canonical_id: ri.canonical_id.clone(),
                 owner: ri.owner,
                 whole_hash,
-                decl_name: verter_type_expr::OwnedStr::from(ri.symbol_name.clone()),
+                decl_name: ri.symbol_name.clone(),
             };
             return LocatorRefPlan::Carrier(RefHeadResolution::Resolved(identity));
         }

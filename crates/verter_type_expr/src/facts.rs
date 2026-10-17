@@ -543,7 +543,6 @@ mod top_level_owner_identity_tests {
     use crate::span_origins::DeclContributorAnchor;
     use std::collections::HashSet;
     use std::hash::{DefaultHasher, Hash, Hasher};
-    use std::sync::Arc;
 
     fn hash_of(value: &impl Hash) -> u64 {
         let mut hasher = DefaultHasher::new();

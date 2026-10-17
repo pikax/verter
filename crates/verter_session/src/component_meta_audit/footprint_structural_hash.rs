@@ -2,8 +2,6 @@
 //! footprint miner. Extracted from the miner so the encoder (variant tags,
 //! cycle/depth sentinels, recursive child fingerprints) is one focused unit.
 
-use std::sync::Arc;
-
 use xxhash_rust::xxh3::xxh3_128;
 
 use verter_session_query::analysis::types::Hash16;

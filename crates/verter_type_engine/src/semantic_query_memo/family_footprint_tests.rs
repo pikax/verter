@@ -31,7 +31,7 @@ fn text(len: usize) -> Arc<str> {
 fn project_member(member: Arc<str>) -> FamilyKey {
     FamilyKey::ProjectMember {
         base: SemanticNodeId(1),
-        member,
+        member: member.into(),
     }
 }
 
@@ -56,7 +56,7 @@ fn type_of(canonical: OwnedStr, name: OwnedStr, path: Vec<OwnedStr>) -> FamilyKe
         value_root: ValueRootSlotIdentity::new(
             ValueRootKey {
                 scope: ScopeId::file(canonical, owner()),
-                name: name.into(),
+                name,
             },
             0,
             HashValue::default(),
@@ -76,15 +76,29 @@ fn slice_growth<T>(count: usize) -> usize {
 }
 
 #[test]
-fn a_family_pays_for_the_member_name_its_key_retains() {
+fn a_family_holds_the_member_name_its_key_retains_by_the_names_own_cell() {
     const NAME: usize = 20_000;
-    let small = family_container_bytes(&project_member(text(1)));
-    let large = family_container_bytes(&project_member(text(NAME)));
+    let small =
+        crate::semantic_query_memo::retention::family_container_footprint(&project_member(text(1)));
+    let large = crate::semantic_query_memo::retention::family_container_footprint(&project_member(
+        text(NAME),
+    ));
     assert_eq!(
-        large - small,
-        arc_block_bytes(NAME) - arc_block_bytes(1),
-        "the name is one shared allocation: the map key counts it, the ledger's clone shares it"
+        large.bytes, small.bytes,
+        "the container pays only its records: the name charges itself"
     );
+    let account = verter_session_query::retention::SemanticRetentionAccount::new(
+        verter_session_query::retention::RetentionLimits::defaults(),
+    );
+    let ctx = verter_session_query::retention::owned::ChargeCtx::new(&account);
+    let holds = large.handles.hold(ctx).expect("admitted");
+    assert_eq!(
+        account.snapshot().retained_bytes,
+        OwnedStr::charge_for_len(NAME),
+        "holding the key retains its name once, however many key copies share it"
+    );
+    drop(holds);
+    drop(small);
 }
 
 #[test]

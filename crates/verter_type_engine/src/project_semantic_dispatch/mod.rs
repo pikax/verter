@@ -2570,11 +2570,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> SemanticNodeId {
         self.graph().intern_node_with_scope(
             SemanticNodeData::Opaque(QueryError::RecursiveRef {
-                name: verter_type_expr::OwnedStr::from(identity.decl_name.clone()),
+                name: identity.decl_name.clone(),
                 args: args.into(),
             }),
             NodeScopeId::File {
-                canonical_id: verter_type_expr::OwnedStr::from(identity.canonical_id.clone()),
+                canonical_id: identity.canonical_id.clone(),
                 owner: identity.owner,
                 whole_hash: identity.whole_hash,
                 local_scope: None,

@@ -18,8 +18,6 @@
 //! is a `#[cfg(test)]` parity suite, so its whole reachable PRODUCTION scope is
 //! output-only.
 
-use std::sync::Arc;
-
 use verter_type_engine::semantic_query::ProjectionMode;
 
 /// A session-local node-bearing expansion result: the produced

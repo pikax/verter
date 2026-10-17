@@ -364,7 +364,6 @@ pub fn type_expr_is_expanded_surface(expr: &TypeExpr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
 
     use super::{
         query_error_is_object_surface_sentinel, query_error_is_semantic_miss_sentinel,

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use super::*;
 use crate::project_semantic_dispatch::walk::{DiagnosticError, WalkerDiagnostics};
 use crate::semantic_query::demand::{Demand, MaterializedPoint};
+use verter_session_query::retention::allocation::arc_block_bytes;
 use verter_session_query::retention::owned::{OwnedSlice, OwnedStr};
 
 fn arm(name: &str, owner: &str) -> ShallowDiagnostic {

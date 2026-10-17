@@ -572,9 +572,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 let canonical = self.lexical_demand_scope.borrow().last().cloned()?;
                 (
                     canonical.clone(),
-                    ApparentDemandScope::Rootless {
-                        canonical: canonical.into(),
-                    },
+                    ApparentDemandScope::Rootless { canonical },
                 )
             }
         };

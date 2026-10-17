@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_type_expr::{ExcessPropertyOrigin, MemberVisibility, ObjectMethodKind};
 

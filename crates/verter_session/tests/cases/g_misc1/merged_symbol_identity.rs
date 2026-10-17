@@ -14,8 +14,6 @@
 //! overload changes the payload but does NOT invalidate consumers
 //! that observed only another overload's facts.
 
-use std::sync::Arc;
-
 use verter_type_engine::semantic_query::{
     DeclIdentity, DeclPartId, ResolvedDeclSlotIdentity, SemanticSymbolSpace, VersionedDeclIdentity,
 };

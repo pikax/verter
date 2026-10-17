@@ -249,10 +249,9 @@ pub(crate) fn hold_node(
                 // adopted child straight back to the callers still holding
                 // it — none is released.
                 let holds = hold_nodes(slot.children(), ctx)?;
-                slot.charge
-                    .as_mut()
-                    .expect("checked above")
-                    .try_adopt_retained()?;
+                if let Some(charge) = slot.charge.as_mut() {
+                    charge.try_adopt_retained()?;
+                }
                 if let Some(nested) = slot.nested.as_mut() {
                     nested.holds = holds;
                 }

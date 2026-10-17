@@ -21,7 +21,6 @@
 //! surface→shape raises. Dispatch is the sole resolution authority on these
 //! paths.
 
-use std::sync::Arc;
 use verter_type_engine::resolver_core::ResolverContext;
 
 /// Extract the OUTER utility/identifier name from a route-bearing

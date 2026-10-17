@@ -11,8 +11,6 @@
 //! (never a materialized `TypeExpr` — materialization happens only at the
 //! sealed output sink).
 
-use std::sync::Arc;
-
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_session_query::analysis::component_meta::ResolvedTypeAnalysis;
 use verter_session_query::type_solver::host::ResolvedRootIdentity;

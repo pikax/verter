@@ -207,7 +207,6 @@ impl AliasSet {
 
     /// The owned allocations the measurement reached, each once, for the
     /// owner taking the charge to charge them.
-    #[must_use]
     pub fn take_handles(&mut self) -> super::owned::OwnedHandles {
         super::owned::OwnedHandles::from_children(self.take_children())
     }

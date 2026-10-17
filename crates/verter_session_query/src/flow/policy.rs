@@ -1,7 +1,5 @@
 //! Flow lowering policy and the gap vocabulary a lowering records where it stops modelling.
 
-use std::sync::Arc;
-
 /// One type-parameter clause enclosing a class expression.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ClassExpressionClause {

@@ -1,6 +1,5 @@
 //! Resolved type authority and pure publication selection.
 
-use crate::OwnedStr;
 use std::sync::Arc;
 
 use verter_no_storedspan::NoStoredSpan;
@@ -917,9 +916,9 @@ mod tests {
     fn locator(field_index: u32) -> MacroPayloadLocator {
         MacroPayloadLocator {
             anchor: AuthoredAnchor {
-                canonical_id: OwnedStr::from("/ws/Comp.vue"),
+                canonical_id: crate::OwnedStr::from("/ws/Comp.vue"),
                 owner: TopLevelOwnerId::instance(0),
-                symbol: OwnedStr::from("defineProps"),
+                symbol: crate::OwnedStr::from("defineProps"),
                 space: LocatorSymbolSpace::Type,
             },
             macro_index: 0,

@@ -10,8 +10,6 @@
 //! compaction, replay ledgers, publication, invalidation,
 //! candidate-retention policy) stays workspace/session-owned.
 
-use std::sync::Arc;
-
 use crate::facts::registry::{FactKey, FactLane, SymbolSpace};
 use crate::facts::resolution::ResolutionFactRef;
 use crate::resolution::resolution_world_identity::{ResolutionPopulation, ResolutionWorldId};

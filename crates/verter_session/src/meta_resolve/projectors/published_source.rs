@@ -219,7 +219,7 @@ pub(crate) fn structural_member_value_source<
 #[cfg(test)]
 mod owner_identity_tests {
     use super::*;
-    use std::sync::Arc;
+
     use verter_type_expr::locators::LocatorSymbolSpace;
     use verter_type_expr::TopLevelOwnerId;
 

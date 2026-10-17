@@ -1407,16 +1407,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let probe = self.observe_read(|| {
                         self.execute_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                             scope: ScopeId {
-                                canonical_id: verter_type_expr::OwnedStr::from(
-                                    identity.canonical_id.clone(),
-                                ),
+                                canonical_id: identity.canonical_id.clone(),
                                 owner: identity.owner,
                                 local_scope: None,
                                 binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
                                     identity.owner,
                                 ),
                             },
-                            name: verter_type_expr::OwnedStr::from(identity.decl_name.clone()),
+                            name: identity.decl_name.clone(),
                         }))
                     });
                     // A negative lookup does not replace this authored carrier.
@@ -1998,9 +1996,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         match self.lower_locator(AuthoredBodyLocator::DeclBody(TypeBodySlot {
             anchor: AuthoredAnchor {
-                canonical_id: verter_type_expr::OwnedStr::from(identity.canonical_id.clone()),
+                canonical_id: identity.canonical_id.clone(),
                 owner: identity.owner,
-                symbol: verter_type_expr::OwnedStr::from(identity.decl_name.clone()),
+                symbol: identity.decl_name.clone(),
                 space: LocatorSymbolSpace::Type,
             },
             path: verter_type_expr::OwnedSlice::default(),

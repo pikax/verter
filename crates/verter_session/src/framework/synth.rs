@@ -135,7 +135,7 @@ impl ComponentDefaultSynth for SvelteComponentDefaultSynth {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+
     use verter_session_query::analysis::types::{AnalyzedMacro, AnalyzedMacroKind};
     use verter_span::Span;
     use verter_type_expr::locators::{

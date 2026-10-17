@@ -5342,7 +5342,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 // site but transparent through alias chains during walk.
                 SemanticNodeData::DeclRef { identity } => {
                     let scope = ScopeId {
-                        canonical_id: verter_type_expr::OwnedStr::from(identity.canonical_id.clone()),
+                        canonical_id: identity.canonical_id.clone(),
                         owner: identity.owner,
                         local_scope: None,
                         binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(identity.owner),
@@ -5350,7 +5350,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     let name = identity.decl_name.clone();
                     drop(data);
                     let resolved = match self.execute_read_folding_partial(
-                        SemanticQueryKey::ResolveDecl(ResolveDeclKey { scope, name: name.into() }),
+                        SemanticQueryKey::ResolveDecl(ResolveDeclKey { scope, name }),
                     ) {
                         QueryResult::Value(id) => id,
                         QueryResult::Recursive(id) => {
@@ -5994,7 +5994,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         match &*data {
             SemanticNodeData::DeclRef { identity } => {
                 let scope = ScopeId {
-                    canonical_id: verter_type_expr::OwnedStr::from(identity.canonical_id.clone()),
+                    canonical_id: identity.canonical_id.clone(),
                     owner: identity.owner,
                     local_scope: None,
                     binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
@@ -6004,10 +6004,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 let name = identity.decl_name.clone();
                 drop(data);
                 match self.execute_read_folding_partial(SemanticQueryKey::ResolveDecl(
-                    ResolveDeclKey {
-                        scope,
-                        name: name.into(),
-                    },
+                    ResolveDeclKey { scope, name },
                 )) {
                     QueryResult::Value(id) => id,
                     // A recursive / errored terminal carrier keeps the
@@ -8302,7 +8299,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             }
             SemanticNodeData::DeclRef { identity } => {
                 let scope = ScopeId {
-                    canonical_id: verter_type_expr::OwnedStr::from(identity.canonical_id.clone()),
+                    canonical_id: identity.canonical_id.clone(),
                     owner: identity.owner,
                     local_scope: None,
                     binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(identity.owner),
@@ -8323,11 +8320,11 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     } => Some((canonical_id, owner)),
                     crate::semantic_query::NodeScopeId::Global => None,
                 });
-                let ref_owner = ref_owner.or(Some((verter_type_expr::OwnedStr::from(target_canonical), target_owner)));
+                let ref_owner = ref_owner.or(Some((target_canonical, target_owner)));
                 match self.execute_read_folding_partial(SemanticQueryKey::ResolveDecl(
                     ResolveDeclKey {
                         scope,
-                        name: verter_type_expr::OwnedStr::from(name.clone()),
+                        name: name.clone(),
                     },
                 )) {
                     QueryResult::Value(resolved) => {

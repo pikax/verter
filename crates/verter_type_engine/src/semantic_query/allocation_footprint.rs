@@ -20,7 +20,7 @@
 use std::sync::Arc;
 
 use verter_session_query::retention::allocation::{
-    arc_block_bytes, arc_slice_block_bytes, arc_str_bytes, heap_block_bytes, AliasSet,
+    arc_slice_block_bytes, arc_str_bytes, heap_block_bytes, AliasSet,
 };
 
 use super::demand::{MaterializedSet, ProjectionPath};
@@ -356,23 +356,9 @@ impl<T: OwnedHeap> OwnedHeap for QueryResult<T> {
     }
 }
 
-/// An `Arc<T>`'s block and the heap its value owns, once per `aliases`.
-pub(crate) fn arc_value_bytes<T: OwnedHeap>(value: &Arc<T>, aliases: &mut AliasSet) -> usize {
-    if aliases.first(value) {
-        arc_block_bytes(std::mem::size_of::<T>()) + T::owned_heap_bytes(value, aliases)
-    } else {
-        0
-    }
-}
-
 /// A field whose type is `Copy` owns no heap: the bound is the proof, so a
 /// field that later gains an allocation stops compiling here.
 pub(crate) const fn copy_inline<T: Copy>(_: &T) -> usize {
-    0
-}
-
-/// [`copy_inline`] for every element of a slice.
-pub(crate) const fn copy_slice_inline<T: Copy>(_: &[T]) -> usize {
     0
 }
 

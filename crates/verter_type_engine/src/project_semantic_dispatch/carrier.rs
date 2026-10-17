@@ -407,7 +407,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let result = self.graph().intern_node_with_scope(
             data.as_ref().clone(),
             NodeScopeId::File {
-                canonical_id: verter_type_expr::OwnedStr::from(identity.canonical_id.clone()),
+                canonical_id: identity.canonical_id.clone(),
                 owner: identity.owner,
                 whole_hash: identity.whole_hash,
                 local_scope: None,
@@ -1068,12 +1068,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .map_or(HashValue::default(), |s| s.whole_hash);
             return CarrierResolutionPlan::complete(self.recursive_ref_sentinel(
                 &DeclIdentity {
-                    canonical_id: verter_type_expr::OwnedStr::from(
-                        resolved_root.canonical_id.clone(),
-                    ),
+                    canonical_id: resolved_root.canonical_id.clone(),
                     owner: resolved_root.owner,
                     whole_hash,
-                    decl_name: verter_type_expr::OwnedStr::from(resolved_root.symbol_name.clone()),
+                    decl_name: resolved_root.symbol_name.clone(),
                 },
                 Arc::from([]),
             ));
@@ -1084,10 +1082,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .shallow_file_state(resolved_root.canonical_id.as_ref())
             .map_or(HashValue::default(), |s| s.whole_hash);
         let decl_identity = DeclIdentity {
-            canonical_id: verter_type_expr::OwnedStr::from(resolved_root.canonical_id.clone()),
+            canonical_id: resolved_root.canonical_id.clone(),
             owner: resolved_root.owner,
             whole_hash,
-            decl_name: verter_type_expr::OwnedStr::from(resolved_root.symbol_name.clone()),
+            decl_name: resolved_root.symbol_name.clone(),
         };
 
         // Carrier modes (Navigate / Skeleton / Shallow) intern a transparent
@@ -1130,14 +1128,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // short-circuits to the bare `ResolveDecl` result.
         let anchor = self.carrier_resolution_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: ScopeId {
-                canonical_id: verter_type_expr::OwnedStr::from(resolved_root.canonical_id.clone()),
+                canonical_id: resolved_root.canonical_id.clone(),
                 owner: resolved_root.owner,
                 local_scope: None,
                 binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
                     resolved_root.owner,
                 ),
             },
-            name: verter_type_expr::OwnedStr::from(resolved_root.symbol_name.clone()),
+            name: resolved_root.symbol_name.clone(),
         }));
         if matches!(anchor.status, FactStatus::Unavailable(_)) {
             return CarrierResolutionPlan::Ready(anchor);

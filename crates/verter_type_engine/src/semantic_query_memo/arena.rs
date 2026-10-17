@@ -532,6 +532,10 @@ pub(super) struct ArenaInner {
     /// with its last, so one shared between many payloads
     /// (`PayloadArray::share`, an interned name) is charged once.
     shared_heap: rustc_hash::FxHashMap<usize, usize>,
+    /// Payloads of released slots a reader still holds: their blocks and
+    /// heap stay charged with graph storage, and their shared allocations
+    /// keep their owner, until the arena next finds the reader gone.
+    held: Vec<(Arc<SemanticNodeData>, NodeScopeId)>,
 }
 
 /// Bytes one bucket of the arena's shared-heap table holds: its key, its
@@ -685,6 +689,7 @@ impl ArenaInner {
         scope: NodeScopeId,
         account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) -> SemanticNodeId {
+        self.release_unheld();
         let id = SemanticNodeId(self.next_id);
         self.next_id += 1;
         let storage = self.storage.get_or_insert_with(|| {
@@ -731,15 +736,44 @@ impl ArenaInner {
         self.live -= 1;
         let mut freed = if chunk.live == 0 {
             self.chunks.remove(&key);
-            payload_block_bytes() + chunk_storage_bytes()
+            chunk_storage_bytes()
         } else {
-            payload_block_bytes()
+            0
         };
-        freed += self.release_payload_heap(&payload, &scope);
+        if Arc::strong_count(&payload) == 1 {
+            freed += payload_block_bytes() + self.release_payload_heap(&payload, &scope);
+        } else {
+            // A reader still holds the payload: it stays allocated, so it
+            // stays charged until the reader lets go.
+            self.held.push((payload, scope));
+        }
         if let Some(storage) = self.storage.as_mut() {
             storage.sub(freed);
         }
+        self.release_unheld();
         true
+    }
+
+    /// Release every held payload its readers have let go of. Under the
+    /// writer lock an unreferenced payload cannot gain a reader: the arena
+    /// holds its last handle.
+    fn release_unheld(&mut self) {
+        if self.held.is_empty() {
+            return;
+        }
+        let mut freed = 0;
+        let mut held = std::mem::take(&mut self.held);
+        held.retain(|(payload, scope)| {
+            if Arc::strong_count(payload) > 1 {
+                return true;
+            }
+            freed += payload_block_bytes() + self.release_payload_heap(payload, scope);
+            false
+        });
+        self.held = held;
+        if let Some(storage) = self.storage.as_mut() {
+            storage.sub(freed);
+        }
     }
 
     /// Every live `(id, payload, scope)` in ascending id order.

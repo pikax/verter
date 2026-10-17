@@ -16,7 +16,6 @@
 //! lane answer published complete and undegraded.
 
 use super::differential_harness_tests::{Matrix, Read};
-use std::sync::Arc;
 
 #[test]
 fn deferred_class_return_rebinding_preserves_a_same_file_permutation() {

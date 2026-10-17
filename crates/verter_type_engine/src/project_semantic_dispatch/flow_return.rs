@@ -2363,7 +2363,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // extractor stamps the declaration name; canonical / owner come
         // from the serving scope.
         let mut identity = identity.clone();
-        identity.anchor.canonical_id = verter_type_expr::OwnedStr::from(scope_canonical);
+        identity.anchor.canonical_id = scope_canonical;
         identity.anchor.owner = scope_owner;
         Some(identity)
     }
@@ -7768,7 +7768,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .ensure_indexed_ready_serve(&identity.canonical_id)?
                 .indexed;
             let scope = crate::semantic_query::NodeScopeId::File {
-                canonical_id: verter_type_expr::OwnedStr::from(identity.canonical_id.clone()),
+                canonical_id: identity.canonical_id.clone(),
                 owner: identity.owner,
                 whole_hash: indexed.whole_hash,
                 local_scope: None,

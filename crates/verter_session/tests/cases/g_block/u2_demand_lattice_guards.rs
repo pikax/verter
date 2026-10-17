@@ -19,7 +19,6 @@
 //!   idempotent, masks `display_needs` to ⊥ unconditionally, and a mask
 //!   that drops a load-bearing axis changes the normalized demand.
 
-use std::sync::Arc;
 // The NEW lattice vocabulary publishes through the `demand` module …
 use verter_type_engine::semantic_query::demand::{
     apply_mask, backfill_points, cached_satisfies, demand_at_hop, relevant_demand_axes,

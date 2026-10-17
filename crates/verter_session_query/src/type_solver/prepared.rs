@@ -10,7 +10,6 @@
 //! - `PreparedImportedDeclContext`
 
 use std::sync::Arc;
-use verter_type_expr::OwnedStr;
 
 use rustc_hash::FxHashMap;
 
@@ -34,11 +33,11 @@ use verter_type_expr::{MappedModifier, ObjectMember, PrimitiveName, TypeExpr, Ty
 /// The content-free anchor of a prepared declaration's authored positions.
 fn decl_anchor(root_identity: &ResolvedRootIdentity, space: LocatorSymbolSpace) -> AuthoredAnchor {
     AuthoredAnchor {
-        // The identity fields are shared `Arc<str>` — the anchor reuses the
+        // The identity fields are owned handles — the anchor shares the
         // same allocations instead of copying.
-        canonical_id: OwnedStr::from(root_identity.canonical_id.clone()),
+        canonical_id: root_identity.canonical_id.clone(),
         owner: root_identity.owner,
-        symbol: OwnedStr::from(root_identity.symbol_name.clone()),
+        symbol: root_identity.symbol_name.clone(),
         space,
     }
 }

@@ -3,7 +3,6 @@
 //! file-size hygiene (the same pattern as `display` / `type_expr_json`).
 
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
 
 use crate::OwnedStr;
 

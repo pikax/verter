@@ -1,6 +1,5 @@
 //! The owned result of dereferencing an authored body locator, and its typed failures.
 
-use std::sync::Arc;
 use verter_type_expr::locators::{TypeBodyPathStep, TypeParamBoundPosition, TypeParamVisibility};
 use verter_type_expr::{TypeExpr, TypeParam};
 

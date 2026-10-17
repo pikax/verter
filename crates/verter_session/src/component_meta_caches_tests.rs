@@ -1941,7 +1941,7 @@ mod cached_result_footprint {
         AcceptedSurfaceCompleteness, ComponentMetaAnalysis, ComponentMetaFlags, FallthroughSurface,
         NoFallthroughReason, PropAnalysis, RootReachability, StyleAnalysis,
     };
-    use verter_session_query::retention::allocation::{arc_block_bytes, heap_block_bytes};
+    use verter_session_query::retention::allocation::heap_block_bytes;
     use verter_session_query::retention::RetainedFootprint;
     use verter_type_expr::facts::{SemanticTypeSource, SourcePosition, TopLevelOwnerId};
     use verter_type_expr::locators::{

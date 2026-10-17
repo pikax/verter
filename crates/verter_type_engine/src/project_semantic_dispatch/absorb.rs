@@ -35,8 +35,6 @@
 //!   an expandable declaration carrier, so it is excluded from the `error`
 //!   classification (mirrors the relation engine's identity-carrier unwrap).
 
-use std::sync::Arc;
-
 use crate::project_semantic_dispatch::walk::QueryBuildOutput;
 use crate::semantic_query::{
     IndexKey, IndexSignature, PathSegment, PrimitiveKind, QueryError, QueryResult,

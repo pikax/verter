@@ -1,6 +1,5 @@
 //! Typed property-key identity shared by authored IR and semantic consumers.
 
-use crate::OwnedSlice;
 use std::fmt;
 use std::sync::Arc;
 
@@ -360,7 +359,6 @@ mod tests {
 mod authored_property_key_contract_tests {
     use super::{AuthoredPropertyKey, CanonicalIndexInt, PropertyKey};
     use crate::{FunctionExpr, MethodSignature, ObjectProperty, TypeExpr, ValueDeclIdentityPart};
-    use std::sync::Arc;
 
     fn symbol(canonical_id: &str) -> ValueDeclIdentityPart {
         ValueDeclIdentityPart {

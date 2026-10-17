@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use rustc_hash::FxHashMap;
 use verter_type_expr::MemberVisibility;
 

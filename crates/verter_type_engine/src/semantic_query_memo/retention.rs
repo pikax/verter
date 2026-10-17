@@ -392,6 +392,7 @@ impl SemanticGraphStore {
         self.canonical_to_entries.storage_charge_bytes()
             + self.alias_charges.table_charged_bytes()
             + self.dep_signature_interner.storage_charge_bytes()
+            + self.derivation.lock().storage_charge_bytes()
     }
 
     /// Bytes the store's own storage is pinned for: its graph storage and

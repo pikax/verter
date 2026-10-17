@@ -519,7 +519,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 scope: value_root.scope.clone(),
                                 name: verter_type_expr::OwnedStr::from(joined),
                             },
-                            verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(rest),
+                            rest,
                             context,
                         )) {
                             QueryResult::Value(SemanticQueryOutput { value, provenance }) => {
@@ -568,16 +568,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let anchor =
                     match self.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                         scope: ScopeId {
-                            canonical_id: verter_type_expr::OwnedStr::from(
-                                identity.canonical_id.clone(),
-                            ),
+                            canonical_id: identity.canonical_id.clone(),
                             owner: identity.owner,
                             local_scope: None,
                             binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
                                 identity.owner,
                             ),
                         },
-                        name: verter_type_expr::OwnedStr::from(identity.decl_name.clone()),
+                        name: identity.decl_name.clone(),
                     })) {
                         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
                         _ => {

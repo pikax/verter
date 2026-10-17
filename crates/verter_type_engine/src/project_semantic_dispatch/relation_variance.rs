@@ -936,7 +936,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 /// at most six per type parameter: three markers and three instantiations.
 pub fn declaration_scope(declaration: &DeclIdentity) -> NodeScopeId {
     NodeScopeId::File {
-        canonical_id: verter_type_expr::OwnedStr::from(declaration.canonical_id.clone()),
+        canonical_id: declaration.canonical_id.clone(),
         owner: declaration.owner,
         whole_hash: declaration.whole_hash,
         local_scope: None,

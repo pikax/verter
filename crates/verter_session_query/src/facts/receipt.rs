@@ -261,7 +261,8 @@ fn evidence_names(facts: &[FactVersionRef]) -> crate::retention::owned::OwnedHan
     use crate::retention::allocation::{fact_heap_bytes, AliasSet};
     let mut aliases = AliasSet::new();
     for fact in facts {
-        fact_heap_bytes(fact, &mut aliases);
+        // A raw leaf is counted in the evidence's own charge.
+        let _raw = fact_heap_bytes(fact, &mut aliases);
     }
     aliases.take_handles()
 }

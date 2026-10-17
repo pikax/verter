@@ -8,7 +8,6 @@ use crate::analysis::types::{
     ScriptTypeEnhancements, StoreDefinition, StoreUsage, VueApiCallSite,
 };
 use verter_span::Span;
-use verter_type_expr::OwnedStr;
 
 // ---------------------------------------------------------------------------
 // Stable declaration identifiers
@@ -285,7 +284,7 @@ mod analyzed_macro_serde_tests {
         AnalyzedMacro, AnalyzedMacroKind, MacroAnchor, MacroAnchorUnsupported, MacroEditAnchors,
         MemberListAnchor, MemberListAnchorData,
     };
-    use std::sync::Arc;
+
     use verter_span::Span;
     use verter_type_expr::locators::{
         AuthoredAnchor, LocatorSymbolSpace, MacroPayloadLocator, MacroPayloadPosition,

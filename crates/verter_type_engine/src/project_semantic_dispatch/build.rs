@@ -818,16 +818,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     {
                         let resolved_key = ResolveDeclKey {
                             scope: crate::semantic_query::ScopeId {
-                                canonical_id: verter_type_expr::OwnedStr::from(
-                                    target.canonical_id.clone(),
-                                ),
+                                canonical_id: target.canonical_id.clone(),
                                 owner: target.owner,
                                 local_scope: None,
                                 binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
                                     target.owner,
                                 ),
                             },
-                            name: verter_type_expr::OwnedStr::from(target.symbol_name.clone()),
+                            name: target.symbol_name.clone(),
                         };
                         // Re-root the barrel-resolved entry on BOTH the
                         // barrel file (whose export surface selected the
@@ -1453,9 +1451,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // authored `unique symbol`; every other member shape projects below.
         if prepared.type_annotation.is_unique_symbol {
             let identity = verter_type_expr::facts::ValueDeclIdentityPart {
-                canonical_id: verter_type_expr::OwnedStr::from(effective_canonical.clone()),
+                canonical_id: effective_canonical.clone(),
                 owner: effective_owner,
-                symbol: verter_type_expr::OwnedStr::from(effective_symbol.clone()),
+                symbol: effective_symbol.clone(),
                 member_path: verter_type_expr::OwnedSlice::from(
                     Vec::<String>::new().into_boxed_slice(),
                 ),
@@ -1783,13 +1781,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
                             verter_type_expr::locators::TypeBodySlot {
                                 anchor: verter_type_expr::locators::AuthoredAnchor {
-                                    canonical_id: verter_type_expr::OwnedStr::from(
-                                        prepared.root_identity.canonical_id.clone(),
-                                    ),
+                                    canonical_id: prepared.root_identity.canonical_id.clone(),
                                     owner: prepared.root_identity.owner,
-                                    symbol: verter_type_expr::OwnedStr::from(
-                                        prepared.root_identity.symbol_name.clone(),
-                                    ),
+                                    symbol: prepared.root_identity.symbol_name.clone(),
                                     space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                                 },
                                 path: verter_type_expr::OwnedSlice::default(),
@@ -1816,13 +1810,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
                     verter_type_expr::locators::TypeBodySlot {
                         anchor: verter_type_expr::locators::AuthoredAnchor {
-                            canonical_id: verter_type_expr::OwnedStr::from(
-                                prepared.root_identity.canonical_id.clone(),
-                            ),
+                            canonical_id: prepared.root_identity.canonical_id.clone(),
                             owner: prepared.root_identity.owner,
-                            symbol: verter_type_expr::OwnedStr::from(
-                                prepared.root_identity.symbol_name.clone(),
-                            ),
+                            symbol: prepared.root_identity.symbol_name.clone(),
                             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                         },
                         path: verter_type_expr::OwnedSlice::default(),
@@ -1900,10 +1890,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.exported_function_augmentations(&prepared, context)
                 {
                     for root in &contributions.contributor_roots {
-                        augmentation_roots.push((
-                            verter_type_expr::OwnedStr::from(root.canonical.clone()),
-                            root.whole_hash,
-                        ));
+                        augmentation_roots.push((root.canonical.clone(), root.whole_hash));
                     }
                     augmentation_unobservable |= contributions.source_env_unobservable;
                     groups.extend(contributions.signature_groups);
@@ -2065,11 +2052,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let locator = verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
                 verter_type_expr::locators::TypeBodySlot {
                     anchor: verter_type_expr::locators::AuthoredAnchor {
-                        canonical_id: verter_type_expr::OwnedStr::from(
-                            identity.canonical_id.clone(),
-                        ),
+                        canonical_id: identity.canonical_id.clone(),
                         owner: identity.owner,
-                        symbol: verter_type_expr::OwnedStr::from(identity.symbol_name.clone()),
+                        symbol: identity.symbol_name.clone(),
                         space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                     },
                     path: verter_type_expr::OwnedSlice::from(
@@ -2375,7 +2360,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 };
                 let copied_root = ValueRootKey {
                     scope: crate::semantic_query::ScopeId {
-                        canonical_id: verter_type_expr::OwnedStr::from(declaring_canonical),
+                        canonical_id: declaring_canonical,
                         owner: declaring_owner,
                         local_scope: None,
                         binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
@@ -2575,7 +2560,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .indexed;
             let rest = &path[skipped..];
             let declaring_scope = crate::semantic_query::ScopeId {
-                canonical_id: verter_type_expr::OwnedStr::from(declaring.canonical_id.clone()),
+                canonical_id: declaring.canonical_id.clone(),
                 owner: declaring.owner,
                 local_scope: None,
                 binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(declaring.owner),
@@ -2586,7 +2571,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 (
                     ValueRootKey {
                         scope: declaring_scope.clone(),
-                        name: verter_type_expr::OwnedStr::from(declaring.symbol_name.clone()),
+                        name: declaring.symbol_name.clone(),
                     },
                     skipped,
                 )
@@ -3191,10 +3176,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .ensure_indexed_ready_serve(own_canonical.as_ref())
                         .map(|serve| serve.indexed)
                     {
-                        Some(indexed) => observed_self_roots.push((
-                            verter_type_expr::OwnedStr::from(own_canonical.clone()),
-                            indexed.whole_hash,
-                        )),
+                        Some(indexed) => {
+                            observed_self_roots.push((own_canonical.clone(), indexed.whole_hash))
+                        }
                         // The declaring file's content version could not be
                         // observed — refuse warm admission (the value would
                         // otherwise survive a declaring-file edit).
@@ -3311,9 +3295,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .prepared_value_decl_return_only(canonical, owner, symbol)
         {
             return Some((
-                verter_type_expr::OwnedStr::from(verter_type_expr::OwnedStr::from(canonical)),
+                verter_type_expr::OwnedStr::from(canonical),
                 owner,
-                verter_type_expr::OwnedStr::from(verter_type_expr::OwnedStr::from(symbol)),
+                verter_type_expr::OwnedStr::from(symbol),
                 prepared,
             ));
         }
@@ -4571,10 +4555,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             for (base_canonical, base_owner, base_name, _args) in reading.bases {
                 let base = crate::semantic_query::DeclIdentity {
-                    canonical_id: verter_type_expr::OwnedStr::from(base_canonical),
+                    canonical_id: base_canonical,
                     owner: base_owner,
                     whole_hash: crate::semantic_query::HashValue::default(),
-                    decl_name: verter_type_expr::OwnedStr::from(base_name),
+                    decl_name: base_name,
                 };
                 if ancestors
                     .iter()
@@ -5596,10 +5580,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let body_mode = build.body_mode;
         let decl_identity = crate::semantic_query::DeclIdentity {
-            canonical_id: verter_type_expr::OwnedStr::from(build.decl_canonical.clone()),
+            canonical_id: build.decl_canonical.clone(),
             owner: build.decl_owner,
             whole_hash: build.decl_whole_hash,
-            decl_name: verter_type_expr::OwnedStr::from(build.decl_name.clone()),
+            decl_name: build.decl_name.clone(),
         };
         let scope = build.scope.clone();
         let unbound_parameter = |index: usize, param: &verter_type_expr::facts::NarrowTypeParam| {
@@ -5646,11 +5630,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let locator = verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
             verter_type_expr::locators::TypeBodySlot {
                 anchor: verter_type_expr::locators::AuthoredAnchor {
-                    canonical_id: verter_type_expr::OwnedStr::from(canonical),
+                    canonical_id: canonical,
                     owner: prepared.root_identity.owner,
-                    symbol: verter_type_expr::OwnedStr::from(
-                        prepared.root_identity.symbol_name.clone(),
-                    ),
+                    symbol: prepared.root_identity.symbol_name.clone(),
                     space: verter_type_expr::locators::LocatorSymbolSpace::Type,
                 },
                 path: verter_type_expr::OwnedSlice::default(),
@@ -8279,7 +8261,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .map(|indexed| indexed.whole_hash)
             .unwrap_or_default();
         let scope = NodeScopeId::File {
-            canonical_id: verter_type_expr::OwnedStr::from(identity.canonical_id.clone()),
+            canonical_id: identity.canonical_id.clone(),
             owner: identity.owner,
             whole_hash,
             local_scope: None,
@@ -8516,7 +8498,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         identity: &crate::semantic_query::DeclIdentity,
     ) -> Option<Arc<PreparedTypeDecl>> {
         let scope = NodeScopeId::File {
-            canonical_id: verter_type_expr::OwnedStr::from(identity.canonical_id.clone()),
+            canonical_id: identity.canonical_id.clone(),
             owner: identity.owner,
             whole_hash: identity.whole_hash,
             local_scope: None,
@@ -17293,10 +17275,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return known;
         }
         let identity = crate::semantic_query::DeclIdentity {
-            canonical_id: verter_type_expr::OwnedStr::from(build.decl_canonical.clone()),
+            canonical_id: build.decl_canonical.clone(),
             owner: build.decl_owner,
             whole_hash: build.decl_whole_hash,
-            decl_name: verter_type_expr::OwnedStr::from(build.decl_name.clone()),
+            decl_name: build.decl_name.clone(),
         };
         let known = match self.declared_alias_body(&identity) {
             Some(Some(body)) => Some(matches!(
