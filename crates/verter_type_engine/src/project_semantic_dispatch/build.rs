@@ -1100,17 +1100,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// resumes with `delivery`, the instantiation or `typeof` it waited on
     /// (or its initializer's evaluation resumes with the `typeof` of the
     /// value it named), and either needs another, begins the value's next
-    /// signature, or completes the build's output. `depth` is how deep the
-    /// build's frame nests.
+    /// signature, or completes the build's output.
     pub(super) fn drain_typeof(
         &self,
         build: &mut TypeofBuild,
-        delivery: Option<super::query_frames::QueryDelivery>,
-        depth: u32,
+        delivery: Option<super::query_frames::FrameDelivery>,
     ) -> InstantiatePoll {
         let mut delivery = match &mut build.body {
             TypeofBody::Lowering(_) => {
-                delivery.map(|delivery| self.consume_delivery(delivery, depth + 1))
+                delivery.map(|delivery| self.consume_frame_delivery(delivery))
             }
             TypeofBody::Expression(run) => {
                 let source = build
@@ -1119,13 +1117,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .expression_source
                     .as_ref()
                     .expect("an initializer evaluating has an expression source");
-                let evaluated =
-                    match self.drain_semantic_expression_source(source, run, delivery, depth + 1) {
-                        super::flow_return::ExpressionSourcePoll::Need(key) => {
-                            return InstantiatePoll::Need(key)
-                        }
-                        super::flow_return::ExpressionSourcePoll::Done(evaluated) => evaluated,
-                    };
+                let evaluated = match self.drain_semantic_expression_source(source, run, delivery) {
+                    super::flow_return::ExpressionSourcePoll::Need(key) => {
+                        return InstantiatePoll::Need(key)
+                    }
+                    super::flow_return::ExpressionSourcePoll::Done(evaluated) => evaluated,
+                };
                 let owner = run.owner();
                 let Some(node) =
                     self.expression_source_value_type(&build.prepared, source, owner, evaluated)

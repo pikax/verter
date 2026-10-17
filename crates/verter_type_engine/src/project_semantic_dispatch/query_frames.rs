@@ -59,6 +59,13 @@ pub(super) struct QueryDelivery {
     carrier: Option<ReadSetSignature>,
 }
 
+/// A delivery a frame's build consumes where its evaluation reads it,
+/// with how deep the needing frame nests.
+pub(super) struct FrameDelivery {
+    delivery: QueryDelivery,
+    depth: u32,
+}
+
 /// The program instantiations run on: the dispatch they evaluate through
 /// and the task that owns every producer the drive claims.
 pub(super) struct QueryProgram<'p, 'a, C: crate::resolver_core::ResolverCapabilities> {
@@ -615,7 +622,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// carrier into the frame's tracer, fold its rails into the frame's
     /// taint, and read the instantiated node as a synchronous
     /// instantiation's reader does.
-    pub(super) fn consume_delivery(&self, delivery: QueryDelivery, depth: u32) -> SemanticNodeId {
+    /// [`Self::consume_delivery`] for a delivery a build consumes itself.
+    pub(super) fn consume_frame_delivery(&self, delivery: FrameDelivery) -> SemanticNodeId {
+        self.consume_delivery(delivery.delivery, delivery.depth)
+    }
+
+    fn consume_delivery(&self, delivery: QueryDelivery, depth: u32) -> SemanticNodeId {
         let QueryDelivery { read, carrier } = delivery;
         if let Some(carrier) = carrier {
             carrier.bubble_via_tls();
@@ -674,7 +686,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ),
             // A typeof build consumes its delivery where its evaluation
             // reads it.
-            Some(FrameBuild::Typeof(build)) => self.drain_typeof(build, delivery, frame.depth),
+            Some(FrameBuild::Typeof(build)) => self.drain_typeof(
+                build,
+                delivery.map(|delivery| FrameDelivery {
+                    delivery,
+                    depth: frame.depth + 1,
+                }),
+            ),
             None => {
                 self.open_cold_build(None);
                 match &frame.key {
@@ -727,7 +745,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 else {
                                     unreachable!("the build was just inserted")
                                 };
-                                self.drain_typeof(build, None, frame.depth)
+                                self.drain_typeof(build, None)
                             }
                         }
                     }

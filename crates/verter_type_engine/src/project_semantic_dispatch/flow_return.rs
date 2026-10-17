@@ -2211,20 +2211,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// runtime: an indexed expression source stops at each value its leaves
     /// name and resumes with that value's `typeof` as `delivery`, and the
     /// observations its steps make are one optional probe's, adopted when
-    /// it yields a value and dropped when it yields none. `depth` is how
-    /// deep the frame needing the delivery nests.
+    /// it yields a value and dropped when it yields none.
     pub(super) fn drain_semantic_expression_source(
         &self,
         source: &verter_type_expr::facts::SemanticExpressionSource,
         run: &mut ExpressionSourceRun,
-        delivery: Option<super::query_frames::QueryDelivery>,
-        depth: u32,
+        delivery: Option<super::query_frames::FrameDelivery>,
     ) -> ExpressionSourcePoll {
         let scope = match run.observed.take() {
             Some(observed) => observed.resume(self),
             None => self.begin_read_observation(),
         };
-        let mut delivered = delivery.map(|delivery| self.consume_delivery(delivery, depth));
+        let mut delivered = delivery.map(|delivery| self.consume_frame_delivery(delivery));
         let owner = run.owner;
         let value = loop {
             let indexed = match &mut run.state {
