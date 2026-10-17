@@ -4926,7 +4926,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if is_non_file_base {
                 None
             } else {
-                self.instantiation_indexed_record(decl_canonical_str)
+                self.transaction_indexed_record(decl_canonical_str)
             };
         let decl_whole_hash: crate::semantic_query::HashValue = match &live_indexed {
             Some(indexed) => indexed.whole_hash,
@@ -5919,7 +5919,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .ctx
                 .reverse_dependency_canonicals(decl_canonical.as_ref())
             {
-                let _ = self.ctx.ensure_indexed_ready_serve(&rdep);
+                let _ = self.transaction_indexed_record(&rdep);
             }
         };
 
@@ -5954,7 +5954,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .ctx
             .reverse_dependency_canonicals(decl_canonical.as_ref())
         {
-            let _ = self.ctx.ensure_indexed_ready_serve(&rdep);
+            let _ = self.transaction_indexed_record(&rdep);
         }
         self.collect_augmentation_contributions(
             AugmentationContribution::FunctionSignatures,
@@ -7464,7 +7464,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         use verter_session_query::declarations::AugmentationScopeKind;
         use verter_session_query::resolution::AugmentationTargetKind;
         for rdep in self.ctx.reverse_dependency_canonicals(module) {
-            let _ = self.ctx.ensure_indexed_ready_serve(&rdep);
+            let _ = self.transaction_indexed_record(&rdep);
         }
         self.module_augmentation_blocks(
             module,
@@ -8148,11 +8148,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         {
             return false;
         }
-        let Some(indexed) = self
-            .ctx
-            .ensure_indexed_ready_serve(canonical)
-            .map(|serve| serve.indexed)
-        else {
+        let Some(indexed) = self.transaction_indexed_record(canonical) else {
             return false;
         };
         let shallow = &indexed.shallow_state;
@@ -8247,9 +8243,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<Arc<[SemanticNodeId]>> {
         let whole_hash = self
-            .ctx
-            .ensure_indexed_ready_serve(identity.canonical_id.as_ref())
-            .map(|serve| serve.indexed.whole_hash)
+            .transaction_indexed_record(identity.canonical_id.as_ref())
+            .map(|indexed| indexed.whole_hash)
             .unwrap_or_default();
         let scope = NodeScopeId::File {
             canonical_id: Arc::clone(&identity.canonical_id),
@@ -8306,14 +8301,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .map(Arc::from)
     }
 
-    /// The live `IndexedReady` record of the declaration file `canonical`, as
-    /// an instantiation reads it: the declaration's content version and
-    /// shallow inventory. Every instantiation of a declaration reads its
-    /// file's record, so a record this transaction already served under the
-    /// same edit clocks answers again by replaying what serving it read —
-    /// its facts, refusal and self-roots reach the enclosing build exactly as
-    /// serving it again would deliver them.
-    pub(super) fn instantiation_indexed_record(
+    /// The live `IndexedReady` record of `canonical` as a build reads it: a
+    /// declaration file's content version and shallow inventory, or an
+    /// augmentation candidate made indexed before the augmentation scan. An
+    /// instantiation reads its declaration file's record several times (its
+    /// content version, the global-interface and member-index checks, the
+    /// augmentation candidates), and every instantiation of a declaration
+    /// reads the same files, so a record this transaction already served
+    /// under the same edit clocks answers again by replaying what serving it
+    /// read — its facts, refusal and self-roots reach the enclosing build
+    /// exactly as serving it again would deliver them.
+    pub(super) fn transaction_indexed_record(
         &self,
         canonical: &str,
     ) -> Option<Arc<verter_session_query::inputs::indexed::IndexedInputRecord>> {
@@ -9285,7 +9283,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // module, indexed before the augmentation index is read — as the
         // declaration's own stitch reads it.
         for rdep in self.ctx.reverse_dependency_canonicals(canonical) {
-            let _ = self.ctx.ensure_indexed_ready_serve(&rdep);
+            let _ = self.transaction_indexed_record(&rdep);
         }
         let target =
             verter_session_query::resolution::AugmentationTargetKind::ResolvedRelativeCanonical(
@@ -9574,10 +9572,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // position (lowered through the ONE located body source); its
         // declaration-site spans are RECOVERED from the declaring file's
         // retained parse via the fact's span-recovery origin.
-        let member_span_memo = self
-            .ctx
-            .ensure_indexed_ready_serve(prepared.root_identity.canonical_id.as_ref())
-            .map(|serve| serve.indexed);
+        let member_span_memo =
+            self.transaction_indexed_record(prepared.root_identity.canonical_id.as_ref());
         let mut added: Vec<SurfaceMember> = prepared
             .member_index
             .iter()

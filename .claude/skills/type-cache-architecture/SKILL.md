@@ -1030,7 +1030,7 @@ shared through the memo) and captured reads keep the family memo. Guarded by
 `recursive_paths_admit_their_instantiations_not_their_nested_steps`.
 
 Instantiation serves: every instantiation reads its declaration file's
-`IndexedReady` record (`ProjectSemanticDispatch::instantiation_indexed_record`).
+`IndexedReady` record (`ProjectSemanticDispatch::transaction_indexed_record`), as do its global-interface, member-index and augmentation-candidate reads.
 The first serve of a canonical on a transaction is recorded with
 `record_transaction_read` and kept in `CheckerDispatchTransaction::indexed_serves`
 under the workspace edit clocks it was served at; a later instantiation under
