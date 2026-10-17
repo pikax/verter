@@ -55,9 +55,12 @@ graph projection and deferred evaluation share that operand-context policy.
 `keyof`. An authored `T[keyof T]` reads its source surface once before the
 selected-value demand, including when the surface is a module namespace.
 Completed deferred-evaluation frames and retained memo witnesses fan their
-canonical fact witnesses into every active tracer as verified sorted runs,
-preserving recorder attribution and refusal propagation without sorting the
-same child evidence again.
+canonical fact witnesses into the active tracers as verified sorted runs —
+down to the first delivering scope, which hands its completed set further
+down when it completes — preserving recorder attribution and refusal
+propagation without sorting the same child evidence again. A root that
+finishes as itself is admitted by its known one-step receipt, with no frame,
+tracer or memo entry of its own.
 The read-set owner merges batches in balanced rounds so growing prefixes are
 not recopied for every following witness. Observation marks cover both local
 facts and retained canonical runs, so consuming a completed result replaces

@@ -163,7 +163,6 @@ impl SemanticGraphStore {
             for entry in &evicted {
                 reverse_index::drain_candidate_reverse_index_registrations(
                     &self.canonical_to_entries,
-                    family,
                     ModeSlot::Single,
                     entry,
                 );

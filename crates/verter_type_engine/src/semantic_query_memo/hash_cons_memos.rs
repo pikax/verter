@@ -89,7 +89,7 @@ impl SemanticGraphStore {
                 }
                 Entry::Vacant(slot) => {
                     let Ok(roots) =
-                        self.root_existing_nodes(vec![value_expr, parameter_node, arg, result])
+                        self.root_existing_nodes(smallvec::smallvec![value_expr, parameter_node, arg, result])
                     else {
                         return;
                     };
@@ -212,7 +212,7 @@ impl SemanticGraphStore {
             verter_session_query::retention::RetentionAdmission::Admitted(charge) => charge,
             verter_session_query::retention::RetentionAdmission::Refused(_) => return,
         };
-        let Ok(roots) = self.root_existing_nodes(vec![node, result]) else {
+        let Ok(roots) = self.root_existing_nodes(smallvec::smallvec![node, result]) else {
             return;
         };
         let entry = Arc::new(DeferredEvaluationMemoEntry {

@@ -113,6 +113,34 @@ where
     (value, finalise_compute_scope(source, read_set))
 }
 
+/// [`install_fact_tracer`] for a compute whose owner delivers the
+/// finalised read set — as a carrier holding at least those facts — to the
+/// tracers active when it completes. Observations made inside it then stop
+/// at its own scope instead of also fanning out to every enclosing one,
+/// which receive them once, deduplicated, through that delivery.
+pub(crate) fn install_delivering_fact_tracer<
+    F,
+    R,
+    W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+>(
+    source: &FactTracerBasisSource<'_, W>,
+    f: F,
+) -> (R, FactReadSetFinalise)
+where
+    F: FnOnce() -> R,
+{
+    let (value, read_set) =
+        crate::resolver_core::resolver_context::with_delivering_fact_tracer_cell(
+            source.live_basis(),
+            |_cell| {
+                #[cfg(any(test, feature = "test-support"))]
+                force_tracer_refusal(source, None);
+                f()
+            },
+        );
+    (value, finalise_compute_scope(source, read_set))
+}
+
 /// Finalise the read set of one compute's tracer scope: re-check its basis,
 /// then finalise it.
 fn finalise_compute_scope<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
@@ -126,7 +154,10 @@ fn finalise_compute_scope<W: verter_session_query::facts::clocks::WorkspaceClock
 /// The fact tracer of one compute that runs in steps (a continuation
 /// frame's build): installed on the thread only while one of its steps
 /// runs, and finalised once, as [`install_fact_tracer`] finalises its
-/// scope, when the compute completes.
+/// scope, when the compute completes. Its observations stop at its own
+/// scope: the owner replays the finalised set (or a carrier holding it)
+/// into the scope that consumes the compute, as
+/// [`install_delivering_fact_tracer`] does.
 pub(crate) struct StepwiseFactTracer<'h, W> {
     source: FactTracerBasisSource<'h, W>,
     tracer: crate::resolver_core::resolver_context::OwnedFactTracer,
@@ -1352,16 +1383,131 @@ pub fn root_fact_visits_for_tests() -> usize {
 /// root's content, where a witness is bound to the one view that minted it.
 /// Every carrier, however wide, is then sealed whole (paged when wide) —
 /// width is never a refusal.
+/// The completed carrier of a sealed traced set that already holds every
+/// fact the completion would add — each fact of `fence`, and a
+/// `FileWholeHash` at its observed version for each observed self-root —
+/// shared rather than rebuilt: completing it would seal the same facts in
+/// the same order. `None` when the completion adds or rewrites anything (a
+/// missing fact, a self-root observed at two versions or traced at another,
+/// an evidence page, a set wide enough for the strict-root rewrite, or a
+/// set out of canonical order); the caller completes it in full.
+pub(crate) fn shared_completed_structural_carrier(
+    observed_self_roots: &[(Arc<str>, Hash16)],
+    traced: &Arc<[FactVersionRef]>,
+    fence: &[FactVersionRef],
+) -> Option<StructuralCarrierReadSet> {
+    if traced.len() > FACT_PAGE_WIDTH || traced.iter().any(is_paged_entry) {
+        return None;
+    }
+    let mut index = 1;
+    while index < traced.len() {
+        if traced[index - 1] >= traced[index] {
+            return None;
+        }
+        index += 1;
+    }
+    for fact in fence {
+        if traced.binary_search(fact).is_err() {
+            return None;
+        }
+    }
+    let mut canonicals: Vec<Arc<str>> = Vec::with_capacity(observed_self_roots.len());
+    for (position, (canonical, observed)) in observed_self_roots.iter().enumerate() {
+        let mut other = 0;
+        while other < position {
+            let (earlier, earlier_hash) = &observed_self_roots[other];
+            if earlier == canonical && earlier_hash != observed {
+                return None;
+            }
+            other += 1;
+        }
+        let mut named = false;
+        for fact in traced.iter() {
+            if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
+                if canonical_id.as_str() == canonical.as_ref() {
+                    if hash != observed {
+                        return None;
+                    }
+                    named = true;
+                }
+            }
+        }
+        if !named {
+            return None;
+        }
+        canonicals.push(Arc::clone(canonical));
+    }
+    canonicals.sort();
+    canonicals.dedup();
+    Some((Arc::clone(traced), Arc::from(canonicals)))
+}
+
+/// [`shared_completed_structural_carrier`] for a completion whose
+/// self-roots are `observed_self_roots` together with every file the traced
+/// set reads whole: each of those files is named by its own fact, so the set
+/// is its own carrier when it reads each file at one version and names every
+/// observed self-root at its observed version. The self-root canonicals are
+/// the whole-read files, in canonical order.
+pub(crate) fn shared_completed_carrier_rooting_traced_files(
+    observed_self_roots: &[(Arc<str>, Hash16)],
+    traced: &Arc<[FactVersionRef]>,
+) -> Option<StructuralCarrierReadSet> {
+    if traced.len() > FACT_PAGE_WIDTH {
+        return None;
+    }
+    // Canonical order puts one file's whole-file facts side by side, so a
+    // file read at two versions shows as two adjacent facts of one file.
+    let mut files: Vec<(&str, &Hash16)> = Vec::new();
+    let mut index = 0;
+    while index < traced.len() {
+        let fact = &traced[index];
+        if (index > 0 && traced[index - 1] >= *fact) || is_paged_entry(fact) {
+            return None;
+        }
+        if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
+            if files
+                .last()
+                .is_some_and(|(last, _)| *last == canonical_id.as_str())
+            {
+                return None;
+            }
+            files.push((canonical_id.as_str(), hash));
+        }
+        index += 1;
+    }
+    for (position, (canonical, observed)) in observed_self_roots.iter().enumerate() {
+        let mut other = 0;
+        while other < position {
+            let (earlier, earlier_hash) = &observed_self_roots[other];
+            if earlier == canonical && earlier_hash != observed {
+                return None;
+            }
+            other += 1;
+        }
+        match files.iter().find(|(file, _)| *file == canonical.as_ref()) {
+            Some((_, hash)) if *hash == observed => {}
+            _ => return None,
+        }
+    }
+    let canonicals: Vec<Arc<str>> = files.iter().map(|(file, _)| Arc::from(*file)).collect();
+    Some((Arc::clone(traced), Arc::from(canonicals)))
+}
+
 pub(crate) fn bound_completed_structural_carrier(
     view: &dyn StoreView,
     mut facts: Vec<FactVersionRef>,
     mut self_root_canonicals: Vec<Arc<str>>,
 ) -> Result<StructuralCarrierReadSet, NonAdmissionReason> {
-    facts.sort_unstable();
-    facts.dedup();
     self_root_canonicals.sort();
     self_root_canonicals.dedup();
 
+    // The seal below sorts and deduplicates; only a set that may need the
+    // wide strict-root rewrite is canonicalised first, so its width is
+    // measured on distinct facts.
+    if facts.len() > FACT_PAGE_WIDTH {
+        facts.sort_unstable();
+        facts.dedup();
+    }
     if facts.len() > FACT_PAGE_WIDTH && !self_root_canonicals.is_empty() {
         // Index the requested roots once, including hashes held on evidence
         // pages. Scanning from the beginning for each root is quadratic.

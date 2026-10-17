@@ -37,7 +37,7 @@ use crate::semantic_query::DepSignature;
 #[derive(Debug, Default)]
 #[allow(dead_code)]
 pub struct DepSignatureInterner {
-    table: DashMap<u64, Vec<DepSignatureWeak>>,
+    table: DashMap<u64, Vec<DepSignatureWeak>, rustc_hash::FxBuildHasher>,
     /// Counter-based auto-sweep trigger. Incremented on
     /// every successful intern; sweep runs when the counter hits
     /// `SWEEP_INTERVAL`. Cheap O(buckets) walk; off the hot path.

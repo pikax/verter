@@ -19,15 +19,16 @@ pub(crate) struct BinderDependencies {
 }
 
 impl BinderDependencies {
-    pub(crate) fn proves_absent(&self, target: &SemanticNodeData, id: SemanticNodeId) -> bool {
-        if !self.complete {
-            return false;
-        }
-        match target {
-            SemanticNodeData::TypeParam { .. } => !self.nodes.contains(&id),
-            SemanticNodeData::Infer { binder, .. } => !self.infer.contains(binder),
-            _ => false,
-        }
+    /// Whether the summarised subtree provably never names the
+    /// type-parameter binder `id`.
+    pub(crate) fn proves_type_param_absent(&self, id: SemanticNodeId) -> bool {
+        self.complete && !self.nodes.contains(&id)
+    }
+
+    /// Whether the summarised subtree provably never names the `infer`
+    /// binder of identity `binder`.
+    pub(crate) fn proves_infer_absent(&self, binder: &InferBinderId) -> bool {
+        self.complete && !self.infer.contains(binder)
     }
 
     pub(crate) fn may_declare_infer(&self) -> bool {
@@ -67,7 +68,7 @@ impl SemanticGraphStore {
             verter_session_query::retention::RetentionAdmission::Admitted(charge) => charge,
             verter_session_query::retention::RetentionAdmission::Refused(_) => return,
         };
-        let Ok(roots) = self.root_existing_nodes(vec![node]) else {
+        let Ok(roots) = self.root_existing_nodes(smallvec::smallvec![node]) else {
             return;
         };
         if let Entry::Vacant(slot) = self.binder_dependencies.entry(node) {

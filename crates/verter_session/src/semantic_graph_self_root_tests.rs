@@ -358,6 +358,161 @@ fn instantiate_same_canonical_edit_rejects_warm_entry() {
     );
 }
 
+/// The facts the `Instantiate` entry of `name` over the argument `published`
+/// publishes when one transaction instantiates it over each of `arguments`
+/// in order, in a fresh host holding `files` (the declaration lives in the
+/// first).
+fn instantiation_entry_facts(
+    files: &[(&str, &str)],
+    name: &str,
+    arguments: &[verter_type_engine::semantic_query::PrimitiveKind],
+    published: verter_type_engine::semantic_query::PrimitiveKind,
+) -> Vec<FactVersionRef> {
+    let sequence: Vec<_> = arguments.iter().map(|argument| (name, *argument)).collect();
+    instantiations_entry_facts(files, &sequence, (name, published))
+}
+
+/// The facts the `Instantiate` entry of `published` publishes when one
+/// transaction instantiates each declaration of `sequence` over its
+/// argument in order, in a fresh host holding `files` (the declarations
+/// live in the first).
+fn instantiations_entry_facts(
+    files: &[(&str, &str)],
+    sequence: &[(&str, verter_type_engine::semantic_query::PrimitiveKind)],
+    published: (&str, verter_type_engine::semantic_query::PrimitiveKind),
+) -> Vec<FactVersionRef> {
+    let host = host();
+    for (path, source) in files {
+        upsert(&host, path, source);
+    }
+    let canonical = files[0].0;
+    let dispatch = host.semantic_dispatch();
+    let graph = host.project_type_store().semantic_graph();
+    let key = |(name, argument): (&str, verter_type_engine::semantic_query::PrimitiveKind)| {
+        let argument = graph.intern_node(SemanticNodeData::Primitive(argument));
+        SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+            verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+                Arc::from(canonical),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from(name),
+            ),
+            Arc::from(vec![argument].into_boxed_slice()),
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                    verter_type_engine::semantic_query::ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
+        ))
+    };
+    for (name, argument) in sequence {
+        assert!(
+            matches!(
+                dispatch.execute_type_node(key((name, *argument))),
+                verter_type_engine::semantic_query::QueryResult::Value(_)
+            ),
+            "`{name}<{argument:?}>` must instantiate"
+        );
+    }
+    let carrier = graph
+        .entry_read_set_signature_for_tests(&key(published))
+        .unwrap_or_else(|| panic!("`{published:?}` must admit its instantiation"));
+    let mut facts: Vec<FactVersionRef> =
+        verter_session_query::facts::fact_cache::signature_entries(&carrier.facts)
+            .cloned()
+            .collect();
+    facts.sort();
+    facts.dedup();
+    facts
+}
+
+/// An instantiation serves its declaration file's `IndexedReady` record and
+/// every file importing it (a candidate augmenter, made indexed before the
+/// augmentation scan); a transaction serves each once and answers its later
+/// instantiations from that serve. The record answered is the file's own
+/// and the replay delivers what serving it read, so an instantiation
+/// answered from the transaction publishes exactly the facts it publishes
+/// when it is the first to serve the files.
+#[test]
+fn a_replayed_declaration_serve_publishes_the_facts_its_first_serve_does() {
+    use verter_type_engine::semantic_query::PrimitiveKind;
+    let files = [
+        (
+            "/sg_self_root/replayed_serve/box.ts",
+            "export interface Box<T> { value: T }\n",
+        ),
+        (
+            "/sg_self_root/replayed_serve/user.ts",
+            "import type { Box } from './box';\nexport type Boxed = Box<string>;\n",
+        ),
+    ];
+    let after_first = instantiation_entry_facts(
+        &files,
+        "Box",
+        &[PrimitiveKind::String, PrimitiveKind::Number],
+        PrimitiveKind::Number,
+    );
+    let alone = instantiation_entry_facts(
+        &files,
+        "Box",
+        &[PrimitiveKind::Number],
+        PrimitiveKind::Number,
+    );
+    assert!(
+        alone.iter().any(|fact| format!("{fact:?}").contains("user.ts")),
+        "fixture invariant: serving the importing candidate is a fact the instantiation reads: {alone:?}"
+    );
+    assert_eq!(
+        after_first, alone,
+        "an instantiation answered from the transaction's recorded serves must publish \
+         the facts of serving its declaration file and its candidates"
+    );
+}
+
+/// A declaration file's serve is the transaction's, not one
+/// declaration's: an instantiation of a second declaration of the file,
+/// whose own body is lowered for the first time, answers the file's
+/// `IndexedReady` record from the serve the first declaration's
+/// instantiation recorded, and still publishes every fact serving the file
+/// reads.
+#[test]
+fn a_sibling_declaration_answered_from_the_recorded_serve_publishes_its_facts() {
+    use verter_type_engine::semantic_query::PrimitiveKind;
+    let files = [
+        (
+            "/sg_self_root/sibling_serve/shapes.ts",
+            "export interface Box<T> { value: T }
+export interface Crate<T> { items: T[] }
+",
+        ),
+        (
+            "/sg_self_root/sibling_serve/user.ts",
+            "import type { Box, Crate } from './shapes';
+export type Both = [Box<string>, Crate<string>];
+",
+        ),
+    ];
+    let after_sibling = instantiations_entry_facts(
+        &files,
+        &[
+            ("Box", PrimitiveKind::String),
+            ("Crate", PrimitiveKind::Number),
+        ],
+        ("Crate", PrimitiveKind::Number),
+    );
+    let alone = instantiations_entry_facts(
+        &files,
+        &[("Crate", PrimitiveKind::Number)],
+        ("Crate", PrimitiveKind::Number),
+    );
+    assert_eq!(
+        after_sibling, alone,
+        "an instantiation answered from a sibling declaration's recorded serve must \
+         publish the facts of serving its declaration file and its candidates"
+    );
+}
+
 /// `ResolveMacroPayload` — a same-canonical content edit to the owning
 /// SFC rejects the warm query-node memo entry.
 ///

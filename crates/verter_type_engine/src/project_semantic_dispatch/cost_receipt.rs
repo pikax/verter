@@ -307,16 +307,37 @@ impl DemandCostReceipt {
         tail_steps: u32,
     ) -> Arc<Self> {
         let mut unique: Vec<CostDependency> = Vec::with_capacity(prerequisites.len());
-        let mut positions: FxHashMap<CostIdentity, usize> = FxHashMap::default();
-        for dependency in prerequisites {
-            match positions.get(&dependency.receipt.identity) {
-                Some(&position) => {
-                    let kept = &mut unique[position];
-                    kept.nesting = kept.nesting.deeper(dependency.nesting);
+        if prerequisites.len() <= LINEAR_DEDUP_LIMIT {
+            // A short list dedups by scanning: no identity is cloned into a
+            // table, and the stored hash rejects most pairs at once.
+            for dependency in prerequisites {
+                let mut kept_at = None;
+                for (position, kept) in unique.iter().enumerate() {
+                    if kept.receipt.identity == dependency.receipt.identity {
+                        kept_at = Some(position);
+                        break;
+                    }
                 }
-                None => {
-                    positions.insert(dependency.receipt.identity.clone(), unique.len());
-                    unique.push(dependency);
+                match kept_at {
+                    Some(position) => {
+                        let kept = &mut unique[position];
+                        kept.nesting = kept.nesting.deeper(dependency.nesting);
+                    }
+                    None => unique.push(dependency),
+                }
+            }
+        } else {
+            let mut positions: FxHashMap<CostIdentity, usize> = FxHashMap::default();
+            for dependency in prerequisites {
+                match positions.get(&dependency.receipt.identity) {
+                    Some(&position) => {
+                        let kept = &mut unique[position];
+                        kept.nesting = kept.nesting.deeper(dependency.nesting);
+                    }
+                    None => {
+                        positions.insert(dependency.receipt.identity.clone(), unique.len());
+                        unique.push(dependency);
+                    }
                 }
             }
         }
@@ -414,6 +435,24 @@ impl DemandCostReceipt {
         if self.retention.get().is_some() {
             return Ok(());
         }
+        // Most receipts are retained after every receipt they consumed
+        // already is: reserve the receipt alone, without walking.
+        let mut closure_reserved = true;
+        for dependency in self.prerequisites.iter() {
+            if dependency.receipt.retention.get().is_none() {
+                closure_reserved = false;
+                break;
+            }
+        }
+        if closure_reserved {
+            return match account.reserve(ChargeClass::Retained, self.retained_bytes()) {
+                RetentionAdmission::Admitted(charge) => {
+                    drop(self.retention.set(charge));
+                    Ok(())
+                }
+                RetentionAdmission::Refused(refusal) => Err(refusal),
+            };
+        }
         let mut visited: FxHashSet<*const Self> = FxHashSet::default();
         let mut stack: Vec<(&Self, bool)> = vec![(self.as_ref(), false)];
         while let Some((next, expanded)) = stack.pop() {
@@ -463,15 +502,24 @@ impl DemandCostReceipt {
     }
 }
 
+/// The prerequisite count up to which a receipt dedups its prerequisites
+/// by scanning rather than through a table.
+const LINEAR_DEDUP_LIMIT: usize = 16;
+
 impl Drop for DemandCostReceipt {
     /// Release the prerequisite DAG iteratively: a receipt reaches the
     /// receipts of a chain as deep as the chain of computations it costs,
     /// and dropping them recursively would spend a native frame per level.
     fn drop(&mut self) {
+        if self.prerequisites.is_empty() {
+            return;
+        }
         let mut pending: Vec<CostDependency> = std::mem::take(&mut self.prerequisites).into_vec();
         while let Some(dependency) = pending.pop() {
             if let Some(mut last) = Arc::into_inner(dependency.receipt) {
-                pending.extend(std::mem::take(&mut last.prerequisites).into_vec());
+                if !last.prerequisites.is_empty() {
+                    pending.extend(std::mem::take(&mut last.prerequisites).into_vec());
+                }
             }
         }
     }

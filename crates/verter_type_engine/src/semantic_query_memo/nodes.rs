@@ -31,13 +31,16 @@ impl SemanticGraphStore {
 
     pub(crate) fn root_existing_nodes(
         &self,
-        mut ids: Vec<SemanticNodeId>,
+        ids: node_roots::RootIds,
     ) -> Result<node_roots::NodeRootSet, QueryError> {
         // A legacy raw carrier may already name a tombstone (or a synthetic
         // test ordinal). Such an id owns no storage. Counted delivery, where
         // all carriers participate in ownership, rejects it instead.
         if !self.arena.counted() {
-            ids.retain(|node| self.node_is_live(*node));
+            return Ok(node_roots::NodeRootSet::acquire_live(
+                Arc::clone(&self.arena.core),
+                ids,
+            ));
         }
         self.root_nodes(ids)
     }
@@ -129,7 +132,10 @@ impl SemanticGraphStore {
         if !node_roots::NodeRootScope::holds(&self.arena.core) {
             return None;
         }
-        match node_roots::NodeRootSet::acquire(Arc::clone(&self.arena.core), vec![id]) {
+        match node_roots::NodeRootSet::acquire(
+            Arc::clone(&self.arena.core),
+            smallvec::smallvec![id],
+        ) {
             Ok(roots) => Some(node_data_lease::NodeDataLease {
                 data: self.arena.get(id)?,
                 root: node_roots::NodeRoot::from_roots(id, roots),
