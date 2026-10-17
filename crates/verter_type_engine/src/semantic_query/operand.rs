@@ -106,7 +106,7 @@ impl OperandLexicalScope {
     fn for_locator(locator: &AuthoredBodyLocator) -> Self {
         let anchor = authored_anchor(locator);
         Self {
-            canonical_id: Arc::clone(&anchor.canonical_id),
+            canonical_id: std::sync::Arc::<str>::from(anchor.canonical_id.as_str()),
             owner: anchor.owner,
         }
     }
@@ -679,7 +679,7 @@ mod force_vocabulary {
         /// the boundary has already proven the index node belongs to the
         /// issuing store at the live generation and merged its producer
         /// evidence.
-        Path(Arc<[PathSegment]>),
+        Path(verter_type_expr::OwnedSlice<PathSegment>),
         /// Key-domain demand: the force answers the operand's `keyof`. It
         /// forces only key-producing structure and never member values.
         KeyDomain,
@@ -737,7 +737,7 @@ impl SemanticOperandForceProjection {
     /// family, so an empty `Path` would compute the whole-surface answer
     /// into a second, force-owned entry.
     #[must_use]
-    pub fn residual_path(&self) -> Option<&Arc<[PathSegment]>> {
+    pub fn residual_path(&self) -> Option<&verter_type_expr::OwnedSlice<PathSegment>> {
         match self {
             Self::Path(path) => Some(path),
             Self::WholeSurface | Self::KeyDomain => None,

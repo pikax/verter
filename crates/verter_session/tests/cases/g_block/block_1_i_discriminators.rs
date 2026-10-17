@@ -130,14 +130,14 @@ fn semantic_memo_invalidate_drains_fact_canonical_entry() {
     // entirely from the carrier's fact rail.
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::from("/test/scope.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/test/scope.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
-        name: Arc::from("MemoTarget"),
+        name: verter_type_expr::OwnedStr::from("MemoTarget"),
     });
 
     // Intern a placeholder node so we have a `Value` to publish.

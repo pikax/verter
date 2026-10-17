@@ -666,19 +666,31 @@ impl<'a> ReverseIndexInputs<'a> {
     }
 }
 
-/// Bytes one family-memo candidate's registration keeps, by the edges
-/// naming it ([`ReverseIndexInputs::direct_edge_count`]): its node, its
-/// edges, and the one `Arc<FamilyKey>` clone it names its family by. The
-/// evidence it shares with other candidates is the index's own storage.
-pub(super) fn registration_bytes(family: &FamilyKey, direct_edges: usize) -> usize {
+/// What one family-memo candidate's registration keeps, by the edges naming
+/// it ([`ReverseIndexInputs::direct_edge_count`]): its node, its edges, and
+/// the one `Arc<FamilyKey>` clone it names its family by — its block and the
+/// boxes the clone copies, plus the owned names the clone shares with
+/// `family`, handed back for the candidate to hold. The evidence it shares
+/// with other candidates is the index's own storage.
+pub(super) fn registration_footprint(
+    family: &FamilyKey,
+    direct_edges: usize,
+) -> verter_session_query::retention::Footprint {
     if direct_edges == 0 {
-        return 0;
+        return verter_session_query::retention::Footprint {
+            bytes: 0,
+            handles: Default::default(),
+        };
     }
+    let clone = super::family_footprint::family_key_clone_heap_bytes(family);
     // The carrier edge is counted with the extras; the node's extra list
     // holds at most every edge.
-    CanonicalToEntries::candidate_bytes(direct_edges, false)
-        + arc_block_bytes(std::mem::size_of::<FamilyKey>())
-        + super::family_footprint::family_key_clone_heap_bytes(family)
+    verter_session_query::retention::Footprint {
+        bytes: CanonicalToEntries::candidate_bytes(direct_edges, false)
+            + arc_block_bytes(std::mem::size_of::<FamilyKey>())
+            + clone.bytes,
+        handles: clone.handles,
+    }
 }
 
 /// Register the just-published candidate `admission_seq` for every slot

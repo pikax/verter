@@ -315,23 +315,34 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             };
             let value_root = ValueRootKey {
                 scope: crate::semantic_query::ScopeId {
-                    canonical_id: Arc::clone(&block.canonical),
+                    canonical_id: verter_type_expr::OwnedStr::from(block.canonical.clone()),
                     owner: block.owner,
                     local_scope: None,
                     binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(block.owner),
                 },
-                name: Arc::clone(root),
+                name: verter_type_expr::OwnedStr::from(root),
             };
             let resolved = if depth > 0 {
                 self.namespace_private_value(evaluation, user, &candidate[..=depth])
-                    .map(|identity| (identity, candidate[depth + 1..].to_vec()))
+                    .map(|identity| {
+                        (
+                            identity,
+                            candidate[depth + 1..]
+                                .iter()
+                                .map(verter_type_expr::OwnedStr::from)
+                                .collect::<Vec<_>>(),
+                        )
+                    })
             } else {
                 None
             };
             let Some((identity, remaining)) = resolved.or_else(|| {
                 self.value_path_declaration(
                     &value_root,
-                    rest,
+                    &rest
+                        .iter()
+                        .map(verter_type_expr::OwnedStr::from)
+                        .collect::<Vec<_>>(),
                     &mut rustc_hash::FxHashSet::default(),
                 )
             }) else {
@@ -722,9 +733,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let first = blocks.iter().find(|block| block.addressed)?;
         let decl = DeclIdentity {
             whole_hash: self.decl_whole_hash(&first.canonical),
-            canonical_id: Arc::clone(&first.canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(first.canonical.clone()),
             owner: first.owner,
-            decl_name: Arc::clone(&symbol),
+            decl_name: verter_type_expr::OwnedStr::from(symbol.clone()),
         };
         let namespace_members =
             self.enum_namespace_members(&canonical, owner, &symbol, is_global, &members);
@@ -815,14 +826,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 Arc::from(member.as_str()),
                 ValueRootKey {
                     scope: crate::semantic_query::ScopeId {
-                        canonical_id: Arc::clone(file),
+                        canonical_id: verter_type_expr::OwnedStr::from(file),
                         owner: *file_owner,
                         local_scope: None,
                         binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
                             *file_owner,
                         ),
                     },
-                    name: Arc::from(format!("{symbol}.{member}")),
+                    name: verter_type_expr::OwnedStr::from(format!("{symbol}.{member}")),
                 },
             ));
         }
@@ -863,17 +874,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let path: Arc<[Arc<str>]> = Arc::from(Vec::new().into_boxed_slice());
         let value_root = ValueRootKey {
             scope: crate::semantic_query::ScopeId {
-                canonical_id: canonical,
+                canonical_id: verter_type_expr::OwnedStr::from(canonical),
                 owner,
                 local_scope: None,
                 binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(owner),
             },
-            name: symbol,
+            name: verter_type_expr::OwnedStr::from(symbol),
         };
         let QueryResult::Value(crate::semantic_query::SemanticQueryOutput { value, .. }) = self
             .execute_type_node(self.typeof_key_with_path(
                 value_root,
-                path,
+                verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(path),
                 crate::semantic_query::ProjectionReductionContext::structural_transit(),
             ))
         else {
@@ -915,7 +926,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         self.graph().intern_node_with_scope(
             SemanticNodeData::EnumLiteral(EnumLiteralType {
                 enum_decl: enumeration.decl.clone(),
-                member: Arc::from(entry.name.as_str()),
+                member: verter_type_expr::OwnedStr::from(entry.name.as_str()),
                 base,
                 member_count: u32::try_from(enumeration.members.len()).unwrap_or(u32::MAX),
             }),
@@ -960,7 +971,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
                     readonly: true,
                     spans: verter_type_expr::IndexSignatureSpans::default(),
-                    declaration_origin: Some(Arc::clone(&enumeration.decl.canonical_id)),
+                    declaration_origin: Some(enumeration.decl.canonical_id.clone()),
                 },
             )
         });
@@ -968,9 +979,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .members
             .iter()
             .map(|entry| crate::semantic_query::SurfaceMember {
-                key: crate::semantic_query::AuthoredPropertyKey::String(Arc::from(
-                    entry.name.as_str(),
-                )),
+                key: crate::semantic_query::AuthoredPropertyKey::String(
+                    verter_type_expr::OwnedStr::from(entry.name.as_str()),
+                ),
                 value: self.enum_member_literal(enumeration, entry),
                 optional: false,
                 readonly: true,
@@ -980,7 +991,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                 // The member inventory carries no per-member source span.
                 spans: verter_type_expr::MemberSpans::default(),
-                declaration_origin: Some(Arc::clone(&enumeration.decl.canonical_id)),
+                declaration_origin: Some(enumeration.decl.canonical_id.clone()),
                 declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
                 merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
             })
@@ -1069,7 +1080,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     fn enum_scope(&self, enumeration: &EnumDeclaration) -> NodeScopeId {
         NodeScopeId::File {
-            canonical_id: Arc::clone(&enumeration.decl.canonical_id),
+            canonical_id: enumeration.decl.canonical_id.clone(),
             owner: enumeration.decl.owner,
             whole_hash: enumeration.decl.whole_hash,
             local_scope: None,
@@ -1193,7 +1204,11 @@ struct EnumEvaluation {
     /// The read enum each addressed block's `(canonical, owner, name)`
     /// declares.
     declared_at: rustc_hash::FxHashMap<
-        (Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>),
+        (
+            verter_type_expr::OwnedStr,
+            verter_type_expr::TopLevelOwnerId,
+            verter_type_expr::OwnedStr,
+        ),
         DeclIdentity,
     >,
     states: rustc_hash::FxHashMap<EnumMemberKey, MemberState>,
@@ -1224,9 +1239,9 @@ impl EnumEvaluation {
         for block in enumeration.blocks.iter().filter(|block| block.addressed) {
             self.declared_at
                 .entry((
-                    Arc::clone(&block.canonical),
+                    verter_type_expr::OwnedStr::from(block.canonical.clone()),
                     block.owner,
-                    Arc::clone(&enumeration.decl.decl_name),
+                    enumeration.decl.decl_name.clone(),
                 ))
                 .or_insert_with(|| enumeration.decl.clone());
         }
@@ -1272,9 +1287,9 @@ impl EnumEvaluation {
         ENUM_ASSEMBLY_WORK.with(|count| count.set(count.get() + 1));
         self.declared_at
             .get(&(
-                Arc::clone(&identity.canonical_id),
+                verter_type_expr::OwnedStr::from(identity.canonical_id.clone()),
                 identity.owner,
-                Arc::clone(&identity.symbol_name),
+                verter_type_expr::OwnedStr::from(identity.symbol_name.clone()),
             ))
             .cloned()
     }

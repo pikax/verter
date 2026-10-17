@@ -284,7 +284,7 @@ mod analyzed_macro_serde_tests {
         AnalyzedMacro, AnalyzedMacroKind, MacroAnchor, MacroAnchorUnsupported, MacroEditAnchors,
         MemberListAnchor, MemberListAnchorData,
     };
-    use std::sync::Arc;
+
     use verter_span::Span;
     use verter_type_expr::locators::{
         AuthoredAnchor, LocatorSymbolSpace, MacroPayloadLocator, MacroPayloadPosition,
@@ -294,9 +294,9 @@ mod analyzed_macro_serde_tests {
     fn sample_payload_locator(symbol: &str) -> MacroPayloadLocator {
         MacroPayloadLocator {
             anchor: AuthoredAnchor {
-                canonical_id: Arc::from(""),
+                canonical_id: verter_type_expr::OwnedStr::from(""),
                 owner: TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from(symbol),
+                symbol: verter_type_expr::OwnedStr::from(symbol),
                 space: LocatorSymbolSpace::Value,
             },
             macro_index: 0,
@@ -511,9 +511,9 @@ mod analyzed_macro_serde_tests {
         // round-trip test exercises the non-empty serialization path.
         m.parsed_type_argument = Some(MacroPayloadLocator {
             anchor: AuthoredAnchor {
-                canonical_id: Arc::from(""),
+                canonical_id: verter_type_expr::OwnedStr::from(""),
                 owner: TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from("default"),
+                symbol: verter_type_expr::OwnedStr::from("default"),
                 space: LocatorSymbolSpace::Value,
             },
             macro_index: 2,

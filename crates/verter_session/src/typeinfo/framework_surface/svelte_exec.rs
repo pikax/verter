@@ -1928,7 +1928,7 @@ pub(crate) fn resolve_svelte_value_export_member(
     let read = dispatch.execute_read(dispatch.typeof_key_for(
         ValueRootKey {
             scope: ScopeId::file(Arc::from(owner), binding_key.owner),
-            name: Arc::clone(&binding_key.name),
+            name: verter_type_expr::OwnedStr::from(binding_key.name.clone()),
         },
         ProjectionReductionContext::published(ProjectionMode::Expanded),
     ));

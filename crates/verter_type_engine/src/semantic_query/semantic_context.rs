@@ -148,7 +148,7 @@ impl SemanticContextId {
 
 intern_domain!(SemanticContext {
     /// The explicit `lib` selection, when the options name one.
-    fn value_heap_bytes(&self) -> usize {
+    fn value_heap_bytes(&self, _aliases: &mut verter_session_query::retention::allocation::AliasSet) -> usize {
         use verter_session_query::retention::allocation::{string_bytes, vec_bytes};
         let SemanticContext {
             effective_semantic_options,
@@ -163,7 +163,7 @@ intern_domain!(SemanticContext {
 });
 intern_domain!(OrderDomainKey {
     /// Every field is inline.
-    fn value_heap_bytes(&self) -> usize {
+    fn value_heap_bytes(&self, _aliases: &mut verter_session_query::retention::allocation::AliasSet) -> usize {
         let OrderDomainKey {
             env: _,
             project_identity: _,

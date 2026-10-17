@@ -835,7 +835,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         });
         let key = crate::semantic_query::ResolveCallKey {
             point: crate::semantic_query::ProgramPointId {
-                canonical_id: Arc::from(self.canonical),
+                canonical_id: verter_type_expr::OwnedStr::from(self.canonical),
                 offset: call.point,
             },
             callee,

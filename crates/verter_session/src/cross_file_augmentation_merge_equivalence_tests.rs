@@ -693,9 +693,9 @@ fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
         let key =
             SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
                 dispatch.type_slot_for(
-                    Arc::from("/types.ts"),
+                    verter_type_expr::OwnedStr::from("/types.ts"),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    Arc::from("Foo"),
+                    verter_type_expr::OwnedStr::from("Foo"),
                 ),
                 Arc::from(
                     Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new()
@@ -921,9 +921,9 @@ fn warm_parent_rejects_contributor_live_parse_env_move_with_unchanged_content() 
         let dispatch = ProjectSemanticDispatch::new(&ctx);
         SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
             dispatch.type_slot_for(
-                Arc::from("/types.ts"),
+                verter_type_expr::OwnedStr::from("/types.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("Foo"),
+                verter_type_expr::OwnedStr::from("Foo"),
             ),
             Arc::from(
                 Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
@@ -1063,9 +1063,9 @@ fn external_module_augmentation_discharges_exact_unresolved_owner_debt() {
         let key =
             SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
                 dispatch.type_slot_for(
-                    Arc::from("/use.ts"),
+                    verter_type_expr::OwnedStr::from("/use.ts"),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    Arc::from("U"),
+                    verter_type_expr::OwnedStr::from("U"),
                 ),
                 Arc::from(
                     Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new()
@@ -1190,9 +1190,9 @@ fn external_module_augmentation_warm_parent_rejects_contributor_content_edit_end
         let dispatch = ProjectSemanticDispatch::new(&ctx);
         SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
             dispatch.type_slot_for(
-                Arc::from("/use.ts"),
+                verter_type_expr::OwnedStr::from("/use.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("U"),
+                verter_type_expr::OwnedStr::from("U"),
             ),
             Arc::from(
                 Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
@@ -1352,9 +1352,9 @@ fn external_module_augmentation_torn_contributor_folds_cache_suppress() {
         let key =
             SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
                 dispatch.type_slot_for(
-                    Arc::from("/use.ts"),
+                    verter_type_expr::OwnedStr::from("/use.ts"),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    Arc::from("U"),
+                    verter_type_expr::OwnedStr::from("U"),
                 ),
                 Arc::from(
                     Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new()
@@ -1467,9 +1467,9 @@ fn relative_augmentation_torn_stitch_fans_non_cacheability_to_outer_tracer() {
                 let key = SemanticQueryKey::Instantiate(
                     verter_type_engine::semantic_query::InstantiateKey::new(
                         dispatch.type_slot_for(
-                            Arc::from("/types.ts"),
+                            verter_type_expr::OwnedStr::from("/types.ts"),
                             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                            Arc::from("Foo"),
+                            verter_type_expr::OwnedStr::from("Foo"),
                         ),
                         Arc::from(
                             Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new()
@@ -1613,9 +1613,9 @@ fn external_module_augmentation_broken_lease_contributor_folds_cache_suppress() 
         let key =
             SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
                 dispatch.type_slot_for(
-                    Arc::from("/use.ts"),
+                    verter_type_expr::OwnedStr::from("/use.ts"),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    Arc::from("U"),
+                    verter_type_expr::OwnedStr::from("U"),
                 ),
                 Arc::from(
                     Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new()

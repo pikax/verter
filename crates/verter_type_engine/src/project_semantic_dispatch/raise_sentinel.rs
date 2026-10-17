@@ -364,7 +364,6 @@ pub fn type_expr_is_expanded_surface(expr: &TypeExpr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
 
     use super::{
         query_error_is_object_surface_sentinel, query_error_is_semantic_miss_sentinel,
@@ -387,7 +386,7 @@ mod tests {
             QueryError::Miss,
             QueryError::Cancelled,
             QueryError::UnsupportedIntrinsic {
-                name: Arc::from("Foo"),
+                name: verter_type_expr::OwnedStr::from("Foo"),
             },
             QueryError::BudgetExceeded(BudgetExceededFailure {
                 domain: BudgetDomain::ProjectionOperation,
@@ -397,17 +396,23 @@ mod tests {
             }),
             QueryError::UnstableState { attempts: 3 },
             QueryError::AliasCycle {
-                chain: Arc::from(vec![Arc::from("A"), Arc::from("B")].into_boxed_slice()),
+                chain: verter_type_expr::OwnedSlice::from(
+                    vec![
+                        verter_type_expr::OwnedStr::from("A"),
+                        verter_type_expr::OwnedStr::from("B"),
+                    ]
+                    .into_boxed_slice(),
+                ),
             },
             QueryError::RecursiveRef {
-                name: Arc::from("Tree"),
+                name: verter_type_expr::OwnedStr::from("Tree"),
                 args: Default::default(),
             },
-            QueryError::Other(Arc::from("custom failure text")),
+            QueryError::Other(verter_type_expr::OwnedStr::from("custom failure text")),
             QueryError::DeclPlaceholder {
-                canonical_id: Arc::from("/w/p.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/w/p.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                name: Arc::from("Pending"),
+                name: verter_type_expr::OwnedStr::from("Pending"),
                 whole_hash: [0u8; 16],
             },
             QueryError::ValueDomainMismatch {
@@ -443,11 +448,11 @@ mod tests {
     /// sentinels: only the typed variant carries control meaning.
     fn adversarial_text_bearing_variants() -> Vec<QueryError> {
         vec![
-            QueryError::Other(Arc::from("semanticMiss")),
-            QueryError::Other(Arc::from("semanticObjectSurface")),
-            QueryError::Other(Arc::from("budgetExceeded(x)")),
-            QueryError::Other(Arc::from("projectedOpenSurface")),
-            QueryError::Other(Arc::from("genuinely free text")),
+            QueryError::Other(verter_type_expr::OwnedStr::from("semanticMiss")),
+            QueryError::Other(verter_type_expr::OwnedStr::from("semanticObjectSurface")),
+            QueryError::Other(verter_type_expr::OwnedStr::from("budgetExceeded(x)")),
+            QueryError::Other(verter_type_expr::OwnedStr::from("projectedOpenSurface")),
+            QueryError::Other(verter_type_expr::OwnedStr::from("genuinely free text")),
         ]
     }
 
@@ -499,7 +504,7 @@ mod tests {
             &QueryError::ForeignSemanticOperand
         ));
         assert!(!query_error_is_unmaterialized_sentinel(&QueryError::Other(
-            Arc::from("semanticMiss")
+            verter_type_expr::OwnedStr::from("semanticMiss")
         )));
     }
 
@@ -532,9 +537,9 @@ mod tests {
             &QueryError::UnrepresentableSurface
         ));
         assert!(
-            !query_error_is_object_surface_sentinel(&QueryError::Other(Arc::from(
-                "semanticObjectSurface"
-            ))),
+            !query_error_is_object_surface_sentinel(&QueryError::Other(
+                verter_type_expr::OwnedStr::from("semanticObjectSurface")
+            )),
             "Other(\"semanticObjectSurface\") NEVER acts as the surface sentinel"
         );
         assert!(!query_error_is_object_surface_sentinel(
@@ -567,7 +572,9 @@ mod tests {
         // _discriminates: unmaterialised is BROADER than miss.
         assert!(query_error_is_semantic_miss_sentinel(&QueryError::Miss));
         assert!(
-            !query_error_is_semantic_miss_sentinel(&QueryError::Other(Arc::from("semanticMiss"))),
+            !query_error_is_semantic_miss_sentinel(&QueryError::Other(
+                verter_type_expr::OwnedStr::from("semanticMiss")
+            )),
             "Other(\"semanticMiss\") NEVER acts as the miss sentinel"
         );
         assert!(!query_error_is_semantic_miss_sentinel(

@@ -1229,9 +1229,9 @@ pub(crate) fn stamp_macro_payload_locators(mac: &mut AnalyzedMacro, macro_index:
 
     fn local_default_anchor(owner: TopLevelOwnerId) -> AuthoredAnchor {
         AuthoredAnchor {
-            canonical_id: std::sync::Arc::from(""),
+            canonical_id: verter_type_expr::OwnedStr::from(""),
             owner,
-            symbol: std::sync::Arc::from("default"),
+            symbol: verter_type_expr::OwnedStr::from("default"),
             space: LocatorSymbolSpace::Value,
         }
     }
@@ -2697,9 +2697,9 @@ fn local_type_ref_shape(
     verter_type_expr::facts::ResolvedLocalShape::Ref(
         verter_type_expr::locators::SymbolBodyLocator {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: std::sync::Arc::from(""),
+                canonical_id: verter_type_expr::OwnedStr::from(""),
                 owner,
-                symbol: std::sync::Arc::from(type_ref),
+                symbol: verter_type_expr::OwnedStr::from(type_ref),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Type,
             },
         },

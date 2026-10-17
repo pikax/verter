@@ -282,7 +282,7 @@ fn lower_node(
             let object = lower_node(graph, object, scope, ctx)?;
             let index = match index.as_ref() {
                 TypeExpr::Literal(LiteralValue::String(s)) => {
-                    IndexKey::String(Arc::from(s.as_str()))
+                    IndexKey::String(verter_type_expr::OwnedStr::from(s.as_str()))
                 }
                 TypeExpr::Literal(LiteralValue::Number(n)) => {
                     match crate::semantic_query::index_key::integer_convention_index_key(*n) {
@@ -545,12 +545,16 @@ fn lower_node(
             };
             let value_root = ValueRootKey {
                 scope: value_root_scope(scope)?,
-                name: Arc::from(root.as_str()),
+                name: verter_type_expr::OwnedStr::from(root.as_str()),
             };
             let path: Arc<[Arc<str>]> = rest.iter().map(|s| Arc::from(s.as_str())).collect();
             let type_args = lower_args(graph, &value_ref.type_args, scope, ctx)?;
             Ok(graph.intern_node_with_scope(
-                SemanticNodeData::new_typeof(value_root, path, type_args),
+                SemanticNodeData::new_typeof(
+                    value_root,
+                    verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(path),
+                    type_args,
+                ),
                 scope.clone(),
             ))
         }
@@ -569,7 +573,9 @@ fn lower_node(
             Ok(graph.intern_node_with_scope(
                 SemanticNodeData::new_import_type(
                     Arc::clone(specifier),
-                    Arc::clone(qualifier),
+                    verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(Arc::clone(
+                        qualifier,
+                    )),
                     type_args,
                     *typeof_query,
                 ),
@@ -839,7 +845,7 @@ fn lower_authored_property_key(
 ) -> Result<AuthoredPropertyKey, StructuralLowerError> {
     Ok(match key {
         verter_type_expr::AuthoredPropertyKey::String(value) => {
-            AuthoredPropertyKey::String(Arc::clone(value))
+            AuthoredPropertyKey::String(value.clone())
         }
         verter_type_expr::AuthoredPropertyKey::Number(value) => AuthoredPropertyKey::Number(*value),
         verter_type_expr::AuthoredPropertyKey::UniqueSymbol(identity) => {
@@ -861,7 +867,7 @@ fn value_root_scope(scope: &NodeScopeId) -> Result<ScopeId, StructuralLowerError
             owner,
             ..
         } => Ok(ScopeId {
-            canonical_id: Arc::clone(canonical_id),
+            canonical_id: canonical_id.clone(),
             owner: *owner,
             local_scope: None,
             binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(*owner),
@@ -1147,10 +1153,10 @@ fn build_script_setup_seed_frames(
         } => (canonical_id, *owner, *whole_hash),
     };
     let decl = DeclIdentity {
-        canonical_id: Arc::clone(canonical_id),
+        canonical_id: canonical_id.clone(),
         owner,
         whole_hash,
-        decl_name: Arc::from("<script-setup>"),
+        decl_name: verter_type_expr::OwnedStr::from("<script-setup>"),
     };
 
     let mut frame = BinderScope::default();
@@ -1166,12 +1172,12 @@ fn build_script_setup_seed_frames(
             verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
                 verter_type_expr::locators::TypeBodySlot {
                     anchor: verter_type_expr::locators::AuthoredAnchor {
-                        canonical_id: Arc::clone(canonical_id),
+                        canonical_id: verter_type_expr::OwnedStr::from(canonical_id),
                         owner,
-                        symbol: Arc::from("<script-setup>"),
+                        symbol: verter_type_expr::OwnedStr::from("<script-setup>"),
                         space: verter_type_expr::locators::LocatorSymbolSpace::Type,
                     },
-                    path: Arc::from(
+                    path: verter_type_expr::OwnedSlice::from(
                         Vec::from([
                             verter_type_expr::locators::TypeBodyPathStep::TypeParamBound {
                                 ordinal: u32::try_from(idx).unwrap_or(u32::MAX),
@@ -1564,7 +1570,7 @@ fn build_macro_hot_ref(
         .collect::<Vec<_>>();
 
     let scope = NodeScopeId::File {
-        canonical_id: Arc::from(owner_canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(owner_canonical),
         owner: mac.owner,
         whole_hash: indexed.whole_hash,
         local_scope: None,

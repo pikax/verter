@@ -119,9 +119,9 @@ fn flow_return_query_named(env_tag: u8, name: &str) -> SemanticQueryKey {
             // slot — the planner proves the query identifies the bound
             // graph's function on every shared axis.
             declaration_slot: ResolvedDeclSlotIdentity::value_slot(
-                Arc::from("/flow_solve_fixture.ts"),
+                verter_type_expr::OwnedStr::from("/flow_solve_fixture.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from(name),
+                verter_type_expr::OwnedStr::from(name),
                 0,
                 [0; 16],
                 [0; 16],
@@ -129,7 +129,7 @@ fn flow_return_query_named(env_tag: u8, name: &str) -> SemanticQueryKey {
             function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
             overload_ordinal: 0,
         },
-        normalized_type_args: Arc::from([]),
+        normalized_type_args: verter_type_expr::OwnedSlice::from([]),
         context: FlowReturnContext {
             parse_env_hash: [env_tag; 16],
             resolve_env_hash: [env_tag; 16],
@@ -533,7 +533,7 @@ fn query_demand_drives_the_subject_exhaustively() {
         unreachable!()
     };
     key.demand.point.projection.path = ProjectionPath::from_segments([PathSegment::Member(
-        PropertyKey::String(Arc::from("value")),
+        PropertyKey::String(verter_type_expr::OwnedStr::from("value")),
     )]);
     let plan = fixture
         .build_plan(named)
@@ -1451,7 +1451,9 @@ fn stale_basis_or_foreign_contract_cannot_complete() {
             unreachable!()
         };
         key.input = FlowInputContext {
-            contextual_parameters: Arc::from(vec![solve_value().return_type()]),
+            contextual_parameters: verter_type_expr::OwnedSlice::from(vec![
+                solve_value().return_type()
+            ]),
         };
         legs.push(("query input", input));
 
@@ -1609,7 +1611,9 @@ fn execution_selection_survives_obligation_budget_refusal() {
 fn member_navigation_executes_without_expanding_the_proof_contract() {
     use verter_type_engine::semantic_query::demand::Demand;
     let fixture = flow_graph_fixture_for_tests(FIXTURE_SOURCE, 7);
-    let member = PathSegment::Member(PropertyKey::String(Arc::from("value")));
+    let member = PathSegment::Member(PropertyKey::String(verter_type_expr::OwnedStr::from(
+        "value",
+    )));
     let mut projected = base_request();
     let SemanticQueryKey::FlowReturn(key) = &mut projected.query else {
         unreachable!()
@@ -1621,7 +1625,7 @@ fn member_navigation_executes_without_expanding_the_proof_contract() {
     for segment in [
         member,
         PathSegment::Index(verter_type_engine::semantic_query::IndexKey::String(
-            Arc::from("value"),
+            verter_type_expr::OwnedStr::from("value"),
         )),
     ] {
         let mut request = base_request();
@@ -1716,7 +1720,7 @@ fn unused_flow_runtime_reserves_no_demand_storage() {
     let pending_roots = [
         SemanticQueryKey::FlowNarrowingAt {
             point: ProgramPointId {
-                canonical_id: Arc::from("/flow_solve_no_flow.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/flow_solve_no_flow.ts"),
                 offset: 0,
             },
             flow: FlowNarrowingKey::empty(),
@@ -1724,7 +1728,7 @@ fn unused_flow_runtime_reserves_no_demand_storage() {
         },
         SemanticQueryKey::ContextualTypeAt {
             point: ProgramPointId {
-                canonical_id: Arc::from("/flow_solve_no_flow.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/flow_solve_no_flow.ts"),
                 offset: 0,
             },
             contextual: ContextualTypingKey::empty(),
@@ -2312,9 +2316,8 @@ fn planning_rejects_a_query_that_does_not_name_the_bound_graph() {
 
     assert!(
         matches!(
-            mismatched(
-                &|key| key.function.declaration_slot.defining_canonical = Arc::from("/foreign.ts")
-            ),
+            mismatched(&|key| key.function.declaration_slot.defining_canonical =
+                verter_type_expr::OwnedStr::from("/foreign.ts")),
             Err(FlowDemandPlanError::BasisKeyMismatch)
         ),
         "a foreign canonical identity must not plan"
@@ -2329,7 +2332,8 @@ fn planning_rejects_a_query_that_does_not_name_the_bound_graph() {
     );
     assert!(
         matches!(
-            mismatched(&|key| key.function.declaration_slot.merged_symbol_name = Arc::from("other")),
+            mismatched(&|key| key.function.declaration_slot.merged_symbol_name =
+                verter_type_expr::OwnedStr::from("other")),
             Err(FlowDemandPlanError::BasisKeyMismatch)
         ),
         "a foreign merged-symbol name must not plan"
@@ -2856,7 +2860,7 @@ fn demand_planner_rejects_a_selection_of_another_demand() {
         unreachable!()
     };
     key.demand.point.projection.path = ProjectionPath::from_segments([PathSegment::Member(
-        PropertyKey::String(Arc::from("value")),
+        PropertyKey::String(verter_type_expr::OwnedStr::from("value")),
     )]);
     let retained_named = fixture
         .retained_plan(&named)

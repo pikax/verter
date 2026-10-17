@@ -1486,7 +1486,7 @@ fn path_key(
     use verter_type_engine::semantic_query::{
         PathSegment, ProjectionMode, ProjectionReductionContext, PropertyKey, SemanticQueryKey,
     };
-    let path: Arc<[PathSegment]> = path
+    let path: verter_type_expr::OwnedSlice<PathSegment> = path
         .iter()
         .map(|member| PathSegment::Member(PropertyKey::identifier(Arc::from(*member))))
         .collect();
@@ -2155,14 +2155,14 @@ fn the_refusal_table_keeps_the_newest_and_refuses_torn_evaluations() {
     let key = |name: usize| {
         SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: ScopeId {
-                canonical_id: Arc::from("/refusals.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/refusals.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
                 binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
             },
-            name: Arc::from(format!("R{name}")),
+            name: verter_type_expr::OwnedStr::from(format!("R{name}")),
         })
     };
     let refusal = || {
@@ -2337,14 +2337,14 @@ fn invalidating_a_canonical_drops_the_refusals_its_failed_prefix_reached() {
     let key = |name: &str| {
         SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: ScopeId {
-                canonical_id: Arc::from("/refusals.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/refusals.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
                 binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
             },
-            name: Arc::from(name),
+            name: verter_type_expr::OwnedStr::from(name),
         })
     };
     let refusal = || {

@@ -110,9 +110,9 @@ impl ComponentMetaQueryEngine<'_> {
         // same key concurrently, exactly one runs the closure and the joiners
         // block on the slot condvar and reuse its published candidate.
         let arc_key = (
-            std::sync::Arc::<str>::from(canonical_id),
+            verter_type_expr::OwnedStr::from(canonical_id),
             source_owner,
-            std::sync::Arc::<str>::from(exported_name),
+            verter_type_expr::OwnedStr::from(exported_name),
         );
         // Bind the resolver context to a local `Copy` reference so the
         // request-local view inserts before and after the cooperative
@@ -416,9 +416,9 @@ impl ComponentMetaQueryEngine<'_> {
             return cached;
         }
         let arc_key = (
-            std::sync::Arc::<str>::from(canonical_source),
+            verter_type_expr::OwnedStr::from(canonical_source),
             owner,
-            std::sync::Arc::<str>::from(requested_name),
+            verter_type_expr::OwnedStr::from(requested_name),
         );
 
         let publish = self.dispatch.declaration_publish();
@@ -546,9 +546,9 @@ impl ComponentMetaQueryEngine<'_> {
             return cached;
         }
         let arc_key = (
-            std::sync::Arc::<str>::from(source_key),
+            verter_type_expr::OwnedStr::from(source_key),
             source_owner,
-            std::sync::Arc::<str>::from(exported_name),
+            verter_type_expr::OwnedStr::from(exported_name),
         );
 
         let publish = self.dispatch.resolvability_publish();
@@ -650,9 +650,9 @@ impl ComponentMetaQueryEngine<'_> {
             return cached;
         }
         let arc_key = (
-            std::sync::Arc::<str>::from(owner_canonical),
+            verter_type_expr::OwnedStr::from(owner_canonical),
             owner,
-            std::sync::Arc::<str>::from(name),
+            verter_type_expr::OwnedStr::from(name),
         );
         let ctx = self.ctx;
 

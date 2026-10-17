@@ -2737,14 +2737,14 @@ fn fenced_indexed_serve_semantic_memo_build_is_served_but_not_admitted() {
 
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::from(owner),
+            canonical_id: verter_type_expr::OwnedStr::from(owner),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
-        name: Arc::from("Owner"),
+        name: verter_type_expr::OwnedStr::from("Owner"),
     });
 
     // Park the owner's IndexedReady flight pre-fence (flight 0 →
@@ -2855,9 +2855,9 @@ fn fenced_declaring_serve_class_surface_static_is_served_but_not_admitted() {
     let project_identity = host.host_view_project_identity_for(barrel).fold_u32();
     let key = SemanticQueryKey::ResolveClassSurface {
         decl_slot: ResolvedDeclSlotIdentity::type_slot(
-            Arc::from(barrel),
+            verter_type_expr::OwnedStr::from(barrel),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from("Klass"),
+            verter_type_expr::OwnedStr::from("Klass"),
             project_identity,
             env.type_env_hash,
             env.lib_env_hash,

@@ -214,7 +214,7 @@ fn rootless_key(
         context: dispatch.apparent_type_context_scoped(
             demand_canonical,
             ApparentDemandScope::Rootless {
-                canonical: Arc::from(demand_canonical),
+                canonical: verter_type_expr::OwnedStr::from(demand_canonical),
             },
         ),
     }
@@ -327,7 +327,7 @@ fn rootless_apparent_taint_propagates_through_enclosing_member_projection() {
     // walker's apparent hop) resolves and inherits the suppress taint.
     let member_key = SemanticQueryKey::ProjectMember {
         base,
-        member: Arc::from("call"),
+        member: verter_type_expr::OwnedStr::from("call"),
         mode: ProjectionMode::Navigate,
     };
     let member_read = {
@@ -355,7 +355,7 @@ fn rootless_apparent_taint_propagates_through_enclosing_member_projection() {
     assert_eq!(graph.slot_candidate_count_for_tests(&member_key), 0);
     let path_key = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![verter_type_engine::semantic_query::PathSegment::Member(
                 verter_type_engine::semantic_query::PropertyKey::identifier("call"),
             )]
@@ -441,7 +441,7 @@ fn a_primitive_member_read_is_scoped_to_its_project_and_reused_warm() {
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let path_key = |base: SemanticNodeId, member: &str| SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![verter_type_engine::semantic_query::PathSegment::Member(
                 verter_type_engine::semantic_query::PropertyKey::identifier(member),
             )]
@@ -549,7 +549,7 @@ fn a_wrapper_member_read_without_a_wrapper_is_an_admitted_miss() {
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let path_key = |base: SemanticNodeId| SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![verter_type_engine::semantic_query::PathSegment::Member(
                 verter_type_engine::semantic_query::PropertyKey::identifier("length"),
             )]
@@ -619,13 +619,13 @@ fn a_flow_reading_a_wrapper_member_is_admitted_and_reused_warm() {
         >| {
             verter_type_engine::semantic_query::FlowReturnKey {
             function: dispatch.flow_function_slot_for(
-                Arc::from(FLOW),
+                verter_type_expr::OwnedStr::from(FLOW),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from(name),
+                verter_type_expr::OwnedStr::from(name),
                 verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
                 0,
             ),
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(FLOW),
             demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
             input: verter_type_engine::semantic_query::FlowInputContext::empty(),

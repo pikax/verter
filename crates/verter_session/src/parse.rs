@@ -657,7 +657,8 @@ pub(crate) fn absolutize_macro_payload_anchors(
     let canonical: std::sync::Arc<str> = std::sync::Arc::from(canonical_id);
     let fill = |locator: &mut MacroPayloadLocator| {
         if locator.anchor.canonical_id.is_empty() {
-            locator.anchor.canonical_id = std::sync::Arc::clone(&canonical);
+            locator.anchor.canonical_id =
+                verter_type_expr::OwnedStr::from(std::sync::Arc::clone(&canonical));
         }
     };
     for mac in macros.iter_mut() {

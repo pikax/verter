@@ -11,6 +11,7 @@
 
 use crate::facts::*;
 use crate::locators::*;
+use crate::OwnedStr;
 
 fn empty_projected_surface() -> ProjectedSurfaceFact {
     ProjectedSurfaceFact {
@@ -33,9 +34,9 @@ fn projected_member_path_fact_discriminates_base_and_path() {
     let base = |canonical: &str, macro_index: u32| {
         AuthoredBodyLocator::MacroPayload(MacroPayloadLocator {
             anchor: AuthoredAnchor {
-                canonical_id: std::sync::Arc::from(canonical),
+                canonical_id: OwnedStr::from(std::sync::Arc::from(canonical)),
                 owner: crate::TopLevelOwnerId::ordinary_file(),
-                symbol: std::sync::Arc::from("default"),
+                symbol: OwnedStr::from(std::sync::Arc::from("default")),
                 space: LocatorSymbolSpace::Value,
             },
             macro_index,
@@ -92,9 +93,9 @@ fn projected_callable_occurrence_fact_discriminates_base_subject_and_projection(
     let base = |canonical: &str, macro_index: u32| {
         AuthoredBodyLocator::MacroPayload(MacroPayloadLocator {
             anchor: AuthoredAnchor {
-                canonical_id: std::sync::Arc::from(canonical),
+                canonical_id: OwnedStr::from(std::sync::Arc::from(canonical)),
                 owner: crate::TopLevelOwnerId::ordinary_file(),
-                symbol: std::sync::Arc::from("default"),
+                symbol: OwnedStr::from(std::sync::Arc::from("default")),
                 space: LocatorSymbolSpace::Value,
             },
             macro_index,
@@ -157,9 +158,9 @@ fn projected_index_position_fact_discriminates_base_ordinal_and_position() {
     let base = |canonical: &str, macro_index: u32| {
         AuthoredBodyLocator::MacroPayload(MacroPayloadLocator {
             anchor: AuthoredAnchor {
-                canonical_id: std::sync::Arc::from(canonical),
+                canonical_id: OwnedStr::from(std::sync::Arc::from(canonical)),
                 owner: crate::TopLevelOwnerId::ordinary_file(),
-                symbol: std::sync::Arc::from("default"),
+                symbol: OwnedStr::from(std::sync::Arc::from("default")),
                 space: LocatorSymbolSpace::Value,
             },
             macro_index,

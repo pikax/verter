@@ -49,10 +49,10 @@ fn under_nested_arrays<R: Send + 'static>(
 /// A declaration of another file named `name`.
 fn foreign(name: &str) -> DeclIdentity {
     DeclIdentity {
-        canonical_id: Arc::from("/src/elsewhere.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/src/elsewhere.ts"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: verter_type_engine::semantic_query::HashValue::default(),
-        decl_name: Arc::from(name),
+        decl_name: verter_type_expr::OwnedStr::from(name),
     }
 }
 
@@ -88,10 +88,10 @@ fn an_imported_utility_route_is_found_at_any_depth() {
             });
             graph.intern_node(SemanticNodeData::InstantiationRef {
                 base: DeclIdentity {
-                    canonical_id: Arc::from("__builtin__"),
+                    canonical_id: verter_type_expr::OwnedStr::from("__builtin__"),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     whole_hash: verter_type_engine::semantic_query::HashValue::default(),
-                    decl_name: Arc::from("Partial"),
+                    decl_name: verter_type_expr::OwnedStr::from("Partial"),
                 },
                 args: verter_type_engine::semantic_query::PayloadArray::from([argument]),
             })

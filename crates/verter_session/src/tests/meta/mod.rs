@@ -1137,12 +1137,12 @@ fn authored_decl_body_source(
         verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
             verter_type_expr::locators::TypeBodySlot {
                 anchor: verter_type_expr::locators::AuthoredAnchor {
-                    canonical_id: Arc::from(canonical),
+                    canonical_id: verter_type_expr::OwnedStr::from(canonical),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    symbol: Arc::from(symbol),
+                    symbol: verter_type_expr::OwnedStr::from(symbol),
                     space: verter_type_expr::locators::LocatorSymbolSpace::Type,
                 },
-                path: Arc::from(Vec::new().into_boxed_slice()),
+                path: verter_type_expr::OwnedSlice::default(),
             },
         ),
     )
@@ -1203,12 +1203,12 @@ fn mutate_pinned_view_dep(project: &Arc<MetaProject>) {
 fn missing_interior_slot() -> verter_type_expr::locators::TypeBodySlot {
     verter_type_expr::locators::TypeBodySlot {
         anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: Arc::from("/definitely-missing.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/definitely-missing.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("NoSuchType"),
+            symbol: verter_type_expr::OwnedStr::from("NoSuchType"),
             space: verter_type_expr::locators::LocatorSymbolSpace::Type,
         },
-        path: Arc::from(Vec::new().into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::default(),
     }
 }
 

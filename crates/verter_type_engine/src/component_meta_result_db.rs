@@ -132,12 +132,20 @@ where
     /// The payload, the entry's validity rail — its fact slice with every
     /// fact's owned text — and the entry's slot.
     fn retained_footprint_bytes(&self) -> usize {
-        self.payload.retained_footprint_bytes()
-            + verter_session_query::retention::allocation::fact_signature_bytes(
-                &self.read_set_signature,
-                &mut verter_session_query::retention::allocation::AliasSet::new(),
-            )
-            + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
+        self.retained_footprint().bytes
+    }
+
+    fn retained_footprint(&self) -> verter_session_query::retention::Footprint {
+        let payload = self.payload.retained_footprint();
+        let mut aliases = verter_session_query::retention::allocation::AliasSet::new();
+        let rail = verter_session_query::retention::allocation::fact_signature_bytes(
+            &self.read_set_signature,
+            &mut aliases,
+        );
+        verter_session_query::retention::Footprint {
+            bytes: payload.bytes + rail + verter_session_query::retention::ENTRY_OVERHEAD_BYTES,
+            handles: payload.handles.merge(aliases.take_handles()),
+        }
     }
 }
 
@@ -764,16 +772,32 @@ impl<P> ComponentMetaResultDb<P> {
     where
         P: verter_session_query::retention::RetainedFootprint,
     {
-        let bytes = {
+        let footprint = {
             use verter_session_query::retention::RetainedFootprint as _;
-            entry.retained_footprint_bytes()
+            entry.retained_footprint()
         };
         let charge = match verter_session_query::facts::receipt::reserve_retained_with_evidence(
             self.retention_account(),
-            bytes,
+            footprint.bytes,
             &[&entry.read_set_signature.facts],
         ) {
-            verter_session_query::retention::RetentionAdmission::Admitted(charge) => charge,
+            verter_session_query::retention::RetentionAdmission::Admitted(charge) => {
+                // The owned allocations the entry reaches are retained by
+                // their own cells, all or nothing with the entry.
+                match footprint.handles.hold(
+                    verter_session_query::retention::owned::ChargeCtx::new(
+                        self.retention_account(),
+                    ),
+                ) {
+                    Ok(holds) => charge.holding(holds),
+                    Err(refusal) => {
+                        crate::cache_runtime::admission::propagate_non_admission(
+                            refusal.non_admission_reason(),
+                        );
+                        return false;
+                    }
+                }
+            }
             verter_session_query::retention::RetentionAdmission::Refused(refusal) => {
                 crate::cache_runtime::admission::propagate_non_admission(
                     refusal.non_admission_reason(),
@@ -861,21 +885,33 @@ impl<P> ComponentMetaResultDb<P> {
             .request
             .as_ref()
             .map_or(0, |spent| spent.owned_heap_bytes(&mut aliases));
-        let bytes =
-            verter_session_query::retention::RetainedFootprint::retained_footprint_bytes(&recovery)
-                + verter_session_query::retention::allocation::fact_signature_bytes(
-                    &read_set_signature,
-                    &mut aliases,
-                )
-                + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
-                + request_bytes;
-        let charge = match verter_session_query::facts::receipt::reserve_retained_with_evidence(
+        let recovery_footprint =
+            verter_session_query::retention::RetainedFootprint::retained_footprint(&recovery);
+        let bytes = recovery_footprint.bytes
+            + verter_session_query::retention::allocation::fact_signature_bytes(
+                &read_set_signature,
+                &mut aliases,
+            )
+            + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
+            + request_bytes;
+        let handles = recovery_footprint.handles.merge(aliases.take_handles());
+        let reserved = match verter_session_query::facts::receipt::reserve_retained_with_evidence(
             self.retention_account(),
             bytes,
             &[&read_set_signature.facts],
         ) {
-            verter_session_query::retention::RetentionAdmission::Admitted(charge) => charge,
-            verter_session_query::retention::RetentionAdmission::Refused(refusal) => {
+            verter_session_query::retention::RetentionAdmission::Admitted(charge) => handles
+                .retained_with(
+                    charge,
+                    verter_session_query::retention::owned::ChargeCtx::new(
+                        self.retention_account(),
+                    ),
+                ),
+            verter_session_query::retention::RetentionAdmission::Refused(refusal) => Err(refusal),
+        };
+        let charge = match reserved {
+            Ok(charge) => charge,
+            Err(refusal) => {
                 crate::cache_runtime::admission::propagate_non_admission(
                     refusal.non_admission_reason(),
                 );
