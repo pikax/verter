@@ -57,6 +57,7 @@ pub mod family;
 mod family_footprint;
 mod family_intern;
 mod family_retention;
+mod fingerprint_hasher;
 mod flow_return_memo;
 #[cfg(any(test, feature = "test-support"))]
 pub mod graph_fixture;
@@ -85,7 +86,7 @@ mod signature_epoch;
 pub mod union_views;
 pub mod unresolved_reach;
 
-pub use arena::UNALLOCATABLE_ID_FLOOR;
+pub use arena::{NodeData, UNALLOCATABLE_ID_FLOOR};
 pub(crate) use inflight::InlineMemberFlight;
 pub use intern_table::{IdentityIndexSnapshot, InternIndexOccupancy};
 pub use producer::{
@@ -356,7 +357,7 @@ pub struct SemanticGraphStore {
     /// snapshots share allocations. Origin edges are bounded best-effort
     /// provenance for the audit origin-graph trace, NOT an invalidation
     /// source — see the `derivation` module docs.
-    pub(super) derivation: Mutex<DerivationStore>,
+    pub(super) derivation: Arc<release::SidecarMutex<DerivationStore>>,
     /// Lock-free telemetry counters. Read via [`Self::stats_snapshot`]
     /// into the public [`SemanticGraphStats`] surface.
     pub(super) stats: AtomicSemanticGraphStats,
@@ -421,14 +422,15 @@ pub struct SemanticGraphStore {
     /// the bound existed (re-walking the same structure per SCC fixpoint
     /// iteration) instead of trading correctness for it. ONE per-node sidecar:
     /// the entry holds every bit memoized for the id, released together.
-    unresolved_reach: Mutex<FxHashMap<SemanticNodeId, unresolved_reach::NodeStructureBits>>,
+    unresolved_reach:
+        Arc<release::SidecarMutex<FxHashMap<SemanticNodeId, unresolved_reach::NodeStructureBits>>>,
     /// The `VerterStableV1` member view of each union built in this store's
     /// arena, keyed by the store's OWN node ids. Ownership, lifetime and the
     /// contract with a payload-retiring holder: `union_views.rs`.
     union_views: Mutex<union_views::UnionViews>,
     /// The stable-key classes of this store's nodes. Ownership, lifetime and
     /// release: [`crate::semantic_query::stable_key::KeyClasses`].
-    key_classes: Mutex<crate::semantic_query::stable_key::KeyClasses>,
+    key_classes: Arc<release::SidecarMutex<crate::semantic_query::stable_key::KeyClasses>>,
     /// Test-only: order union members by DESCENDING stable key. Reversing the
     /// one union order in a fresh store — an isolated cache namespace, its
     /// views and memo entries included — is the §5.8 counterfactual that
@@ -728,9 +730,9 @@ pub struct SemanticGraphStore {
     // and the inner name map both use the collision-safe std default
     // hasher (member names are authored strings — never FxHash).
     pub(super) member_ordinal_index_memo:
-        DashMap<SemanticNodeId, Arc<member_index::MemberOrdinalIndex>>,
+        Arc<DashMap<SemanticNodeId, Arc<member_index::MemberOrdinalIndex>>>,
     pub(super) member_ordinal_index_fifo:
-        parking_lot::Mutex<std::collections::VecDeque<SemanticNodeId>>,
+        Arc<release::SidecarMutex<std::collections::VecDeque<SemanticNodeId>>>,
     /// Sealed refusals of isolated root demands — see `refusal_summary`.
     pub(super) refusal_summaries: refusal_summary::RefusalSummaryTable,
     /// Test-only: run by a dispatch's synchronous entry once it holds a
@@ -781,7 +783,7 @@ impl SemanticGraphStore {
         signatures.bind_retention_account(retention_account.get());
         let canonical_to_entries = CanonicalToEntries::charged(retention_account.get());
         let dep_signature_interner = DepSignatureInterner::charged(retention_account.get());
-        Self {
+        let store = Self {
             operand_identity: Default::default(),
             arena,
             signatures,
@@ -789,7 +791,9 @@ impl SemanticGraphStore {
             inflight: Default::default(),
             task_registry: Default::default(),
             independent_inflight: Default::default(),
-            derivation: Default::default(),
+            derivation: Arc::new(release::SidecarMutex::new(DerivationStore::charged(
+                retention_account.get(),
+            ))),
             stats: Default::default(),
             provenance: Default::default(),
             retention_account,
@@ -845,7 +849,9 @@ impl SemanticGraphStore {
             produce_hook: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
             exhausted_join_abort: Default::default(),
-        }
+        };
+        store.bind_destroyed_sidecar_sink();
+        store
     }
 }
 
@@ -935,7 +941,9 @@ pub fn semantic_operand_evidence(
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                 canonical_id,
                 hash,
-            } if canonical_id == canonical.as_ref() => Some((Arc::clone(canonical), *hash)),
+            } if canonical_id == canonical.as_ref() => {
+                Some((verter_type_expr::OwnedStr::from(canonical), *hash))
+            }
             _ => None,
         });
         let root = found?;
@@ -1503,9 +1511,9 @@ impl SemanticGraphStore {
                     let mut state = inflight.state.lock();
                     state.aborted = true;
                     if state.completed.is_none() {
-                        state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
-                            "aborted by canonical invalidation",
-                        ))));
+                        state.completed = Some(QueryResult::Error(QueryError::Other(
+                            verter_type_expr::OwnedStr::from("aborted by canonical invalidation"),
+                        )));
                         state.dep_signature = Some(empty_signature());
                     }
                 }
@@ -1693,9 +1701,9 @@ impl SemanticGraphStore {
                     let mut state = inflight.state.lock();
                     state.aborted = true;
                     if state.completed.is_none() {
-                        state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
-                            "aborted by project-generation reset",
-                        ))));
+                        state.completed = Some(QueryResult::Error(QueryError::Other(
+                            verter_type_expr::OwnedStr::from("aborted by project-generation reset"),
+                        )));
                         state.dep_signature = Some(empty_signature());
                     }
                 }
@@ -2289,20 +2297,6 @@ impl SemanticGraphStore {
         );
     }
 
-    /// The observations of a lookup of `key` a dispatcher answers from a
-    /// result it already holds, in place of a family-memo lookup: the
-    /// lookup entry, then the warm hit a lookup of a result the memo holds
-    /// (`resident`) makes, else the miss a lookup of a result completed for
-    /// one request alone makes.
-    pub(crate) fn note_replayed_lookup(&self, key: &SemanticQueryKey, resident: bool) {
-        self.note_lookup_entry();
-        if resident {
-            self.note_warm_hit(key);
-        } else {
-            self.note_lookup_miss(key);
-        }
-    }
-
     /// The observations a family-memo lookup answered warm for `key` makes.
     fn note_warm_hit(&self, key: &SemanticQueryKey) {
         // Instrumentation — fast-path attribution.
@@ -2887,7 +2881,10 @@ impl SemanticGraphStore {
 /// current content inside the signature builder would reopen the publish
 /// race a concurrent `upsert` between value-compute and signature-build
 /// otherwise creates.
-pub type ObservedGraphSelfRoot = (Arc<str>, verter_session_query::analysis::types::Hash16);
+pub type ObservedGraphSelfRoot = (
+    verter_type_expr::OwnedStr,
+    verter_session_query::analysis::types::Hash16,
+);
 
 /// Build the [`ReadSetSignature`](verter_session_query::facts::fact_cache::ReadSetSignature)
 /// carrier for a [`SemanticGraphStore`] query-identity memo entry —
@@ -2965,7 +2962,10 @@ pub fn semantic_graph_carrier(
     // of roots, so they are compared linearly, in plain loops: this runs
     // once per cold build.
     let mut self_root_hashes: smallvec::SmallVec<
-        [(&Arc<str>, verter_session_query::analysis::types::Hash16); 4],
+        [(
+            &verter_type_expr::OwnedStr,
+            verter_session_query::analysis::types::Hash16,
+        ); 4],
     > = smallvec::SmallVec::new();
     for (canonical, observed_hash) in observed_self_roots {
         match root_position(&self_root_hashes, canonical) {
@@ -3020,7 +3020,7 @@ pub fn semantic_graph_carrier(
                 hash: *observed_hash,
             });
         }
-        self_root_canonicals.push(Arc::clone(canonical));
+        self_root_canonicals.push(Arc::<str>::from(*canonical));
     }
     crate::fact_signature_helpers::bound_completed_structural_carrier(
         view,
@@ -3035,7 +3035,10 @@ pub fn semantic_graph_carrier(
 
 /// The position of `canonical` among collapsed self-roots.
 fn root_position(
-    roots: &[(&Arc<str>, verter_session_query::analysis::types::Hash16)],
+    roots: &[(
+        &verter_type_expr::OwnedStr,
+        verter_session_query::analysis::types::Hash16,
+    )],
     canonical: &str,
 ) -> Option<usize> {
     for (index, (root, _)) in roots.iter().enumerate() {

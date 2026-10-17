@@ -135,7 +135,7 @@ const INDEX_STORAGE_GRANULE: usize = 4 * 1024;
 /// beside its records.
 ///
 /// Every registration record is charged by the candidate that registered it
-/// ([`registration_bytes`]). Everything else the index holds is charged
+/// ([`registration_footprint`]). Everything else the index holds is charged
 /// here, pinned while it is held: each shard's copy of its canonical's
 /// text, every shard table's unused buckets (capacity beyond its live
 /// records), and the outer table's buckets. A shard table gives its backing
@@ -144,7 +144,7 @@ const INDEX_STORAGE_GRANULE: usize = 4 * 1024;
 /// Every mutation runs under the family memo's `entries` lock (see the
 /// module docs), so the storage figures settle without racing each other.
 pub(super) struct CanonicalToEntries {
-    map: dashmap::DashMap<Arc<str>, Mutex<ShardMap>>,
+    map: dashmap::DashMap<Arc<str>, Mutex<ShardMap>, rustc_hash::FxBuildHasher>,
     storage: Mutex<IndexStorage>,
 }
 
@@ -194,7 +194,7 @@ fn shrink_drained_shard(map: &mut ShardMap) {
 }
 
 impl std::ops::Deref for CanonicalToEntries {
-    type Target = dashmap::DashMap<Arc<str>, Mutex<ShardMap>>;
+    type Target = dashmap::DashMap<Arc<str>, Mutex<ShardMap>, rustc_hash::FxBuildHasher>;
     fn deref(&self) -> &Self::Target {
         &self.map
     }
@@ -206,7 +206,7 @@ impl CanonicalToEntries {
         account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) -> Self {
         Self {
-            map: dashmap::DashMap::new(),
+            map: dashmap::DashMap::default(),
             storage: Mutex::new(IndexStorage {
                 account: Some(Arc::clone(account)),
                 ..IndexStorage::default()
@@ -270,18 +270,25 @@ impl CanonicalToEntries {
 /// `Arc`s it shares with `family`). A shard's own storage — its canonical's
 /// text, its unused buckets — is charged by the index
 /// ([`CanonicalToEntries`]).
-pub(super) fn registration_bytes(
+pub(super) fn registration_footprint(
     family: &FamilyKey,
     registered_canonicals: usize,
     populated_slots: usize,
-) -> usize {
+) -> verter_session_query::retention::Footprint {
     use verter_session_query::retention::allocation::arc_block_bytes;
     if registered_canonicals == 0 || populated_slots == 0 {
-        return 0;
+        return verter_session_query::retention::Footprint {
+            bytes: 0,
+            handles: Default::default(),
+        };
     }
-    registered_canonicals * populated_slots * RECORD_BUCKET_BYTES
-        + arc_block_bytes(std::mem::size_of::<FamilyKey>())
-        + super::family_footprint::family_key_clone_heap_bytes(family)
+    let clone = super::family_footprint::family_key_clone_heap_bytes(family);
+    verter_session_query::retention::Footprint {
+        bytes: registered_canonicals * populated_slots * RECORD_BUCKET_BYTES
+            + arc_block_bytes(std::mem::size_of::<FamilyKey>())
+            + clone.bytes,
+        handles: clone.handles,
+    }
 }
 
 /// Register the just-published candidate's reverse-index entries.

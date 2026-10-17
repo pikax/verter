@@ -547,7 +547,7 @@ fn a_joiner_never_takes_a_retired_epoch_value_from_the_build_it_joined() {
         .shallow_file_state(CANONICAL)
         .expect("the fixture file is indexed");
     let scope = NodeScopeId::File {
-        canonical_id: Arc::from(CANONICAL),
+        canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: shallow.whole_hash,
         local_scope: None,
@@ -707,9 +707,9 @@ fn observe(host: &VerterHost) -> Vec<String> {
         .map(|symbol| {
             let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
                 anchor: verter_type_expr::locators::AuthoredAnchor {
-                    canonical_id: Arc::from(CHURN),
+                    canonical_id: verter_type_expr::OwnedStr::from(CHURN),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    symbol: Arc::from(*symbol),
+                    symbol: verter_type_expr::OwnedStr::from(*symbol),
                     space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                 },
                 function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,

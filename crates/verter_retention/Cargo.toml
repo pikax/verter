@@ -1,0 +1,29 @@
+[package]
+name = "verter_retention"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "The one process-local semantic-retention account and its charge primitives: RAII charges, shared and granular charges, and sealed self-charged allocations"
+publish = false
+
+[features]
+# Exposes isolated-account constructors and test-only observability to
+# cross-crate test code. Production binaries MUST NOT enable this feature.
+test-support = []
+
+# The lowest semantic layer: every crate that mints a retained allocation —
+# the type-expression DTO included — reaches the one account through here, so
+# this crate depends on nothing semantic.
+[dependencies]
+verter_audit = { path = "../verter_audit" }
+verter_debug_assert = { workspace = true }
+verter_retention_derive = { workspace = true }
+verter_no_storedspan = { workspace = true }
+verter_no_typeexpr = { workspace = true }
+parking_lot = "0.12.5"
+rustc-hash = { workspace = true }
+serde = { workspace = true }
+smallvec = "1.15"

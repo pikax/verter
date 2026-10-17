@@ -3822,6 +3822,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "verter_retention"
+version = "0.0.1-beta.6"
+dependencies = [
+ "parking_lot",
+ "rustc-hash",
+ "serde",
+ "smallvec",
+ "verter_audit",
+ "verter_debug_assert",
+ "verter_no_storedspan",
+ "verter_no_typeexpr",
+ "verter_retention_derive",
+]
+
+[[package]]
+name = "verter_retention_derive"
+version = "0.0.1-beta.6"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "verter_scheduler"
 version = "0.0.1-beta.6"
 dependencies = [
@@ -4020,6 +4044,7 @@ dependencies = [
  "verter_language",
  "verter_macro_dto",
  "verter_no_typeexpr",
+ "verter_retention",
  "verter_span",
  "verter_type_expr",
  "xxhash-rust",
@@ -4183,6 +4208,7 @@ dependencies = [
  "verter_ecma",
  "verter_no_storedspan",
  "verter_no_typeexpr",
+ "verter_retention",
  "verter_span",
 ]
 

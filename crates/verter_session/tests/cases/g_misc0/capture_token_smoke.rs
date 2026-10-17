@@ -186,14 +186,14 @@ fn key_family_matches_resolve_decl_for_resolved_name() {
     // resolver, so it matches by name string equality on the inner key.
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::from("/scope.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/scope.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
-        name: Arc::from("UIMessage"),
+        name: verter_type_expr::OwnedStr::from("UIMessage"),
     });
     assert!(KeyFamily::AnyDispatch.matches(&key));
     // Non-Instantiate dispatches do not match the Instantiate family even
@@ -284,14 +284,14 @@ fn key_family_matches_instantiate_expanded_for_resolved_name() {
     // Non-Instantiate dispatch never matches.
     let resolve_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::from("/scope.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/scope.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
-        name: Arc::from("UIMessage"),
+        name: verter_type_expr::OwnedStr::from("UIMessage"),
     });
     assert!(!KeyFamily::InstantiateExpandedForResolvedName("UIMessage").matches(&resolve_key));
 }

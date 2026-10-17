@@ -49,6 +49,7 @@ pub(crate) fn object_literal_this_name(offset: u32) -> String {
 }
 
 use std::sync::Arc;
+use verter_type_expr::OwnedStr;
 
 use super::ProjectSemanticDispatch;
 use crate::request_context::RecursiveSubstituteIdentity;
@@ -136,15 +137,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> SemanticNodeId {
         self.graph().intern_node(SemanticNodeData::TypeParam {
             decl: crate::semantic_query::DeclIdentity {
-                canonical_id: Arc::from(canonical),
+                canonical_id: verter_type_expr::OwnedStr::from(canonical),
                 owner,
                 whole_hash: crate::semantic_query::HashValue::default(),
-                decl_name: Arc::clone(class),
+                decl_name: verter_type_expr::OwnedStr::from(class),
             },
             param_index: THIS_BINDER_INDEX,
             constraint: instance,
             default: None,
-            display_name: Arc::from("this"),
+            display_name: OwnedStr::from("this"),
         })
     }
 
@@ -343,10 +344,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let Some(data) = self.graph().node_data(current) else {
                 continue;
             };
-            if data
-                .bare_ref_head()
-                .is_some_and(|(name, _)| name.as_ref() == "this")
-            {
+            if data.bare_ref_head().is_some_and(|(name, _)| name == "this") {
                 found.push(current);
                 continue;
             }
@@ -416,7 +414,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             } = data.as_ref()
             {
                 if decl.canonical_id.as_ref() == canonical && decl.decl_name == *display_name {
-                    binders.push((current, Arc::clone(display_name)));
+                    binders.push((current, Arc::<str>::from(display_name)));
                 }
                 continue;
             }
@@ -552,13 +550,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         owner: verter_type_expr::TopLevelOwnerId,
         ordinal: usize,
     ) -> SemanticNodeId {
-        let name: Arc<str> = Arc::from(format!("\u{1}{ordinal}").as_str());
+        let name = verter_type_expr::OwnedStr::from(format!("\u{1}{ordinal}"));
         self.graph().intern_node(SemanticNodeData::TypeParam {
             decl: crate::semantic_query::DeclIdentity {
-                canonical_id: Arc::from(canonical),
+                canonical_id: verter_type_expr::OwnedStr::from(canonical),
                 owner,
                 whole_hash: crate::semantic_query::HashValue::default(),
-                decl_name: Arc::clone(&name),
+                decl_name: name.clone(),
             },
             param_index: 0,
             constraint: None,
@@ -1174,7 +1172,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if all_closed {
                     let read = self.execute_read(
                         crate::semantic_query::SemanticQueryKey::TemplateLiteralReduce {
-                            pattern: Arc::clone(quasis),
+                            pattern: (*quasis).clone(),
                             args: Arc::from(new_expressions.as_slice()),
                             context: self.template_literal_reduce_context(),
                         },
@@ -1189,7 +1187,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.graph().intern_preserving_scope(
                         node,
                         SemanticNodeData::TemplateLiteral {
-                            quasis: Arc::clone(quasis),
+                            quasis: (*quasis).clone(),
                             expressions: crate::semantic_query::PayloadArray::from(
                                 new_expressions.into_boxed_slice(),
                             ),
@@ -1399,7 +1397,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let next_pending = if next_pending.is_empty() {
                     None
                 } else {
-                    Some(Arc::new(next_pending))
+                    Some(verter_session_query::retention::owned::Owned::new(
+                        next_pending,
+                    ))
                 };
                 if !cc && !ec && next_pending == *pending {
                     return (node, false);
@@ -1592,14 +1592,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     param_index: *param_index,
                                     constraint: new_constraint,
                                     default: new_default,
-                                    display_name: Arc::clone(&tp.name),
+                                    display_name: tp.name.clone(),
                                 },
                             ),
                             _ => tp.param,
                         }
                     };
                     new_type_parameters.push(TypeParamDecl {
-                        name: Arc::clone(&tp.name),
+                        name: tp.name.clone(),
                         param,
                         constraint: new_constraint,
                         default: new_default,
@@ -1769,7 +1769,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         None => None,
                     };
                     new_type_parameters.push(TypeParamDecl {
-                        name: Arc::clone(&tp.name),
+                        name: tp.name.clone(),
                         param: tp.param,
                         constraint: new_constraint,
                         default: new_default,
@@ -2170,7 +2170,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         arg: SemanticNodeId,
     ) -> (IndexKey, bool) {
         match index {
-            IndexKey::String(text) => (IndexKey::String(Arc::clone(text)), false),
+            IndexKey::String(text) => (IndexKey::String(text.clone()), false),
             IndexKey::Number(number) => (IndexKey::Number(*number), false),
             IndexKey::UniqueSymbol(identity) => (IndexKey::UniqueSymbol(identity.clone()), false),
             IndexKey::Computed(node) => {

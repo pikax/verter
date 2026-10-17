@@ -14,6 +14,7 @@ verter_ecma = { workspace = true }
 verter_span = { path = "../verter_span" }
 verter_no_typeexpr = { workspace = true }
 verter_no_storedspan = { workspace = true }
+verter_retention = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rustc-hash = { workspace = true }

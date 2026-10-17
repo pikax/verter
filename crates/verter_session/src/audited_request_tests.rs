@@ -216,7 +216,7 @@ fn raw_dispatch_execute_emits_no_audit_records() {
         ));
         let path_key = SemanticQueryKey::ProjectPath {
             base: primitive_base,
-            path: Arc::from(
+            path: verter_type_expr::OwnedSlice::from(
                 vec![PathSegment::Member(
                     verter_type_engine::semantic_query::PropertyKey::identifier("nonexistent"),
                 )]

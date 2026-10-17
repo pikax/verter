@@ -1227,7 +1227,9 @@ impl VerterHost {
                     ctx,
                     dispatch,
                     payload,
-                    Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                    verter_type_expr::OwnedSlice::from(
+                        Vec::<PathSegment>::new().into_boxed_slice(),
+                    ),
                     ProjectionReductionContext::macro_object_surface(
                         ProjectionMode::Shallow,
                         SurfaceProvenanceContext::MacroTypeArgOwnBody,
@@ -1322,7 +1324,9 @@ impl VerterHost {
                     ctx,
                     dispatch,
                     payload,
-                    Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                    verter_type_expr::OwnedSlice::from(
+                        Vec::<PathSegment>::new().into_boxed_slice(),
+                    ),
                     ProjectionReductionContext::macro_object_surface(
                         ProjectionMode::Shallow,
                         SurfaceProvenanceContext::Structural,
@@ -1475,7 +1479,7 @@ impl VerterHost {
                     let key = dispatch.typeof_key_for(
                         ValueRootKey {
                             scope: ScopeId::file(Arc::from(owner_canonical), binding_key.owner),
-                            name: Arc::clone(&binding_key.name),
+                            name: verter_type_expr::OwnedStr::from(binding_key.name.clone()),
                         },
                         ProjectionReductionContext::published(ProjectionMode::Expanded),
                     );
@@ -1585,7 +1589,7 @@ impl VerterHost {
             ctx,
             dispatch,
             payload,
-            Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+            verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
             ProjectionReductionContext::vue_runtime_object_surface(
                 ProjectionMode::Shallow,
                 SurfaceProvenanceContext::MacroTypeArgOwnBody,
@@ -1744,7 +1748,7 @@ impl VerterHost {
             ctx,
             dispatch,
             payload,
-            Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+            verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
             runtime_context,
             Some(walker_diagnostics),
         );

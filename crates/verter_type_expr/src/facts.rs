@@ -14,6 +14,8 @@
 //! Adding an arm to any family is a reviewed schema event.
 
 use std::sync::Arc;
+
+use crate::{OwnedSlice, OwnedStr};
 use verter_no_storedspan::NoStoredSpan;
 use verter_no_typeexpr::NoTypeExpr;
 
@@ -541,7 +543,6 @@ mod top_level_owner_identity_tests {
     use crate::span_origins::DeclContributorAnchor;
     use std::collections::HashSet;
     use std::hash::{DefaultHasher, Hash, Hasher};
-    use std::sync::Arc;
 
     fn hash_of(value: &impl Hash) -> u64 {
         let mut hasher = DefaultHasher::new();
@@ -588,15 +589,15 @@ mod top_level_owner_identity_tests {
         let module = TopLevelOwnerId::module(0);
         let instance = TopLevelOwnerId::instance(0);
         let value = |owner| ValueDeclIdentityPart {
-            canonical_id: Arc::from("/src/App.vue"),
+            canonical_id: crate::OwnedStr::from("/src/App.vue"),
             owner,
-            symbol: Arc::from("shared"),
-            member_path: Arc::from([]),
+            symbol: crate::OwnedStr::from("shared"),
+            member_path: crate::OwnedSlice::from([]),
         };
         let anchor = |owner| AuthoredAnchor {
-            canonical_id: Arc::from("/src/App.vue"),
+            canonical_id: crate::OwnedStr::from("/src/App.vue"),
             owner,
-            symbol: Arc::from("Shared"),
+            symbol: crate::OwnedStr::from("Shared"),
             space: LocatorSymbolSpace::Type,
         };
         let contributor = |owner| DeclContributorAnchor {
@@ -777,7 +778,7 @@ impl TypeDependencyPathFact {
 )]
 pub enum DeclarationOrigin {
     /// The member's declaration lives in this canonical file.
-    Declared(Arc<str>),
+    Declared(crate::OwnedStr),
     /// Genuinely synthetic or multi-origin — no single declaring file (the
     /// `None`/empty case in the untyped `declaration_origin` carriers).
     Synthetic,
@@ -801,13 +802,27 @@ pub enum DeclarationOrigin {
 )]
 pub struct ValueDeclIdentityPart {
     /// Canonical id of the file declaring the value symbol.
-    pub canonical_id: Arc<str>,
+    pub canonical_id: OwnedStr,
     /// Top-level lexical owner of the value declaration.
     pub owner: TopLevelOwnerId,
     /// The value symbol name (`typeof x` → `x`).
-    pub symbol: Arc<str>,
+    pub symbol: OwnedStr,
     /// Member path for `typeof x.y.z` (empty = the bare value symbol).
-    pub member_path: Arc<[String]>,
+    pub member_path: OwnedSlice<String>,
+}
+
+impl verter_retention::owned::Measured for ValueDeclIdentityPart {
+    /// Its names and member path are owned allocations, each charged by its
+    /// own cell.
+    fn heap_bytes(&self, aliases: &mut verter_retention::allocation::AliasSet) -> usize {
+        let Self {
+            canonical_id,
+            owner: _,
+            symbol,
+            member_path,
+        } = self;
+        canonical_id.offer(aliases) + symbol.offer(aliases) + member_path.offer(aliases)
+    }
 }
 
 // ===========================================================================
@@ -2296,7 +2311,7 @@ pub enum FunctionPartIdentity {
     /// the declaration surface.
     Member {
         /// Member ordinal path from the declaration to the callable member.
-        member_path: Arc<[u32]>,
+        member_path: OwnedSlice<u32>,
     },
     /// The arrow / function expression that IS the declaration's
     /// initializer (`const f = () => { .. }`, `const f = function () { .. }`).

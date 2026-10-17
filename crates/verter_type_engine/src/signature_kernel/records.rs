@@ -450,7 +450,7 @@ pub const LAYOUT_QUERY_OUTCOME_SET: usize = 32;
 /// It also includes the candidate's `Arc` cost receipt: a stored result
 /// that carried no receipt could only be served free, so the word is the
 /// price of every warm read charging what its computation cost.
-pub const LAYOUT_MEMO_ENTRY: usize = 160;
+pub const LAYOUT_MEMO_ENTRY: usize = 152;
 
 #[cfg(target_pointer_width = "64")]
 const _: () = {

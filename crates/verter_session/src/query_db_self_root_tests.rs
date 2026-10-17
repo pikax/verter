@@ -172,9 +172,9 @@ fn declaration_lookup_db_untracked_self_root_rejects_warm_entry() {
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().declaration_db();
     let key = (
-        Arc::<str>::from(c),
+        verter_type_expr::OwnedStr::from(c),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::<str>::from("Probe"),
+        verter_type_expr::OwnedStr::from("Probe"),
     );
 
     // Prime attempt: a "stale" value paired with an untracked
@@ -220,12 +220,12 @@ fn imported_symbol(canonical: &str, marker: &str) -> ResolvedImportedRegistrySym
             classification: verter_type_expr::facts::TypeBodyClass::Alias,
             body_slot: verter_type_expr::locators::TypeBodySlot {
                 anchor: verter_type_expr::locators::AuthoredAnchor {
-                    canonical_id: Arc::from(canonical),
+                    canonical_id: verter_type_expr::OwnedStr::from(canonical),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    symbol: Arc::from(marker),
+                    symbol: verter_type_expr::OwnedStr::from(marker),
                     space: verter_type_expr::locators::LocatorSymbolSpace::Type,
                 },
-                path: Arc::from(Vec::new().into_boxed_slice()),
+                path: verter_type_expr::OwnedSlice::default(),
             },
             merged_contributor_slots: Arc::from(Vec::new().into_boxed_slice()),
         },
@@ -248,9 +248,9 @@ fn imported_registry_db_untracked_self_root_rejects_warm_entry() {
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().imported_registry_db();
     let key = (
-        Arc::<str>::from(c),
+        verter_type_expr::OwnedStr::from(c),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::<str>::from("Probe"),
+        verter_type_expr::OwnedStr::from("Probe"),
     );
 
     let _ = db
@@ -312,9 +312,9 @@ fn resolvability_db_untracked_self_root_rejects_warm_entry() {
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().resolvable_db();
     let key = (
-        Arc::<str>::from(c),
+        verter_type_expr::OwnedStr::from(c),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::<str>::from("Probe"),
+        verter_type_expr::OwnedStr::from("Probe"),
     );
 
     let _ = db.fixture(ctx).get_or_compute_traced_for_test(&key, || {
@@ -356,12 +356,12 @@ fn owner_collection_marker_locator(
     verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
         verter_type_expr::locators::TypeBodySlot {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: Arc::from(canonical),
+                canonical_id: verter_type_expr::OwnedStr::from(canonical),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from(marker),
+                symbol: verter_type_expr::OwnedStr::from(marker),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Type,
             },
-            path: Arc::from([]),
+            path: verter_type_expr::OwnedSlice::from([]),
         },
     )
 }
@@ -384,9 +384,9 @@ fn owner_collection_db_untracked_self_root_rejects_warm_entry() {
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().owner_collection_db();
     let key = (
-        Arc::<str>::from(c),
+        verter_type_expr::OwnedStr::from(c),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::<str>::from("Probe"),
+        verter_type_expr::OwnedStr::from("Probe"),
     );
 
     let _ = db.fixture(ctx).get_or_compute_traced_for_test(&key, || {
@@ -979,9 +979,9 @@ fn declaration_lookup_db_self_root_sibling_edit_rejects_warm_entry() {
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().declaration_db();
     let key = (
-        Arc::<str>::from(c),
+        verter_type_expr::OwnedStr::from(c),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::<str>::from("Probe"),
+        verter_type_expr::OwnedStr::from("Probe"),
     );
 
     // Observe the keyed canonical's content version at cold-publish
@@ -1052,9 +1052,9 @@ fn imported_registry_db_self_root_sibling_edit_rejects_warm_entry() {
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().imported_registry_db();
     let key = (
-        Arc::<str>::from(c),
+        verter_type_expr::OwnedStr::from(c),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::<str>::from("Probe"),
+        verter_type_expr::OwnedStr::from("Probe"),
     );
 
     // Observe the keyed canonical's content version at cold-publish
@@ -1130,9 +1130,9 @@ fn resolvability_db_self_root_sibling_edit_rejects_warm_entry() {
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().resolvable_db();
     let key = (
-        Arc::<str>::from(c),
+        verter_type_expr::OwnedStr::from(c),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::<str>::from("Probe"),
+        verter_type_expr::OwnedStr::from("Probe"),
     );
 
     // Observe the keyed canonical's content version at cold-publish
@@ -1197,9 +1197,9 @@ fn owner_collection_db_self_root_sibling_edit_rejects_warm_entry() {
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().owner_collection_db();
     let key = (
-        Arc::<str>::from(c),
+        verter_type_expr::OwnedStr::from(c),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::<str>::from("Probe"),
+        verter_type_expr::OwnedStr::from("Probe"),
     );
 
     // Observe the keyed canonical's content version at cold-publish
@@ -1281,9 +1281,9 @@ fn owner_collection_db_reuses_warm_then_invalidate_canonical_drops_and_recompute
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().owner_collection_db();
     let key = (
-        Arc::<str>::from(c),
+        verter_type_expr::OwnedStr::from(c),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::<str>::from("Probe"),
+        verter_type_expr::OwnedStr::from("Probe"),
     );
 
     assert_eq!(
@@ -3241,9 +3241,9 @@ fn imported_registry_base_and_overlay_candidates_coexist() {
         .whole_hash;
     let host = Arc::new(host);
     let key: verter_type_engine::component_meta_caches::ImportedRegistryKey = (
-        Arc::<str>::from(canonical),
+        verter_type_expr::OwnedStr::from(canonical),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::<str>::from("Probe"),
+        verter_type_expr::OwnedStr::from("Probe"),
     );
 
     // Base-view publish — self-roots the keyed canonical at its BASE hash.
@@ -3386,9 +3386,9 @@ fn imported_registry_coexisting_candidates_keep_live_counter_consistent() {
         .whole_hash;
     let host = Arc::new(host);
     let key: verter_type_engine::component_meta_caches::ImportedRegistryKey = (
-        Arc::<str>::from(canonical),
+        verter_type_expr::OwnedStr::from(canonical),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::<str>::from("Probe"),
+        verter_type_expr::OwnedStr::from("Probe"),
     );
 
     let live_counter = Arc::clone(&host.project_type_store().counters.component_meta_cache_live);
@@ -3719,9 +3719,9 @@ fn imported_registry_peek_rejects_entry_from_superseded_generation() {
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().imported_registry_db();
     let key: verter_type_engine::component_meta_caches::ImportedRegistryKey = (
-        Arc::from(canonical),
+        verter_type_expr::OwnedStr::from(canonical),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::from("Probe"),
+        verter_type_expr::OwnedStr::from("Probe"),
     );
 
     // Prime the cache through the production cold path — the `Cacheable`
@@ -3827,9 +3827,9 @@ fn imported_registry_cooperative_generation_reject_cleans_reverse_index() {
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().imported_registry_db();
     let key: verter_type_engine::component_meta_caches::ImportedRegistryKey = (
-        Arc::from(canonical),
+        verter_type_expr::OwnedStr::from(canonical),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::from("Probe"),
+        verter_type_expr::OwnedStr::from("Probe"),
     );
 
     // Prime the cache through the production cold path — stamps
@@ -3968,9 +3968,9 @@ fn declaration_lookup_failed_revalidation_does_not_leak_live_counter() {
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().declaration_db();
     let key = (
-        Arc::<str>::from(c),
+        verter_type_expr::OwnedStr::from(c),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::<str>::from("Probe"),
+        verter_type_expr::OwnedStr::from("Probe"),
     );
 
     let counter_before = component_meta_cache_live(&host);
@@ -4018,9 +4018,9 @@ fn resolvability_failed_revalidation_does_not_leak_live_counter() {
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().resolvable_db();
     let key = (
-        Arc::<str>::from(c),
+        verter_type_expr::OwnedStr::from(c),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::<str>::from("Probe"),
+        verter_type_expr::OwnedStr::from("Probe"),
     );
 
     let counter_before = component_meta_cache_live(&host);
@@ -4059,9 +4059,9 @@ fn owner_collection_failed_revalidation_does_not_leak_live_counter() {
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().owner_collection_db();
     let key = (
-        Arc::<str>::from(c),
+        verter_type_expr::OwnedStr::from(c),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::<str>::from("Probe"),
+        verter_type_expr::OwnedStr::from("Probe"),
     );
 
     let counter_before = component_meta_cache_live(&host);
@@ -4183,9 +4183,9 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
         .fixture(ctx)
         .get_or_compute_traced_for_test(
             &(
-                Arc::<str>::from("/lc_total/decl.ts"),
+                verter_type_expr::OwnedStr::from("/lc_total/decl.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::<str>::from("P"),
+                verter_type_expr::OwnedStr::from("P"),
             ),
             || {
                 bump();
@@ -4197,9 +4197,9 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
         .fixture(ctx)
         .get_or_compute_traced_for_test(
             &(
-                Arc::<str>::from("/lc_total/resolv.ts"),
+                verter_type_expr::OwnedStr::from("/lc_total/resolv.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::<str>::from("P"),
+                verter_type_expr::OwnedStr::from("P"),
             ),
             || {
                 bump();
@@ -4211,9 +4211,9 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
         .fixture(ctx)
         .get_or_compute_traced_for_test(
             &(
-                Arc::<str>::from("/lc_total/owner.ts"),
+                verter_type_expr::OwnedStr::from("/lc_total/owner.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::<str>::from("P"),
+                verter_type_expr::OwnedStr::from("P"),
             ),
             || {
                 bump();
@@ -4849,10 +4849,10 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
     seam_member_b.optional = true;
     let seam_member_other = shape_member("seamAlpha", seam_other_node);
     let seam_owner = DeclIdentity {
-        canonical_id: std::sync::Arc::from(seam_scope),
+        canonical_id: verter_type_expr::OwnedStr::from(seam_scope),
         owner: verter_type_expr::TopLevelOwnerId::instance(0),
         whole_hash: Default::default(),
-        decl_name: std::sync::Arc::from("<sfc-script-setup>"),
+        decl_name: verter_type_expr::OwnedStr::from("<sfc-script-setup>"),
     };
 
     let fixture_dispatch_3 =
@@ -4991,7 +4991,7 @@ fn fenced_serve_surface_member_shape_is_not_admitted() {
                 .intern_node(SemanticNodeData::new_typeof(
                     ValueRootKey {
                         scope: ScopeId {
-                            canonical_id: Arc::from(scope),
+                            canonical_id: verter_type_expr::OwnedStr::from(scope),
                             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                             local_scope: None,
                             binder_scope_id:
@@ -4999,16 +4999,16 @@ fn fenced_serve_surface_member_shape_is_not_admitted() {
                                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                                 ),
                         },
-                        name: Arc::from("seamValue"),
+                        name: verter_type_expr::OwnedStr::from("seamValue"),
                     },
-                    Arc::from(Vec::new().into_boxed_slice()),
+                    verter_type_expr::OwnedSlice::default(),
                     Arc::from(Vec::new().into_boxed_slice()),
                 ));
         let owner = DeclIdentity {
-            canonical_id: Arc::from(scope),
+            canonical_id: verter_type_expr::OwnedStr::from(scope),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: Default::default(),
-            decl_name: Arc::from("<sfc-script-setup>"),
+            decl_name: verter_type_expr::OwnedStr::from("<sfc-script-setup>"),
         };
         let projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Props);
         let member = shape_member("seamProbe", value_node);
@@ -5387,10 +5387,10 @@ mod fenced_gate_arm_admission_tests {
     /// `value_node` and return the post-drive `ShapeCacheDb` `live_count`.
     fn drive_member_seam(host: &VerterHost, scope: &str, value_node: SemanticNodeId) -> usize {
         let owner = DeclIdentity {
-            canonical_id: Arc::from(scope),
+            canonical_id: verter_type_expr::OwnedStr::from(scope),
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
             whole_hash: Default::default(),
-            decl_name: Arc::from("<sfc-script-setup>"),
+            decl_name: verter_type_expr::OwnedStr::from("<sfc-script-setup>"),
         };
         let projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Props);
         let member = shape_member("gateProbe", value_node);
@@ -5576,7 +5576,7 @@ mod fenced_gate_arm_admission_tests {
                 SemanticNodeData::new_bare_ref(
                     Arc::from("MyStr"),
                     NodeScopeId::File {
-                        canonical_id: Arc::from(SCOPE),
+                        canonical_id: verter_type_expr::OwnedStr::from(SCOPE),
                         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         whole_hash: indexed.whole_hash,
                         local_scope: None,
@@ -5644,9 +5644,9 @@ fn declaration_lookup_straddling_compute_is_not_served_to_the_winner() {
     let stable = "/reval_qdb/stable.ts";
     load_tracked_keyed(&host, stable);
     let stable_key = (
-        Arc::<str>::from(stable),
+        verter_type_expr::OwnedStr::from(stable),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::<str>::from("Probe"),
+        verter_type_expr::OwnedStr::from("Probe"),
     );
     let stable_observed = observed_whole_hash(ctx, stable);
     let control_live_before = db.live_count();
@@ -5681,9 +5681,9 @@ fn declaration_lookup_straddling_compute_is_not_served_to_the_winner() {
     let owner = "/reval_qdb/owner.ts";
     load_tracked_keyed(&host, owner);
     let key = (
-        Arc::<str>::from(owner),
+        verter_type_expr::OwnedStr::from(owner),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::<str>::from("Probe"),
+        verter_type_expr::OwnedStr::from("Probe"),
     );
     let observed = observed_whole_hash(ctx, owner);
     let generation_before = host.project_type_store().current_project_generation();

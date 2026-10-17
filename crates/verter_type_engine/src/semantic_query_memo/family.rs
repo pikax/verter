@@ -128,22 +128,30 @@ impl MemoEntry {
     /// owner for as long as it lives; the carrier, the delivered rails and
     /// the value are shared allocations, charged once through
     /// [`super::retention::MemoRetention`]'s shared holds.
-    pub(super) fn own_retained_footprint_bytes(
+    ///
+    /// The materialised point's path names owned strings: those are charged
+    /// by their own cells and held by the candidate beside this charge.
+    pub(super) fn own_retained_footprint(
         &self,
         family: &FamilyKey,
         populated_slots: usize,
         registered_canonicals: usize,
-    ) -> usize {
+    ) -> verter_session_query::retention::Footprint {
         use crate::semantic_query::allocation_footprint::OwnedHeap as _;
         let mut aliases = verter_session_query::retention::allocation::AliasSet::new();
-        populated_slots
+        let registration = super::reverse_index::registration_footprint(
+            family,
+            registered_canonicals,
+            populated_slots,
+        );
+        let bytes = populated_slots
             * (std::mem::size_of::<Self>() + verter_session_query::retention::ENTRY_OVERHEAD_BYTES)
             + self.satisfied_projection.owned_heap_bytes(&mut aliases)
-            + super::reverse_index::registration_bytes(
-                family,
-                registered_canonicals,
-                populated_slots,
-            )
+            + registration.bytes;
+        verter_session_query::retention::Footprint {
+            bytes,
+            handles: aliases.take_handles().merge(registration.handles),
+        }
     }
 }
 
@@ -246,7 +254,7 @@ pub enum FamilyKey {
     },
     ProjectMember {
         base: SemanticNodeId,
-        member: Arc<str>,
+        member: verter_type_expr::OwnedStr,
     },
     IndexedAccess {
         base: SemanticNodeId,
@@ -287,7 +295,11 @@ pub enum FamilyKey {
         true_branch: SemanticNodeId,
         false_branch: SemanticNodeId,
         distributive: bool,
-        pending: Option<Arc<crate::semantic_query::ConditionalPendingSubstitution>>,
+        pending: Option<
+            verter_session_query::retention::owned::Owned<
+                crate::semantic_query::ConditionalPendingSubstitution,
+            >,
+        >,
     },
     /// `value_root` is the env-bearing, content-free
     /// [`crate::semantic_query::ValueRootSlotIdentity`] (R6 — carries the
@@ -308,7 +320,7 @@ pub enum FamilyKey {
         /// `FamilyKey → FamilySlots` keyspace for every other family. The
         /// box delegates `Hash`/`Eq`/`Clone` to the `Arc`, so the family
         /// IDENTITY is unchanged.
-        path: Box<Arc<[Arc<str>]>>,
+        path: Box<verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>>,
         resolve_env_hash: crate::semantic_query::HashValue,
         /// Surface-provenance dimension. `build_typeof` lowers the value's
         /// annotation / shape under the full projection-reduction context,
@@ -343,7 +355,7 @@ pub enum FamilyKey {
     },
     ProjectPath {
         base: SemanticNodeId,
-        path: Arc<[PathSegment]>,
+        path: verter_type_expr::OwnedSlice<PathSegment>,
         /// Surface-provenance dimension. A
         /// macro-type-argument own-body path projection (the empty-path
         /// macro-payload surface read) and a plain structural path
@@ -505,7 +517,7 @@ pub enum FamilyKey {
     /// dims ride here ON the family key (env hashes, R6-clean). LIVE
     /// producer (build folds via the shared deferred evaluator).
     TemplateLiteralReduce {
-        pattern: Arc<[Arc<str>]>,
+        pattern: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
         args: Arc<[SemanticNodeId]>,
         resolve_env_hash: crate::semantic_query::HashValue,
         type_env_hash: crate::semantic_query::HashValue,
@@ -1036,7 +1048,7 @@ impl FamilyKey {
     /// carrier sweep cover them). No wildcard: a new variant must be
     /// dispositioned here.
     pub(super) fn binds_canonical(&self, canonical_id: &str) -> bool {
-        let names = |canonical: &Arc<str>| canonical.as_ref() == canonical_id;
+        let names = |canonical: &str| canonical == canonical_id;
         match self {
             FamilyKey::ResolveDecl(key) => names(&key.scope.canonical_id),
             FamilyKey::Instantiate { base, .. }
@@ -1401,7 +1413,7 @@ pub(super) struct FamilyPublishOutcome {
 pub(crate) struct FamilySlots {
     /// The family's own container charge: its key and slot lists in the
     /// family map and its record in the retention budget's ledger, held for
-    /// as long as the family is keyed ([`super::retention::family_container_bytes`]).
+    /// as long as the family is keyed ([`super::retention::family_container_footprint`]).
     _retention: Arc<verter_session_query::retention::RetentionCharge>,
     single: CandidateList,
     identity: CandidateList,
@@ -2122,7 +2134,7 @@ pub(crate) fn family_and_slot_in(
         SemanticQueryKey::ProjectMember { base, member, mode } => (
             FamilyKey::ProjectMember {
                 base: *base,
-                member: Arc::clone(member),
+                member: member.clone(),
             },
             mode_to_slot(*mode),
         ),
@@ -2181,7 +2193,7 @@ pub(crate) fn family_and_slot_in(
         } => (
             FamilyKey::TypeOf {
                 value_root: value_root.clone(),
-                path: Box::new(Arc::clone(path)),
+                path: Box::new(path.clone()),
                 resolve_env_hash: context.resolve_env_hash,
                 provenance: context.projection_reduction.provenance,
                 merge_role: context.projection_reduction.merge_role,
@@ -2243,7 +2255,7 @@ pub(crate) fn family_and_slot_in(
         } => (
             FamilyKey::ProjectPath {
                 base: *base,
-                path: Arc::clone(path),
+                path: path.clone(),
                 provenance: context.provenance,
                 merge_role: context.merge_role,
                 vue_heritage_policy: context.vue_heritage_policy,
@@ -2408,7 +2420,7 @@ pub(crate) fn family_and_slot_in(
             context,
         } => (
             FamilyKey::TemplateLiteralReduce {
-                pattern: Arc::clone(pattern),
+                pattern: pattern.clone(),
                 args: Arc::clone(args),
                 resolve_env_hash: context.resolve_env_hash,
                 type_env_hash: context.type_env_hash,
@@ -2576,10 +2588,10 @@ pub(crate) fn family_and_slot_in(
 /// the requested point the same real point.
 pub(crate) fn requested_path_for_key(key: &SemanticQueryKey) -> ProjectionPath {
     match key {
-        SemanticQueryKey::ProjectPath { path, .. } => ProjectionPath::from(Arc::clone(path)),
+        SemanticQueryKey::ProjectPath { path, .. } => ProjectionPath::from(path.clone()),
         SemanticQueryKey::ProjectMember { member, .. } => {
             ProjectionPath::from_segments([PathSegment::Member(PropertyKey::identifier(
-                Arc::clone(member),
+                member.clone(),
             ))])
         }
         SemanticQueryKey::IndexedAccess { index, .. } => {

@@ -8,7 +8,7 @@ use verter_type_expr::TopLevelOwnerId;
 
 fn scope(canonical: &str) -> ScopeId {
     ScopeId {
-        canonical_id: Arc::from(canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical),
         owner: TopLevelOwnerId::ordinary_file(),
         local_scope: None,
         binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
@@ -38,8 +38,8 @@ fn carrier_naming(
 // Family-memo backfill matrix
 // ──────────────────────────────────────────────────────────────────
 
-fn family_test_path() -> Arc<[PathSegment]> {
-    Arc::from(
+fn family_test_path() -> verter_type_expr::OwnedSlice<PathSegment> {
+    verter_type_expr::OwnedSlice::from(
         vec![PathSegment::Member(
             crate::semantic_query::PropertyKey::identifier("foo"),
         )]
@@ -67,7 +67,7 @@ fn dep_sig_for(canonical: &str, hash: u8) -> DepSignature {
 
 fn release_file_scope(canonical: &str, hash: u8) -> NodeScopeId {
     NodeScopeId::File {
-        canonical_id: Arc::from(canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: [hash; 16],
         local_scope: None,
@@ -77,15 +77,15 @@ fn release_file_scope(canonical: &str, hash: u8) -> NodeScopeId {
 fn release_type_param(canonical: &str, hash: u8, name: &str) -> SemanticNodeData {
     SemanticNodeData::TypeParam {
         decl: DeclIdentity {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner: TopLevelOwnerId::ordinary_file(),
             whole_hash: [hash; 16],
-            decl_name: Arc::from(name),
+            decl_name: verter_type_expr::OwnedStr::from(name),
         },
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from(name),
+        display_name: verter_type_expr::OwnedStr::from(name),
     }
 }
 
@@ -151,8 +151,95 @@ fn release_intern_document(
 fn release_decl_key(canonical: &str, name: &str) -> SemanticQueryKey {
     SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope(canonical),
-        name: Arc::from(name),
+        name: verter_type_expr::OwnedStr::from(name),
     })
+}
+
+/// A holder whose final drop comes after the close destroys the closed
+/// content then, with no close or sidecar write left to drain the log: the
+/// release that grows the destroyed log past its threshold drains it into
+/// the sidecars itself, so neither the log nor the stale sidecar entries
+/// outlive the drop by more than the threshold. When a sidecar lock is held
+/// across that final release the drain cannot run then; the lock's holder
+/// runs it as it unlocks, with no fresh entry of its own and no later work.
+///
+/// Discriminating against a log drained only by a later close or sidecar
+/// write, and against a release that gives up on a held sidecar lock: every
+/// destroyed id and its structure bits would stay retained.
+#[test]
+fn a_final_drop_after_close_keeps_the_destroyed_log_bounded() {
+    /// A lock guard held across the final release, dropped by type erasure.
+    trait Held {}
+    impl<T> Held for T {}
+    type Hold = for<'a> fn(&'a SemanticGraphStore) -> Box<dyn Held + 'a>;
+    let cases: [(&str, Option<Hold>); 5] = [
+        ("uncontended", None),
+        (
+            "key classes held",
+            Some(|store| Box::new(store.key_classes.lock())),
+        ),
+        (
+            "structure bits held",
+            Some(|store| Box::new(store.unresolved_reach.lock())),
+        ),
+        (
+            "origin edges held",
+            Some(|store| Box::new(store.derivation.lock())),
+        ),
+        (
+            "member-index order held",
+            Some(|store| Box::new(store.member_ordinal_index_fifo.lock())),
+        ),
+    ];
+    let threshold = super::super::release::DESTROYED_DRAIN_THRESHOLD;
+    for (label, hold) in cases {
+        let store = SemanticGraphStore::new();
+        let count = threshold * 4;
+        let scope = store.enter_node_root_scope();
+        let scoped = release_file_scope("/w/a.ts", 1);
+        for index in 0..count {
+            let node = store.intern_node_with_scope(
+                release_type_param("/w/a.ts", 1, &format!("T{index}")),
+                scoped.clone(),
+            );
+            // Classifying writes the node's structure-bit sidecar entry.
+            store.node_is_inert_structure(node);
+        }
+        assert_eq!(store.unresolved_reach_count(), count, "{label}");
+
+        store.close_canonical("/w/a.ts");
+        assert_eq!(
+            store.unresolved_reach_count(),
+            count,
+            "{label}: premise: the scope still holds every node"
+        );
+        let held = hold.map(|hold| hold(&store));
+        drop(scope);
+        assert_eq!(
+            store.node_count(),
+            0,
+            "{label}: the final drop destroys them all"
+        );
+        if held.is_some() {
+            assert_eq!(
+                store.pending_destroyed_nodes(),
+                count,
+                "{label}: premise: the held lock blocks the release's drain"
+            );
+        }
+        drop(held);
+
+        assert!(
+            store.pending_destroyed_nodes() <= threshold,
+            "{label}: pending {} of {count}",
+            store.pending_destroyed_nodes()
+        );
+        assert!(
+            store.unresolved_reach_count() <= threshold,
+            "{label}: stale structure bits {} of {count}",
+            store.unresolved_reach_count()
+        );
+    }
 }
 
 /// The inert-structure bit and the unresolved-reach bit of a node live in
@@ -236,7 +323,7 @@ fn intern_dedups_structural_values_across_contexts() {
     let scoped = store.intern_node_with_scope(
         SemanticNodeData::Primitive(PrimitiveKind::Number),
         NodeScopeId::File {
-            canonical_id: Arc::from("/w/a.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/w/a.ts"),
             owner: TopLevelOwnerId::ordinary_file(),
             whole_hash: [0u8; 16],
             local_scope: None,
@@ -258,7 +345,7 @@ fn intern_identity_discriminates_top_level_owner() {
     let store = SemanticGraphStore::new();
     let _scope = store.enter_node_root_scope();
     let scope = |owner| NodeScopeId::File {
-        canonical_id: Arc::from("/w/Component.vue"),
+        canonical_id: verter_type_expr::OwnedStr::from("/w/Component.vue"),
         owner,
         whole_hash: [7u8; 16],
         local_scope: None,
@@ -291,10 +378,10 @@ fn intern_identity_discriminates_top_level_owner() {
 #[test]
 fn declaration_and_slot_identity_discriminate_top_level_owner() {
     let decl = |owner| DeclIdentity {
-        canonical_id: Arc::from("/w/Component.vue"),
+        canonical_id: verter_type_expr::OwnedStr::from("/w/Component.vue"),
         owner,
         whole_hash: [9u8; 16],
-        decl_name: Arc::from("Shared"),
+        decl_name: verter_type_expr::OwnedStr::from("Shared"),
     };
     let module_decl = decl(TopLevelOwnerId::module(0));
     let instance_decl = decl(TopLevelOwnerId::instance(0));
@@ -302,9 +389,9 @@ fn declaration_and_slot_identity_discriminate_top_level_owner() {
 
     let slot = |owner| {
         ResolvedDeclSlotIdentity::type_slot(
-            Arc::from("/w/Component.vue"),
+            verter_type_expr::OwnedStr::from("/w/Component.vue"),
             owner,
-            Arc::from("Shared"),
+            verter_type_expr::OwnedStr::from("Shared"),
             3,
             [4u8; 16],
             [5u8; 16],
@@ -418,15 +505,15 @@ fn intern_typeparam_display_name_excluded_from_identity() {
     let _scope = store.enter_node_root_scope();
     let mk = |display: &str| SemanticNodeData::TypeParam {
         decl: DeclIdentity {
-            canonical_id: Arc::from("/w/a.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/w/a.ts"),
             owner: TopLevelOwnerId::ordinary_file(),
             whole_hash: [3u8; 16],
-            decl_name: Arc::from("T"),
+            decl_name: verter_type_expr::OwnedStr::from("T"),
         },
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from(display),
+        display_name: verter_type_expr::OwnedStr::from(display),
     };
     let id1 = store.intern_node(mk("T"));
     let id2 = store.intern_node(mk("TRenamed"));
@@ -449,7 +536,7 @@ fn shard_routing_is_deterministic_per_payload_and_scope() {
     let data_b = SemanticNodeData::Primitive(PrimitiveKind::String);
     let scope_global = NodeScopeId::Global;
     let scope_file = NodeScopeId::File {
-        canonical_id: Arc::from("/w/x.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/w/x.ts"),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: [0u8; 16],
         local_scope: None,
@@ -606,13 +693,13 @@ fn node_arena_invalidation_preserves_global_scope() {
     let whole_a: Hash16 = [1u8; 16];
     let whole_b: Hash16 = [2u8; 16];
     let scope_a = NodeScopeId::File {
-        canonical_id: Arc::clone(&canonical_a),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical_a.clone()),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: whole_a,
         local_scope: None,
     };
     let scope_b = NodeScopeId::File {
-        canonical_id: Arc::clone(&canonical_b),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical_b.clone()),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: whole_b,
         local_scope: None,
@@ -623,27 +710,27 @@ fn node_arena_invalidation_preserves_global_scope() {
     // shard entries.
     let file_a_payload = SemanticNodeData::TypeParam {
         decl: DeclIdentity {
-            canonical_id: Arc::clone(&canonical_a),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical_a.clone()),
             owner: TopLevelOwnerId::ordinary_file(),
             whole_hash: whole_a,
-            decl_name: Arc::from("Param_A"),
+            decl_name: verter_type_expr::OwnedStr::from("Param_A"),
         },
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("Param_A"),
+        display_name: verter_type_expr::OwnedStr::from("Param_A"),
     };
     let file_b_payload = SemanticNodeData::TypeParam {
         decl: DeclIdentity {
-            canonical_id: Arc::clone(&canonical_b),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical_b.clone()),
             owner: TopLevelOwnerId::ordinary_file(),
             whole_hash: whole_b,
-            decl_name: Arc::from("Param_B"),
+            decl_name: verter_type_expr::OwnedStr::from("Param_B"),
         },
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("Param_B"),
+        display_name: verter_type_expr::OwnedStr::from("Param_B"),
     };
 
     let global_id_first = store.intern_node_with_scope(global_payload(), NodeScopeId::Global);
@@ -809,15 +896,15 @@ fn many_distinct_relations_under_tiny_retention_keep_operand_only_residency() {
     let _scope = store.enter_node_root_scope();
     let operand = |name: String| SemanticNodeData::TypeParam {
         decl: DeclIdentity {
-            canonical_id: Arc::from("/w/operands.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/w/operands.ts"),
             owner: TopLevelOwnerId::ordinary_file(),
             whole_hash: [7u8; 16],
-            decl_name: Arc::from(name.as_str()),
+            decl_name: verter_type_expr::OwnedStr::from(name.as_str()),
         },
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from(name.as_str()),
+        display_name: verter_type_expr::OwnedStr::from(name.as_str()),
     };
     let pairs: Vec<(SemanticNodeId, SemanticNodeId)> = (0..RELATIONS)
         .map(|i| {
@@ -968,7 +1055,7 @@ fn invalidate_all_clears_memo_budget_under_entries_lock() {
     store.publish_with_carrier_for_tests(
         SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: scope("/w/seed.ts"),
-            name: Arc::from("Seed"),
+            name: verter_type_expr::OwnedStr::from("Seed"),
         }),
         QueryResult::Value(node),
         verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
@@ -1055,7 +1142,7 @@ fn warm_publish_records_memo_budget_under_entries_lock() {
         store_p.publish_with_carrier_for_tests(
             SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                 scope: scope("/w/publish.ts"),
-                name: Arc::from("Pub"),
+                name: verter_type_expr::OwnedStr::from("Pub"),
             }),
             QueryResult::Value(node),
             verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
@@ -1134,7 +1221,7 @@ fn invalidate_all_clears_reverse_index_under_entries_lock() {
     store.publish_with_carrier_for_tests(
         SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: scope("/w/seed.ts"),
-            name: Arc::from("Seed"),
+            name: verter_type_expr::OwnedStr::from("Seed"),
         }),
         QueryResult::Value(node),
         carrier_naming("/w/seed.ts", 1),
@@ -1251,7 +1338,7 @@ fn budget_eviction_prunes_reverse_index_under_entries_lock() {
         store.publish_with_carrier_for_tests(
             SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                 scope: scope(canonical),
-                name: Arc::from(name),
+                name: verter_type_expr::OwnedStr::from(name),
             }),
             QueryResult::Value(node),
             carrier_naming(canonical, hash),
@@ -1285,7 +1372,7 @@ fn budget_eviction_prunes_reverse_index_under_entries_lock() {
         store_p.publish_with_carrier_for_tests(
             SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                 scope: scope("/w/c.ts"),
-                name: Arc::from("C"),
+                name: verter_type_expr::OwnedStr::from("C"),
             }),
             QueryResult::Value(node),
             carrier_naming("/w/c.ts", 3),
@@ -1397,7 +1484,7 @@ fn fifo_eviction_prunes_dispatch_only_reverse_index_registration() {
     let node_a = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let key_a = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/a.ts"),
-        name: Arc::from("A"),
+        name: verter_type_expr::OwnedStr::from("A"),
     });
     let carrier_a =
         verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
@@ -1419,7 +1506,7 @@ fn fifo_eviction_prunes_dispatch_only_reverse_index_registration() {
     let node_b = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let key_b = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/b.ts"),
-        name: Arc::from("B"),
+        name: verter_type_expr::OwnedStr::from("B"),
     });
     let carrier_b =
         verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
@@ -1467,7 +1554,7 @@ fn fifo_eviction_prunes_dispatch_only_reverse_index_registration() {
     let node_c = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let key_c = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/c.ts"),
-        name: Arc::from("C"),
+        name: verter_type_expr::OwnedStr::from("C"),
     });
     let carrier_c =
         verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
@@ -1599,7 +1686,7 @@ fn alias_resolve_edge_walk_returns_declaration_identity() {
         target,
         OriginEdgeKind::AliasResolve,
         Arc::from(vec![alias_decl].into_boxed_slice()),
-        crate::semantic_query::OriginMeta::AliasName(Arc::from("AliasName")),
+        crate::semantic_query::OriginMeta::AliasName(verter_type_expr::OwnedStr::from("AliasName")),
         dep_sig_for("/w/a.ts", 1),
     );
 
@@ -2063,6 +2150,52 @@ fn an_origin_edge_retains_its_fence_until_its_store_lets_go() {
     );
 }
 
+/// The origin-edge store's own storage — its tables, edge lists, source
+/// lists and pooled fence blocks — is charged while it holds them and
+/// given back as it drops them; the store's teardown restores the baseline.
+#[test]
+fn the_origin_edge_store_charges_its_own_storage_until_it_drops_it() {
+    use verter_session_query::retention::allocation::arc_block_bytes;
+    use verter_session_query::retention::{
+        RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+    const EDGES: usize = 200;
+    const SOURCES: usize = 32;
+    let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+    let store = SemanticGraphStore::with_account(StoreAccount::new(Arc::clone(&account)));
+    // An edge describes a live node: the scope owns every endpoint.
+    let scope = store.enter_node_root_scope();
+    let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let before = store.bookkeeping_storage_charge_bytes();
+    for index in 0..EDGES {
+        let result = store.intern_node(SemanticNodeData::Literal(
+            crate::semantic_query::LiteralValue::String(format!("edge-{index}")),
+        ));
+        store.record_origin_edge(
+            result,
+            OriginEdgeKind::Normalize,
+            Arc::from(vec![source; SOURCES].into_boxed_slice()),
+            crate::semantic_query::OriginMeta::None,
+            dep_sig_for(&format!("/w/edge-{index}.ts"), index as u8),
+        );
+    }
+    let source_lists = EDGES * arc_block_bytes(SOURCES * std::mem::size_of::<SemanticNodeId>());
+    let grown = store.bookkeeping_storage_charge_bytes() - before;
+    assert!(
+        grown >= source_lists,
+        "every edge's source list is charged with the store: {grown} < {source_lists}"
+    );
+    store.invalidate_all();
+    let cleared = store.bookkeeping_storage_charge_bytes();
+    assert!(
+        cleared + source_lists <= before + grown,
+        "cleared edges give their lists back; only retained table capacity stays: {cleared}"
+    );
+    drop(scope);
+    drop(store);
+    assert_eq!(account.snapshot().total_bytes(), 0);
+}
+
 /// ORIGIN-EDGE DEDUP DURABILITY — re-emitting an origin edge whose fence
 /// was driven out of the interning pool's reclamation reach by a flood of
 /// other distinct fences MUST still deduplicate. `record_origin_edge`
@@ -2303,7 +2436,7 @@ fn node_scope_sidecar_populated_at_intern_time_for_every_decl_origin_node() {
     // Non-exempt scope-bound origin (e.g. `build_resolve_decl` /
     // `build_instantiate` result).
     let scope = NodeScopeId::File {
-        canonical_id: Arc::from("/w/decl.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/w/decl.ts"),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: [7u8; 16],
         local_scope: None,
@@ -2328,7 +2461,7 @@ fn node_scope_sidecar_populated_at_intern_time_for_every_decl_origin_node() {
 
     // Multiple non-exempt nodes get independent sidecar slots.
     let scope_b = NodeScopeId::File {
-        canonical_id: Arc::from("/w/other.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/w/other.ts"),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: [8u8; 16],
         local_scope: Some(3),
@@ -2351,13 +2484,13 @@ fn node_scope_returns_origin_not_reader_scope() {
     let store = SemanticGraphStore::new();
     let _scope = store.enter_node_root_scope();
     let scope_a = NodeScopeId::File {
-        canonical_id: Arc::from("/w/a.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/w/a.ts"),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: [1u8; 16],
         local_scope: None,
     };
     let scope_b = NodeScopeId::File {
-        canonical_id: Arc::from("/w/b.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/w/b.ts"),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: [2u8; 16],
         local_scope: None,
@@ -2762,19 +2895,19 @@ fn close_canonical_drops_content_bound_nodes_and_compacted_candidates() {
     let decl_ref_in_consumer = store.intern_node_with_scope(
         SemanticNodeData::DeclRef {
             identity: DeclIdentity {
-                canonical_id: Arc::from("/w/a.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/w/a.ts"),
                 owner: TopLevelOwnerId::ordinary_file(),
                 whole_hash: [1u8; 16],
-                decl_name: Arc::from("T"),
+                decl_name: verter_type_expr::OwnedStr::from("T"),
             },
         },
         scope_c.clone(),
     );
     let placeholder_in_consumer = store.intern_node_with_scope(
         SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
-            canonical_id: Arc::from("/w/a.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/w/a.ts"),
             owner: TopLevelOwnerId::ordinary_file(),
-            name: Arc::from("T"),
+            name: verter_type_expr::OwnedStr::from("T"),
             whole_hash: [1u8; 16],
         }),
         scope_c,
@@ -2998,7 +3131,6 @@ fn display_and_union_by_ordinal_answer_only_inside_a_construction_lane() {
 #[test]
 fn dep_signature_interner_charges_the_rail_blocks_it_keeps_until_swept() {
     use verter_session_query::retention::owned::{ChargeCtx, Owned};
-    use verter_session_query::retention::shared::AliasCharges;
     use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
 
     const RAILS: usize = 64;
@@ -3030,11 +3162,10 @@ fn dep_signature_interner_charges_the_rail_blocks_it_keeps_until_swept() {
     );
 
     // A caller keeping a rail pays for its entries, never its block again.
-    let registry = AliasCharges::new();
     rails[0]
         .owned()
         .expect("a nonempty rail")
-        .pin(ChargeCtx::new(&account, &registry));
+        .pin(ChargeCtx::new(&account));
     let entries = verter_session_query::retention::allocation::heap_block_bytes(
         WIDTH * std::mem::size_of::<crate::semantic_query::DepEntry>(),
     );

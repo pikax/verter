@@ -9,7 +9,10 @@ fn evaluate_deferred_terminates_on_stable_template_literal_fixpoint() {
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let template = graph.intern_node(SemanticNodeData::TemplateLiteral {
-        quasis: Arc::from([Arc::<str>::from("prefix:"), Arc::<str>::from("")]),
+        quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from([
+            verter_type_expr::OwnedStr::from("prefix:"),
+            verter_type_expr::OwnedStr::from(""),
+        ]),
         expressions: verter_type_engine::semantic_query::PayloadArray::from([string]),
     });
 
@@ -97,8 +100,8 @@ fn walk_path_terminates_on_deeply_nested_acyclic_union() {
             other => panic!("ReduceUnion iteration {i} failed: {other:?}"),
         }
     }
-    let empty_path: std::sync::Arc<[verter_type_engine::semantic_query::PathSegment]> =
-        std::sync::Arc::from(Vec::new().into_boxed_slice());
+    let empty_path: verter_type_expr::OwnedSlice<verter_type_engine::semantic_query::PathSegment> =
+        verter_type_expr::OwnedSlice::default();
     let result = dispatch.execute_type_node(
         verter_type_engine::semantic_query::SemanticQueryKey::ProjectPath {
             base: current,
@@ -161,8 +164,8 @@ fn walk_path_terminates_on_self_referential_alias_chain() {
     for _ in 0..64 {
         current = graph.intern_node(SemanticNodeData::Alias(current));
     }
-    let path: std::sync::Arc<[verter_type_engine::semantic_query::PathSegment]> =
-        std::sync::Arc::from(
+    let path: verter_type_expr::OwnedSlice<verter_type_engine::semantic_query::PathSegment> =
+        verter_type_expr::OwnedSlice::from(
             vec![verter_type_engine::semantic_query::PathSegment::Member(
                 verter_type_engine::semantic_query::PropertyKey::identifier("name"),
             )]
@@ -251,7 +254,9 @@ fn relation_guard_returns_unknown_on_cyclic_reentry() {
     let object = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![])));
     let source = graph.intern_node(SemanticNodeData::IndexedAccess {
         object,
-        index: verter_type_engine::semantic_query::IndexKey::String(Arc::from("a")),
+        index: verter_type_engine::semantic_query::IndexKey::String(
+            verter_type_expr::OwnedStr::from("a"),
+        ),
     });
     // Deferred shell on source → Unknown.
     let before = graph.relation_memo_count();
@@ -316,7 +321,7 @@ fn mapped_type_value_substitutes_into_keyspace_even_when_source_is_not_object() 
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
     let value_expr = parameter_node;
     let mapper = MapperKey {
@@ -427,7 +432,7 @@ fn mapped_type_value_falls_back_to_substituted_shell_when_evaluation_yields_opaq
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
     let value_expr = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: source,
@@ -532,7 +537,7 @@ fn build_mapped_type_produces_canonical_mapped_shell_on_unresolvable_enumeration
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     // Key space is also a TypeParam — not enumerable.
     let key_space = graph.intern_node(SemanticNodeData::TypeParam {
@@ -540,7 +545,7 @@ fn build_mapped_type_produces_canonical_mapped_shell_on_unresolvable_enumeration
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
     // Value expression: opaque unknown node (doesn't matter for this
     // test — the shell is all we care about).
@@ -551,7 +556,7 @@ fn build_mapped_type_produces_canonical_mapped_shell_on_unresolvable_enumeration
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
     let mapper = MapperKey {
         over_type_variable: false,
@@ -734,7 +739,7 @@ fn build_key_of_over_conditional_distributes_into_branches() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: std::sync::Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
 
     let true_branch = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
@@ -811,14 +816,14 @@ fn mapped_type_with_as_clause_symbolic_remapping_defers_whole_shape_preserving_n
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let key_space = graph.intern_node(SemanticNodeData::TypeParam {
         decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
     let value_expr = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     // name_remap references another symbolic TypeParam — cannot be
@@ -828,7 +833,7 @@ fn mapped_type_with_as_clause_symbolic_remapping_defers_whole_shape_preserving_n
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("R"),
+        display_name: verter_type_expr::OwnedStr::from("R"),
     });
 
     let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
@@ -836,7 +841,7 @@ fn mapped_type_with_as_clause_symbolic_remapping_defers_whole_shape_preserving_n
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
     let mapper = MapperKey {
         over_type_variable: false,
@@ -1461,11 +1466,15 @@ fn relation_unknown_is_never_warm_admitted_and_decided_entries_replay() {
     ])));
     let source = graph.intern_node(SemanticNodeData::IndexedAccess {
         object,
-        index: verter_type_engine::semantic_query::IndexKey::String(Arc::from("a")),
+        index: verter_type_engine::semantic_query::IndexKey::String(
+            verter_type_expr::OwnedStr::from("a"),
+        ),
     });
     let target = graph.intern_node(SemanticNodeData::IndexedAccess {
         object,
-        index: verter_type_engine::semantic_query::IndexKey::String(Arc::from("b")),
+        index: verter_type_engine::semantic_query::IndexKey::String(
+            verter_type_expr::OwnedStr::from("b"),
+        ),
     });
 
     let before = graph.relation_memo_count();
@@ -1495,11 +1504,15 @@ fn relation_unknown_is_never_warm_admitted_and_decided_entries_replay() {
     // NEVER produce for this pair), then read through the warm path.
     let seed_source = graph.intern_node(SemanticNodeData::IndexedAccess {
         object,
-        index: verter_type_engine::semantic_query::IndexKey::String(Arc::from("c")),
+        index: verter_type_engine::semantic_query::IndexKey::String(
+            verter_type_expr::OwnedStr::from("c"),
+        ),
     });
     let seed_target = graph.intern_node(SemanticNodeData::IndexedAccess {
         object,
-        index: verter_type_engine::semantic_query::IndexKey::String(Arc::from("d")),
+        index: verter_type_engine::semantic_query::IndexKey::String(
+            verter_type_expr::OwnedStr::from("d"),
+        ),
     });
     let seed_key = dispatch.relate_key_for(seed_source, seed_target);
     // Empty carrier + empty self-roots validate trivially; stamp the live
@@ -1575,9 +1588,9 @@ fn relation_memo_fences_on_transitive_imported_fact_edit() {
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let source = graph.intern_node(SemanticNodeData::Opaque(
         verter_type_engine::semantic_query::QueryError::DeclPlaceholder {
-            canonical_id: Arc::from("/w/dep.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/w/dep.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            name: Arc::from("Dep"),
+            name: verter_type_expr::OwnedStr::from("Dep"),
             whole_hash: whole_hash_v1,
         },
     ));
@@ -2828,8 +2841,9 @@ fn migrate_owner_engine_solve_scoped_preserves_env_and_name_resolution() {
         "shallow_lower_type_expr must accept the `env` map"
     );
     assert!(
-        lower_src
-            .contains("name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>"),
+        lower_src.contains(
+            "name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>"
+        ),
         "shallow_lower_type_expr must accept the `name_resolution` map"
     );
 }
@@ -2849,7 +2863,7 @@ fn migrate_owner_engine_project_expr_surface_as_type_expr_preserves_env() {
     // SemanticQueryKey admits ProjectPath with `ProjectionMode::Expanded`.
     let key = verter_type_engine::semantic_query::SemanticQueryKey::ProjectPath {
         base: verter_type_engine::semantic_query::SemanticNodeId(0),
-        path: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::default(),
         context: verter_type_engine::semantic_query::ProjectionReductionContext::published(mode),
     };
     match key {
@@ -2979,8 +2993,8 @@ fn type_eval_evaluate_removal_preserves_semantic_output() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let empty_path: std::sync::Arc<[verter_type_engine::semantic_query::PathSegment]> =
-        std::sync::Arc::from(Vec::new().into_boxed_slice());
+    let empty_path: verter_type_expr::OwnedSlice<verter_type_engine::semantic_query::PathSegment> =
+        verter_type_expr::OwnedSlice::default();
     let result = dispatch.execute_type_node(
         verter_type_engine::semantic_query::SemanticQueryKey::ProjectPath {
             base: string,
@@ -3015,8 +3029,8 @@ fn type_expand_expand_object_shape_removal_preserves_shape_output() {
     let object = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
         required_member("label", string),
     ])));
-    let empty_path: std::sync::Arc<[verter_type_engine::semantic_query::PathSegment]> =
-        std::sync::Arc::from(Vec::new().into_boxed_slice());
+    let empty_path: verter_type_expr::OwnedSlice<verter_type_engine::semantic_query::PathSegment> =
+        verter_type_expr::OwnedSlice::default();
     let result = dispatch.execute_type_node(
         verter_type_engine::semantic_query::SemanticQueryKey::ProjectPath {
             base: object,
@@ -3372,7 +3386,7 @@ fn ax_hybrid_mapped_type_carrier_stops_under_structural_transit() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
     let value_expr = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: source,
@@ -3487,7 +3501,7 @@ fn ax_hybrid_userland_mypick_follows_same_carrier_stop_as_builtin_pick() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("P"),
+        display_name: verter_type_expr::OwnedStr::from("P"),
     });
     let value_expr = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: source,
@@ -3860,17 +3874,18 @@ fn coinductive_positive_scc_publishes_assignable() {
 }
 
 /// A `semantic-observe` build captures the cyclic discharge's explanation
-/// request-owned, and the explanation LEASES its operands: after the memo
-/// evicts the judgement and a document close tombstones the operand slots,
-/// the captured explanation still reads the operands' payloads. The answer
-/// and bindings are the uncaptured ones, and a warm re-ask captures nothing.
+/// request-owned, and the explanation ROOTS its operands: after the memo
+/// evicts the judgement and a document close evicts every cache owner of the
+/// closed content, the captured explanation still reads the operands'
+/// payloads, because it is now one of their owners. The answer and bindings
+/// are the uncaptured ones, and a warm re-ask captures nothing.
 ///
-/// DISCRIMINATES an id-only explanation (its operands would read the
-/// released `Opaque(Miss)` placeholder after the close) and a store-owned
-/// one (the close would drop it).
+/// DISCRIMINATES an id-only explanation (its operands would read nothing
+/// once the close evicted their owners) and a store-owned one (the close
+/// would drop it).
 #[cfg(feature = "semantic-observe")]
 #[test]
-fn captured_cycle_explanation_leases_operands_past_eviction_and_release() {
+fn captured_cycle_explanation_leases_operands_past_eviction_and_close() {
     use verter_type_engine::project_semantic_dispatch::relation_explanation::RelationExplanation;
 
     let host = host_for_relation_tests();
@@ -3895,7 +3910,7 @@ fn captured_cycle_explanation_leases_operands_past_eviction_and_release() {
         .iter()
         .find_map(|explanation| match explanation {
             RelationExplanation::CoinductiveCycle { pair, members }
-                if pair.source.id == a && pair.target.id == b =>
+                if pair.source.id() == a && pair.target.id() == b =>
             {
                 Some((pair.clone(), Arc::clone(members)))
             }
@@ -3907,16 +3922,16 @@ fn captured_cycle_explanation_leases_operands_past_eviction_and_release() {
     assert!(
         members
             .iter()
-            .any(|member| member.source.id == a && member.target.id == b),
+            .any(|member| member.source.id() == a && member.target.id() == b),
         "the cycle names every co-discharged pair, the root included: {members:?}"
     );
     let leased_source = pair
         .source
-        .payload
-        .clone()
+        .payload()
+        .cloned()
         .expect("the source operand is leased");
     assert!(
-        !matches!(leased_source.as_ref(), SemanticNodeData::Opaque(_)),
+        !matches!(&*leased_source, SemanticNodeData::Opaque(_)),
         "the lease holds the operand's real payload, got {leased_source:?}"
     );
 
@@ -3930,35 +3945,34 @@ fn captured_cycle_explanation_leases_operands_past_eviction_and_release() {
     let key = dispatch.relate_key_for(a, b);
     assert!(graph
         .get_relation_payload(&host, &key)
-        .map(|served| served.value)
+        .map(|served| served.value().clone())
         .is_some());
-    graph.release_canonical(canonical);
+    graph.close_canonical(canonical);
     assert!(
         graph
             .get_relation_payload(&host, &key)
-            .map(|served| served.value)
+            .map(|served| served.value().clone())
             .is_none(),
         "the close evicts the published judgement"
     );
-    assert!(!graph.node_is_live(a), "the close tombstones the operand");
     assert!(
-        matches!(
-            graph.node_data(a).as_deref(),
-            Some(SemanticNodeData::Opaque(_))
-        ),
-        "the store now reads the released placeholder"
+        graph.node_is_live(a),
+        "the explanation is an owner the close cannot revoke"
     );
-    assert_eq!(
-        pair.source.payload.as_deref(),
-        Some(leased_source.as_ref()),
+    assert!(
+        pair.source.payload().is_some_and(|payload| {
+            verter_type_engine::semantic_query_memo::node_data_lease::NodeDataLease::ptr_eq(
+                payload,
+                &leased_source,
+            )
+        }),
         "the captured explanation still reads the leased operand"
     );
     assert!(
         members.iter().all(|member| member
             .source
-            .payload
-            .as_deref()
-            .is_some_and(|payload| !matches!(payload, SemanticNodeData::Opaque(_)))),
+            .payload()
+            .is_some_and(|payload| !matches!(&**payload, SemanticNodeData::Opaque(_)))),
         "every cycle member keeps its leased source operand"
     );
 }
@@ -4098,7 +4112,7 @@ fn binding_session_close_publishes_root_only_with_fixed_bindings() {
         required_member("value", number),
     ])));
     let infer_v = graph.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("V"),
+        name: verter_type_expr::OwnedStr::from("V"),
         binder: graph.alloc_infer_binder_id(),
         constraint: None,
     });
@@ -4172,7 +4186,7 @@ fn binding_session_abandoned_by_budget_publishes_nothing() {
         required_member("value", number),
     ])));
     let infer_v = graph.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("V"),
+        name: verter_type_expr::OwnedStr::from("V"),
         binder: graph.alloc_infer_binder_id(),
         constraint: None,
     });
@@ -4882,7 +4896,7 @@ fn contravariant_infer_candidates_intersect_not_union() {
     let never_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
     let infer_u_binder = graph.alloc_infer_binder_id();
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("U"),
+        name: verter_type_expr::OwnedStr::from("U"),
         binder: infer_u_binder.clone(),
         constraint: None,
     });
@@ -5019,7 +5033,7 @@ fn infer_substitution_does_not_capture_function_shadowed_binder() {
     let string_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let never_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("U"),
+        name: verter_type_expr::OwnedStr::from("U"),
         binder: graph.alloc_infer_binder_id(),
         constraint: None,
     });
@@ -5030,7 +5044,7 @@ fn infer_substitution_does_not_capture_function_shadowed_binder() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("U"),
+        display_name: verter_type_expr::OwnedStr::from("U"),
     });
     // true branch: `<U>() => U`.
     let generic_fn = graph.intern_node(SemanticNodeData::Signature {
@@ -5045,7 +5059,7 @@ fn infer_substitution_does_not_capture_function_shadowed_binder() {
         ),
         type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
             vec![TypeParamDecl {
-                name: Arc::from("U"),
+                name: verter_type_expr::OwnedStr::from("U"),
                 param: inner_u,
                 constraint: None,
                 default: None,
@@ -5120,7 +5134,7 @@ fn mutable_array_infer_element_binds_covariantly() {
     let string_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let never_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("U"),
+        name: verter_type_expr::OwnedStr::from("U"),
         binder: graph.alloc_infer_binder_id(),
         constraint: None,
     });
@@ -5209,7 +5223,7 @@ fn nested_same_name_infer_binder_is_not_captured_by_outer_substitution() {
     let number_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let never_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("U"),
+        name: verter_type_expr::OwnedStr::from("U"),
         binder: graph.alloc_infer_binder_id(),
         constraint: None,
     });
@@ -5252,7 +5266,7 @@ fn nested_same_name_infer_binder_is_not_captured_by_outer_substitution() {
     // branches: `string extends infer U ? (number extends infer V ? U :
     // never) : never` → `string`.
     let infer_v = graph.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("V"),
+        name: verter_type_expr::OwnedStr::from("V"),
         binder: graph.alloc_infer_binder_id(),
         constraint: None,
     });
@@ -5367,18 +5381,18 @@ fn expanded_distribution_treats_infer_ref_check_as_open() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let infer_u_binder = graph.alloc_infer_binder_id();
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("U"),
+        name: verter_type_expr::OwnedStr::from("U"),
         binder: infer_u_binder.clone(),
         constraint: None,
     });
     // The post-activation lowering shape: the inner check `U` is an
     // `InferRef` REFERENCE to the outer binder.
     let infer_ref_u = graph.intern_node(SemanticNodeData::InferRef {
-        name: Arc::from("U"),
+        name: verter_type_expr::OwnedStr::from("U"),
         binder: infer_u_binder,
     });
     // The branch arms are REAL declaration placeholders so the terminal
@@ -5401,9 +5415,9 @@ fn expanded_distribution_treats_infer_ref_check_as_open() {
     let placeholder = |name: &str| {
         graph.intern_node(SemanticNodeData::Opaque(
             verter_type_engine::semantic_query::QueryError::DeclPlaceholder {
-                canonical_id: Arc::from(canonical),
+                canonical_id: verter_type_expr::OwnedStr::from(canonical),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                name: Arc::from(name),
+                name: verter_type_expr::OwnedStr::from(name),
                 whole_hash,
             },
         ))
@@ -5432,7 +5446,7 @@ fn expanded_distribution_treats_infer_ref_check_as_open() {
 
     let projected = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: outer,
-        path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -5492,7 +5506,7 @@ fn mapped_extends_infer_declaration_shadows_outer_binder() {
     let number_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let never_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("U"),
+        name: verter_type_expr::OwnedStr::from("U"),
         binder: graph.alloc_infer_binder_id(),
         constraint: None,
     });
@@ -5504,7 +5518,7 @@ fn mapped_extends_infer_declaration_shadows_outer_binder() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
     // `{ [K in "a"]: infer U }` — the mapped VALUE declares `infer U`.
     let mapped = graph.intern_node(SemanticNodeData::Mapped {
@@ -5588,7 +5602,7 @@ fn mapped_own_key_param_shadows_same_named_outer_infer_binder() {
     let string_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let never_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
     let infer_k = graph.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("K"),
+        name: verter_type_expr::OwnedStr::from("K"),
         binder: graph.alloc_infer_binder_id(),
         constraint: None,
     });
@@ -5602,7 +5616,7 @@ fn mapped_own_key_param_shadows_same_named_outer_infer_binder() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
     // `{ [K in "a"]: K }` — the value IS the mapped binder occurrence.
     let mapped = graph.intern_node(SemanticNodeData::Mapped {
@@ -5696,14 +5710,14 @@ fn constructor_type_substitutes_bound_infer_inside_signature() {
     let never_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
     let infer_t_binder = graph.alloc_infer_binder_id();
     let infer_t = graph.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("T"),
+        name: verter_type_expr::OwnedStr::from("T"),
         binder: infer_t_binder.clone(),
         constraint: None,
     });
     // References inside the true branch bind as `InferRef` (the producer
     // contract).
     let t_ref = graph.intern_node(SemanticNodeData::InferRef {
-        name: Arc::from("T"),
+        name: verter_type_expr::OwnedStr::from("T"),
         binder: infer_t_binder,
     });
     let signature = graph.intern_node(SemanticNodeData::Signature {
@@ -5781,12 +5795,12 @@ fn constructor_type_relates_and_binds_infer_return() {
     let bool_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
     let infer_r_binder = graph.alloc_infer_binder_id();
     let infer_r = graph.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("R"),
+        name: verter_type_expr::OwnedStr::from("R"),
         binder: infer_r_binder.clone(),
         constraint: None,
     });
     let r_ref = graph.intern_node(SemanticNodeData::InferRef {
-        name: Arc::from("R"),
+        name: verter_type_expr::OwnedStr::from("R"),
         binder: infer_r_binder,
     });
     let ctor_of = |ret: verter_type_engine::semantic_query::SemanticNodeId| {
@@ -5873,7 +5887,7 @@ fn mapped_constructor_value_substitutes_per_key() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
     let signature = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
@@ -5968,12 +5982,12 @@ fn constructor_pattern_infer_declaration_shadows_outer_binder() {
     let number_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let infer_p_binder = graph.alloc_infer_binder_id();
     let infer_p = graph.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("P"),
+        name: verter_type_expr::OwnedStr::from("P"),
         binder: infer_p_binder.clone(),
         constraint: None,
     });
     let p_ref = graph.intern_node(SemanticNodeData::InferRef {
-        name: Arc::from("P"),
+        name: verter_type_expr::OwnedStr::from("P"),
         binder: infer_p_binder,
     });
     // Inner extends: `new (x: infer P) => any`.
@@ -6210,9 +6224,9 @@ fn signature_utilities_select_by_kind_over_direct_constructor() {
     let run = |name: &str| {
         let anchor =
             verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
-                Arc::from("/w/lib.ts"),
+                verter_type_expr::OwnedStr::from("/w/lib.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from(name),
+                verter_type_expr::OwnedStr::from(name),
             );
         dispatch.execute_type_node(SemanticQueryKey::Instantiate(
             verter_type_engine::semantic_query::InstantiateKey::new(
@@ -6309,7 +6323,7 @@ fn signature_kind_semantics_and_cross_producer_parity() {
     // against the direct construct pattern `new () => infer R` binds
     // R := number (not merely the correct boolean).
     let infer_r = graph.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("R"),
+        name: verter_type_expr::OwnedStr::from("R"),
         binder: graph.alloc_infer_binder_id(),
         constraint: None,
     });
@@ -6465,7 +6479,7 @@ pub(crate) mod fresh_excess_property_checking {
             param_index: 0,
             constraint: None,
             default: None,
-            display_name: Arc::from("T"),
+            display_name: verter_type_expr::OwnedStr::from("T"),
         });
         let arm = spread_program(operand, graph);
 
@@ -6492,7 +6506,7 @@ pub(crate) mod fresh_excess_property_checking {
             param_index: 0,
             constraint: None,
             default: None,
-            display_name: Arc::from("T"),
+            display_name: verter_type_expr::OwnedStr::from("T"),
         });
         let source =
             graph.intern_node(SemanticNodeData::Object(empty_surface(vec![fresh_member(
@@ -6780,7 +6794,7 @@ pub(crate) mod fresh_excess_property_checking {
             .shallow_file_state("/excess_object_skip.ts")
             .expect("fixture must index");
         let scope = NodeScopeId::File {
-            canonical_id: Arc::from("/excess_object_skip.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/excess_object_skip.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: shallow.whole_hash,
             local_scope: None,
@@ -6819,10 +6833,10 @@ pub(crate) mod fresh_excess_property_checking {
         // skip: never an excess rejection.
         let builtin_object = graph.intern_node(SemanticNodeData::DeclRef {
             identity: verter_type_engine::semantic_query::DeclIdentity {
-                canonical_id: Arc::from("__builtin__"),
+                canonical_id: verter_type_expr::OwnedStr::from("__builtin__"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: verter_type_engine::semantic_query::HashValue::default(),
-                decl_name: Arc::from("Object"),
+                decl_name: verter_type_expr::OwnedStr::from("Object"),
             },
         });
         assert!(
@@ -7040,10 +7054,10 @@ pub(crate) mod fresh_excess_property_checking {
         // value check against it is undecidable.
         let unresolved = graph.intern_node(SemanticNodeData::DeclRef {
             identity: verter_type_engine::semantic_query::DeclIdentity {
-                canonical_id: Arc::from("/missing-file.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/missing-file.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: verter_type_engine::semantic_query::HashValue::default(),
-                decl_name: Arc::from("MissingType"),
+                decl_name: verter_type_expr::OwnedStr::from("MissingType"),
             },
         });
 
@@ -7120,7 +7134,7 @@ pub(crate) mod fresh_excess_property_checking {
             .shallow_file_state("/excess_nested_exhaustion.ts")
             .expect("fixture must index");
         let scope = NodeScopeId::File {
-            canonical_id: Arc::from("/excess_nested_exhaustion.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/excess_nested_exhaustion.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: shallow.whole_hash,
             local_scope: None,
@@ -7280,7 +7294,7 @@ pub(crate) mod fresh_excess_property_checking {
             .shallow_file_state("/excess_named_target.ts")
             .expect("fixture must index");
         let scope = NodeScopeId::File {
-            canonical_id: Arc::from("/excess_named_target.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/excess_named_target.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: shallow.whole_hash,
             local_scope: None,
@@ -7332,10 +7346,10 @@ pub(crate) mod fresh_excess_property_checking {
         let one = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(1.0)));
         let unresolvable_kind = graph.intern_node(SemanticNodeData::DeclRef {
             identity: verter_type_engine::semantic_query::DeclIdentity {
-                canonical_id: Arc::from("/missing-kind.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/missing-kind.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: verter_type_engine::semantic_query::HashValue::default(),
-                decl_name: Arc::from("MissingKind"),
+                decl_name: verter_type_expr::OwnedStr::from("MissingKind"),
             },
         });
 

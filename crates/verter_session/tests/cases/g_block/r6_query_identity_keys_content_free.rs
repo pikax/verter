@@ -70,9 +70,9 @@ fn r6_semantic_query_key_instantiate_base_is_content_free_decl_key() {
     let key = verter_session::for_tests::instantiate_key_for_tests(
         &host,
         ResolvedDeclSlotIdentity::type_slot_unscoped(
-            Arc::from("/r6_check.ts"),
+            verter_type_expr::OwnedStr::from("/r6_check.ts"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from("Foo"),
+            verter_type_expr::OwnedStr::from("Foo"),
         ),
         Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
         ProjectionReductionContext::published(ProjectionMode::Expanded),

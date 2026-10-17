@@ -287,7 +287,7 @@ fn synthetic_binding_identity_drops_value_node_and_round_trips_provenance() {
     let id = SyntheticBindingId::from_carrier_key(&carrier);
     assert_eq!(id.scope_canonical_id, carrier.scope_canonical_id);
     assert_eq!(id.surface_kind, carrier.surface_kind);
-    assert_eq!(id.slot_name, carrier.slot_name);
+    assert_eq!(id.slot_name.as_deref(), carrier.slot_name.as_deref());
     assert_eq!(id.binding_name, carrier.binding_name);
 
     // Two carriers differing ONLY in `value_node` project to the SAME

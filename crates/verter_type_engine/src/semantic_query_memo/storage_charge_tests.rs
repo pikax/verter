@@ -149,9 +149,12 @@ fn graph_storage_charges_payload_heap_once_per_shared_allocation() {
     let account = account();
     let harness = GraphFixture::with_account(StoreAccount::new(Arc::clone(&account)));
     let pinned = || account.snapshot().pinned_bytes;
-    let quasi: Arc<str> = Arc::from("q".repeat(TEXT));
-    let quasis: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&quasi)]);
     harness.run(|store| {
+        // The template's quasi list is an owned allocation: every payload
+        // naming it shares its one charge.
+        let quasis = verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from(
+            "q".repeat(TEXT),
+        )]);
         let small = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(
             "small".into(),
         )));
@@ -167,7 +170,7 @@ fn graph_storage_charges_payload_heap_once_per_shared_allocation() {
 
         let before = pinned();
         let _first = store.intern_node(SemanticNodeData::TemplateLiteral {
-            quasis: Arc::clone(&quasis),
+            quasis: quasis.clone(),
             expressions: PayloadArray::from(Vec::new()),
         });
         assert!(
@@ -176,9 +179,10 @@ fn graph_storage_charges_payload_heap_once_per_shared_allocation() {
         );
         let before = pinned();
         let _second = store.intern_node(SemanticNodeData::TemplateLiteral {
-            quasis: Arc::clone(&quasis),
+            quasis: quasis.clone(),
             expressions: PayloadArray::from(vec![small]),
         });
+        drop(quasis);
         assert!(
             pinned() - before < TEXT / 2,
             "a second payload sharing the quasis is not charged for them again: {}",
@@ -193,4 +197,95 @@ fn graph_storage_charges_payload_heap_once_per_shared_allocation() {
     );
     drop(harness);
     assert_eq!(account.snapshot().total_bytes(), 0);
+}
+
+/// A payload a reader still holds when its last owner destroys its slot
+/// stays allocated, so it stays charged with graph storage; the reader's
+/// drop releases it in the same step, with no later arena operation, and
+/// the store's teardown restores the baseline.
+#[test]
+fn a_released_payload_a_reader_still_holds_stays_charged_until_the_reader_lets_go() {
+    use crate::semantic_query::NodeScopeId;
+    const TEXT: usize = 1 << 20;
+    const FILE: &str = "/held.ts";
+    let account = account();
+    let store = SemanticGraphStore::with_account(StoreAccount::new(Arc::clone(&account)));
+    let scope = |canonical: &str| NodeScopeId::File {
+        canonical_id: verter_type_expr::OwnedStr::from(canonical),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        whole_hash: [0; 16],
+        local_scope: None,
+    };
+    let owner = store.enter_node_root_scope();
+    let node = store.intern_node_with_scope(
+        SemanticNodeData::Literal(LiteralValue::String("h".repeat(TEXT))),
+        scope(FILE),
+    );
+    let held = store
+        .arena
+        .core
+        .live_payload(node)
+        .expect("a live node reads");
+    let charged = store.graph_storage_charge_for_tests();
+    assert!(charged >= TEXT);
+    drop(owner);
+    assert!(!store.arena.is_live(node));
+    assert!(
+        store.graph_storage_charge_for_tests() >= TEXT,
+        "the held payload is still allocated, so still charged"
+    );
+    drop(held);
+    assert!(
+        store.graph_storage_charge_for_tests() < TEXT,
+        "the reader's drop releases the payload's charge at once"
+    );
+    drop(store);
+    assert_eq!(account.snapshot().total_bytes(), 0);
+}
+
+/// A payload a reader holds past the store's teardown stays charged — and
+/// only it: the rest of the graph's storage goes with the store and the
+/// last owner of its nodes, and the reader's drop restores the baseline, in
+/// either release order.
+#[test]
+fn a_payload_a_reader_holds_past_the_store_stays_charged_until_its_own_drop() {
+    const TEXT: usize = 1 << 20;
+    const OTHER: usize = 1 << 21;
+    for reader_first in [false, true] {
+        let account = account();
+        let store = SemanticGraphStore::with_account(StoreAccount::new(Arc::clone(&account)));
+        let owner = store.enter_node_root_scope();
+        let node = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "h".repeat(TEXT),
+        )));
+        let _other = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "o".repeat(OTHER),
+        )));
+        let held = store
+            .arena
+            .core
+            .live_payload(node)
+            .expect("a live node reads");
+        if reader_first {
+            drop(held);
+            assert!(store.graph_storage_charge_for_tests() >= TEXT + OTHER);
+            drop(store);
+            drop(owner);
+            assert_eq!(account.snapshot().total_bytes(), 0);
+            continue;
+        }
+        drop(store);
+        drop(owner);
+        let charged = account.snapshot().total_bytes();
+        assert!(
+            (TEXT..OTHER).contains(&charged),
+            "only the held payload stays charged after the store's teardown: {charged}"
+        );
+        drop(held);
+        assert_eq!(
+            account.snapshot().total_bytes(),
+            0,
+            "the reader's drop restores the baseline"
+        );
+    }
 }

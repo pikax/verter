@@ -435,17 +435,24 @@ impl DemandCostReceipt {
     }
 
     /// The bytes this receipt keeps alive of its own: its block, its
-    /// prerequisite list's backing and its own identity. A prerequisite's
-    /// identity lives in the prerequisite's receipt, which charges it.
-    fn retained_bytes(&self) -> usize {
+    /// prerequisite list's backing and its own identity, with the owned
+    /// names its identity reaches (each charged by its own cell, held by the
+    /// receipt). A prerequisite's identity lives in the prerequisite's
+    /// receipt, which charges it.
+    fn retained_footprint(&self) -> verter_session_query::retention::Footprint {
         use verter_session_query::retention::allocation::{
             arc_block_bytes, heap_block_bytes, AliasSet,
         };
-        arc_block_bytes(std::mem::size_of::<Self>())
+        let mut aliases = AliasSet::new();
+        let bytes = arc_block_bytes(std::mem::size_of::<Self>())
             + heap_block_bytes(std::mem::size_of_val::<[CostDependency]>(
                 &self.prerequisites,
             ))
-            + self.identity.owned_heap_bytes(&mut AliasSet::new())
+            + self.identity.owned_heap_bytes(&mut aliases);
+        verter_session_query::retention::Footprint {
+            bytes,
+            handles: aliases.take_handles(),
+        }
     }
 
     /// Reserve this receipt, and every receipt of its closure not yet
@@ -466,6 +473,28 @@ impl DemandCostReceipt {
         if self.retention.get().is_some() {
             return Ok(());
         }
+        // Most receipts are retained after every receipt they consumed
+        // already is: reserve the receipt alone, without walking.
+        let mut closure_reserved = true;
+        for dependency in self.prerequisites.iter() {
+            if dependency.receipt.retention.get().is_none() {
+                closure_reserved = false;
+                break;
+            }
+        }
+        if closure_reserved {
+            let footprint = self.retained_footprint();
+            return match account.reserve(ChargeClass::Retained, footprint.bytes) {
+                RetentionAdmission::Admitted(charge) => {
+                    drop(self.retention.set(footprint.handles.retained_with(
+                        charge,
+                        verter_session_query::retention::owned::ChargeCtx::new(account),
+                    )?));
+                    Ok(())
+                }
+                RetentionAdmission::Refused(refusal) => Err(refusal),
+            };
+        }
         let mut visited: FxHashSet<*const Self> = FxHashSet::default();
         let mut stack: Vec<(&Self, bool)> = vec![(self.as_ref(), false)];
         while let Some((next, expanded)) = stack.pop() {
@@ -473,10 +502,16 @@ impl DemandCostReceipt {
                 continue;
             }
             if expanded {
-                match account.reserve(ChargeClass::Retained, next.retained_bytes()) {
+                let footprint = next.retained_footprint();
+                match account.reserve(ChargeClass::Retained, footprint.bytes) {
                     // A concurrent store that reserved it first keeps its
                     // charge; this one releases on drop.
-                    RetentionAdmission::Admitted(charge) => drop(next.retention.set(charge)),
+                    RetentionAdmission::Admitted(charge) => {
+                        drop(next.retention.set(footprint.handles.retained_with(
+                            charge,
+                            verter_session_query::retention::owned::ChargeCtx::new(account),
+                        )?))
+                    }
                     RetentionAdmission::Refused(refusal) => return Err(refusal),
                 }
                 continue;

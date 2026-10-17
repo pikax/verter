@@ -185,7 +185,11 @@ pub struct ImportedRegistryEntry {
     pub validated_at_generation: u64,
 }
 
-pub type ImportedRegistryKey = (Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>);
+pub type ImportedRegistryKey = (
+    verter_type_expr::OwnedStr,
+    verter_type_expr::TopLevelOwnerId,
+    verter_type_expr::OwnedStr,
+);
 
 /// The value the imported-registry store holds per candidate.
 pub type ImportedRegistryValue = Option<Arc<ResolvedImportedRegistrySymbol>>;
@@ -301,7 +305,7 @@ impl ImportedRegistryDb {
     /// publish path. NOT for use from production code.
     #[cfg(any(test, feature = "test-support"))]
     pub fn insert_for_test(&self, key: ImportedRegistryKey, entry: Arc<ImportedRegistryEntry>) {
-        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&key.0)]);
+        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(key.0.as_str())]);
         let signature = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::clone(
             &entry.fact_dep_signature,
         ));
@@ -322,9 +326,9 @@ impl ImportedRegistryDb {
     #[cfg(any(test, feature = "test-support"))]
     pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
         let key: ImportedRegistryKey = (
-            Arc::from(marker),
+            verter_type_expr::OwnedStr::from(marker),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from("synthetic"),
+            verter_type_expr::OwnedStr::from("synthetic"),
         );
         let entry = Arc::new(ImportedRegistryEntry {
             value: None,
@@ -388,7 +392,11 @@ impl crate::cache_schema::CacheSchemaVersioned for ImportedRegistryDb {
 // 2. DeclarationLookupDb — `(canonical, owner, name) → ResolvedTypeDeclaration`
 // ===========================================================================
 
-pub type DeclarationLookupKey = (Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>);
+pub type DeclarationLookupKey = (
+    verter_type_expr::OwnedStr,
+    verter_type_expr::TopLevelOwnerId,
+    verter_type_expr::OwnedStr,
+);
 
 pub struct DeclarationLookupDb {
     entries: DashMap<DeclarationLookupKey, Arc<CacheEntry<Arc<ResolvedTypeDeclaration>>>>,
@@ -479,7 +487,11 @@ impl Default for DeclarationLookupDb {
 // 3. ResolvabilityDb — `(canonical, owner, name) → bool`
 // ===========================================================================
 
-pub type ResolvabilityKey = (Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>);
+pub type ResolvabilityKey = (
+    verter_type_expr::OwnedStr,
+    verter_type_expr::TopLevelOwnerId,
+    verter_type_expr::OwnedStr,
+);
 
 pub struct ResolvabilityDb {
     entries: DashMap<ResolvabilityKey, Arc<CacheEntry<bool>>>,
@@ -580,7 +592,11 @@ impl Default for ResolvabilityDb {
 // only, not a key or validity-oracle change.
 // ===========================================================================
 
-pub type OwnerCollectionKey = (Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>);
+pub type OwnerCollectionKey = (
+    verter_type_expr::OwnedStr,
+    verter_type_expr::TopLevelOwnerId,
+    verter_type_expr::OwnedStr,
+);
 
 pub struct OwnerCollectionDb {
     entries: DashMap<
@@ -686,7 +702,7 @@ impl Default for OwnerCollectionDb {
 //                               // (scope + sealed MemberShapeNodeSubject) |
 //                               // SyntheticBinding (content-free id)
 //       demand: ShapeDemand {
-//           path: Arc<[PathSegment]>,
+//           path: verter_type_expr::OwnedSlice<crate::semantic_query::PathSegment>,
 //           terminal_context: ProjectionReductionContext,  // mode + demand
 //           key_filter: KeyFilter,
 //           surface: PublishedSurfaceKind,
@@ -926,7 +942,7 @@ impl ShapeSubject {
     /// Canonical scope id this subject is rooted in. Used for
     /// strict self-root warm-read validation and per-canonical
     /// invalidation.
-    pub(crate) fn scope_canonical(&self) -> &Arc<str> {
+    pub(crate) fn scope_canonical(&self) -> &str {
         match self {
             ShapeSubject::MemberValueNode { scope, .. } => scope,
             ShapeSubject::SyntheticBinding { id, .. } => &id.scope_canonical_id,
@@ -953,7 +969,7 @@ pub struct ShapeDemand {
     /// Path segments narrowing the requested shape. Empty path =
     /// whole subject. Non-empty path = path-precise demand: projectors
     /// narrow this at the publication boundary.
-    pub(crate) path: Arc<[crate::semantic_query::PathSegment]>,
+    pub(crate) path: verter_type_expr::OwnedSlice<crate::semantic_query::PathSegment>,
     /// Terminal-hop projection / reduction context. `(mode, demand)`
     /// keyed disjointly so cache slots split per the disjoint-slot
     /// rule ("ShapeCacheKey must carry the complete demand/context,
@@ -986,7 +1002,9 @@ impl ShapeDemand {
         terminal_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Self {
         Self {
-            path: Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::from(
+                Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice(),
+            ),
             terminal_context,
             key_filter: KeyFilter::All,
             surface: PublishedSurfaceKind::Internal {
@@ -1031,7 +1049,7 @@ impl ShapeCacheKey {
     /// Canonical scope id this key is rooted in — the public accessor
     /// sibling modules use now that `subject` is module-private. Delegates
     /// to [`ShapeSubject::scope_canonical`].
-    pub fn scope_canonical(&self) -> &Arc<str> {
+    pub fn scope_canonical(&self) -> &str {
         self.subject.scope_canonical()
     }
 
@@ -1225,7 +1243,7 @@ impl ShapeCacheDb {
             .entries
             .iter()
             .filter_map(|entry| {
-                if entry.key().subject.scope_canonical().as_ref() == canonical_id {
+                if entry.key().subject.scope_canonical() == canonical_id {
                     Some(entry.key().clone())
                 } else {
                     None
@@ -1271,10 +1289,10 @@ impl ShapeCacheDb {
         // subject requires a lowered node).
         let key = ShapeCacheKey::synthetic_binding_whole(
             crate::semantic_query::SyntheticBindingId {
-                scope_canonical_id: Arc::from(marker),
+                scope_canonical_id: verter_type_expr::OwnedStr::from(marker),
                 surface_kind: verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding,
                 slot_name: None,
-                binding_name: Arc::from("__schema_probe__"),
+                binding_name: verter_type_expr::OwnedStr::from("__schema_probe__"),
             },
             ProjectionMode::Shallow,
         );
@@ -1286,7 +1304,7 @@ impl ShapeCacheDb {
                 false,
             ),
             signature: ReadSetSignature::empty(),
-            self_root_canonicals: Arc::from(vec![Arc::clone(key.subject.scope_canonical())]),
+            self_root_canonicals: Arc::from(vec![Arc::<str>::from(key.subject.scope_canonical())]),
             validated_at_generation: 0,
         });
         self.entries.insert(key, entry);
@@ -1351,7 +1369,7 @@ impl ShapeCacheDb {
                 false,
             ),
             signature: ReadSetSignature::empty(),
-            self_root_canonicals: Arc::from(vec![Arc::clone(key.subject.scope_canonical())]),
+            self_root_canonicals: Arc::from(vec![Arc::<str>::from(key.subject.scope_canonical())]),
             validated_at_generation: 0,
         });
         // Bump `live_counter` ONLY on a genuine new key. `DashMap::insert`

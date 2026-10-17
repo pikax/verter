@@ -58,7 +58,11 @@ fn arena_wait_counter_includes_hit_and_both_miss_acquisitions() {
 #[test]
 fn multiset_guard_distinguishes_planted_omission_and_duplicate() {
     let data = SemanticNodeData::TemplateLiteral {
-        quasis: Arc::from([Arc::from(""), Arc::from(""), Arc::from("")]),
+        quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from([
+            verter_type_expr::OwnedStr::from(""),
+            verter_type_expr::OwnedStr::from(""),
+            verter_type_expr::OwnedStr::from(""),
+        ]),
         expressions: crate::semantic_query::PayloadArray::from([
             SemanticNodeId(3),
             SemanticNodeId(3),
@@ -113,7 +117,11 @@ fn counted_last_root_releases_repeated_internal_edges() {
     );
     let parent = arena.intern_owned(
         SemanticNodeData::TemplateLiteral {
-            quasis: Arc::from([Arc::from(""), Arc::from(""), Arc::from("")]),
+            quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from([
+                verter_type_expr::OwnedStr::from(""),
+                verter_type_expr::OwnedStr::from(""),
+                verter_type_expr::OwnedStr::from(""),
+            ]),
             expressions: crate::semantic_query::PayloadArray::from([child.id(), child.id()]),
         },
         NodeScopeId::Global,
@@ -298,13 +306,16 @@ fn production_constructor_destroys_a_node_on_its_last_release() {
         "the parent's destruction releases its edge"
     );
     assert_eq!(arena.live_len(), 0);
-    assert!(Arc::ptr_eq(
+    assert!(NodeData::ptr_eq(
         &arena.get(child_id).unwrap(),
         &arena.released_placeholder
     ));
     assert_eq!(
-        super::super::node_roots::NodeRootSet::acquire(Arc::clone(&arena.core), vec![child_id])
-            .err(),
+        super::super::node_roots::NodeRootSet::acquire(
+            Arc::clone(&arena.core),
+            smallvec::smallvec![child_id]
+        )
+        .err(),
         Some(crate::semantic_query::QueryError::StaleSemanticOperand),
         "a destroyed ordinal can never be rooted again"
     );

@@ -83,8 +83,10 @@ pub(super) struct EpochInner {
     pub environments: AppendInterner<CanonicalTypeSubstitution>,
     pub locators: AppendInterner<u64>,
     pub type_tokens: AppendInterner<SemanticNodeId>,
-    graph_roots:
-        Mutex<rustc_hash::FxHashMap<u32, crate::semantic_query_memo::node_roots::NodeRootSet>>,
+    /// Each type token's graph root, or the mark a close left on a token
+    /// whose root it released. The stranded count changes only under this
+    /// lock, with the entry it describes.
+    graph_roots: Mutex<rustc_hash::FxHashMap<u32, TokenRoot>>,
     /// Authored source node of a descriptor (graph `Signature` node token).
     /// Epoch-local, like every handle it is keyed by.
     /// Logical identity that owns each binder-space key, so a truncated key
@@ -98,9 +100,30 @@ pub(super) struct EpochInner {
     pub descriptor_chain_walks: AtomicU64,
     pub apply_count: AtomicU64,
     /// Type tokens of this epoch whose graph root a close released
-    /// ([`SignatureStore::note_released_nodes`]): every record reached
-    /// through one of them is garbage no live request can name again.
+    /// ([`SignatureStore::note_released_nodes`]) and no intern has rooted
+    /// again: every record reached through one of them is garbage no live
+    /// request can name again. Exactly the [`TokenRoot::Stranded`] entries
+    /// of [`Self::graph_roots`], updated under that lock.
     pub stranded_tokens: AtomicUsize,
+    /// Read views and leases of this epoch alive now. Each one may read any
+    /// of the epoch's tokens back to its node, so while one is alive a
+    /// close moves the store's root on a closed token into
+    /// [`Self::released_roots`] instead of dropping it.
+    holders: AtomicU64,
+    /// Roots a close took from the store while a holder of this epoch was
+    /// alive. They are dropped when the last holder drops, or by the next
+    /// close that finds none; the epoch's storage stays charged for them
+    /// until then.
+    released_roots: Mutex<Vec<crate::semantic_query_memo::node_roots::NodeRootSet>>,
+}
+
+/// A type token's entry in its epoch's root table.
+enum TokenRoot {
+    /// The root the store holds on the token's node.
+    Rooted(crate::semantic_query_memo::node_roots::NodeRootSet),
+    /// A close released the root; an intern of the same node roots it
+    /// again.
+    Stranded,
 }
 
 impl EpochInner {
@@ -137,7 +160,62 @@ impl EpochInner {
             descriptor_chain_walks: AtomicU64::new(0),
             apply_count: AtomicU64::new(0),
             stranded_tokens: AtomicUsize::new(0),
+            holders: AtomicU64::new(0),
+            released_roots: Mutex::new(Vec::new()),
         }
+    }
+
+    /// A read view or lease of this epoch now exists.
+    pub(super) fn hold(&self) {
+        self.holders.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// A read view or lease of this epoch dropped; the last one releases
+    /// the roots a close deferred for it.
+    pub(super) fn release_hold(&self) {
+        if self.holders.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.drain_released_roots();
+        }
+    }
+
+    /// Keep `roots`, taken from the store by a close, until no holder of
+    /// this epoch can read their tokens back.
+    fn defer_released_roots(
+        &self,
+        roots: Vec<crate::semantic_query_memo::node_roots::NodeRootSet>,
+    ) {
+        if roots.is_empty() {
+            return;
+        }
+        {
+            let mut released = self.released_roots.lock();
+            let before = released.capacity();
+            released.extend(roots);
+            self.storage.add(
+                (released.capacity() - before)
+                    * std::mem::size_of::<crate::semantic_query_memo::node_roots::NodeRootSet>(),
+            );
+        }
+        self.drain_released_roots();
+    }
+
+    /// Drop the deferred roots once no holder of this epoch is alive. The
+    /// holder count is read under the lock a close defers under, so a close
+    /// and a final release racing each other leave nothing behind.
+    fn drain_released_roots(&self) {
+        let drained = {
+            let mut released = self.released_roots.lock();
+            if self.holders.load(Ordering::SeqCst) != 0 || released.capacity() == 0 {
+                return;
+            }
+            std::mem::take(&mut *released)
+        };
+        let block = drained.capacity()
+            * std::mem::size_of::<crate::semantic_query_memo::node_roots::NodeRootSet>();
+        let heap: usize = drained.iter().map(|roots| roots.heap_bytes()).sum();
+        // The roots drop here, outside the lock.
+        drop(drained);
+        self.storage.sub(heap + block);
     }
 
     pub(super) fn shard_lock_acquires(&self) -> u64 {
@@ -205,9 +283,9 @@ impl EpochInner {
 /// while a long-lived editor's kernel tables stop growing at a fixed size.
 pub const EPOCH_RECORD_CAP: usize = 1 << 18;
 
-/// Intentionally retained result: owns the epoch tables it was published in.
+/// Intentionally retained result: holds the epoch it was published in.
 struct RetainedRoot {
-    epoch: Arc<EpochInner>,
+    epoch: SignatureEpochLease,
     result: AppliedResult,
 }
 
@@ -323,30 +401,39 @@ impl SignatureStore {
 
     construction_ordinal_seam! {
         /// Release the current epoch's roots on the type tokens naming
-        /// `released` — closed content no request reaches again — so the
-        /// epoch no longer keeps those nodes alive; every record reached
-        /// through such a token is stranded. A token is counted once, when
-        /// its root is released. Returns how many of `released` the current
-        /// epoch held a root for.
+        /// `released` — closed content no new request reaches again — so the
+        /// store no longer keeps those nodes alive; every record reached
+        /// through such a token is stranded. A read view or lease of the
+        /// epoch alive now may still read those tokens back, so the roots
+        /// are dropped only once the last one drops. A token is counted
+        /// once per release of its root; re-rooting it uncounts it. Returns
+        /// how many of `released` the current epoch held a root for.
         fn note_released_nodes(&self, released: impl IntoIterator<Item = SemanticNodeId>) -> usize {
             let inner = self.current.load();
-            let freed: Vec<_> = released
+            let indexes: Vec<u32> = released
                 .into_iter()
-                .filter_map(|node| {
-                    let index = inner.type_tokens.lookup(&node)?;
-                    inner
-                        .graph_roots
-                        .lock()
-                        .remove(&super::records::handle_index(index))
-                })
+                .filter_map(|node| inner.type_tokens.lookup(&node))
+                .map(super::records::handle_index)
                 .collect();
-            let stranded = freed.len();
-            for roots in &freed {
-                inner.storage.sub(roots.heap_bytes());
+            let mut freed = Vec::new();
+            {
+                let mut roots = inner.graph_roots.lock();
+                for index in indexes {
+                    let Some(entry) = roots.get_mut(&index) else {
+                        continue;
+                    };
+                    if let TokenRoot::Rooted(root) =
+                        std::mem::replace(entry, TokenRoot::Stranded)
+                    {
+                        freed.push(root);
+                    }
+                }
+                // Counted with the marks, under the lock an intern re-roots
+                // under, so a concurrent re-root never misses its uncount.
+                inner.stranded_tokens.fetch_add(freed.len(), Ordering::Relaxed);
             }
-            // The roots drop here, outside the table's lock.
-            drop(freed);
-            inner.stranded_tokens.fetch_add(stranded, Ordering::Relaxed);
+            let stranded = freed.len();
+            inner.defer_released_roots(freed);
             stranded
         }
     }
@@ -359,7 +446,10 @@ impl SignatureStore {
             .graph_roots
             .lock()
             .values()
-            .filter_map(|roots| roots.operands().first().copied())
+            .filter_map(|entry| match entry {
+                TokenRoot::Rooted(roots) => roots.operands().first().copied(),
+                TokenRoot::Stranded => None,
+            })
             .collect()
     }
 
@@ -441,7 +531,7 @@ impl SignatureStore {
         let inner = self.current.load_full();
         self.check_applied(&inner, &result)?;
         self.retained_results.lock().push(RetainedRoot {
-            epoch: inner,
+            epoch: SignatureEpochLease::from_epoch(inner),
             result,
         });
         Ok(())
@@ -460,9 +550,10 @@ impl SignatureStore {
     pub fn retained_descriptor(&self, index: usize) -> Result<SignatureDescriptor, StoreError> {
         let guard = self.retained_results.lock();
         let entry = guard.get(index).ok_or(StoreError::Missing)?;
-        check_epoch(entry.epoch.epoch, entry.result.descriptor.epoch())?;
+        check_epoch(entry.epoch.inner.epoch, entry.result.descriptor.epoch())?;
         entry
             .epoch
+            .inner
             .descriptors
             .get(entry.result.descriptor.index())
             .copied()
@@ -477,6 +568,17 @@ impl SignatureStore {
 
     fn inner(&self) -> arc_swap::Guard<Arc<EpochInner>> {
         self.current.load()
+    }
+
+    /// Intern `node`'s token record without its root: the state a
+    /// concurrent [`Self::intern_type_token`] leaves between interning the
+    /// record and rooting it.
+    #[cfg(test)]
+    pub(crate) fn intern_unrooted_type_token_for_tests(&self, node: SemanticNodeId) {
+        self.inner()
+            .type_tokens
+            .intern(node, None)
+            .expect("a test token interns");
     }
 
     fn require_id<T>(
@@ -695,9 +797,9 @@ impl SignatureStore {
                 .map(|arena| {
                     let nodes =
                         if Self::is_binder_token(node) {
-                            Vec::new()
+                            crate::semantic_query_memo::node_roots::RootIds::new()
                         } else {
-                            vec![node]
+                            smallvec::smallvec![node]
                         };
                     crate::semantic_query_memo::node_roots::NodeRootSet::acquire(arena, nodes)
                         .map_err(|_| StoreError::Missing)
@@ -707,16 +809,26 @@ impl SignatureStore {
             if let Some(root) = root {
                 let mut roots = inner.graph_roots.lock();
                 let before = roots.capacity();
-                if let std::collections::hash_map::Entry::Vacant(slot) =
-                    roots.entry(super::records::handle_index(raw))
-                {
-                    inner.storage.add(root.heap_bytes());
-                    slot.insert(root);
+                match roots.entry(super::records::handle_index(raw)) {
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        inner.storage.add(root.heap_bytes());
+                        slot.insert(TokenRoot::Rooted(root));
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut slot) => {
+                        if matches!(slot.get(), TokenRoot::Stranded) {
+                            // A close stranded this token; rooting it again
+                            // makes it live, decided under the lock the
+                            // close marked it under.
+                            inner.storage.add(root.heap_bytes());
+                            slot.insert(TokenRoot::Rooted(root));
+                            inner.stranded_tokens.fetch_sub(1, Ordering::Relaxed);
+                        }
+                    }
                 }
                 inner.storage.map_growth(
                     before,
                     roots.capacity(),
-                    std::mem::size_of::<(u32, crate::semantic_query_memo::node_roots::NodeRootSet)>(),
+                    std::mem::size_of::<(u32, TokenRoot)>(),
                 );
             }
             Ok(super::records::TypeToken::from_raw(raw))
@@ -1335,10 +1447,22 @@ impl SignatureStore {
 }
 
 /// Owns the tables used by one published result without adding it to a
-/// store-global retained-results list. Replacement never changes this lease.
-#[derive(Clone)]
+/// store-global retained-results list. Replacement never changes this lease,
+/// and a close never drops the graph roots of the tokens it can read.
 pub struct SignatureEpochLease {
     inner: Arc<EpochInner>,
+}
+
+impl Clone for SignatureEpochLease {
+    fn clone(&self) -> Self {
+        Self::from_epoch(Arc::clone(&self.inner))
+    }
+}
+
+impl Drop for SignatureEpochLease {
+    fn drop(&mut self) {
+        self.inner.release_hold();
+    }
 }
 
 impl std::fmt::Debug for SignatureEpochLease {
@@ -1351,6 +1475,7 @@ impl std::fmt::Debug for SignatureEpochLease {
 
 impl SignatureEpochLease {
     pub(super) fn from_epoch(inner: Arc<EpochInner>) -> Self {
+        inner.hold();
         Self { inner }
     }
     pub fn epoch(&self) -> GraphEpoch {
@@ -1391,7 +1516,7 @@ impl SignatureStore {
     pub fn lease_epoch(&self, epoch: GraphEpoch) -> Result<SignatureEpochLease, StoreError> {
         let inner = self.current.load_full();
         check_epoch(inner.epoch, epoch)?;
-        Ok(SignatureEpochLease { inner })
+        Ok(SignatureEpochLease::from_epoch(inner))
     }
 }
 

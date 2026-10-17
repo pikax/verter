@@ -9,8 +9,12 @@ use crate::semantic_query::{QueryError, SemanticNodeId};
 
 struct RootOwner {
     arena: Arc<NodeArenaCore>,
-    ids: Vec<SemanticNodeId>,
+    ids: RootIds,
 }
+
+/// The operands one root set holds. Most sets hold a node or two, so they
+/// are stored in place rather than in an allocation of their own.
+pub(crate) type RootIds = smallvec::SmallVec<[SemanticNodeId; 4]>;
 
 /// Storage acquired for a freshly interned node's construction root: the
 /// Arc owner and its one-element operand allocation, plus the scope vector's
@@ -22,6 +26,28 @@ pub(crate) fn construction_root_bytes() -> usize {
         + 2 * std::mem::size_of::<NodeRoot>()
 }
 
+impl verter_session_query::retention::owned::Measured for RootOwner {
+    /// Its operand list. The arena it roots in is the graph's storage,
+    /// charged with it.
+    fn heap_bytes(
+        &self,
+        _aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        root_ids_bytes(&self.ids)
+    }
+}
+
+/// The heap an operand list holds once it spills past its inline ids.
+fn root_ids_bytes(ids: &RootIds) -> usize {
+    if ids.spilled() {
+        verter_session_query::retention::allocation::heap_block_bytes(
+            ids.capacity() * std::mem::size_of::<SemanticNodeId>(),
+        )
+    } else {
+        0
+    }
+}
+
 impl Drop for RootOwner {
     fn drop(&mut self) {
         self.arena.release_roots(&self.ids);
@@ -31,7 +57,7 @@ impl Drop for RootOwner {
 /// One immutable retained operand multiset. Clones share one root reservation;
 /// separate owners acquire separate counts, including repeated operands.
 #[derive(Clone, Default)]
-pub struct NodeRootSet(Option<Arc<RootOwner>>);
+pub struct NodeRootSet(Option<verter_session_query::retention::owned::Owned<RootOwner>>);
 
 /// An ownership attachment is transport, never semantic key identity.
 /// Each wrapper holds its issuing arena's reservation even when the weak
@@ -108,9 +134,11 @@ impl NodeRootSet {
     /// without alias tracking: for a holder that is the set's only charged
     /// owner.
     pub(crate) fn heap_bytes(&self) -> usize {
-        use verter_session_query::retention::allocation::{arc_block_bytes, vec_bytes};
+        use verter_session_query::retention::allocation::heap_block_bytes;
         self.0.as_ref().map_or(0, |owner| {
-            arc_block_bytes(std::mem::size_of::<RootOwner>()) + vec_bytes(&owner.ids)
+            verter_session_query::retention::owned::Owned::<RootOwner>::cell_block_bytes()
+                .max(heap_block_bytes(0))
+                + root_ids_bytes(&owner.ids)
         })
     }
 
@@ -121,13 +149,8 @@ impl NodeRootSet {
         &self,
         aliases: &mut verter_session_query::retention::allocation::AliasSet,
     ) -> usize {
-        use verter_session_query::retention::allocation::{arc_block_bytes, vec_bytes};
-        match &self.0 {
-            Some(owner) if aliases.first(owner) => {
-                arc_block_bytes(std::mem::size_of::<RootOwner>()) + vec_bytes(&owner.ids)
-            }
-            _ => 0,
-        }
+        // The root owner is an owned allocation, charged by its own cell.
+        self.0.as_ref().map_or(0, |owner| owner.offer(aliases))
     }
 
     /// Keep a cache hit alive in the active issuing graph construction scope.
@@ -157,15 +180,14 @@ impl NodeRootSet {
             .as_ref()
             .map_or(0, |owner| owner.arena.ownership_counts().live_nodes)
     }
-    pub(crate) fn acquire(
-        arena: Arc<NodeArenaCore>,
-        ids: Vec<SemanticNodeId>,
-    ) -> Result<Self, QueryError> {
+    pub(crate) fn acquire(arena: Arc<NodeArenaCore>, ids: RootIds) -> Result<Self, QueryError> {
         if ids.is_empty() {
             return Ok(Self::default());
         }
         arena.retain(&ids)?;
-        Ok(Self(Some(Arc::new(RootOwner { arena, ids }))))
+        Ok(Self(Some(
+            verter_session_query::retention::owned::Owned::new(RootOwner { arena, ids }),
+        )))
     }
 
     pub fn operands(&self) -> &[SemanticNodeId] {
@@ -228,7 +250,7 @@ impl<'a> NodeRef<'a> {
     /// Read the payload under a new owning root. The borrow's owner keeps
     /// the node live, so the read cannot find it destroyed.
     pub fn read(self) -> Result<super::node_data_lease::NodeDataLease, QueryError> {
-        let roots = NodeRootSet::acquire(Arc::clone(self.arena), vec![self.id])?;
+        let roots = NodeRootSet::acquire(Arc::clone(self.arena), smallvec::smallvec![self.id])?;
         let data = self
             .arena
             .live_payload(self.id)
@@ -241,7 +263,7 @@ impl<'a> NodeRef<'a> {
 
     /// Acquire an owning root that outlives this borrow.
     pub fn to_root(self) -> Result<NodeRoot, QueryError> {
-        let roots = NodeRootSet::acquire(Arc::clone(self.arena), vec![self.id])?;
+        let roots = NodeRootSet::acquire(Arc::clone(self.arena), smallvec::smallvec![self.id])?;
         Ok(NodeRoot::from_roots(self.id, roots))
     }
 }
@@ -268,10 +290,12 @@ impl NodeRoot {
     pub(crate) fn adopt(arena: Arc<NodeArenaCore>, id: SemanticNodeId) -> Self {
         Self {
             id,
-            roots: NodeRootSet(Some(Arc::new(RootOwner {
-                arena,
-                ids: vec![id],
-            }))),
+            roots: NodeRootSet(Some(verter_session_query::retention::owned::Owned::new(
+                RootOwner {
+                    arena,
+                    ids: smallvec::smallvec![id],
+                },
+            ))),
         }
     }
     pub fn id(&self) -> SemanticNodeId {
@@ -550,7 +574,7 @@ impl NodeRootScope {
     /// Borrow a construction ordinal of this scope's arena. The scope roots
     /// the node until it closes, so the capability cannot outlive its owner.
     pub fn node_ref(&self, id: SemanticNodeId) -> Result<NodeRef<'_>, QueryError> {
-        let roots = NodeRootSet::acquire(Arc::clone(&self.core), vec![id])?;
+        let roots = NodeRootSet::acquire(Arc::clone(&self.core), smallvec::smallvec![id])?;
         // Root it in THIS scope, not an inner one of the same arena that
         // could close while the borrow is still live.
         SCOPES.with(|scopes| {
@@ -691,18 +715,20 @@ pub(crate) fn root_in_arena(
     arena: Arc<NodeArenaCore>,
     ids: impl IntoIterator<Item = SemanticNodeId>,
 ) -> NodeRootSet {
-    let ids: Vec<SemanticNodeId> = ids
+    let mut ids: RootIds = ids
         .into_iter()
         .filter(|node| node.0 < super::UNALLOCATABLE_ID_FLOOR)
         .collect();
     if ids.is_empty() {
         return NodeRootSet::default();
     }
-    let ids = arena.retain_live(ids);
+    arena.retain_live(&mut ids);
     if ids.is_empty() {
         return NodeRootSet::default();
     }
-    NodeRootSet(Some(Arc::new(RootOwner { arena, ids })))
+    NodeRootSet(Some(verter_session_query::retention::owned::Owned::new(
+        RootOwner { arena, ids },
+    )))
 }
 
 impl Drop for NodeRootScope {

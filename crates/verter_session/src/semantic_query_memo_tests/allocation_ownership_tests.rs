@@ -42,14 +42,14 @@ fn host() -> VerterHost {
 fn key() -> SemanticQueryKey {
     SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::from(FILE),
+            canonical_id: OwnedStr::from(FILE),
             owner: TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 TopLevelOwnerId::ordinary_file(),
             ),
         },
-        name: Arc::from("Target"),
+        name: OwnedStr::from("Target"),
     })
 }
 
@@ -326,6 +326,229 @@ fn a_cloned_delivered_name_alone_keeps_its_charge_until_its_own_drop() {
             account.snapshot().total_bytes(),
             0,
             "the final holder's drop restores the baseline"
+        );
+    }
+}
+
+/// A declaration identity a delivered value names — inside a graph node the
+/// value roots, a type-parameter name a rooted payload lends by borrow, or
+/// inside the value's own error — is an owned name shared
+/// with the arena or the cache. An owning clone of it that outlives the
+/// read, the cache and the whole store keeps exactly that name charged, and
+/// its own drop restores the baseline at once. Holds in both release orders
+/// and with no headroom at all.
+#[test]
+fn a_cloned_identity_from_a_delivered_value_keeps_its_charge_until_its_own_drop() {
+    use verter_type_engine::semantic_query::DeclIdentity;
+    let long = format!("/{}.ts", "i".repeat(NAME_LEN));
+    type Deliver = fn(&SemanticGraphStore, &str) -> QueryResult<SemanticNodeId>;
+    type Extract = fn(&CacheRead<QueryResult<SemanticNodeId>>) -> OwnedStr;
+    let cases: [(&str, Deliver, Extract); 3] = [
+        (
+            "a rooted node's identity",
+            |store, canonical| {
+                QueryResult::Value(store.intern_node(SemanticNodeData::DeclRef {
+                    identity: DeclIdentity {
+                        canonical_id: OwnedStr::from(canonical),
+                        owner: TopLevelOwnerId::ordinary_file(),
+                        whole_hash: Default::default(),
+                        decl_name: OwnedStr::from("Decl"),
+                    },
+                }))
+            },
+            |read| {
+                let QueryResult::Value(node) = read.value() else {
+                    panic!("a node-valued delivery");
+                };
+                let payload = read
+                    .lease()
+                    .node_ref(*node)
+                    .and_then(|node| node.read())
+                    .expect("the delivery roots its node");
+                match &*payload {
+                    SemanticNodeData::DeclRef { identity } => identity.canonical_id.clone(),
+                    other => panic!("the delivered declaration reference, got {other:?}"),
+                }
+            },
+        ),
+        (
+            "a rooted node's type-parameter name",
+            |store, name| {
+                QueryResult::Value(store.intern_node(SemanticNodeData::TypeParam {
+                    decl: DeclIdentity::synthetic("T"),
+                    param_index: 0,
+                    constraint: None,
+                    default: None,
+                    display_name: OwnedStr::from(name),
+                }))
+            },
+            |read| {
+                let QueryResult::Value(node) = read.value() else {
+                    panic!("a node-valued delivery");
+                };
+                let payload = read
+                    .lease()
+                    .node_ref(*node)
+                    .and_then(|node| node.read())
+                    .expect("the delivery roots its node");
+                match &*payload {
+                    SemanticNodeData::TypeParam { display_name, .. } => display_name.clone(),
+                    other => panic!("the delivered type parameter, got {other:?}"),
+                }
+            },
+        ),
+        (
+            "the value's own error identity",
+            |_, canonical| {
+                QueryResult::Error(QueryError::DeclPlaceholder {
+                    canonical_id: OwnedStr::from(canonical),
+                    owner: TopLevelOwnerId::ordinary_file(),
+                    name: OwnedStr::from("Decl"),
+                    whole_hash: Default::default(),
+                })
+            },
+            |read| match read.value() {
+                QueryResult::Error(QueryError::DeclPlaceholder { canonical_id, .. }) => {
+                    canonical_id.clone()
+                }
+                other => panic!("the delivered placeholder, got {other:?}"),
+            },
+        ),
+    ];
+    for (label, deliver, extract) in cases {
+        for (ceiling, read_first) in [(usize::MAX / 2, true), (usize::MAX / 2, false), (0, true)] {
+            let host = host();
+            let account = SemanticRetentionAccount::new(RetentionLimits {
+                aggregate_ceiling_bytes: ceiling,
+                active_ceiling_bytes: ceiling,
+                max_entry_bytes: ceiling,
+                pin_threshold_bytes: ceiling,
+            });
+            let harness = GraphFixture::with_account(StoreAccount::new(Arc::clone(&account)));
+            let read = harness.run(|store| {
+                store.execute_cooperative(
+                    &host,
+                    key(),
+                    || panic!("no recursion"),
+                    || -> QueryBuildOutput<SemanticNodeId> {
+                        (deliver(store, &long), empty_signature()).into()
+                    },
+                )
+            });
+            let name = extract(&read);
+            assert_eq!(
+                name.charge_bytes(),
+                Some(OwnedStr::charge_for_len(long.len())),
+                "{label}: the delivered identity is charged by its own cell"
+            );
+            if read_first {
+                drop(read);
+                harness.run(|store| store.invalidate_all());
+            } else {
+                harness.run(|store| store.invalidate_all());
+                drop(read);
+            }
+            drop(harness);
+            let snapshot = account.snapshot();
+            assert_eq!(
+                (snapshot.retained_bytes, snapshot.pinned_bytes),
+                (0, OwnedStr::charge_for_len(long.len())),
+                "{label} (ceiling {ceiling}, read first {read_first}): the clone alone keeps \
+                 its name charged, exactly once"
+            );
+            drop(name);
+            assert_eq!(
+                account.snapshot().total_bytes(),
+                0,
+                "{label}: the final holder's drop restores the baseline"
+            );
+        }
+    }
+}
+
+/// A builder's nested copy of a delivered member — taken through the
+/// graph's construction copy, the one public copy path — shares the
+/// member's owned names with the arena and the cache. Kept past the read,
+/// the cache and the store, it alone keeps exactly those names charged,
+/// in both release orders and with no headroom, and its drop restores the
+/// baseline.
+#[test]
+fn a_nested_copy_of_a_delivered_member_keeps_its_names_charged_until_its_own_drop() {
+    use verter_type_engine::semantic_query::{AuthoredPropertyKey, SurfaceMember, SurfaceView};
+    let key_text = "k".repeat(NAME_LEN);
+    let origin_text = format!("/{}.ts", "o".repeat(NAME_LEN));
+    let names =
+        OwnedStr::charge_for_len(key_text.len()) + OwnedStr::charge_for_len(origin_text.len());
+    for (ceiling, read_first) in [(usize::MAX / 2, true), (usize::MAX / 2, false), (0, true)] {
+        let host = host();
+        let account = SemanticRetentionAccount::new(RetentionLimits {
+            aggregate_ceiling_bytes: ceiling,
+            active_ceiling_bytes: ceiling,
+            max_entry_bytes: ceiling,
+            pin_threshold_bytes: ceiling,
+        });
+        let harness = GraphFixture::with_account(StoreAccount::new(Arc::clone(&account)));
+        let read = harness.run(|store| {
+            store.execute_cooperative(
+                &host,
+                key(),
+                || panic!("no recursion"),
+                || -> QueryBuildOutput<SemanticNodeId> {
+                    let value = store
+                        .intern_node(SemanticNodeData::Literal(LiteralValue::String("v".into())));
+                    let member = SurfaceMember {
+                        key: AuthoredPropertyKey::String(OwnedStr::from(key_text.as_str())),
+                        value,
+                        optional: false,
+                        readonly: false,
+                        method_kind: None,
+                        has_implementation_body: false,
+                        visibility: verter_type_expr::MemberVisibility::Public,
+                        spans: Default::default(),
+                        declaration_origin: Some(OwnedStr::from(origin_text.as_str())),
+                        declared_in_macro_type_arg: Default::default(),
+                        merge_role: Default::default(),
+                        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                    };
+                    let object = store.intern_node(SemanticNodeData::Object(
+                        SurfaceView::from_members(vec![member], None),
+                    ));
+                    (QueryResult::Value(object), empty_signature()).into()
+                },
+            )
+        });
+        let copy = harness.run(|store| {
+            let QueryResult::Value(node) = *read.value() else {
+                panic!("the delivery carries its object");
+            };
+            let payload = read.node(node).unwrap().read().unwrap();
+            let SemanticNodeData::Object(view) = &*payload else {
+                panic!("the delivered node is the object");
+            };
+            store
+                .copy_in_scope(&view.positive_members()[0])
+                .expect("a builder copies inside its construction scope")
+        });
+        if read_first {
+            drop(read);
+            harness.run(|store| store.invalidate_all());
+        } else {
+            harness.run(|store| store.invalidate_all());
+            drop(read);
+        }
+        drop(harness);
+        let snapshot = account.snapshot();
+        assert_eq!(
+            (snapshot.retained_bytes, snapshot.pinned_bytes),
+            (0, names),
+            "(ceiling {ceiling}, read first {read_first}): the copy alone keeps its key and \
+             origin charged, once each"
+        );
+        drop(copy);
+        assert_eq!(
+            account.snapshot().total_bytes(),
+            0,
+            "the copy's drop restores the baseline"
         );
     }
 }
