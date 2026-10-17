@@ -70,7 +70,7 @@ fn counted_emit_merge_owns_surface_without_an_enclosing_scope() {
             param_index: 0,
             constraint: None,
             default: None,
-            display_name: Arc::from("Mode"),
+            display_name: verter_type_expr::OwnedStr::from("Mode"),
         });
         let extends = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
             "editor".into(),

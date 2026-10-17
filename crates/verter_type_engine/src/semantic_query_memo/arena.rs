@@ -2092,7 +2092,7 @@ mod arena_intern_tests {
                         false,
                     )]),
                     Arc::from([TypeParamDecl {
-                        name: Arc::from("T"),
+                        name: verter_type_expr::OwnedStr::from("T"),
                         param: binder,
                         constraint,
                         default: None,
@@ -2163,7 +2163,7 @@ mod arena_intern_tests {
                 true_branch_ref: kept,
                 false_branch_ref: kept,
                 distributive: false,
-                pending: Some(Arc::new(
+                pending: Some(verter_session_query::retention::owned::Owned::new(
                     ConditionalPendingSubstitution::empty().append_both(param, bound),
                 )),
             })

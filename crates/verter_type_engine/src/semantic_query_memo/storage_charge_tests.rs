@@ -167,7 +167,9 @@ fn graph_storage_charges_payload_heap_once_per_shared_allocation() {
 
         let before = pinned();
         let _first = store.intern_node(SemanticNodeData::TemplateLiteral {
-            quasis: Arc::clone(&quasis),
+            quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+                std::sync::Arc::clone(&quasis),
+            ),
             expressions: PayloadArray::from(Vec::new()),
         });
         assert!(
@@ -176,7 +178,9 @@ fn graph_storage_charges_payload_heap_once_per_shared_allocation() {
         );
         let before = pinned();
         let _second = store.intern_node(SemanticNodeData::TemplateLiteral {
-            quasis: Arc::clone(&quasis),
+            quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+                std::sync::Arc::clone(&quasis),
+            ),
             expressions: PayloadArray::from(vec![small]),
         });
         assert!(

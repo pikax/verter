@@ -649,10 +649,7 @@ fn carrier_head_namespace_sibling_bare_name_diverges_recorded_for_producer_flip(
         dispatch.graph().node_data(via_carrier).as_deref()
     );
     match dispatch.graph().node_data(via_carrier).as_deref() {
-        Some(data)
-            if data
-                .bare_ref_head()
-                .is_some_and(|(n, _)| n.as_ref() == "Sib") => {}
+        Some(data) if data.bare_ref_head().is_some_and(|(n, _)| n == "Sib") => {}
         other => panic!(
             "the preserved divergent terminal must still be the `BareRef(\"Sib\")` \
              carrier; got {other:?}"
@@ -888,7 +885,7 @@ fn generic_head_of_an_active_declaration_keeps_its_back_edge_where_its_position_
                 Some(SemanticNodeData::Opaque(
                     verter_type_engine::semantic_query::QueryError::RecursiveRef { name, args },
                 )) => {
-                    assert_eq!(name.as_ref(), "G");
+                    assert_eq!(name, "G");
                     assert_eq!(args.len(), 1, "the back-edge records its own arguments");
                 }
                 other => panic!(
@@ -1596,7 +1593,7 @@ fn navigate_unresolvable_ref_head_preserves_bare_ref_carrier_with_args() {
     let (name, scope) = data
         .bare_ref_head()
         .expect("Navigate transit must preserve the unresolved head as a BareRef carrier");
-    assert_eq!(name.as_ref(), "Unknown", "the authored head name survives");
+    assert_eq!(name, "Unknown", "the authored head name survives");
     match scope {
         NodeScopeId::File { canonical_id, .. } => assert_eq!(
             canonical_id.as_ref(),

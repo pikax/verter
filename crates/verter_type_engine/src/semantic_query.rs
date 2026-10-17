@@ -8654,14 +8654,14 @@ impl RelateMemoKey {
 /// hash, span, or display text participates.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PendingSubstitutionFrame {
-    pairs: Arc<[(SemanticNodeId, SemanticNodeId)]>,
+    pairs: OwnedSlice<(SemanticNodeId, SemanticNodeId)>,
 }
 
 impl PendingSubstitutionFrame {
     #[must_use]
     pub fn empty() -> Self {
         Self {
-            pairs: Arc::from(Vec::<(SemanticNodeId, SemanticNodeId)>::new().into_boxed_slice()),
+            pairs: OwnedSlice::default(),
         }
     }
 
@@ -8683,7 +8683,7 @@ impl PendingSubstitutionFrame {
             pair.1 = arg;
         }
         Self {
-            pairs: Arc::from(pairs.into_boxed_slice()),
+            pairs: OwnedSlice::from(pairs),
         }
     }
 
@@ -8696,7 +8696,7 @@ impl PendingSubstitutionFrame {
         pairs.extend_from_slice(&self.pairs);
         pairs.push((param, arg));
         Self {
-            pairs: Arc::from(pairs.into_boxed_slice()),
+            pairs: OwnedSlice::from(pairs),
         }
     }
 }
@@ -8714,6 +8714,26 @@ pub struct ConditionalPendingSubstitution {
     /// `getConditionalTypeInstantiation` maps the check parameter to each
     /// member).
     distribution: Option<SemanticNodeId>,
+}
+
+impl verter_session_query::retention::owned::Measured for PendingSubstitutionFrame {
+    /// The pair list: an owned allocation charged by itself.
+    fn heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        self.pairs.offer(aliases)
+    }
+}
+
+impl verter_session_query::retention::owned::Measured for ConditionalPendingSubstitution {
+    /// Both branch frames' pair lists; the distribution parameter is inline.
+    fn heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        self.true_branch.heap_bytes(aliases) + self.false_branch.heap_bytes(aliases)
+    }
 }
 
 impl ConditionalPendingSubstitution {
@@ -8894,7 +8914,8 @@ pub enum SemanticQueryKey {
         /// Content-free pairing of each materialized branch handle with a
         /// pending positional substitution frame. `None` means both
         /// branches are already substituted (or never instantiated).
-        pending: Option<Arc<ConditionalPendingSubstitution>>,
+        pending:
+            Option<verter_session_query::retention::owned::Owned<ConditionalPendingSubstitution>>,
     },
     /// `typeof value_root` — resolves the TYPE of a value declaration.
     ///
@@ -9259,7 +9280,7 @@ pub enum SemanticQueryKey {
     ///
     /// [`AdmissionSpec::Singleflight`]: crate::semantic_query::query_key_spec::AdmissionSpec::Singleflight
     TemplateLiteralReduce {
-        pattern: Arc<[Arc<str>]>,
+        pattern: OwnedSlice<OwnedStr>,
         args: Arc<[SemanticNodeId]>,
         context: TemplateLiteralReduceContext,
     },
@@ -10117,7 +10138,7 @@ impl<T> FromIterator<T> for PayloadArray<T> {
 /// is interned.
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct TupleElement {
-    pub label: Option<Arc<str>>,
+    pub label: Option<OwnedStr>,
     pub value: SemanticNodeId,
     pub optional: bool,
     pub rest: bool,
@@ -10535,7 +10556,7 @@ pub enum SemanticNodeData {
     /// separate follow-up — the shell carrier itself is not
     /// deferred.
     TemplateLiteral {
-        quasis: Arc<[Arc<str>]>,
+        quasis: OwnedSlice<OwnedStr>,
         expressions: PayloadArray<SemanticNodeId>,
     },
     /// Deferred `keyof` shell used when the operand still carries open
@@ -10623,7 +10644,7 @@ pub enum SemanticNodeData {
         /// names intern to the same slot. In practice `display_name`
         /// is consistent with `decl + param_index`; the exclusion
         /// is defensive.
-        display_name: Arc<str>,
+        display_name: OwnedStr,
     },
     /// `infer X` placeholder inside a conditional's `extends` clause
     /// Modelled as an explicit variant rather than
@@ -10632,7 +10653,7 @@ pub enum SemanticNodeData {
     /// `true` branch will substitute the bound type into; `constraint` is
     /// the declared `infer X extends C` constraint.
     Infer {
-        name: Arc<str>,
+        name: OwnedStr,
         binder: InferBinderId,
         constraint: Option<SemanticNodeId>,
     },
@@ -10648,7 +10669,7 @@ pub enum SemanticNodeData {
     /// same `TypeExpr::Infer { name }` as a declaration, so
     /// TypeExpr-level consumers are unaffected.
     InferRef {
-        name: Arc<str>,
+        name: OwnedStr,
         binder: InferBinderId,
     },
     // Declaration identity is carried as the env-bearing, content-free
@@ -10685,7 +10706,8 @@ pub enum SemanticNodeData {
         true_branch_ref: SemanticNodeId,
         false_branch_ref: SemanticNodeId,
         distributive: bool,
-        pending: Option<Arc<ConditionalPendingSubstitution>>,
+        pending:
+            Option<verter_session_query::retention::owned::Owned<ConditionalPendingSubstitution>>,
     },
     // §5.6 Signature shape — ONE variant for call AND construct signatures.
     ///
@@ -11580,7 +11602,7 @@ pub enum SignatureKind {
 /// Parameter of a [`SemanticNodeData::Signature`].
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct FunctionParam {
-    pub name: Option<Arc<str>>,
+    pub name: Option<OwnedStr>,
     pub ty: SemanticNodeId,
     pub optional: bool,
     pub rest: bool,
@@ -11642,7 +11664,7 @@ impl FunctionParam {
         rest: bool,
     ) -> Self {
         Self {
-            name,
+            name: name.as_deref().map(OwnedStr::from),
             ty,
             optional,
             rest,
@@ -11719,7 +11741,7 @@ pub fn split_this_receiver(params: &[FunctionParam]) -> (Option<&FunctionParam>,
 /// Type-parameter declaration on a [`SemanticNodeData::Signature`].
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct TypeParamDecl {
-    pub name: Arc<str>,
+    pub name: OwnedStr,
     /// The exact interned [`SemanticNodeData::TypeParam`] node for this
     /// parameter — the identity inference binds. Per-parameter policy
     /// (const-ness, binding) keys off THIS node, never the display name.

@@ -58,7 +58,11 @@ fn arena_wait_counter_includes_hit_and_both_miss_acquisitions() {
 #[test]
 fn multiset_guard_distinguishes_planted_omission_and_duplicate() {
     let data = SemanticNodeData::TemplateLiteral {
-        quasis: Arc::from([Arc::from(""), Arc::from(""), Arc::from("")]),
+        quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from([
+            verter_type_expr::OwnedStr::from(""),
+            verter_type_expr::OwnedStr::from(""),
+            verter_type_expr::OwnedStr::from(""),
+        ]),
         expressions: crate::semantic_query::PayloadArray::from([
             SemanticNodeId(3),
             SemanticNodeId(3),
@@ -113,7 +117,11 @@ fn counted_last_root_releases_repeated_internal_edges() {
     );
     let parent = arena.intern_owned(
         SemanticNodeData::TemplateLiteral {
-            quasis: Arc::from([Arc::from(""), Arc::from(""), Arc::from("")]),
+            quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from([
+                verter_type_expr::OwnedStr::from(""),
+                verter_type_expr::OwnedStr::from(""),
+                verter_type_expr::OwnedStr::from(""),
+            ]),
             expressions: crate::semantic_query::PayloadArray::from([child.id(), child.id()]),
         },
         NodeScopeId::Global,

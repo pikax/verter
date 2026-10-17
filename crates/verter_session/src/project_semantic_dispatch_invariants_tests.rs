@@ -9,7 +9,10 @@ fn evaluate_deferred_terminates_on_stable_template_literal_fixpoint() {
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let template = graph.intern_node(SemanticNodeData::TemplateLiteral {
-        quasis: Arc::from([Arc::<str>::from("prefix:"), Arc::<str>::from("")]),
+        quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from([
+            verter_type_expr::OwnedStr::from("prefix:"),
+            verter_type_expr::OwnedStr::from(""),
+        ]),
         expressions: verter_type_engine::semantic_query::PayloadArray::from([string]),
     });
 
@@ -318,7 +321,7 @@ fn mapped_type_value_substitutes_into_keyspace_even_when_source_is_not_object() 
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
     let value_expr = parameter_node;
     let mapper = MapperKey {
@@ -429,7 +432,7 @@ fn mapped_type_value_falls_back_to_substituted_shell_when_evaluation_yields_opaq
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
     let value_expr = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: source,
@@ -534,7 +537,7 @@ fn build_mapped_type_produces_canonical_mapped_shell_on_unresolvable_enumeration
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     // Key space is also a TypeParam — not enumerable.
     let key_space = graph.intern_node(SemanticNodeData::TypeParam {
@@ -542,7 +545,7 @@ fn build_mapped_type_produces_canonical_mapped_shell_on_unresolvable_enumeration
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
     // Value expression: opaque unknown node (doesn't matter for this
     // test — the shell is all we care about).
@@ -553,7 +556,7 @@ fn build_mapped_type_produces_canonical_mapped_shell_on_unresolvable_enumeration
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
     let mapper = MapperKey {
         over_type_variable: false,
@@ -736,7 +739,7 @@ fn build_key_of_over_conditional_distributes_into_branches() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: std::sync::Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
 
     let true_branch = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
@@ -813,14 +816,14 @@ fn mapped_type_with_as_clause_symbolic_remapping_defers_whole_shape_preserving_n
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let key_space = graph.intern_node(SemanticNodeData::TypeParam {
         decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
     let value_expr = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     // name_remap references another symbolic TypeParam — cannot be
@@ -830,7 +833,7 @@ fn mapped_type_with_as_clause_symbolic_remapping_defers_whole_shape_preserving_n
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("R"),
+        display_name: verter_type_expr::OwnedStr::from("R"),
     });
 
     let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
@@ -838,7 +841,7 @@ fn mapped_type_with_as_clause_symbolic_remapping_defers_whole_shape_preserving_n
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
     let mapper = MapperKey {
         over_type_variable: false,
@@ -3379,7 +3382,7 @@ fn ax_hybrid_mapped_type_carrier_stops_under_structural_transit() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
     let value_expr = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: source,
@@ -3494,7 +3497,7 @@ fn ax_hybrid_userland_mypick_follows_same_carrier_stop_as_builtin_pick() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("P"),
+        display_name: verter_type_expr::OwnedStr::from("P"),
     });
     let value_expr = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: source,
@@ -4105,7 +4108,7 @@ fn binding_session_close_publishes_root_only_with_fixed_bindings() {
         required_member("value", number),
     ])));
     let infer_v = graph.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("V"),
+        name: verter_type_expr::OwnedStr::from("V"),
         binder: graph.alloc_infer_binder_id(),
         constraint: None,
     });
@@ -4179,7 +4182,7 @@ fn binding_session_abandoned_by_budget_publishes_nothing() {
         required_member("value", number),
     ])));
     let infer_v = graph.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("V"),
+        name: verter_type_expr::OwnedStr::from("V"),
         binder: graph.alloc_infer_binder_id(),
         constraint: None,
     });
@@ -4885,7 +4888,7 @@ fn contravariant_infer_candidates_intersect_not_union() {
     let never_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
     let infer_u_binder = graph.alloc_infer_binder_id();
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("U"),
+        name: verter_type_expr::OwnedStr::from("U"),
         binder: infer_u_binder.clone(),
         constraint: None,
     });
@@ -5022,7 +5025,7 @@ fn infer_substitution_does_not_capture_function_shadowed_binder() {
     let string_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let never_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("U"),
+        name: verter_type_expr::OwnedStr::from("U"),
         binder: graph.alloc_infer_binder_id(),
         constraint: None,
     });
@@ -5033,7 +5036,7 @@ fn infer_substitution_does_not_capture_function_shadowed_binder() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("U"),
+        display_name: verter_type_expr::OwnedStr::from("U"),
     });
     // true branch: `<U>() => U`.
     let generic_fn = graph.intern_node(SemanticNodeData::Signature {
@@ -5048,7 +5051,7 @@ fn infer_substitution_does_not_capture_function_shadowed_binder() {
         ),
         type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
             vec![TypeParamDecl {
-                name: Arc::from("U"),
+                name: verter_type_expr::OwnedStr::from("U"),
                 param: inner_u,
                 constraint: None,
                 default: None,
@@ -5123,7 +5126,7 @@ fn mutable_array_infer_element_binds_covariantly() {
     let string_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let never_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("U"),
+        name: verter_type_expr::OwnedStr::from("U"),
         binder: graph.alloc_infer_binder_id(),
         constraint: None,
     });
@@ -5212,7 +5215,7 @@ fn nested_same_name_infer_binder_is_not_captured_by_outer_substitution() {
     let number_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let never_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("U"),
+        name: verter_type_expr::OwnedStr::from("U"),
         binder: graph.alloc_infer_binder_id(),
         constraint: None,
     });
@@ -5255,7 +5258,7 @@ fn nested_same_name_infer_binder_is_not_captured_by_outer_substitution() {
     // branches: `string extends infer U ? (number extends infer V ? U :
     // never) : never` → `string`.
     let infer_v = graph.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("V"),
+        name: verter_type_expr::OwnedStr::from("V"),
         binder: graph.alloc_infer_binder_id(),
         constraint: None,
     });
@@ -5370,18 +5373,18 @@ fn expanded_distribution_treats_infer_ref_check_as_open() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let infer_u_binder = graph.alloc_infer_binder_id();
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("U"),
+        name: verter_type_expr::OwnedStr::from("U"),
         binder: infer_u_binder.clone(),
         constraint: None,
     });
     // The post-activation lowering shape: the inner check `U` is an
     // `InferRef` REFERENCE to the outer binder.
     let infer_ref_u = graph.intern_node(SemanticNodeData::InferRef {
-        name: Arc::from("U"),
+        name: verter_type_expr::OwnedStr::from("U"),
         binder: infer_u_binder,
     });
     // The branch arms are REAL declaration placeholders so the terminal
@@ -5495,7 +5498,7 @@ fn mapped_extends_infer_declaration_shadows_outer_binder() {
     let number_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let never_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("U"),
+        name: verter_type_expr::OwnedStr::from("U"),
         binder: graph.alloc_infer_binder_id(),
         constraint: None,
     });
@@ -5507,7 +5510,7 @@ fn mapped_extends_infer_declaration_shadows_outer_binder() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
     // `{ [K in "a"]: infer U }` — the mapped VALUE declares `infer U`.
     let mapped = graph.intern_node(SemanticNodeData::Mapped {
@@ -5591,7 +5594,7 @@ fn mapped_own_key_param_shadows_same_named_outer_infer_binder() {
     let string_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let never_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
     let infer_k = graph.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("K"),
+        name: verter_type_expr::OwnedStr::from("K"),
         binder: graph.alloc_infer_binder_id(),
         constraint: None,
     });
@@ -5605,7 +5608,7 @@ fn mapped_own_key_param_shadows_same_named_outer_infer_binder() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
     // `{ [K in "a"]: K }` — the value IS the mapped binder occurrence.
     let mapped = graph.intern_node(SemanticNodeData::Mapped {
@@ -5699,14 +5702,14 @@ fn constructor_type_substitutes_bound_infer_inside_signature() {
     let never_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
     let infer_t_binder = graph.alloc_infer_binder_id();
     let infer_t = graph.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("T"),
+        name: verter_type_expr::OwnedStr::from("T"),
         binder: infer_t_binder.clone(),
         constraint: None,
     });
     // References inside the true branch bind as `InferRef` (the producer
     // contract).
     let t_ref = graph.intern_node(SemanticNodeData::InferRef {
-        name: Arc::from("T"),
+        name: verter_type_expr::OwnedStr::from("T"),
         binder: infer_t_binder,
     });
     let signature = graph.intern_node(SemanticNodeData::Signature {
@@ -5784,12 +5787,12 @@ fn constructor_type_relates_and_binds_infer_return() {
     let bool_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
     let infer_r_binder = graph.alloc_infer_binder_id();
     let infer_r = graph.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("R"),
+        name: verter_type_expr::OwnedStr::from("R"),
         binder: infer_r_binder.clone(),
         constraint: None,
     });
     let r_ref = graph.intern_node(SemanticNodeData::InferRef {
-        name: Arc::from("R"),
+        name: verter_type_expr::OwnedStr::from("R"),
         binder: infer_r_binder,
     });
     let ctor_of = |ret: verter_type_engine::semantic_query::SemanticNodeId| {
@@ -5876,7 +5879,7 @@ fn mapped_constructor_value_substitutes_per_key() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
     let signature = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
@@ -5971,12 +5974,12 @@ fn constructor_pattern_infer_declaration_shadows_outer_binder() {
     let number_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let infer_p_binder = graph.alloc_infer_binder_id();
     let infer_p = graph.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("P"),
+        name: verter_type_expr::OwnedStr::from("P"),
         binder: infer_p_binder.clone(),
         constraint: None,
     });
     let p_ref = graph.intern_node(SemanticNodeData::InferRef {
-        name: Arc::from("P"),
+        name: verter_type_expr::OwnedStr::from("P"),
         binder: infer_p_binder,
     });
     // Inner extends: `new (x: infer P) => any`.
@@ -6312,7 +6315,7 @@ fn signature_kind_semantics_and_cross_producer_parity() {
     // against the direct construct pattern `new () => infer R` binds
     // R := number (not merely the correct boolean).
     let infer_r = graph.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("R"),
+        name: verter_type_expr::OwnedStr::from("R"),
         binder: graph.alloc_infer_binder_id(),
         constraint: None,
     });
@@ -6468,7 +6471,7 @@ pub(crate) mod fresh_excess_property_checking {
             param_index: 0,
             constraint: None,
             default: None,
-            display_name: Arc::from("T"),
+            display_name: verter_type_expr::OwnedStr::from("T"),
         });
         let arm = spread_program(operand, graph);
 
@@ -6491,7 +6494,7 @@ pub(crate) mod fresh_excess_property_checking {
             param_index: 0,
             constraint: None,
             default: None,
-            display_name: Arc::from("T"),
+            display_name: verter_type_expr::OwnedStr::from("T"),
         });
         let source =
             graph.intern_node(SemanticNodeData::Object(empty_surface(vec![fresh_member(

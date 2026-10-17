@@ -8319,7 +8319,7 @@ fn emit_branch_merge_with_open_program_branch_keeps_the_conditional_carrier() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let open_branch = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {

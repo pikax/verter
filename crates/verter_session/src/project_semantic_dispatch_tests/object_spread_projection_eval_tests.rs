@@ -316,7 +316,7 @@ fn optional_spread_write_fold_distinguishes_policy_and_live_open_state() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
 
     let exact = program(
@@ -462,7 +462,7 @@ fn whole_program_excess_and_direct_signature_rules_survive_open_spreads() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let call = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
@@ -758,7 +758,7 @@ fn keyof_and_substitution_consume_the_canonical_program() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let open = program(
         graph,
@@ -841,7 +841,7 @@ fn relation_quantifies_correlated_alternatives_and_never_shortcuts_open_identity
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let unresolved = program(graph, [ObjectConstructionEffect::Spread(generic)]);
     assert_eq!(
@@ -942,7 +942,7 @@ fn unclassifiable_spread_residual_yields_indeterminate_excess_not_generic_suppre
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let concrete = object(graph, [surface_member("known", number, false)]);
     let intersection = graph.intern_node(SemanticNodeData::Intersection(
@@ -1152,7 +1152,7 @@ fn spread_index_signature_never_manufactures_required_named_presence() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let open = program(
         graph,
@@ -1233,7 +1233,7 @@ fn finite_and_broad_record_targets_consume_named_presence_and_envelopes() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let open_residual = program(
         graph,
@@ -1273,7 +1273,7 @@ fn open_targets_reject_on_exact_mismatch_and_stay_unknown_on_known_subset() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let post_open = program(
         graph,
@@ -1661,7 +1661,7 @@ fn generic_spread_excess_suppression_matrix_with_closed_contrast_and_healing() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let empty_target = object(graph, []);
     let knows_a_target = object(graph, [surface_member("a", number, false)]);
@@ -1792,7 +1792,7 @@ fn identical_unresolved_program_relation_is_unknown_and_never_published() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let unresolved = program(graph, [ObjectConstructionEffect::Spread(generic)]);
     let key = dispatch.relate_key_for(unresolved, unresolved);
@@ -1927,10 +1927,10 @@ fn inference_deposits_only_from_exact_whole_branch_positions() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("U"),
+        name: verter_type_expr::OwnedStr::from("U"),
         binder: graph.alloc_infer_binder_id(),
         constraint: None,
     });
@@ -2034,7 +2034,7 @@ fn joined_shallow_surface_reports_incomplete_unless_single_closed_witness() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let shallow = |node: SemanticNodeId| {
         host.project_shallow_surface_graph_only(
@@ -2191,7 +2191,7 @@ fn distributed_and_aliased_program_operands_reach_the_program_relation() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let open = program(graph, [ObjectConstructionEffect::Spread(generic)]);
     let open_union = graph.intern_node(SemanticNodeData::Union(
@@ -2261,7 +2261,7 @@ fn program_relation_unwraps_transparent_carriers_before_projecting() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let open = program(graph, [ObjectConstructionEffect::Spread(generic)]);
     assert_eq!(
@@ -2282,7 +2282,7 @@ fn nested_open_program_keeps_post_open_exact_keys_proven() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let inner = program(
         graph,
@@ -2482,7 +2482,7 @@ fn program_relation_applies_top_bottom_rules_before_projecting() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let open = program(graph, [ObjectConstructionEffect::Spread(generic)]);
     let closed = program(
@@ -2815,7 +2815,7 @@ fn key_liveness_keeps_the_getter_of_a_paired_accessor() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let paired = program(
         graph,
@@ -3021,7 +3021,7 @@ fn empty_path_shallow_over_open_program_root_returns_open_typed_evidence() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let root = program(
         graph,
@@ -3174,7 +3174,7 @@ fn empty_path_shallow_over_union_with_program_arm_projects_the_arm() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let open_arm = program(
         graph,
@@ -3233,7 +3233,7 @@ fn empty_path_shallow_over_intersection_with_open_program_arm_keeps_the_carrier(
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let open_arm = program(
         graph,
@@ -3288,7 +3288,7 @@ fn typeinfo_surface_view_refuses_partial_terminal_reads() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let open_arm = program(
         graph,
@@ -3349,7 +3349,7 @@ fn empty_path_shallow_over_program_root_failure_is_typed_partial() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let mut node = program(graph, [ObjectConstructionEffect::Spread(type_param)]);
     // bounded-loop: fixed 12-iteration fixture chain past the depth cap
@@ -3582,7 +3582,7 @@ fn macro_member_reader_publishes_open_program_positive_names_without_completenes
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let open_root = program(
         graph,
@@ -3840,7 +3840,7 @@ fn macro_member_reader_recurses_union_carriers_for_positive_members() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let open_arm = program(
         graph,
@@ -3933,7 +3933,7 @@ fn props_reader_applies_intersection_rules_to_intersection_carriers() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let names_of =
         |node: SemanticNodeId| -> Vec<verter_type_engine::semantic_query::SurfaceMember> {
@@ -4060,7 +4060,7 @@ fn macro_union_merge_collapses_dual_spelling_members() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let numeric_arm = object(graph, [numeric_surface_member(1, string)]);
     let open_arm = program(
@@ -4389,7 +4389,7 @@ fn keyof_over_program_base_enumerates_closed_and_defers_open() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let open_program = program(
         graph,
@@ -4557,7 +4557,7 @@ fn selector_local_closed_domain_proves_only_the_declared_keys() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let pruned = program(
         graph,
@@ -4667,7 +4667,7 @@ fn typeinfo_join_publishes_indeterminate_value_members_as_open_rows() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let root = program(
         graph,

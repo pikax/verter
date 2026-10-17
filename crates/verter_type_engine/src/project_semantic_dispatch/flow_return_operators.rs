@@ -5,6 +5,7 @@
 //! `getUnaryResultType` and element-access rules, measured on 7.0.2.
 
 use std::sync::Arc;
+use verter_type_expr::OwnedStr;
 
 use super::super::dispatch_txn::RelationStep;
 use super::{FlowDemandDriver, FlowEvaluator, FlowProductSubject, Positional};
@@ -1760,8 +1761,9 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             self.record_degradation(FlowReturnDegradation::FlowGap(FlowGap::UnmodeledExpression));
             return Positional::Unmodeled;
         }
+        let quasis: Vec<OwnedStr> = quasis.iter().map(OwnedStr::from).collect();
         match self.dispatch.reduce_template_literal_nodes(
-            quasis,
+            &quasis,
             &nodes,
             crate::semantic_query::ProjectionReductionContext::published(
                 crate::semantic_query::ProjectionMode::Expanded,

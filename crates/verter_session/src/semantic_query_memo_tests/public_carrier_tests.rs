@@ -500,7 +500,7 @@ fn a_deferred_substitutions_pending_operands_stay_owned_by_the_delivering_read()
                     true_branch_ref: literal(store, "true branch"),
                     false_branch_ref: literal(store, "false branch"),
                     distributive: false,
-                    pending: Some(Arc::new(
+                    pending: Some(verter_session_query::retention::owned::Owned::new(
                         ConditionalPendingSubstitution::empty().append_true(param, argument),
                     )),
                 });

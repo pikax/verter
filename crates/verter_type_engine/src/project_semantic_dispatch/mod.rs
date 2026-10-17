@@ -1136,7 +1136,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             )),
             SemanticQueryKey::TemplateLiteralReduce { pattern, args, .. } => {
                 graph.intern_node(SemanticNodeData::TemplateLiteral {
-                    quasis: Arc::clone(pattern),
+                    quasis: (*pattern).clone(),
                     expressions: crate::semantic_query::PayloadArray::from(Arc::clone(args)),
                 })
             }

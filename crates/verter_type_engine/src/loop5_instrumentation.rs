@@ -984,7 +984,7 @@ mod tests {
             },
         };
         let template_literal_reduce = SemanticQueryKey::TemplateLiteralReduce {
-            pattern: Arc::from(Vec::new().into_boxed_slice()),
+            pattern: verter_type_expr::OwnedSlice::default(),
             args: Arc::from(Vec::new().into_boxed_slice()),
             context: crate::semantic_query::TemplateLiteralReduceContext {
                 resolve_env_hash: Default::default(),

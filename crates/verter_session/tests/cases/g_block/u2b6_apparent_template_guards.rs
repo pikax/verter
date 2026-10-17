@@ -114,7 +114,10 @@ fn template_literal_reduce_key(
     l: u8,
     j: u32,
 ) -> SemanticQueryKey {
-    let quasis: Arc<[Arc<str>]> = pattern.iter().map(|s| Arc::from(*s)).collect();
+    let quasis: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr> = pattern
+        .iter()
+        .map(|s| verter_type_expr::OwnedStr::from(*s))
+        .collect();
     let args: Arc<[SemanticNodeId]> = Arc::from(args.to_vec().into_boxed_slice());
     SemanticQueryKey::TemplateLiteralReduce {
         pattern: quasis,

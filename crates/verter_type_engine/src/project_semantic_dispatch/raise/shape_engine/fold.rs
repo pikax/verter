@@ -325,7 +325,7 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
             active.remove(&node);
             let constraint_out = constraint_out?;
             let default_out = default_out?;
-            alg.type_parameter(Arc::clone(display_name), constraint_out, default_out)
+            alg.type_parameter(Arc::<str>::from(display_name), constraint_out, default_out)
         }
         // A declaration raises with its constraint (a present but
         // unraisable one fails the node); a reference names the declaration.
@@ -333,9 +333,9 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
             name, constraint, ..
         } => {
             let constraint_out = fold_optional_slot(alg, dispatch, *constraint, active)?;
-            alg.infer(Arc::clone(name), constraint_out)
+            alg.infer(Arc::<str>::from(name), constraint_out)
         }
-        SemanticNodeData::InferRef { name, .. } => alg.infer(Arc::clone(name), None),
+        SemanticNodeData::InferRef { name, .. } => alg.infer(Arc::<str>::from(name), None),
         SemanticNodeData::Opaque(err) => match err {
             QueryError::RecursiveRef { name, args } => {
                 let raised_args: Vec<A::Out> = args
@@ -439,7 +439,7 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
                     })
                 })
                 .collect();
-            alg.reference(Arc::clone(name), raised_args)
+            alg.reference(Arc::<str>::from(name), raised_args)
         }
         SemanticNodeData::ImportType(_) => {
             let (specifier, qualifier, typeof_query) =
@@ -454,7 +454,7 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
                 })
                 .collect();
             alg.import_type(
-                Arc::clone(specifier),
+                Arc::<str>::from(specifier),
                 std::sync::Arc::<[std::sync::Arc<str>]>::from(qualifier.clone()),
                 typeof_query,
                 raised_args,
@@ -518,7 +518,7 @@ fn fold_function<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
         .iter()
         .map(|p| {
             Some(FoldedFunctionParam {
-                name: p.name.clone(),
+                name: p.name.as_deref().map(Arc::<str>::from),
                 ty: fold_node(alg, dispatch, p.ty, active)?,
                 optional: p.optional,
                 rest: p.rest,
@@ -533,7 +533,7 @@ fn fold_function<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
     let mut type_params: Vec<FoldedTypeParam<A::Out>> = Vec::new();
     for tp in type_parameters {
         type_params.push(FoldedTypeParam {
-            name: Arc::clone(&tp.name),
+            name: Arc::<str>::from(&tp.name),
             constraint: fold_optional_slot(alg, dispatch, tp.constraint, active)?,
             default: fold_optional_slot(alg, dispatch, tp.default, active)?,
             is_const: tp.is_const,
@@ -549,7 +549,7 @@ fn fold_function<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
                 }
                 crate::semantic_query::PredicateSubject::Parameter(_) => predicate
                     .subject_parameter(params)
-                    .and_then(|param| param.name.clone())
+                    .and_then(|param| param.name.as_deref().map(Arc::<str>::from))
                     .map(verter_type_expr::TypePredicateSubject::Parameter),
             };
             match subject {

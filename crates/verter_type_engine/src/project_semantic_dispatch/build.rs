@@ -6,6 +6,7 @@
 //! visibility beyond `pub(super)`.
 
 use std::sync::Arc;
+use verter_type_expr::OwnedStr;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_session_query::type_solver::builtin::BuiltinUtility;
@@ -3685,7 +3686,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     param_index: index as u16,
                     constraint: None,
                     default: None,
-                    display_name: Arc::from(param.name.as_str()),
+                    display_name: OwnedStr::from(param.name.as_str()),
                 },
                 scope.clone(),
             );
@@ -4048,7 +4049,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     _ => (None, None),
                 };
                 crate::semantic_query::TypeParamDecl {
-                    name: Arc::clone(name),
+                    name: OwnedStr::from(name),
                     param: *binder,
                     constraint,
                     default,
@@ -5288,7 +5289,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         param_index: index as u16,
                         constraint: None,
                         default: None,
-                        display_name: Arc::from(param.name.as_str()),
+                        display_name: OwnedStr::from(param.name.as_str()),
                     },
                     scope.clone(),
                 )
@@ -5594,7 +5595,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         param_index: index as u16,
                         constraint: None,
                         default: None,
-                        display_name: Arc::from(param.name.as_str()),
+                        display_name: OwnedStr::from(param.name.as_str()),
                     },
                     scope.clone(),
                 )
@@ -10062,7 +10063,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 param_index,
                 constraint: None,
                 default: None,
-                display_name: Arc::from("K"),
+                display_name: OwnedStr::from("K"),
             });
             MapperKey {
                 parameter_node,
@@ -10220,7 +10221,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     param_index,
                     constraint: None,
                     default: None,
-                    display_name: Arc::from("P"),
+                    display_name: OwnedStr::from("P"),
                 });
                 let mapper = MapperKey {
                     parameter_node,
@@ -11460,7 +11461,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             type_parameters
                 .iter()
                 .zip(bound.iter())
-                .map(|(decl, (_, argument))| (Arc::clone(&decl.name), *argument)),
+                .map(|(decl, (_, argument))| (Arc::<str>::from(&decl.name), *argument)),
         );
         self.graph()
             .intern_node(SemanticNodeData::DeferredCallable(source.with_substituted(
@@ -11929,9 +11930,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // occurrences the searched clause actually binds are
                     // claimed.
                     if spelling.claims_deferred_heads()
-                        && data
-                            .bare_ref_head()
-                            .is_some_and(|(head, _)| head.as_ref() == name)
+                        && data.bare_ref_head().is_some_and(|(head, _)| head == name)
                     {
                         found.push(node);
                     }
@@ -12258,7 +12257,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .iter()
             .skip(from)
             .map(|param| TupleElement {
-                label: param.name.as_ref().map(Arc::clone),
+                label: param.name.clone(),
                 // An optional parameter's tuple SLOT type is
                 // `T | undefined` (TS widens the optional slot), while the
                 // `optional` marker below keeps the `?` surface flag —
@@ -16352,7 +16351,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(SemanticNodeData::Primitive(PrimitiveKind::Number | PrimitiveKind::BigInt)) => {
                 drop(data);
                 let pattern = graph.intern_node(SemanticNodeData::TemplateLiteral {
-                    quasis: Arc::from(vec![Arc::from(""), Arc::from("")].into_boxed_slice()),
+                    quasis: verter_type_expr::OwnedSlice::from(vec![
+                        OwnedStr::from(""),
+                        OwnedStr::from(""),
+                    ]),
                     expressions: crate::semantic_query::PayloadArray::from(
                         vec![resolved].into_boxed_slice(),
                     ),
@@ -16363,7 +16365,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 quasis,
                 expressions,
             }) if expressions.iter().all(|hole| self.is_template_hole(*hole)) => {
-                let (quasis, expressions) = (Arc::clone(quasis), Arc::clone(expressions.as_arc()));
+                let (quasis, expressions) = (quasis.clone(), Arc::clone(expressions.as_arc()));
                 drop(data);
                 self.apply_template_string_mapping(intrinsic, &quasis, &expressions, context)
             }
@@ -16385,7 +16387,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     fn apply_template_string_mapping(
         &self,
         intrinsic: &str,
-        quasis: &[Arc<str>],
+        quasis: &[OwnedStr],
         holes: &[SemanticNodeId],
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
@@ -16560,7 +16562,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// never reordered.
     pub(super) fn build_template_literal_reduce(
         &self,
-        pattern: &Arc<[Arc<str>]>,
+        pattern: &verter_type_expr::OwnedSlice<OwnedStr>,
         args: &Arc<[SemanticNodeId]>,
         _context: crate::semantic_query::TemplateLiteralReduceContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
@@ -16572,7 +16574,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let observed_self_roots = self.observed_self_roots_from_nodes(args.iter().copied());
         let node = reduced.unwrap_or_else(|_| {
             self.graph().intern_node(SemanticNodeData::TemplateLiteral {
-                quasis: Arc::clone(pattern),
+                quasis: pattern.clone(),
                 expressions: crate::semantic_query::PayloadArray::from(Arc::clone(args)),
             })
         });
@@ -18127,19 +18129,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// both reach this helper THROUGH that query, never a second walker.
     pub(super) fn reduce_template_literal_nodes(
         &self,
-        quasis: &[Arc<str>],
+        quasis: &[OwnedStr],
         args: &[SemanticNodeId],
         eval_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Result<SemanticNodeId, crate::semantic_query::PartialReasonSet> {
         let graph = self.graph();
         let spliced = self.spliced_template(quasis, args);
-        let (quasis, args): (&[Arc<str>], &[SemanticNodeId]) = match &spliced {
+        let (quasis, args): (&[OwnedStr], &[SemanticNodeId]) = match &spliced {
             Some((quasis, args)) => (quasis, args),
             None => (quasis, args),
         };
         let authored = || {
             graph.intern_node(SemanticNodeData::TemplateLiteral {
-                quasis: Arc::from(quasis.to_vec().into_boxed_slice()),
+                quasis: verter_type_expr::OwnedSlice::from(quasis),
                 expressions: crate::semantic_query::PayloadArray::from(
                     args.to_vec().into_boxed_slice(),
                 ),
@@ -18207,21 +18209,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// template literal type.
     fn spliced_template(
         &self,
-        quasis: &[Arc<str>],
+        quasis: &[OwnedStr],
         args: &[SemanticNodeId],
-    ) -> Option<(Vec<Arc<str>>, Vec<SemanticNodeId>)> {
+    ) -> Option<(Vec<OwnedStr>, Vec<SemanticNodeId>)> {
         let graph = self.graph();
         let nested = |arg: SemanticNodeId| match graph.node_data(arg).as_deref() {
             Some(SemanticNodeData::TemplateLiteral {
                 quasis,
                 expressions,
-            }) => Some((Arc::clone(quasis), Arc::clone(expressions.as_arc()))),
+            }) => Some((quasis.clone(), Arc::clone(expressions.as_arc()))),
             _ => None,
         };
         if !args.iter().any(|arg| nested(*arg).is_some()) {
             return None;
         }
-        let text = |quasis: &[Arc<str>], index: usize| {
+        let text = |quasis: &[OwnedStr], index: usize| {
             quasis
                 .get(index)
                 .map(|q| q.as_ref())
@@ -18231,8 +18233,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut texts: Vec<String> = vec![text(quasis, 0)];
         let mut holes: Vec<SemanticNodeId> = Vec::new();
         // Each template being spliced: its texts, its holes and its next hole.
-        type Splicing = (Arc<[Arc<str>]>, Arc<[SemanticNodeId]>, usize);
-        let mut stack: Vec<Splicing> = vec![(Arc::from(quasis), Arc::from(args), 0)];
+        type Splicing = (
+            verter_type_expr::OwnedSlice<OwnedStr>,
+            Arc<[SemanticNodeId]>,
+            usize,
+        );
+        let mut stack: Vec<Splicing> = vec![(
+            verter_type_expr::OwnedSlice::from(quasis),
+            Arc::from(args),
+            0,
+        )];
         while let Some((quasis, args, next)) = stack.last_mut() {
             let Some(&arg) = args.get(*next) else {
                 stack.pop();
@@ -18256,7 +18266,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
         }
-        Some((texts.into_iter().map(Arc::from).collect(), holes))
+        Some((texts.into_iter().map(OwnedStr::from).collect(), holes))
     }
 
     /// Every concatenation a template of `quasis` and `args` distributes
@@ -18269,7 +18279,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// built is charged to the connected-work ledger before it is formed.
     fn template_alternatives(
         &self,
-        quasis: &[Arc<str>],
+        quasis: &[OwnedStr],
         args: &[SemanticNodeId],
         eval_context: crate::semantic_query::ProjectionReductionContext,
     ) -> TemplateAlternatives {
@@ -18452,7 +18462,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 quasis,
                 expressions,
             }) => {
-                let (quasis, expressions) = (Arc::clone(quasis), Arc::clone(expressions.as_arc()));
+                let (quasis, expressions) = (quasis.clone(), Arc::clone(expressions.as_arc()));
                 drop(data);
                 self.template_alternatives(&quasis, &expressions, eval_context)
             }
@@ -18518,7 +18528,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         graph.intern_node(SemanticNodeData::TemplateLiteral {
             quasis: texts
                 .into_iter()
-                .map(|text| Arc::from(text.as_str()))
+                .map(|text| OwnedStr::from(text.as_str()))
                 .collect(),
             expressions: crate::semantic_query::PayloadArray::from(holes.into_boxed_slice()),
         })

@@ -1096,7 +1096,7 @@ fn one_level_surface_converts_every_entry_kind_and_generic_roots_stay_open() {
         param_index: 0,
         constraint: Some(constraint),
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let dispatch =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());

@@ -14,6 +14,7 @@
 //! `fn raise_node_to_type_expr` exists in `crates/`.
 
 use std::sync::Arc;
+use verter_type_expr::OwnedStr;
 
 use crate::semantic_query::SurfaceView;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -1606,7 +1607,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 (self.opaque(QueryError::ExecutionAborted(abort)), None),
                             _ => (self.opaque(QueryError::Miss), None),
                         };
-                        let names: Vec<_> = type_parameters.iter().map(|p| Arc::clone(&p.name)).collect();
+                        let names: Vec<_> = type_parameters.iter().map(|p| Arc::<str>::from(&p.name)).collect();
                         let arguments: Vec<_> = type_parameters.iter().map(|p| p.param).collect();
                         let returned = self.bind_flow_return_own_clause(returned,
                             source.identity().anchor.canonical_id.as_ref(), source.identity().anchor.owner,
@@ -2804,7 +2805,7 @@ fn type_param_shell_node<C: crate::resolver_core::ResolverCapabilities>(
         param_index: u16::try_from(param.ordinal).unwrap_or(u16::MAX),
         constraint: None,
         default: None,
-        display_name: Arc::from(param.name.as_str()),
+        display_name: OwnedStr::from(param.name.as_str()),
     })
 }
 

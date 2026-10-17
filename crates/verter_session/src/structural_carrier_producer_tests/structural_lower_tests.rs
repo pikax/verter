@@ -112,7 +112,7 @@ fn lowers_bare_ref_with_empty_type_args() {
         n @ SemanticNodeData::BareRef(_) => {
             let (name, scope) = n.bare_ref_head().expect("BareRef head");
             let type_args = n.carrier_type_args();
-            assert_eq!(name.as_ref(), "Foo");
+            assert_eq!(name, "Foo");
             assert_eq!(
                 *scope,
                 fixture_scope(),
@@ -140,7 +140,7 @@ fn lowers_generic_ref_with_structurally_lowered_args() {
         n @ SemanticNodeData::BareRef(_) => {
             let (name, _scope) = n.bare_ref_head().expect("BareRef head");
             let type_args = n.carrier_type_args();
-            assert_eq!(name.as_ref(), "Foo");
+            assert_eq!(name, "Foo");
             assert_eq!(type_args.len(), 1, "Foo<string> carries exactly one arg");
             type_args[0]
         }
@@ -337,7 +337,7 @@ fn lowers_import_type_with_qualifier_and_args() {
             let (specifier, qualifier, typeof_query) =
                 n.import_type_head().expect("ImportType head");
             let type_args = n.carrier_type_args();
-            assert_eq!(specifier.as_ref(), "./m");
+            assert_eq!(specifier, "./m");
             assert_eq!(qualifier.len(), 1);
             assert_eq!(qualifier[0].as_ref(), "Box");
             assert!(!typeof_query, "import(...).Box is type position");
@@ -779,7 +779,7 @@ fn lowers_conditional_as_deferred_shell() {
             param_index: 0,
             constraint: None,
             default: None,
-            display_name: Arc::from("T"),
+            display_name: verter_type_expr::OwnedStr::from("T"),
         },
         fixture_scope(),
     );
@@ -840,7 +840,7 @@ fn conditional_binds_bare_infer_in_true_branch() {
             param_index: 0,
             constraint: None,
             default: None,
-            display_name: Arc::from("T"),
+            display_name: verter_type_expr::OwnedStr::from("T"),
         },
         fixture_scope(),
     );
@@ -1214,7 +1214,7 @@ fn lowers_interface_heritage_preserving_ref_args_and_member_provenance() {
         n @ SemanticNodeData::BareRef(_) => {
             let (name, _scope) = n.bare_ref_head().expect("BareRef head");
             let type_args = n.carrier_type_args();
-            assert_eq!(name.as_ref(), "Base");
+            assert_eq!(name, "Base");
             assert_eq!(type_args.len(), 1, "heritage `Base<string>` keeps its arg");
             assert!(matches!(
                 &*node(&graph, type_args[0]),
@@ -1526,7 +1526,7 @@ fn structural_infer_predeclaration_does_not_capture_ordinary_sibling_ref() {
             param_index: 0,
             constraint: None,
             default: None,
-            display_name: Arc::from("U"),
+            display_name: verter_type_expr::OwnedStr::from("U"),
         },
         fixture_scope(),
     );

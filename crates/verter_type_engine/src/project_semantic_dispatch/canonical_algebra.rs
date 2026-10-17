@@ -88,6 +88,7 @@
 
 use std::ops::ControlFlow;
 use std::sync::Arc;
+use verter_type_expr::OwnedStr;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -3988,7 +3989,7 @@ fn classify_node(
             quasis,
             expressions,
         }) => {
-            let quasis = Arc::clone(quasis);
+            let quasis = quasis.clone();
             let expressions = Arc::clone(expressions.as_arc());
             classify_template(walk, &quasis, &expressions)
         }
@@ -4054,7 +4055,7 @@ fn literal_is_truthy(literal: &LiteralValue) -> bool {
 
 fn classify_template(
     walk: &mut TruthinessWalk<'_>,
-    quasis: &[Arc<str>],
+    quasis: &[OwnedStr],
     expressions: &[SemanticNodeId],
 ) -> crate::semantic_query::TruthinessDomain {
     use crate::semantic_query::TruthinessInhabitance as Tri;
@@ -4160,7 +4161,7 @@ fn render_domain(walk: &mut TruthinessWalk<'_>, node: SemanticNodeId) -> RenderD
             quasis,
             expressions,
         }) => {
-            let quasis = Arc::clone(quasis);
+            let quasis = quasis.clone();
             let expressions = Arc::clone(expressions.as_arc());
             let nested = classify_template(walk, &quasis, &expressions);
             // A template denotes strings, so its render domain IS its

@@ -414,14 +414,6 @@ fn box_block_bytes<T>(_: &Box<T>) -> usize {
     box_bytes::<T>()
 }
 
-/// An `Arc<T>`'s block, or `None` when this charge already counted it.
-fn sized_arc_block_bytes<T>(value: &Arc<T>, aliases: &mut AliasSet) -> Option<usize> {
-    use verter_session_query::retention::allocation::arc_block_bytes;
-    aliases
-        .first(value)
-        .then(|| arc_block_bytes(std::mem::size_of::<T>()))
-}
-
 /// A declaration slot's file and symbol names.
 pub(super) fn decl_slot_heap_bytes(
     slot: &ResolvedDeclSlotIdentity,
@@ -670,12 +662,17 @@ fn mapper_heap_bytes(mapper: &crate::semantic_query::MapperKey) -> usize {
 
 /// A conditional's shared pending-substitution record and its frames.
 fn pending_heap_bytes(
-    pending: &Option<Arc<crate::semantic_query::ConditionalPendingSubstitution>>,
+    pending: &Option<
+        verter_session_query::retention::owned::Owned<
+            crate::semantic_query::ConditionalPendingSubstitution,
+        >,
+    >,
     aliases: &mut AliasSet,
 ) -> usize {
     pending.as_ref().map_or(0, |pending| {
-        sized_arc_block_bytes(pending, aliases)
-            .map_or(0, |block| block + pending.key_heap_bytes(aliases))
+        // An owned allocation the key shares with the payload: charged by
+        // its own cell.
+        pending.offer(aliases)
     })
 }
 

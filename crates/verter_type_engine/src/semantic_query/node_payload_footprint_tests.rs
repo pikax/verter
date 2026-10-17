@@ -97,7 +97,7 @@ fn node_payload_footprint_shared_array_offers_one_key_and_descends_once() {
     let label: Arc<str> = Arc::from("label");
     let elements: PayloadArray<TupleElement> = (0..3)
         .map(|ordinal| TupleElement {
-            label: Some(Arc::clone(&label)),
+            label: Some(verter_type_expr::OwnedStr::from(&label)),
             value: SemanticNodeId(ordinal),
             optional: false,
             rest: false,
@@ -143,7 +143,9 @@ fn node_payload_footprint_repeated_quasi_counts_once_per_measurement() {
         Arc::clone(&long),
     ]);
     let template = SemanticNodeData::TemplateLiteral {
-        quasis: Arc::clone(&quasis),
+        quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+            std::sync::Arc::clone(&quasis),
+        ),
         expressions: PayloadArray::from(vec![SemanticNodeId(1), SemanticNodeId(2)]),
     };
 

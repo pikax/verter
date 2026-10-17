@@ -1087,7 +1087,7 @@ fn parity_deferred_operator_shells() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
 
     // `keyof T` ⇒ raised-root KeyOf ⇒ expanded_surface == false, materialized
@@ -1106,7 +1106,7 @@ fn parity_deferred_operator_shells() {
         param_index: 1,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
     let indexed = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: tp,
@@ -1156,7 +1156,7 @@ fn parity_deferred_operator_shells() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("V"),
+        display_name: verter_type_expr::OwnedStr::from("V"),
     });
     let keyspace = graph.intern_node(SemanticNodeData::KeyOf { base: tp });
     let mapped = graph.intern_node(SemanticNodeData::Mapped {
@@ -1388,7 +1388,7 @@ fn discrimination_oracle_separates_the_facts() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let keyof = graph.intern_node(SemanticNodeData::KeyOf { base: tp });
     assert!(node_is_expanded_surface_legacy_equivalent(&host, obj));
@@ -1581,7 +1581,13 @@ fn parity_template_literal_leaf_vs_recurse_boundary() {
     // treats a raised `TypeExpr::TemplateLiteral` as a LEAF (always materialized)
     // — the exact leaf-vs-recurse boundary. ⇒ NOT a miss.
     let template = graph.intern_node(SemanticNodeData::TemplateLiteral {
-        quasis: Arc::from(vec![Arc::<str>::from("a"), Arc::<str>::from("")].into_boxed_slice()),
+        quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+            vec![
+                verter_type_expr::OwnedStr::from("a"),
+                verter_type_expr::OwnedStr::from(""),
+            ]
+            .into_boxed_slice(),
+        ),
         expressions: verter_type_engine::semantic_query::PayloadArray::from(
             vec![string_id].into_boxed_slice(),
         ),
@@ -1600,7 +1606,13 @@ fn parity_template_literal_leaf_vs_recurse_boundary() {
     // assert it matches LEGACY (the oracle), not intuition.
     let miss = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
     let template_miss_expr = graph.intern_node(SemanticNodeData::TemplateLiteral {
-        quasis: Arc::from(vec![Arc::<str>::from("x"), Arc::<str>::from("")].into_boxed_slice()),
+        quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+            vec![
+                verter_type_expr::OwnedStr::from("x"),
+                verter_type_expr::OwnedStr::from(""),
+            ]
+            .into_boxed_slice(),
+        ),
         expressions: verter_type_engine::semantic_query::PayloadArray::from(
             vec![miss].into_boxed_slice(),
         ),
@@ -1636,7 +1648,7 @@ fn parity_type_param_with_constraint_and_default() {
         param_index: 0,
         constraint: Some(string_id),
         default: Some(number_id),
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     assert_classifier_parity(&host, tp, "typeparam-constraint-and-default");
     assert!(
@@ -1659,7 +1671,7 @@ fn parity_type_param_with_constraint_and_default() {
         param_index: 1,
         constraint: Some(miss),
         default: Some(miss),
-        display_name: Arc::from("U"),
+        display_name: verter_type_expr::OwnedStr::from("U"),
     });
     assert_classifier_parity(&host, tp_miss_constraint, "typeparam-miss-constraint-leaf");
     assert!(
@@ -2141,7 +2153,13 @@ fn raise_oracle_payload_shape_preserves_recursed_children() {
     // `TypeExpr::TemplateLiteral` must PRESERVE the recursed expression
     // (`Primitive(String)`) in its `expressions`, not drop it.
     let template = graph.intern_node(SemanticNodeData::TemplateLiteral {
-        quasis: Arc::from(vec![Arc::<str>::from("a"), Arc::<str>::from("")].into_boxed_slice()),
+        quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+            vec![
+                verter_type_expr::OwnedStr::from("a"),
+                verter_type_expr::OwnedStr::from(""),
+            ]
+            .into_boxed_slice(),
+        ),
         expressions: verter_type_engine::semantic_query::PayloadArray::from(
             vec![string_id].into_boxed_slice(),
         ),
@@ -2164,7 +2182,13 @@ fn raise_oracle_payload_shape_preserves_recursed_children() {
     // `Unknown`), proving the child is recursed-and-preserved even though the leaf
     // predicate reads materialized.
     let template_miss = graph.intern_node(SemanticNodeData::TemplateLiteral {
-        quasis: Arc::from(vec![Arc::<str>::from("x"), Arc::<str>::from("")].into_boxed_slice()),
+        quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+            vec![
+                verter_type_expr::OwnedStr::from("x"),
+                verter_type_expr::OwnedStr::from(""),
+            ]
+            .into_boxed_slice(),
+        ),
         expressions: verter_type_engine::semantic_query::PayloadArray::from(
             vec![miss].into_boxed_slice(),
         ),
@@ -2196,7 +2220,7 @@ fn raise_oracle_payload_shape_preserves_recursed_children() {
         param_index: 0,
         constraint: Some(string_id),
         default: Some(number_id),
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let tp_oracle = raise_oracle(&host, tp).expect("typeparam raises");
     match &tp_oracle {
@@ -2486,14 +2510,14 @@ fn node_improvement_verdict_matches_type_expr_improvement_over_raise() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let v_tp = graph.intern_node(SemanticNodeData::TypeParam {
         decl: decl_identity_unscoped("/w/m.ts", "V"),
         param_index: 1,
         constraint: None,
         default: None,
-        display_name: Arc::from("V"),
+        display_name: verter_type_expr::OwnedStr::from("V"),
     });
     let keyof_tp = graph.intern_node(SemanticNodeData::KeyOf { base: tp });
     let mapped_tp = mapped_fixture(&graph, tp, keyof_tp, v_tp);
@@ -2587,21 +2611,21 @@ fn publication_score_corpus(
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let v_tp = graph.intern_node(SemanticNodeData::TypeParam {
         decl: decl_identity_unscoped("/w/m.ts", "V"),
         param_index: 1,
         constraint: None,
         default: None,
-        display_name: Arc::from("V"),
+        display_name: verter_type_expr::OwnedStr::from("V"),
     });
     let tp_bounded = graph.intern_node(SemanticNodeData::TypeParam {
         decl: decl_identity_unscoped("/w/m.ts", "B"),
         param_index: 2,
         constraint: Some(foo),
         default: Some(bar),
-        display_name: Arc::from("B"),
+        display_name: verter_type_expr::OwnedStr::from("B"),
     });
     let keyof_tp = graph.intern_node(SemanticNodeData::KeyOf { base: tp });
 
@@ -2737,8 +2761,12 @@ fn publication_score_corpus(
         (
             "template_literal",
             graph.intern_node(SemanticNodeData::TemplateLiteral {
-                quasis: Arc::from(
-                    vec![Arc::<str>::from("a"), Arc::<str>::from("")].into_boxed_slice(),
+                quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+                    vec![
+                        verter_type_expr::OwnedStr::from("a"),
+                        verter_type_expr::OwnedStr::from(""),
+                    ]
+                    .into_boxed_slice(),
                 ),
                 expressions: verter_type_engine::semantic_query::PayloadArray::from(
                     vec![foo].into_boxed_slice(),
@@ -2784,7 +2812,7 @@ fn publication_score_corpus(
         (
             "infer",
             graph.intern_node(SemanticNodeData::Infer {
-                name: Arc::from("U"),
+                name: verter_type_expr::OwnedStr::from("U"),
                 binder: graph.alloc_infer_binder_id(),
                 constraint: None,
             }),
@@ -3206,7 +3234,9 @@ fn template_literal_with_unraisable_expression_fails_whole() {
     let host = host();
     let graph = graph_of(&host);
     let node = graph.intern_node(SemanticNodeData::TemplateLiteral {
-        quasis: Arc::from(vec![Arc::from("x")].into_boxed_slice()),
+        quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+            vec![verter_type_expr::OwnedStr::from("x")].into_boxed_slice(),
+        ),
         expressions: verter_type_engine::semantic_query::PayloadArray::from(
             vec![SemanticNodeId(u64::MAX)].into_boxed_slice(),
         ),
@@ -3290,7 +3320,7 @@ fn type_parameter_with_unraisable_constraint_or_default_fails_whole() {
         param_index: 0,
         constraint: Some(SemanticNodeId(u64::MAX)),
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     assert!(
         !fold_raises(&host, with_constraint),
@@ -3301,7 +3331,7 @@ fn type_parameter_with_unraisable_constraint_or_default_fails_whole() {
         param_index: 0,
         constraint: None,
         default: Some(SemanticNodeId(u64::MAX)),
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     assert!(
         !fold_raises(&host, with_default),
@@ -3313,7 +3343,7 @@ fn type_parameter_with_unraisable_constraint_or_default_fails_whole() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     assert!(fold_raises(&host, plain), "absent slots stay absent");
 }

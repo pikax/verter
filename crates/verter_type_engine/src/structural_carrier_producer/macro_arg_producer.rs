@@ -118,6 +118,7 @@
 use std::cell::Cell;
 use std::sync::{Arc, OnceLock};
 use verter_session_query::source::demand::ExpressionSourceDemand;
+use verter_type_expr::OwnedStr;
 
 use rustc_hash::FxHashMap;
 use verter_type_expr::{FunctionExpr, LiteralValue, MappedModifier, ObjectMember, TypeExpr};
@@ -235,7 +236,7 @@ fn lower_node(
             let mut lowered = Vec::with_capacity(elements.len());
             for el in elements.iter() {
                 lowered.push(TupleElement {
-                    label: el.label.as_deref().map(Arc::<str>::from),
+                    label: el.label.as_deref().map(OwnedStr::from),
                     value: lower_node(graph, &el.ty, scope, ctx)?,
                     optional: el.optional,
                     rest: el.rest,
@@ -253,7 +254,10 @@ fn lower_node(
             quasis,
             expressions,
         } => {
-            let quasis: Arc<[Arc<str>]> = quasis.iter().map(|q| Arc::from(q.as_str())).collect();
+            let quasis: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr> = quasis
+                .iter()
+                .map(|q| verter_type_expr::OwnedStr::from(q.as_str()))
+                .collect();
             let expressions = lower_args(graph, expressions, scope, ctx)?;
             Ok(graph.intern_node_with_scope(
                 SemanticNodeData::TemplateLiteral {
@@ -336,7 +340,7 @@ fn lower_node(
                 let binder = infer_binders.binder_at(&site.path);
                 let declaration = graph.intern_node_with_scope(
                     SemanticNodeData::Infer {
-                        name: Arc::clone(&site.name),
+                        name: OwnedStr::from(&site.name),
                         binder: binder.clone(),
                         constraint: None,
                     },
@@ -358,7 +362,7 @@ fn lower_node(
                     // declaration node (the shadow stop keys on declarations).
                     let infer_node = graph.intern_node_with_scope(
                         SemanticNodeData::InferRef {
-                            name: Arc::clone(&site.name),
+                            name: OwnedStr::from(&site.name),
                             binder: declarations
                                 .get(&site.name)
                                 .expect("conditional infer declaration was preseeded")
@@ -428,7 +432,7 @@ fn lower_node(
             }
             Ok(graph.intern_node_with_scope(
                 SemanticNodeData::Infer {
-                    name: Arc::from(name.as_str()),
+                    name: OwnedStr::from(name.as_str()),
                     binder: ctx
                         .infer_binders
                         .expect("structural lowering injects an infer identity authority")
@@ -467,8 +471,8 @@ fn lower_node(
                 .as_deref()
                 .map(|d| lower_node(graph, d, scope, ctx))
                 .transpose()?;
-            let display_name: Arc<str> = Arc::from(param.name.as_str());
-            let decl = DeclIdentity::from_scope(scope, Arc::clone(&display_name));
+            let display_name = OwnedStr::from(param.name.as_str());
+            let decl = DeclIdentity::from_scope(scope, display_name.clone());
             Ok(graph.intern_node_with_scope(
                 SemanticNodeData::TypeParam {
                     decl,
@@ -748,7 +752,7 @@ fn lower_node(
                     param_index: ctx.next_mapper_ordinal(),
                     constraint: None,
                     default: None,
-                    display_name: Arc::clone(&mapper_display_name),
+                    display_name: OwnedStr::from(&mapper_display_name),
                 },
                 scope.clone(),
             );
@@ -761,7 +765,7 @@ fn lower_node(
                     );
                     let base_infer = match graph.node_data(inner_id).as_deref() {
                         Some(SemanticNodeData::Infer { name, binder, .. }) => {
-                            Some((Arc::clone(name), binder.clone()))
+                            Some((Arc::<str>::from(name), binder.clone()))
                         }
                         _ => None,
                     };
@@ -780,7 +784,7 @@ fn lower_node(
             if let Some((base_infer_name, binder)) = base_infer_name {
                 let reference = graph.intern_node_with_scope(
                     SemanticNodeData::InferRef {
-                        name: Arc::clone(&base_infer_name),
+                        name: OwnedStr::from(&base_infer_name),
                         binder,
                     },
                     scope.clone(),
@@ -937,7 +941,7 @@ fn lower_function_signature(
     let mut own_frame = BinderScope::default();
     let mut type_parameters: Vec<TypeParamDecl> = Vec::with_capacity(func.type_parameters.len());
     for tp in &func.type_parameters {
-        let display_name: Arc<str> = Arc::from(tp.name.as_str());
+        let display_name = OwnedStr::from(tp.name.as_str());
         // This parameter's constraint / default sees the PRIOR own binders in
         // this list (TS scoping), so build a head context over the outer stack
         // plus the own-frame accumulated so far. The first parameter has no
@@ -963,7 +967,7 @@ fn lower_function_signature(
             .as_deref()
             .map(|d| lower_node(graph, d, scope, &head_ctx))
             .transpose()?;
-        let decl = DeclIdentity::from_scope(scope, Arc::clone(&display_name));
+        let decl = DeclIdentity::from_scope(scope, display_name.clone());
         let binder = graph.intern_node_with_scope(
             SemanticNodeData::TypeParam {
                 decl,
@@ -973,11 +977,11 @@ fn lower_function_signature(
                 param_index: 0,
                 constraint,
                 default,
-                display_name: Arc::clone(&display_name),
+                display_name: OwnedStr::from(&display_name),
             },
             scope.clone(),
         );
-        own_frame.bind(Arc::clone(&display_name), binder);
+        own_frame.bind(Arc::<str>::from(&display_name), binder);
         type_parameters.push(TypeParamDecl {
             name: display_name,
             param: binder,
@@ -1003,7 +1007,7 @@ fn lower_function_signature(
     let mut params: Vec<FunctionParam> = Vec::with_capacity(func.parameters.len());
     for p in &func.parameters {
         params.push(FunctionParam {
-            name: p.name.as_deref().map(Arc::<str>::from),
+            name: p.name.as_deref().map(OwnedStr::from),
             ty: lower_node(graph, &p.ty, scope, &inner_ctx)?,
             optional: p.optional,
             rest: p.rest,
@@ -1207,18 +1211,18 @@ fn build_script_setup_seed_frames(
         // The clause-position index is the ordinal / `param_index` the eager
         // path and prepared-decl bundle assign — matching identity tuples.
         let ordinal = u16::try_from(idx).unwrap_or(u16::MAX);
-        let display_name: Arc<str> = Arc::from(param.name.as_str());
+        let display_name = OwnedStr::from(param.name.as_str());
         let node: SemanticNodeId = graph.intern_node_with_scope(
             SemanticNodeData::TypeParam {
                 decl: decl.clone(),
                 param_index: ordinal,
                 constraint,
                 default,
-                display_name: Arc::clone(&display_name),
+                display_name: OwnedStr::from(&display_name),
             },
             scope.clone(),
         );
-        frame.bind(display_name, node);
+        frame.bind(Arc::<str>::from(&display_name), node);
     }
 
     // De-sugared `vec![frame]`: this producer module forbids ALL production bang

@@ -65,7 +65,7 @@ fn a_type_param_reference_is_found_at_any_depth() {
                 param_index: 0,
                 constraint: None,
                 default: None,
-                display_name: Arc::from("T"),
+                display_name: verter_type_expr::OwnedStr::from("T"),
             })
         },
         |engine, node| {

@@ -2871,7 +2871,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             } => {
                                 let read =
                                     self.execute_read(SemanticQueryKey::TemplateLiteralReduce {
-                                        pattern: Arc::clone(quasis),
+                                        pattern: (*quasis).clone(),
                                         args: Arc::clone(expressions.as_arc()),
                                         context: self.template_literal_reduce_context(),
                                     });
@@ -3704,7 +3704,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     expressions,
                 }) => {
                     let read = self.execute_read(SemanticQueryKey::TemplateLiteralReduce {
-                        pattern: Arc::clone(quasis),
+                        pattern: (*quasis).clone(),
                         args: Arc::clone(expressions.as_arc()),
                         context: self.template_literal_reduce_context(),
                     });
