@@ -477,9 +477,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         ),
         ValueRead,
     > {
-        if let Some(ctx) = crate::request_context::current_request_context() {
-            ctx.record_dispatched_query_tag(key.tag());
-        }
+        crate::request_context::with_current_request_context(|ctx| {
+            ctx.record_dispatched_query_tag(key.tag())
+        });
         let (_connected_guard, preexisting_trip) = self.enter_connected_demand(false);
         let query_depth_guard =
             self.charge_query_entry(key, preexisting_trip, nesting.query_levels() > 0)?;
