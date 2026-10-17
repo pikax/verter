@@ -112,6 +112,60 @@ impl SemanticGraphStore {
         Ok(lease)
     }
 
+    /// `lease` itself when it already roots, in this graph's arena, every
+    /// node `result` and `diagnostics` deliver (a lease the result was
+    /// stored or produced with), handed to this thread's construction owner
+    /// as a fresh lease would be; otherwise a fresh delivery lease. A value
+    /// that carries a signature kernel epoch is always leased afresh, so its
+    /// epoch lease is the one this read names.
+    pub(crate) fn redeliver(
+        &self,
+        lease: SemanticDeliveryLease,
+        result: &QueryResult<SemanticQueryValue>,
+        diagnostics: &[crate::project_semantic_dispatch::walk::ShallowDiagnostic],
+    ) -> Result<SemanticDeliveryLease, QueryError> {
+        if self.lease_covers(&lease, result, diagnostics) {
+            lease.capture();
+            return Ok(lease);
+        }
+        self.lease_delivery(result, diagnostics)
+    }
+
+    /// Whether `lease` roots, in this graph's arena, every allocatable node
+    /// `result` and `diagnostics` retain, and `result` names no kernel epoch.
+    fn lease_covers(
+        &self,
+        lease: &SemanticDeliveryLease,
+        result: &QueryResult<SemanticQueryValue>,
+        diagnostics: &[crate::project_semantic_dispatch::walk::ShallowDiagnostic],
+    ) -> bool {
+        let Some(owner) = lease.0.as_ref() else {
+            return false;
+        };
+        if !owner.roots.belongs_to(&self.arena.core)
+            || matches!(
+                result,
+                QueryResult::Value(
+                    SemanticQueryValue::SignatureSet(_) | SemanticQueryValue::SignatureResult(_)
+                )
+            )
+        {
+            return false;
+        }
+        let roots = owner.roots.operands();
+        let mut covered = true;
+        let mut check = |node: crate::semantic_query::SemanticNodeId| {
+            if node.0 < super::UNALLOCATABLE_ID_FLOOR && !roots.contains(&node) {
+                covered = false;
+            }
+        };
+        result.for_each_retained_node(&mut check);
+        for diagnostic in diagnostics {
+            diagnostic.for_each_retained_node(&mut check);
+        }
+        covered
+    }
+
     pub(super) fn lease_candidate(
         &self,
         family: &super::family::FamilyKey,

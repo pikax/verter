@@ -568,12 +568,60 @@ fn fingerprint_seed() -> &'static RandomState {
 ///
 /// Because it routes through [`fingerprint_seed`], the fingerprint of a
 /// given payload is stable within a process run but unpredictable across
-/// runs — the HashDoS defense.
+/// runs — the HashDoS defense. The scope enters as its own seeded digest
+/// ([`scope_digest`]), a function of the scope's value alone, so equal
+/// pairs still fingerprint equal.
 fn structural_fingerprint(data: &SemanticNodeData, scope: &NodeScopeId) -> u64 {
     let mut hasher = fingerprint_seed().build_hasher();
     data.hash(&mut hasher);
-    scope.hash(&mut hasher);
+    hasher.write_u64(scope_digest(scope));
     hasher.finish()
+}
+
+/// The seeded hash of `scope`. Nodes are interned in runs under one
+/// declaration scope, so the thread keeps the digest of the last file scope
+/// it hashed, holding that scope's canonical id so the allocation that
+/// recognises it stays its own: an equal scope behind another allocation is
+/// hashed again, to the same digest.
+fn scope_digest(scope: &NodeScopeId) -> u64 {
+    type LastScope = (
+        Arc<str>,
+        verter_type_expr::TopLevelOwnerId,
+        crate::semantic_query::HashValue,
+        Option<u32>,
+        u64,
+    );
+    std::thread_local! {
+        static LAST_FILE_SCOPE: std::cell::RefCell<Option<LastScope>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    let NodeScopeId::File {
+        canonical_id,
+        owner,
+        whole_hash,
+        local_scope,
+    } = scope
+    else {
+        return fingerprint_seed().hash_one(scope);
+    };
+    LAST_FILE_SCOPE.with(|last| {
+        let mut last = last.borrow_mut();
+        if let Some((held, o, h, l, digest)) = last.as_ref() {
+            if Arc::ptr_eq(held, canonical_id) && o == owner && h == whole_hash && l == local_scope
+            {
+                return *digest;
+            }
+        }
+        let digest = fingerprint_seed().hash_one(scope);
+        *last = Some((
+            Arc::clone(canonical_id),
+            *owner,
+            *whole_hash,
+            *local_scope,
+            digest,
+        ));
+        digest
+    })
 }
 
 /// Whether a payload binds `canonical_id`'s CONTENT identity regardless of

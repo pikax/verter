@@ -127,7 +127,18 @@ impl PreparedKeyHandle {
 
 impl super::SemanticGraphStore {
     pub(crate) fn prepare_rooted_key(&self, key: SemanticQueryKey) -> PreparedKeyHandle {
-        let _scope = self.enter_node_root_scope();
+        let mut prepared = self.prepare_probe_key(key);
+        self.root_prepared_key(&mut prepared);
+        prepared
+    }
+
+    /// The prepared identity of `key` for a warm probe: its family, slot,
+    /// requested point and hash, with its operands still owned by the
+    /// caller that holds `key`'s nodes. A probe that hits returns the
+    /// stored result's own lease and drops this identity; one that goes on
+    /// to claim roots it first ([`Self::root_prepared_key`]), because a
+    /// claim keeps it past the caller's hold.
+    pub(super) fn prepare_probe_key(&self, key: SemanticQueryKey) -> PreparedKeyHandle {
         let signature = match &key {
             SemanticQueryKey::ReadSignatureResult(key) => self
                 .signature_store()
@@ -136,17 +147,27 @@ impl super::SemanticGraphStore {
             _ => None,
         };
         let mut prepared = PreparedKeyHandle::prepare_in(Some(&self.arena.core), key);
+        Arc::get_mut(&mut prepared.0)
+            .expect("a fresh prepared identity is unshared")
+            ._signature = signature;
+        prepared
+    }
+
+    /// Root a probe identity's family operands in this arena, so the
+    /// identity outlives the caller's hold on them.
+    pub(super) fn root_prepared_key(&self, prepared: &mut PreparedKeyHandle) {
         let mut nodes = super::node_roots::RootIds::new();
         prepared.family().for_each_node_id(|node| {
             if node.0 < super::UNALLOCATABLE_ID_FLOOR {
                 nodes.push(node);
             }
         });
-        Arc::get_mut(&mut prepared.0).unwrap()._roots = self
+        let roots = self
             .root_existing_nodes(nodes)
             .expect("a prepared key has live counted operands");
-        Arc::get_mut(&mut prepared.0).unwrap()._signature = signature;
-        prepared
+        Arc::get_mut(&mut prepared.0)
+            .expect("a probe identity is unshared until its claim")
+            ._roots = roots;
     }
 }
 
