@@ -967,18 +967,26 @@ enum Verdict {
 /// Whether a fact that fails validation fails for as long as the
 /// completion state and strict roots it was read under hold.
 ///
-/// Every arm reads the base this view captured or the completion overlay
-/// at its exact state, except two that consult stores shared with live
-/// writers: a per-canonical resolved-import fact reads the shared
-/// resolved-import store, whose missing slot a concurrent cold compute can
-/// fill, and a route-surface fact reads the augmentation index and program
-/// file order, which can gain entries the view never captured. Their
-/// failures are uncertainty, not staleness.
+/// Settled arms read only the base this view captured (its roots and its
+/// memoised per-canonical views) or the completion overlay at its exact
+/// state. Two consult stores shared with live writers: a per-canonical
+/// resolved-import fact reads the shared resolved-import store, whose
+/// missing slot a concurrent cold compute can fill, and a route-surface
+/// fact reads the augmentation index and program file order, which can gain
+/// entries the view never captured. Their failures are uncertainty, not
+/// staleness. A receipt is read through by the walk and never fails here.
 fn failure_is_settled(fact: &FactVersionRef) -> bool {
     match fact {
+        FactVersionRef::FileWholeHash { .. }
+        | FactVersionRef::DerivedFactHash { .. }
+        | FactVersionRef::Parse(_)
+        | FactVersionRef::ProgramAnalysis(_)
+        | FactVersionRef::FileSourceEnv { .. }
+        | FactVersionRef::ProjectGeneration { .. }
+        | FactVersionRef::DomainGeneration(_)
+        | FactVersionRef::StrictSelfRootWorld(_) => true,
         FactVersionRef::ResolveImports(fact) => fact.resolution_fact().is_some(),
-        FactVersionRef::RouteSurface(_) => false,
-        _ => true,
+        FactVersionRef::RouteSurface(_) | FactVersionRef::Receipt(_) => false,
     }
 }
 
