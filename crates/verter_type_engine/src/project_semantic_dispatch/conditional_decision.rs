@@ -453,6 +453,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 ));
             }
         };
+        // A decision whose frame waits on an operand's read decides nothing
+        // from the gap it read: its frame runs it again once delivered.
+        if self.decision_waits() {
+            return self.waiting_decision_output();
+        }
         if !operands_complete
             && !operands.checker_recovery
             && !self.is_conditional_checker_recovery(operands.absorbed_check)
@@ -495,7 +500,27 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
         }
         let check = operands.check;
+        // A decision running as its frame demands the operands its relation
+        // relates first, as the checker instantiates a conditional's check
+        // and extends types before relating them: the relation then reads
+        // them answered instead of evaluating them in place. What the
+        // demand observed is the relation's to observe, so it is dropped.
+        if self.deciding_on_the_runtime() {
+            let demanded = self.observe_read(|| {
+                for operand in [check, extends] {
+                    let _ = self.unwrap_identity_carrier_for_relation(operand);
+                }
+            });
+            let _ = demanded.discard();
+            if self.decision_waits() {
+                return self.waiting_decision_output();
+            }
+        }
         let observation = self.observe_read(|| self.conditional_branch_selection(check, extends));
+        if self.decision_waits() {
+            let _ = observation.discard();
+            return self.waiting_decision_output();
+        }
         let relation_complete = observation.observations_are_complete();
         let false_recovery = observation.value().0 == ConditionalBranchSelection::False
             && observation.operation_refusals().iter().any(|refusal| {
@@ -586,6 +611,20 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 )
             }
         }
+    }
+
+    /// What a decision that waits on a read returns: a typed gap its frame
+    /// discards, never a branch.
+    fn waiting_decision_output(&self) -> super::walk::QueryBuildOutput {
+        let reasons = crate::semantic_query::PartialReasonSet::PROPAGATED;
+        let mut output = super::walk::QueryBuildOutput::from((
+            QueryResult::Error(QueryError::IncompleteSemanticOperand { reasons }),
+            self.project_generation_signature(),
+        ));
+        output.cache_suppress = true;
+        output.mark_partial();
+        output.add_partial_reasons(reasons);
+        output
     }
 
     /// A conditional's operands as the checker constructs them before it

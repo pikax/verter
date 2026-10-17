@@ -568,6 +568,11 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// The facts the root frame of the running drive traced soundly, left
     /// by its completion for the drive's entry to seal a refusal on.
     driven_root_traced: std::cell::RefCell<Option<TracedFacts>>,
+    /// The seam of the conditional decision a frame's step is running: the
+    /// answers its frame has received, the first read they do not answer,
+    /// and how many queries the decision is evaluating in place, which read
+    /// only those answers.
+    decision_seam: std::cell::RefCell<Option<query_frames::DecisionSeam>>,
     /// The dispatch's share of its graph's construction owner on this
     /// thread: every ordinal a live dispatcher of the graph interns or reads
     /// is owned until the last of them drops, so a producer reading a
@@ -958,6 +963,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             request_local_open: std::cell::RefCell::new(rustc_hash::FxHashSet::default()),
             self_evaluation_receipts: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             driven_root_traced: std::cell::RefCell::new(None),
+            decision_seam: std::cell::RefCell::new(None),
             _construction: binding_graph_scope,
         }
     }
@@ -1308,6 +1314,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// falls back to the cooperative query, which does.
     pub(super) fn admits_served(&self, receipt: &crate::semantic_query::ReadReceipt) -> bool {
         self.admits_served_in(receipt, true)
+    }
+
+    /// [`Self::admits_served`] for a result its reader evaluates in place,
+    /// entering no query: a deferred evaluation, read warm the way its cold
+    /// evaluation is recorded ([`cost_receipt::Nesting::InPlace`]).
+    pub(super) fn admits_served_in_place(
+        &self,
+        receipt: &crate::semantic_query::ReadReceipt,
+    ) -> bool {
+        receipt.priced().is_none_or(|receipt| {
+            matches!(
+                self.admit_served_in(receipt, cost_receipt::Nesting::InPlace, true),
+                ServedAdmission::Admitted
+            )
+        })
     }
 
     /// [`Self::admits_served`] for a read that is a relation check of its
@@ -4006,6 +4027,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 };
             }
         }
+        // An instantiation or a `typeof` a running conditional decision
+        // reads is answered by its frame's deliveries, or becomes the
+        // frame's need; any other query the decision reaches evaluates in
+        // place, where only those deliveries answer it.
+        if publication.is_none() && operand_evidence.is_none() {
+            if let Some(read) = self.read_at_decision_seam(&key) {
+                return read;
+            }
+        }
+        let _nested = self.nested_decision_query();
         // An instantiation or a `typeof` read for its value alone, outside
         // any drive, runs on the continuation runtime: the chain of
         // instantiations and `typeof`s its body reaches waits in heap-owned
