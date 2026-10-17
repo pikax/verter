@@ -309,6 +309,14 @@ where
     }
 }
 
+impl HeapSize for super::RetentionCharge {
+    /// A charge token: the bytes it holds are the account's, not its
+    /// holder's heap.
+    fn heap_size<'t>(&'t self, _meter: &mut HeapMeter<'_, 't>) -> usize {
+        0
+    }
+}
+
 impl HeapSize for OwnedStr {
     /// Charged by its own cell.
     fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {

@@ -349,6 +349,7 @@ impl FunctionReturnLocator {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct SymbolBodyLocator {
     /// The resolvable symbol.
@@ -368,6 +369,7 @@ pub struct SymbolBodyLocator {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct TypeArgLocator {
     /// The owning declaration.
