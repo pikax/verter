@@ -771,19 +771,55 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         None
     }
 
-    /// A check no lattice row absorbs and no distribution splits: neither it
-    /// nor the type it names is an extreme, a union or an indexed access.
+    /// A check no lattice row absorbs and no distribution splits, proven
+    /// positively: the type it completely names (an alias or an
+    /// instantiation read through, `Id<any>` being `any`) is a non-extreme
+    /// primitive, a literal, an object, an array or a signature. A
+    /// reference to an interface or a class names an object type. Every
+    /// other check — a union, an intersection (`1 & Id<any>` is `any`), an
+    /// indexed access, a `keyof`, a conditional, a template, a tuple, or a
+    /// name the lane cannot read completely — is not proven plain.
     fn check_neither_absorbs_nor_distributes(&self, check: SemanticNodeId) -> bool {
-        let declared = self.union_as_constructed(self.declared_operand_where_written(check));
-        let absorbed = self.indexed_access_where_written(declared);
-        [check, declared, absorbed].into_iter().all(|operand| {
-            self.peek_special(operand).is_none()
-                && !matches!(
-                    self.graph().node_data(operand).as_deref(),
-                    Some(SemanticNodeData::Union(_) | SemanticNodeData::IndexedAccess { .. })
+        let named = match self.graph().node_data(check).as_deref() {
+            Some(
+                SemanticNodeData::DeclRef { identity }
+                | SemanticNodeData::InstantiationRef { base: identity, .. },
+            ) if matches!(
+                self.prepared_decl_kind(identity),
+                Some(
+                    verter_session_query::declarations::TypeDeclKind::Interface
+                        | verter_session_query::declarations::TypeDeclKind::Class
                 )
-                && self.distributive_check_union_members(operand).is_none()
-        })
+            ) =>
+            {
+                return true;
+            }
+            Some(
+                SemanticNodeData::Alias(_)
+                | SemanticNodeData::DeclRef { .. }
+                | SemanticNodeData::InstantiationRef { .. }
+                | SemanticNodeData::TypeOf(_)
+                | SemanticNodeData::BareRef(_)
+                | SemanticNodeData::ImportType(_)
+                | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. }),
+            ) => match self.resolved_conditional_operand(check) {
+                Some(named) => named,
+                None => return false,
+            },
+            _ => check,
+        };
+        self.peek_special(named).is_none()
+            && matches!(
+                self.graph().node_data(named).as_deref(),
+                Some(
+                    SemanticNodeData::Primitive(_)
+                        | SemanticNodeData::Literal(_)
+                        | SemanticNodeData::EnumLiteral(_)
+                        | SemanticNodeData::Object(_)
+                        | SemanticNodeData::Array { .. }
+                        | SemanticNodeData::Signature { .. }
+                )
+            )
     }
 
     /// A conditional's operands as the checker constructs them before it

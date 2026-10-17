@@ -455,13 +455,19 @@ fn package_augmentations_merge_into_the_module_they_resolve_to() {
 fn a_bail_union_with_an_unreadable_member_is_not_answered() {
     let reads: Vec<(Read<'_>, Vec<&str>)> = ["vnode"]
         .into_iter()
-        .map(|function| (Read::Return(function), vec!["1"]))
+        .map(|function| (Read::Return(function), vec!["1"; ALL.len()]))
         .collect();
     let verdicts = Matrix::new(BAIL_SOURCE)
         .settings(&ALL)
         .installed_packages_of(&["vue", "@vue/runtime-dom"])
         .verdicts(&reads);
     for ((read, _), row) in reads.iter().zip(&verdicts) {
+        assert_eq!(
+            row.len(),
+            ALL.len(),
+            "`{}` is read in every setting",
+            read.text()
+        );
         for verdict in row {
             assert!(
                 !verdict.matched && verdict.class == "GAP",
@@ -523,6 +529,7 @@ type F2<T> = T extends string | Bag[keyof Bag] ? { v: T } : 0;
 type Two<X> = X | "z";
 type An = any;
 type AB = "a" | "b";
+type Id<T> = T;
 export function u1() { return null! as ("a" extends string | Dom<1> ? 1 : 2); }
 export function u2() { return null! as F2<"a">; }
 export function u3() { return null! as F2<Two<"a">>; }
@@ -531,6 +538,9 @@ export function u5() { return null! as F2<never>; }
 export function u6() { return null! as F2<AB>; }
 export function u7() { return null! as F2<An>; }
 export function u8() { return null! as F2<keyof { a: 1; b: 2 }>; }
+export function u9() { return null! as (Id<any> extends string | Dom<1> ? 1 : 2); }
+export function u10() { return null! as ((1 & Id<any>) extends string | Dom<1> ? 1 : 2); }
+export function u11() { return null! as F2<Id<never>>; }
 "#;
 
 /// A check related to one readable arm of a union `extends` is related to
@@ -538,8 +548,9 @@ export function u8() { return null! as F2<keyof { a: 1; b: 2 }>; }
 /// true branch. A check that distributes or absorbs — a union named
 /// through an alias or an instantiation, `any`, `never` and a closed
 /// `keyof` — is decided per member or by its lattice row, never by
-/// relating the whole check to one arm: those stay unavailable until every
-/// member is decided.
+/// relating the whole check to one arm, whether it names that type
+/// directly or through an instantiation (`Id<any>`, `1 & Id<any>`,
+/// `Id<never>`): those stay unavailable until every member is decided.
 #[test]
 fn a_written_arm_proves_only_a_check_that_neither_distributes_nor_absorbs() {
     let failures = Matrix::new(UNREADABLE_ARM_SOURCE)
@@ -553,6 +564,9 @@ fn a_written_arm_proves_only_a_check_that_neither_distributes_nor_absorbs() {
         ("u6", "{ v: \"a\"; } | { v: \"b\"; }"),
         ("u7", "0 | { v: any; }"),
         ("u8", "{ v: \"a\"; } | { v: \"b\"; }"),
+        ("u9", "1 | 2"),
+        ("u10", "1 | 2"),
+        ("u11", "never"),
     ];
     let reads: Vec<(Read<'_>, Vec<&str>)> = rows
         .iter()
@@ -562,6 +576,12 @@ fn a_written_arm_proves_only_a_check_that_neither_distributes_nor_absorbs() {
         .settings(&ALL)
         .verdicts(&reads);
     for ((read, _), row) in reads.iter().zip(&verdicts) {
+        assert_eq!(
+            row.len(),
+            ALL.len(),
+            "`{}` is read in every setting",
+            read.text()
+        );
         for verdict in row {
             assert!(
                 verdict.matched || verdict.class == "GAP",
