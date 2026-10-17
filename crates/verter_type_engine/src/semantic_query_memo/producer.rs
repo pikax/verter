@@ -1014,7 +1014,11 @@ impl SemanticGraphStore {
         settled.carrier.bubble_via_tls();
         let read = CacheRead {
             lease: self
-                .lease_delivery(&settled.result, &settled.walker_diagnostics)
+                .lease_delivery(super::delivery_lease::DeliveredAllocations::read(
+                    &settled.result,
+                    &settled.walker_diagnostics,
+                    &settled.dep_signature,
+                ))
                 .expect("settled output owns live operands"),
             value: settled.result,
             dep_signature: settled.dep_signature,
