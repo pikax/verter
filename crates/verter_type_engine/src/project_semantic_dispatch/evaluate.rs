@@ -401,7 +401,7 @@ struct DeferredEvaluationFrame {
     context: ProjectionReductionContext,
     demand: DeferredEvaluationDemand,
     memo_checked: bool,
-    visited: rustc_hash::FxHashSet<SemanticNodeId>,
+    visited: VisitedNodes,
     completeness: ResultCompleteness,
     availability: crate::semantic_query::FactStatus,
     cache_suppress: bool,
@@ -421,7 +421,7 @@ impl DeferredEvaluationFrame {
         budget_epoch: u64,
         demand: DeferredEvaluationDemand,
     ) -> Self {
-        let mut visited = rustc_hash::FxHashSet::default();
+        let mut visited = VisitedNodes::default();
         visited.insert(node);
         Self {
             entry_node: node,
@@ -460,6 +460,37 @@ impl DeferredEvaluationFrame {
             self.node = next;
             DeferredEvaluationAction::Continue
         }
+    }
+}
+
+/// The nodes one evaluation frame has advanced through. A frame advances
+/// a few steps, so the set is a short list until it grows wide enough to
+/// need a table.
+#[derive(Default)]
+struct VisitedNodes {
+    listed: smallvec::SmallVec<[SemanticNodeId; 8]>,
+    wide: Option<rustc_hash::FxHashSet<SemanticNodeId>>,
+}
+
+impl VisitedNodes {
+    /// Up to this many nodes, membership is a linear scan.
+    const LINEAR_SCAN_MAX: usize = 16;
+
+    /// Add `node`; `false` when it was already visited.
+    fn insert(&mut self, node: SemanticNodeId) -> bool {
+        if let Some(wide) = &mut self.wide {
+            return wide.insert(node);
+        }
+        for listed in self.listed.iter() {
+            if listed.0 == node.0 {
+                return false;
+            }
+        }
+        self.listed.push(node);
+        if self.listed.len() > Self::LINEAR_SCAN_MAX {
+            self.wide = Some(self.listed.drain(..).collect());
+        }
+        true
     }
 }
 
@@ -2198,16 +2229,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // This memo has no single file owner. Every consumed
                 // declaration and augmentation contributor is a strict root,
                 // including whole-file facts retained on evidence pages.
-                roots.extend(signature_entries(&facts).filter_map(|fact| match fact {
-                    FactVersionRef::FileWholeHash { canonical_id, hash } => Some((
-                        verter_type_expr::OwnedStr::from(canonical_id.as_str()),
-                        *hash,
-                    )),
-                    _ => None,
-                }));
-                self.ctx
-                    .complete_graph_signature(&roots, facts.to_vec())
-                    .ok()
+                crate::fact_signature_helpers::shared_completed_carrier_rooting_traced_files(
+                    &roots, &facts,
+                )
+                .map(Ok)
+                .unwrap_or_else(|| {
+                    roots.extend(signature_entries(&facts).filter_map(|fact| match fact {
+                        FactVersionRef::FileWholeHash { canonical_id, hash } => Some((
+                            verter_type_expr::OwnedStr::from(canonical_id.as_str()),
+                            *hash,
+                        )),
+                        _ => None,
+                    }));
+                    self.ctx.complete_graph_signature(&roots, facts.to_vec())
+                })
+                .ok()
             }
             FactReadSetFinalise::NonCacheable(_) => None,
             FactReadSetFinalise::MutationUnstable => {
@@ -2540,7 +2576,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             super::cost_receipt::CostIdentity::of_key((node, reduction_context, demand))
                 .with_roots(
                     self.graph()
-                        .root_existing_nodes(vec![node])
+                        .root_existing_nodes(smallvec::smallvec![node])
                         .expect("evaluation operand is live"),
                 ),
         );
@@ -2688,7 +2724,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         super::cost_receipt::CostIdentity::of_key((entry_node, context, demand))
                             .with_roots(
                                 self.graph()
-                                    .root_existing_nodes(vec![entry_node])
+                                    .root_existing_nodes(smallvec::smallvec![entry_node])
                                     .expect("evaluation operand is live"),
                             ),
                     );
@@ -3034,7 +3070,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let receipt = match cached {
             Some(receipt) => receipt,
             None => {
-                let Ok(roots) = self.graph().root_existing_nodes(vec![node]) else {
+                let Ok(roots) = self.graph().root_existing_nodes(smallvec::smallvec![node]) else {
                     return false;
                 };
                 let receipt = super::cost_receipt::DemandCostReceipt::new(

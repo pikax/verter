@@ -416,7 +416,7 @@ impl SemanticGraphStore {
             // producer registration, the panic guard and the publish. See the
             // `prepared` module for the equality contract (token equality ⟺
             // key equality).
-            let prepared = self.prepare_rooted_key(key);
+            let mut prepared = self.prepare_probe_key(key);
 
             // Warm lookup. One lock acquisition snapshots the slot; the
             // candidate's carrier is validated strictly (self-roots through
@@ -435,6 +435,8 @@ impl SemanticGraphStore {
             // this lookup and the claim's own warm re-read is credited as a
             // hit there; that race is benign.
             self.note_lookup_miss(prepared.key());
+            // The claim outlives the caller's hold on the key's operands.
+            self.root_prepared_key(&mut prepared);
             Ok(ClaimAttempt {
                 prepared,
                 independent,

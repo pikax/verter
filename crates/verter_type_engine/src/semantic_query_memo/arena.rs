@@ -97,7 +97,6 @@
 //! `Arc` block, and each dedup shard's table and spilled buckets, charged
 //! from the moment they are allocated until they are freed.
 
-use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::sync::{Arc, OnceLock, Weak};
@@ -128,9 +127,9 @@ fn names_forward_child(data: &SemanticNodeData, id: SemanticNodeId) -> bool {
 /// unallocatable one). Read off the printed payload, independently of the
 /// walk, so a variant or field the walk forgets fails the first test that
 /// interns it, rather than leaving a releasing holder to keep the node it
-/// names alive. The visited ids are sorted once and each printed id found
-/// by a binary search, so a wide payload (a union of hundreds of members)
-/// costs its size, not its size squared.
+/// names alive. Both multisets are sorted once and compared, so a wide
+/// payload (a union of hundreds of members) costs its size, not its size
+/// squared.
 #[cfg(any(test, feature = "test-support"))]
 fn assert_retained_walk_is_complete(data: &SemanticNodeData) {
     let mut retained = SmallVec::<[u64; 16]>::new();
@@ -140,21 +139,10 @@ fn assert_retained_walk_is_complete(data: &SemanticNodeData) {
 
 #[cfg(any(test, feature = "test-support"))]
 fn assert_retained_multiset(data: &SemanticNodeData, mut retained: SmallVec<[u64; 16]>) {
-    const MARK: &str = "SemanticNodeId(";
-    let printed = format!("{data:?}");
-    retained.sort_unstable();
-    let mut expected: SmallVec<[u64; 16]> = SmallVec::new();
-    let mut rest = printed.as_str();
-    while let Some(at) = rest.find(MARK) {
-        rest = &rest[at + MARK.len()..];
-        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-        let Ok(held) = rest[..digits].parse::<u64>() else {
-            continue;
-        };
-        if held < UNALLOCATABLE_ID_FLOOR {
-            expected.push(held);
-        }
-    }
+    use std::fmt::Write as _;
+    let mut printed = PrintedNodeIds::default();
+    write!(printed, "{data:?}").expect("a payload's Debug form writes");
+    let mut expected = printed.ids;
     // This carrier predates typed node ids and prints its retained child as
     // a bare ordinal. Read the field directly, independently of the visitor.
     if let SemanticNodeData::SyntheticBinding { value_node, .. } = data {
@@ -163,13 +151,82 @@ fn assert_retained_multiset(data: &SemanticNodeData, mut retained: SmallVec<[u64
         }
     }
     retained.retain(|held| *held < UNALLOCATABLE_ID_FLOOR);
-    expected.sort_unstable();
+    sort_small(&mut retained);
+    sort_small(&mut expected);
     assert_eq!(
         retained,
         expected,
         "retained operand multiset for {:?}",
         data.node_tag()
     );
+}
+
+/// Sort a node-id multiset in place. Payloads name a handful of children,
+/// which a plain insertion sort orders without the slice sort's machinery;
+/// a wide one (a union of hundreds of members) takes the slice sort.
+#[cfg(any(test, feature = "test-support"))]
+fn sort_small(ids: &mut SmallVec<[u64; 16]>) {
+    if ids.len() > 16 {
+        ids.sort_unstable();
+        return;
+    }
+    let ids = ids.as_mut_slice();
+    let mut next = 1;
+    while next < ids.len() {
+        let held = ids[next];
+        let mut at = next;
+        while at > 0 && ids[at - 1] > held {
+            ids[at] = ids[at - 1];
+            at -= 1;
+        }
+        ids[at] = held;
+        next += 1;
+    }
+}
+
+/// The allocatable node ids a `Debug` rendering prints, read as it is
+/// written rather than from a buffered copy. The derived form of
+/// [`SemanticNodeId`] writes its name, then `(`, then its digits, each as
+/// one write, so the reader matches whole writes and never scans text.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Default)]
+struct PrintedNodeIds {
+    stage: PrintedNodeIdStage,
+    ids: SmallVec<[u64; 16]>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum PrintedNodeIdStage {
+    #[default]
+    Text,
+    Name,
+    Open,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl std::fmt::Write for PrintedNodeIds {
+    fn write_str(&mut self, written: &str) -> std::fmt::Result {
+        const NAME: &[u8] = b"SemanticNodeId";
+        let bytes = written.as_bytes();
+        let stage = self.stage;
+        self.stage = PrintedNodeIdStage::Text;
+        match stage {
+            PrintedNodeIdStage::Name if bytes == b"(" => self.stage = PrintedNodeIdStage::Open,
+            PrintedNodeIdStage::Open => {
+                if let Ok(held) = written.parse::<u64>() {
+                    if held < UNALLOCATABLE_ID_FLOOR {
+                        self.ids.push(held);
+                    }
+                }
+            }
+            _ if bytes.len() == NAME.len() && bytes == NAME => {
+                self.stage = PrintedNodeIdStage::Name;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
 }
 
 pub const NUM_SHARDS: usize = 16;
@@ -187,12 +244,14 @@ type NodeCandidate = (Weak<SemanticNodeData>, NodeScopeId, SemanticNodeId);
 /// `(payload, scope)` against the (usually single) candidate to confirm
 /// identity — the fingerprint only narrows.
 ///
-/// The bucket map uses the std [`RandomState`] (SipHash) hasher, **not**
-/// `FxHash`: workspace-derived names in the payload feed the fingerprint,
-/// so a predictable hash would be a HashDoS vector.
+/// The bucket key is the fingerprint itself, which is already seeded
+/// randomly per process ([`fingerprint_seed`]): workspace-derived names in
+/// the payload feed it, so it must stay unpredictable (a HashDoS vector
+/// otherwise), and keying the map by it keeps that property without hashing
+/// it a second time ([`FingerprintKeyHasher`]).
 #[derive(Default)]
 pub(super) struct ShardIndex {
-    index: HashMap<u64, SmallVec<[NodeCandidate; 1]>>,
+    index: HashMap<u64, SmallVec<[NodeCandidate; 1]>, FingerprintKeys>,
     /// The shard's table and spilled buckets, pinned while they live.
     storage: Option<verter_session_query::retention::granular::GranularPin>,
     /// The table bytes [`Self::storage`] currently counts.
@@ -237,6 +296,40 @@ fn payload_block_bytes() -> usize {
     verter_session_query::retention::allocation::arc_block_bytes(std::mem::size_of::<
         SemanticNodeData,
     >())
+}
+
+/// Builds [`FingerprintKeyHasher`]s for the dedup index.
+#[derive(Default, Clone, Copy)]
+pub(super) struct FingerprintKeys;
+
+impl BuildHasher for FingerprintKeys {
+    type Hasher = FingerprintKeyHasher;
+
+    fn build_hasher(&self) -> FingerprintKeyHasher {
+        FingerprintKeyHasher(0)
+    }
+}
+
+/// Places a fingerprint in the dedup index without rehashing it. Every
+/// fingerprint of one shard shares its low routing bits
+/// ([`SHARD_MASK`]), so the high half is folded into the low one: the
+/// table's position bits and its tag bits both stay seeded-random.
+pub(super) struct FingerprintKeyHasher(u64);
+
+impl Hasher for FingerprintKeyHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 = self.0.rotate_left(8) ^ u64::from(byte);
+        }
+    }
+
+    fn write_u64(&mut self, fingerprint: u64) {
+        self.0 = fingerprint ^ (fingerprint >> 32);
+    }
 }
 
 impl ShardIndex {
@@ -796,18 +889,6 @@ impl ArenaInner {
     }
 }
 
-/// Process-global seed for structural fingerprints. A single
-/// [`RandomState`] captured once per process — SipHash-quality and randomly
-/// seeded so workspace-derived names carried in node payloads cannot be
-/// used to force fingerprint (and thus bucket) collisions. Fingerprints are
-/// purely an in-memory, per-generation interning optimisation and never
-/// cross a process / serialization boundary, so a per-process random seed
-/// is correct.
-fn fingerprint_seed() -> &'static RandomState {
-    static SEED: OnceLock<RandomState> = OnceLock::new();
-    SEED.get_or_init(RandomState::new)
-}
-
 /// Structural fingerprint of `(data, scope)` — the 64-bit narrowing key for
 /// the dedup bucket index. Hashes the FULL structural identity (payload
 /// incl. spans, plus origin scope) through the node's own [`Hash`] impl, so
@@ -816,14 +897,75 @@ fn fingerprint_seed() -> &'static RandomState {
 /// narrows candidates; per-bucket content `Eq` is the identity authority,
 /// so a fingerprint collision never aliases two distinct nodes.
 ///
-/// Because it routes through [`fingerprint_seed`], the fingerprint of a
-/// given payload is stable within a process run but unpredictable across
-/// runs — the HashDoS defense.
+/// It hashes with SipHash-1-3 under a per-process random key
+/// ([`super::fingerprint_hasher`]), so the fingerprint of a given payload
+/// is stable within a process run but unpredictable across runs: a
+/// workspace-derived name carried in a payload cannot be chosen to force
+/// fingerprint (and thus bucket) collisions — the HashDoS defense.
+/// Fingerprints never cross a process or serialization boundary. The scope
+/// enters as its own keyed digest ([`scope_digest`]), a function of the
+/// scope's value alone, so equal pairs still fingerprint equal.
 fn structural_fingerprint(data: &SemanticNodeData, scope: &NodeScopeId) -> u64 {
-    let mut hasher = fingerprint_seed().build_hasher();
+    let mut hasher = super::fingerprint_hasher::FingerprintHasher::new();
     data.hash(&mut hasher);
+    hasher.write_u64(scope_digest(scope));
+    hasher.finish()
+}
+
+/// The keyed fingerprint hash of a scope.
+fn keyed_scope_hash(scope: &NodeScopeId) -> u64 {
+    let mut hasher = super::fingerprint_hasher::FingerprintHasher::new();
     scope.hash(&mut hasher);
     hasher.finish()
+}
+
+/// The seeded hash of `scope`. Nodes are interned in runs under one
+/// declaration scope, so the thread keeps the digest of the last file scope
+/// it hashed, holding that scope's canonical id so the allocation that
+/// recognises it stays its own: an equal scope behind another allocation is
+/// hashed again, to the same digest.
+fn scope_digest(scope: &NodeScopeId) -> u64 {
+    type LastScope = (
+        verter_type_expr::OwnedStr,
+        verter_type_expr::TopLevelOwnerId,
+        crate::semantic_query::HashValue,
+        Option<u32>,
+        u64,
+    );
+    std::thread_local! {
+        static LAST_FILE_SCOPE: std::cell::RefCell<Option<LastScope>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    let NodeScopeId::File {
+        canonical_id,
+        owner,
+        whole_hash,
+        local_scope,
+    } = scope
+    else {
+        return keyed_scope_hash(scope);
+    };
+    LAST_FILE_SCOPE.with(|last| {
+        let mut last = last.borrow_mut();
+        if let Some((held, o, h, l, digest)) = last.as_ref() {
+            if verter_type_expr::OwnedStr::ptr_eq(held, canonical_id)
+                && o == owner
+                && h == whole_hash
+                && l == local_scope
+            {
+                return *digest;
+            }
+        }
+        let digest = keyed_scope_hash(scope);
+        *last = Some((
+            canonical_id.clone(),
+            *owner,
+            *whole_hash,
+            *local_scope,
+            digest,
+        ));
+        digest
+    })
 }
 
 /// Whether a payload binds `canonical_id`'s CONTENT identity regardless of
@@ -1173,9 +1315,45 @@ impl NodeArenaCore {
         Ok(())
     }
 
+    /// Keep only the live ids of `ids` and retain each of them, under one
+    /// hold of the arena: a tombstone or an unallocated ordinal owns no
+    /// storage, so it is dropped rather than refused.
+    pub(super) fn retain_live(&self, ids: &mut super::node_roots::RootIds) {
+        let mut inner = self.inner.write();
+        ids.retain(|id| matches!(inner.slot(*id), Slot::Live(..)));
+        for id in ids.iter() {
+            inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)).unwrap().owners
+                [(id.0 & CHUNK_MASK) as usize] += 1;
+        }
+    }
+
     pub(super) fn release_roots(&self, ids: &[SemanticNodeId]) {
-        let mut pending = ids.to_vec();
-        let mut retired = Vec::new();
+        if !self.counted() {
+            // Without counted release a node outlives its last owner, so a
+            // release only returns each id's count.
+            #[cfg(test)]
+            self.race_event(ArenaRaceEvent::BeforeRootRelease {
+                blocked: self.inner.try_write().is_none(),
+            });
+            let mut inner = self.inner.write();
+            for id in ids {
+                let Some(chunk) = inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)) else {
+                    continue;
+                };
+                let index = (id.0 & CHUNK_MASK) as usize;
+                if chunk.nodes[index].is_none() {
+                    continue;
+                }
+                assert!(chunk.owners[index] > 0, "live root released twice");
+                chunk.owners[index] -= 1;
+            }
+            drop(inner);
+            #[cfg(test)]
+            self.race_event(ArenaRaceEvent::AfterRootRelease);
+            return;
+        }
+        let mut pending = SmallVec::<[SemanticNodeId; 16]>::from_slice(ids);
+        let mut retired = SmallVec::<[(SemanticNodeId, u64); 4]>::new();
         #[cfg(test)]
         self.race_event(ArenaRaceEvent::BeforeRootRelease {
             blocked: self.inner.try_write().is_none(),

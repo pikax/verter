@@ -117,7 +117,7 @@ impl SemanticGraphStore {
         if !NodeRootScope::holds(&self.arena.core) {
             return None;
         }
-        let mut operands = Vec::new();
+        let mut operands = super::node_roots::RootIds::new();
         value.for_each_operand(&mut |node| {
             if node.0 < super::UNALLOCATABLE_ID_FLOOR {
                 operands.push(node);

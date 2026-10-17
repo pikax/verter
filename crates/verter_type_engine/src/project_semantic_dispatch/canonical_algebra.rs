@@ -1009,6 +1009,10 @@ enum SupertypeReduction {
     ExceptPrimitiveOverEmptyObject,
 }
 
+/// Up to this many arms, the content-identity tier compares each arm with
+/// the arms already kept instead of hashing every payload.
+const TIER1_DIRECT_SCAN_MAX: usize = 8;
+
 fn canonicalize_with(
     graph: &SemanticGraphStore,
     members: &[SemanticNodeId],
@@ -1348,41 +1352,75 @@ fn canonicalize_with(
     //    in the evidence (the identity decision rests on the shared
     //    children); an `Incomplete` comparison keeps every arm and taints
     //    the evidence.
-    let hasher = std::collections::hash_map::RandomState::new();
-    let mut seen_payloads: FxHashMap<u64, smallvec::SmallVec<[SemanticNodeId; 1]>> =
-        FxHashMap::default();
+    //    A few arms compare directly against the arms already kept, in
+    //    order; wider sets narrow the candidates by a payload hash first.
+    //    Either way only an exact payload match deduplicates.
     let mut kept: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
     let mut child_bearing: Vec<(usize, Arc<SemanticNodeData>)> = Vec::new();
-    'tier1: for &m in &arms {
-        let Some(data) = graph.node_data(m) else {
-            // A dangling arm cannot be compared — preserve it and refuse
-            // canonical warm admission.
-            evidence.incomplete = true;
+    if arms.len() <= TIER1_DIRECT_SCAN_MAX {
+        let mut kept_payloads: smallvec::SmallVec<
+            [(SemanticNodeId, Arc<SemanticNodeData>); TIER1_DIRECT_SCAN_MAX],
+        > = smallvec::SmallVec::new();
+        'direct: for &m in &arms {
+            let Some(data) = graph.node_data(m) else {
+                // A dangling arm cannot be compared — preserve it and refuse
+                // canonical warm admission.
+                evidence.incomplete = true;
+                kept.push(m);
+                continue;
+            };
+            for (candidate, candidate_data) in kept_payloads.iter() {
+                if *candidate == m {
+                    continue 'direct;
+                }
+                if **candidate_data == *data && same_importing_unit(graph, *candidate, m, &data) {
+                    // Content-identical cross-scope duplicate — discarded,
+                    // its transitive structure roots kept as evidence.
+                    evidence.record_subtree_roots(graph, m);
+                    continue 'direct;
+                }
+            }
+            if !payload_is_childless(&data) {
+                child_bearing.push((kept.len(), Arc::clone(&data)));
+            }
+            kept_payloads.push((m, data));
             kept.push(m);
-            continue;
-        };
-        use std::hash::BuildHasher;
-        let bucket = seen_payloads.entry(hasher.hash_one(&*data)).or_default();
-        for &candidate in bucket.iter() {
-            if candidate == m {
-                continue 'tier1;
-            }
-            if graph.node_data(candidate).is_some_and(|cand| {
-                *cand == *data && same_importing_unit(graph, candidate, m, &data)
-            }) {
-                // Content-identical cross-scope duplicate — discarded. The
-                // payload-equality claim rests on the SHARED CHILD ids, so
-                // the discarded arm's transitive structure roots enter the
-                // evidence even though tier 1 never descends.
-                evidence.record_subtree_roots(graph, m);
-                continue 'tier1;
-            }
         }
-        bucket.push(m);
-        if !payload_is_childless(&data) {
-            child_bearing.push((kept.len(), Arc::clone(&data)));
+    } else {
+        let hasher = std::collections::hash_map::RandomState::new();
+        let mut seen_payloads: FxHashMap<u64, smallvec::SmallVec<[SemanticNodeId; 1]>> =
+            FxHashMap::default();
+        'tier1: for &m in &arms {
+            let Some(data) = graph.node_data(m) else {
+                // A dangling arm cannot be compared — preserve it and refuse
+                // canonical warm admission.
+                evidence.incomplete = true;
+                kept.push(m);
+                continue;
+            };
+            use std::hash::BuildHasher;
+            let bucket = seen_payloads.entry(hasher.hash_one(&*data)).or_default();
+            for &candidate in bucket.iter() {
+                if candidate == m {
+                    continue 'tier1;
+                }
+                if graph.node_data(candidate).is_some_and(|cand| {
+                    *cand == *data && same_importing_unit(graph, candidate, m, &data)
+                }) {
+                    // Content-identical cross-scope duplicate — discarded. The
+                    // payload-equality claim rests on the SHARED CHILD ids, so
+                    // the discarded arm's transitive structure roots enter the
+                    // evidence even though tier 1 never descends.
+                    evidence.record_subtree_roots(graph, m);
+                    continue 'tier1;
+                }
+            }
+            bucket.push(m);
+            if !payload_is_childless(&data) {
+                child_bearing.push((kept.len(), Arc::clone(&data)));
+            }
+            kept.push(m);
         }
-        kept.push(m);
     }
     if child_bearing.len() > 1 {
         // Candidate narrowing for wide arm sets: bucket by the CANONICAL

@@ -473,6 +473,28 @@ impl DemandCostReceipt {
         if self.retention.get().is_some() {
             return Ok(());
         }
+        // Most receipts are retained after every receipt they consumed
+        // already is: reserve the receipt alone, without walking.
+        let mut closure_reserved = true;
+        for dependency in self.prerequisites.iter() {
+            if dependency.receipt.retention.get().is_none() {
+                closure_reserved = false;
+                break;
+            }
+        }
+        if closure_reserved {
+            let footprint = self.retained_footprint();
+            return match account.reserve(ChargeClass::Retained, footprint.bytes) {
+                RetentionAdmission::Admitted(charge) => {
+                    drop(self.retention.set(footprint.handles.retained_with(
+                        charge,
+                        verter_session_query::retention::owned::ChargeCtx::new(account),
+                    )?));
+                    Ok(())
+                }
+                RetentionAdmission::Refused(refusal) => Err(refusal),
+            };
+        }
         let mut visited: FxHashSet<*const Self> = FxHashSet::default();
         let mut stack: Vec<(&Self, bool)> = vec![(self.as_ref(), false)];
         while let Some((next, expanded)) = stack.pop() {

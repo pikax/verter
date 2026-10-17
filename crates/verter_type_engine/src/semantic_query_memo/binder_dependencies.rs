@@ -67,7 +67,7 @@ impl SemanticGraphStore {
             verter_session_query::retention::RetentionAdmission::Admitted(charge) => charge,
             verter_session_query::retention::RetentionAdmission::Refused(_) => return,
         };
-        let Ok(roots) = self.root_existing_nodes(vec![node]) else {
+        let Ok(roots) = self.root_existing_nodes(smallvec::smallvec![node]) else {
             return;
         };
         if let Entry::Vacant(slot) = self.binder_dependencies.entry(node) {
