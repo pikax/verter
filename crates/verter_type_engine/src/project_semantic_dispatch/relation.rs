@@ -7337,9 +7337,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     QueryResult::Value(formula) => formula,
                     QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
                 };
+                let alternatives = self.object_spread_alternatives(&formula).ok()?;
                 Some(
-                    formula
-                        .alternatives()
+                    alternatives
                         .iter()
                         .map(|alternative| {
                             let mut members = Vec::new();

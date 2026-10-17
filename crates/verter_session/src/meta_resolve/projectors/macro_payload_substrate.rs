@@ -439,7 +439,9 @@ pub(crate) fn resolve_payload_surface_with_scope(
                             return Err(NonEmptyReasons::from_query_error(&error));
                         }
                     };
-                    let members = dispatch.spread_formula_positive_members_for_macro(&formula);
+                    let members = dispatch
+                        .spread_formula_positive_members_for_macro(&formula)
+                        .map_err(NonEmptyReasons::from_demand_trip)?;
                     Ok(Some(members))
                 }
                 other => {

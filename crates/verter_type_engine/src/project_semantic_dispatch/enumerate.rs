@@ -340,12 +340,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     ),
                 ) {
                     crate::semantic_query::QueryResult::Value(formula) => {
-                        match formula.closed().and_then(|closed| closed.keyof()) {
-                            Some(keyof) => KeyNamesArm::Names(keyof.to_vec()),
+                        match self.object_spread_exact_keyof(&formula) {
+                            Ok(Some(keyof)) => KeyNamesArm::Names(keyof),
                             // An open / multi-alternative construction
                             // program has no exact key domain — poison
                             // the enclosing intersection combine.
-                            None => KeyNamesArm::OpenConstruction,
+                            Ok(None) => KeyNamesArm::OpenConstruction,
+                            Err(_) => KeyNamesArm::Unresolvable,
                         }
                     }
                     crate::semantic_query::QueryResult::Recursive(_)
@@ -1427,7 +1428,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     | crate::semantic_query::QueryResult::Error(_) => return None,
                 };
                 let mut present = true;
-                for alternative in formula.alternatives() {
+                for alternative in self.object_spread_cursor(&formula) {
+                    let alternative = alternative.ok()?;
                     let closed = alternative.closed()?;
                     // The formula was projected under `Key(needle)`, so
                     // the lookup is inside the selector's declared set —

@@ -304,7 +304,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             return ExcessPrepassOutcome::Undecided;
                         }
                     };
-                    if formula.alternatives().iter().any(|alternative| {
+                    let Ok(alternatives) = self.object_spread_alternatives(&formula) else {
+                        return ExcessPrepassOutcome::Undecided;
+                    };
+                    if alternatives.iter().any(|alternative| {
                         matches!(
                             alternative.excess(),
                             crate::semantic_query::ExcessEligibility::SuppressedByGenericSpread
@@ -314,7 +317,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                     let mut source_members = Vec::new();
                     let mut candidates = Vec::new();
-                    for alternative in formula.alternatives() {
+                    for alternative in &alternatives {
                         if alternative.closed().is_none() {
                             return ExcessPrepassOutcome::Undecided;
                         }
@@ -974,7 +977,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                 };
                 let mut any_undecidable = false;
-                for alternative in formula.alternatives() {
+                for alternative in self.object_spread_cursor(&formula) {
+                    let Ok(alternative) = alternative else {
+                        return ArmKnows::Undecidable;
+                    };
                     match alternative.selected_key(key) {
                         crate::semantic_query::OpenSafeKeyEvidence::Positive(_) => {
                             return ArmKnows::Yes;

@@ -117,13 +117,12 @@ pub(crate) mod node_payload_footprint;
 /// only through the module's sealed complete-domain witnesses.
 pub mod object_spread_projection;
 pub use object_spread_projection::{
-    ClosedKeyLookup, ClosedObjectProjectionAlternative, ClosedObjectProjectionFormula,
-    ClosedObjectProjectionSurface, CompleteObjectDomain, ExactOptionalPropertyPolicy,
-    ExcessEligibility, IndexDomain, MemberFacets, ObjectProjectionAlternative,
-    ObjectProjectionFormula, ObjectProjectionIndex, ObjectProjectionSelector,
-    ObjectProjectionSignature, ObjectSignatureKind, ObjectSpreadProjectionContext,
-    OpenSafeKeyEvidence, PositiveAlternativeEvidence, PositiveKeyFact, PositiveKeyPresence,
-    ProjectionEvidence,
+    ClosedKeyLookup, ClosedObjectProjectionAlternative, ClosedObjectProjectionSurface,
+    CompleteObjectDomain, ExactOptionalPropertyPolicy, ExcessEligibility, IndexDomain,
+    MemberFacets, ObjectProjectionAlternative, ObjectProjectionFormula, ObjectProjectionIndex,
+    ObjectProjectionSelector, ObjectProjectionSignature, ObjectSignatureKind,
+    ObjectSpreadProjectionContext, OpenSafeKeyEvidence, PositiveAlternativeEvidence,
+    PositiveKeyFact, PositiveKeyPresence, ProjectionEvidence,
 };
 
 /// The [`IndexKey::Number`] payload domain: the proof-carrying

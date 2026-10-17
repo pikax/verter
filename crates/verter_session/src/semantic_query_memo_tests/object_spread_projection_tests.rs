@@ -621,7 +621,9 @@ fn cross_view_projection_joiner_forks_when_winner_carrier_fails_follower_validat
     );
     let key_fact = |value: &QueryResult<SemanticQueryValue>| match value {
         QueryResult::Value(SemanticQueryValue::ObjectProjection(formula)) => {
-            match formula.alternatives()[0].selected_key(&PropertyKey::identifier("x")) {
+            match test_support::sealed_alternatives(formula)[0]
+                .selected_key(&PropertyKey::identifier("x"))
+            {
                 verter_type_engine::semantic_query::OpenSafeKeyEvidence::Positive(fact) => {
                     fact.value().clone()
                 }

@@ -370,7 +370,10 @@ pub(crate) fn node_matches(
                 ),
             ) {
                 verter_type_engine::semantic_query::QueryResult::Value(formula) => {
-                    spread_arms_match(dispatch, arms, formula.alternatives(), depth)
+                    match dispatch.object_spread_alternatives(&formula) {
+                        Ok(alternatives) => spread_arms_match(dispatch, arms, &alternatives, depth),
+                        Err(_) => false,
+                    }
                 }
                 _ => false,
             }
@@ -2697,7 +2700,9 @@ pub(crate) mod checker_syntax {
             verter_type_engine::semantic_query::QueryResult::Value(formula) => formula,
             _ => return false,
         };
-        let arms = formula.alternatives();
+        let Ok(arms) = dispatch.object_spread_alternatives(&formula) else {
+            return false;
+        };
         match expected {
             CheckerType::Object(members) => {
                 arms.len() == 1
@@ -2751,7 +2756,7 @@ pub(crate) mod checker_syntax {
                     false
                 }
                 let mut used = vec![false; arms.len()];
-                assign(dispatch, arms, &printed, &mut used, 0, depth)
+                assign(dispatch, &arms, &printed, &mut used, 0, depth)
             }
             _ => false,
         }

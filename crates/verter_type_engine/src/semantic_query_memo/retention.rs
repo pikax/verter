@@ -92,9 +92,7 @@ pub(super) fn with_value_allocation<V: ValueAllocation>(
         return None;
     };
     Some(match value {
-        SemanticQueryValue::ObjectProjection(formula) => {
-            visit.allocation(formula.alternatives_owned())
-        }
+        SemanticQueryValue::ObjectProjection(formula) => visit.allocation(formula.product_owned()),
         SemanticQueryValue::DeclarationAnalysis(analysis) => {
             visit.allocation(&analysis.contributors)
         }

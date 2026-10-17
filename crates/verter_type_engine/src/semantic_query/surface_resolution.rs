@@ -181,6 +181,12 @@ impl NonEmptyReasons {
         .unwrap_or_else(|| Self::of(PartialReason::SemanticQueryFault))
     }
 
+    /// The trip of a connected demand that refused a read: its sticky
+    /// reasons, never empty (an unattributed trip is still a work stop).
+    pub fn from_demand_trip(trip: PartialReasonSet) -> Self {
+        Self::new(trip).unwrap_or_else(|| Self::of(PartialReason::ProjectionWorkLimit))
+    }
+
     /// Union with additional (possibly-empty) reasons — non-empty is
     /// preserved by construction.
     pub(crate) fn with(self, more: PartialReasonSet) -> Self {

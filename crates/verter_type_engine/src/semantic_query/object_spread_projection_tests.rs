@@ -134,48 +134,42 @@ fn context_retains_every_env_substitution_reduction_and_optional_axis() {
 
 #[test]
 fn finite_union_keeps_branch_surfaces_correlated() {
-    let formula = test_support::closed_formula([
-        test_support::closed_alternative([test_support::positive_key(
-            key("left"),
-            PositiveKeyPresence::Required,
-            ProjectionEvidence::Proven(SemanticNodeId(11)),
-        )]),
-        test_support::closed_alternative([test_support::positive_key(
-            key("right"),
-            PositiveKeyPresence::Optional,
-            ProjectionEvidence::Proven(SemanticNodeId(22)),
-        )]),
-    ]);
+    let left = test_support::closed_alternative([test_support::positive_key(
+        key("left"),
+        PositiveKeyPresence::Required,
+        ProjectionEvidence::Proven(SemanticNodeId(11)),
+    )]);
+    let right = test_support::closed_alternative([test_support::positive_key(
+        key("right"),
+        PositiveKeyPresence::Optional,
+        ProjectionEvidence::Proven(SemanticNodeId(22)),
+    )]);
+    let formula = test_support::closed_formula([left.clone(), right.clone()]);
 
-    assert_eq!(formula.alternatives().len(), 2);
-    let complete = formula.closed().expect("every branch is closed");
-    let alternatives: Vec<_> = complete.alternatives().collect();
+    assert_eq!(formula.width(), 2);
+    assert!(formula.all_alternatives_closed(), "every branch is closed");
+    let left = left.closed().expect("closed branch");
+    let right = right.closed().expect("closed branch");
     assert!(matches!(
-        alternatives[0].lookup(&key("left")),
+        left.lookup(&key("left")),
         Some(ClosedKeyLookup::Present(fact))
             if *fact.value() == ProjectionEvidence::Proven(SemanticNodeId(11))
     ));
     assert!(matches!(
-        alternatives[0].lookup(&key("right")),
+        left.lookup(&key("right")),
         Some(ClosedKeyLookup::AbsentProven)
     ));
     assert!(matches!(
-        alternatives[1].lookup(&key("right")),
+        right.lookup(&key("right")),
         Some(ClosedKeyLookup::Present(fact))
             if fact.presence() == PositiveKeyPresence::Optional
     ));
-    assert!(
-        complete.keyof().is_some_and(|keyof| keyof.is_empty()),
-        "`keyof (left-arm | right-arm)` is the exact common-key intersection"
-    );
-    let surfaces: Vec<_> = complete.surfaces().collect();
-    assert_eq!(surfaces.len(), 2);
     assert_eq!(
-        surfaces[0].expect("whole-domain surface").members()[0].key(),
+        left.surface().expect("whole-domain surface").members()[0].key(),
         &key("left")
     );
     assert_eq!(
-        surfaces[1].expect("whole-domain surface").members()[0].key(),
+        right.surface().expect("whole-domain surface").members()[0].key(),
         &key("right")
     );
 }
@@ -193,11 +187,19 @@ fn open_alternative_exposes_only_positive_or_indeterminate_key_evidence() {
         [residual, second_residual],
     );
     assert_eq!(
-        formula.alternatives().len(),
+        formula.width(),
         1,
         "generic/non-enumerable operands remain residual evidence, never relation arms"
     );
-    let alternative = &formula.alternatives()[0];
+    assert!(!formula.all_alternatives_closed());
+    let alternative = test_support::open_alternative(
+        [test_support::positive_key(
+            key("known"),
+            PositiveKeyPresence::Required,
+            ProjectionEvidence::Indeterminate,
+        )],
+        [residual, second_residual],
+    );
 
     assert!(matches!(
         alternative.selected_key(&key("known")),
@@ -210,35 +212,34 @@ fn open_alternative_exposes_only_positive_or_indeterminate_key_evidence() {
             if residual_operands == [residual, second_residual]
     ));
     assert!(alternative.closed().is_none());
-    assert!(formula.closed().is_none());
 }
 
 #[test]
 fn open_alternative_reports_indeterminate_possible_writes_without_absence() {
-    let formula = test_support::open_formula_with_possible_writes(
+    let alternative = test_support::open_alternative_with_possible_writes(
         [],
         [SemanticNodeId(101)],
         [key("possible")],
     );
     assert!(matches!(
-        formula.alternatives()[0].selected_key(&key("possible")),
+        alternative.selected_key(&key("possible")),
         OpenSafeKeyEvidence::IndeterminatePossibleWrite
     ));
 }
 
 #[test]
 fn mixed_formula_has_only_branch_local_closed_witnesses() {
-    let formula = test_support::formula([
-        test_support::closed_alternative([test_support::positive_key(
-            key("closed"),
-            PositiveKeyPresence::Required,
-            ProjectionEvidence::Proven(SemanticNodeId(102)),
-        )]),
-        test_support::open_alternative([], [SemanticNodeId(103)]),
-    ]);
-    assert!(formula.alternatives()[0].closed().is_some());
-    assert!(formula.alternatives()[1].closed().is_none());
-    assert!(formula.closed().is_none());
+    let closed = test_support::closed_alternative([test_support::positive_key(
+        key("closed"),
+        PositiveKeyPresence::Required,
+        ProjectionEvidence::Proven(SemanticNodeId(102)),
+    )]);
+    let open = test_support::open_alternative([], [SemanticNodeId(103)]);
+    assert!(closed.closed().is_some());
+    assert!(open.closed().is_none());
+    let formula = test_support::formula([closed, open]);
+    assert_eq!(formula.width(), 2);
+    assert!(!formula.all_alternatives_closed());
 }
 
 #[test]
