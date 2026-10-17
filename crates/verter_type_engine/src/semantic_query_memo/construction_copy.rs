@@ -5,13 +5,18 @@
 //! roots every operand the copy names until the scope closes. Outside such
 //! a scope there is no copy: a consumer borrows the carrier from the lease
 //! that owns it.
+//!
+//! A copy allocates nothing of its own: every name it carries is an owned
+//! handle it shares with the carrier it copies, so it keeps that one charge
+//! — never a second, never none — for as long as it lives. Only member
+//! records copy; a whole payload or surface, whose lists and text the
+//! payload owns, has no copy.
 
 use super::node_roots::{NodeRoot, NodeRootScope, NodeRootSet};
 use super::SemanticGraphStore;
-use crate::project_semantic_dispatch::walk::ShallowDiagnostic;
+use crate::semantic_query::node_payload_footprint::{PayloadHeap, PayloadHeapVisitor};
 use crate::semantic_query::{
-    authored_property_key_child, IndexSignature, SemanticNodeData, SemanticNodeId, SurfaceEntry,
-    SurfaceMember, SurfaceView,
+    authored_property_key_child, IndexSignature, SemanticNodeId, SurfaceEntry, SurfaceMember,
 };
 use std::sync::Arc;
 
@@ -27,6 +32,33 @@ pub trait ConstructionCopy: sealed::Sealed + Sized {
     fn for_each_operand(&self, visit: &mut dyn FnMut(SemanticNodeId));
     #[doc(hidden)]
     fn copy_with(&self, token: sealed::CopyToken) -> Self;
+    /// Heap the carrier reaches outside its owned handles.
+    #[doc(hidden)]
+    fn unowned_heap_bytes(&self, token: &sealed::CopyToken) -> usize;
+}
+
+/// Heap a copy would allocate or alias outside its owned handles.
+struct UnownedHeap(usize);
+
+fn unowned_heap(value: &impl PayloadHeap) -> usize {
+    let mut unowned = UnownedHeap(0);
+    value.visit_payload_heap(&mut unowned);
+    unowned.0
+}
+
+impl PayloadHeapVisitor for UnownedHeap {
+    fn owned(&mut self, bytes: usize) {
+        self.0 += bytes;
+    }
+    fn shared(&mut self, _key: usize, bytes: usize) -> bool {
+        self.0 += bytes;
+        true
+    }
+    fn handle(
+        &mut self,
+        _offer: &mut dyn FnMut(&mut verter_session_query::retention::allocation::AliasSet) -> usize,
+    ) {
+    }
 }
 
 fn member_operands(member: &SurfaceMember, visit: &mut dyn FnMut(SemanticNodeId)) {
@@ -49,6 +81,9 @@ impl ConstructionCopy for SurfaceMember {
     fn copy_with(&self, _: sealed::CopyToken) -> Self {
         self.clone()
     }
+    fn unowned_heap_bytes(&self, _: &sealed::CopyToken) -> usize {
+        unowned_heap(self)
+    }
 }
 
 impl sealed::Sealed for IndexSignature {}
@@ -58,6 +93,9 @@ impl ConstructionCopy for IndexSignature {
     }
     fn copy_with(&self, _: sealed::CopyToken) -> Self {
         self.clone()
+    }
+    fn unowned_heap_bytes(&self, _: &sealed::CopyToken) -> usize {
+        unowned_heap(self)
     }
 }
 
@@ -73,38 +111,8 @@ impl ConstructionCopy for SurfaceEntry {
     fn copy_with(&self, _: sealed::CopyToken) -> Self {
         self.clone()
     }
-}
-
-impl sealed::Sealed for SurfaceView {}
-impl ConstructionCopy for SurfaceView {
-    fn for_each_operand(&self, visit: &mut dyn FnMut(SemanticNodeId)) {
-        for entry in self.entries() {
-            entry.for_each_operand(visit);
-        }
-        self.keyspace().into_iter().for_each(visit);
-    }
-    fn copy_with(&self, _: sealed::CopyToken) -> Self {
-        self.clone()
-    }
-}
-
-impl sealed::Sealed for SemanticNodeData {}
-impl ConstructionCopy for SemanticNodeData {
-    fn for_each_operand(&self, visit: &mut dyn FnMut(SemanticNodeId)) {
-        self.for_each_retained_child(visit);
-    }
-    fn copy_with(&self, _: sealed::CopyToken) -> Self {
-        self.clone()
-    }
-}
-
-impl sealed::Sealed for ShallowDiagnostic {}
-impl ConstructionCopy for ShallowDiagnostic {
-    fn for_each_operand(&self, visit: &mut dyn FnMut(SemanticNodeId)) {
-        self.for_each_retained_node(visit);
-    }
-    fn copy_with(&self, _: sealed::CopyToken) -> Self {
-        self.clone()
+    fn unowned_heap_bytes(&self, _: &sealed::CopyToken) -> usize {
+        unowned_heap(self)
     }
 }
 
@@ -133,6 +141,12 @@ impl SemanticGraphStore {
                 NodeRootSet::acquire(Arc::clone(&self.arena.core), operands.clone()).ok()?;
             NodeRootScope::capture(NodeRoot::from_roots(first, roots));
         }
-        Some(value.copy_with(sealed::CopyToken(())))
+        let copy = value.copy_with(sealed::CopyToken(()));
+        verter_debug_assert::verter_debug_assert_eq!(
+            copy.unowned_heap_bytes(&sealed::CopyToken(())),
+            0,
+            "a construction copy shares only owned handles"
+        );
+        Some(copy)
     }
 }
