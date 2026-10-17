@@ -187,7 +187,7 @@ impl ProjectionStamp {
 pub struct LocatorViewInputs<'a> {
     pub env: &'a FxHashMap<String, SemanticNodeId>,
     pub scope: &'a NodeScopeId,
-    pub name_resolution: &'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+    pub name_resolution: &'a FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
     pub scope_payload: Option<&'a DeclarationScopePayload>,
     pub shadowing: &'a ScopeShadowing,
     pub authored_resolution_debt: Option<&'a super::carrier::AuthoredResolutionDebtFrame>,
@@ -207,7 +207,7 @@ pub type ViewMemo = FxHashMap<(SemanticNodeId, ProjectionReductionContext), Sema
 pub struct ProjectionBenchCase {
     root: SemanticNodeId,
     scope: NodeScopeId,
-    name_resolution: FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+    name_resolution: FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
     scope_payload: Option<DeclarationScopePayload>,
     shadowing: ScopeShadowing,
 }
@@ -290,7 +290,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectionBenchHarness<'
             .iter()
             .map(|(local_name, defining_canonical, defining_symbol)| {
                 (
-                    Arc::from(*local_name),
+                    verter_type_expr::OwnedStr::from(*local_name),
                     ResolvedRootIdentity::new_in_owner(
                         *defining_canonical,
                         verter_type_expr::TopLevelOwnerId::ordinary_file(),

@@ -580,8 +580,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
         // The scopes the walk reads nodes in: the field's, then each local
         // alias declaration's it hops into.
-        let mut scopes: Vec<(std::sync::Arc<str>, verter_type_expr::TopLevelOwnerId)> =
-            vec![(std::sync::Arc::from(scope_canonical_id), scope_owner)];
+        let mut scopes: Vec<(
+            verter_type_expr::OwnedStr,
+            verter_type_expr::TopLevelOwnerId,
+        )> = vec![(
+            verter_type_expr::OwnedStr::from(scope_canonical_id),
+            scope_owner,
+        )];
         verter_type_engine::graph_walk::reaches((node, 0usize), |(node, scope)| {
             let (scope_canonical_id, scope_owner) = scopes[scope].clone();
             let in_scope = |nodes: &mut dyn Iterator<
@@ -630,10 +635,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         let Some(body) = body else {
                             return Reach::Parts(Vec::new());
                         };
-                        let declaration_scope = (
-                            std::sync::Arc::clone(&root_identity.canonical_id),
-                            root_identity.owner,
-                        );
+                        let declaration_scope =
+                            (root_identity.canonical_id.clone(), root_identity.owner);
                         let declaration_scope =
                             match scopes.iter().position(|known| *known == declaration_scope) {
                                 Some(index) => index,

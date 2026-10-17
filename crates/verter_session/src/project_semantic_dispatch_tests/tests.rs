@@ -25009,7 +25009,7 @@ fn constructor_type_lowers_function_like_not_opaque_miss() {
     // site; primitives + the constructor type lower without host routing).
     let origin = "/ctor.ts";
     let env: rustc_hash::FxHashMap<String, SemanticNodeId> = rustc_hash::FxHashMap::default();
-    let name_resolution: rustc_hash::FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> =
+    let name_resolution: rustc_hash::FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity> =
         rustc_hash::FxHashMap::default();
     let scope = NodeScopeId::File {
         canonical_id: verter_type_expr::OwnedStr::from(origin),
@@ -25126,7 +25126,7 @@ fn multi_segment_import_type_with_generic_args_fails_loud_not_silent_drop() {
 
     let origin = "/consumer.ts";
     let env: rustc_hash::FxHashMap<String, SemanticNodeId> = rustc_hash::FxHashMap::default();
-    let name_resolution: rustc_hash::FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> =
+    let name_resolution: rustc_hash::FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity> =
         rustc_hash::FxHashMap::default();
     let scope = NodeScopeId::File {
         canonical_id: verter_type_expr::OwnedStr::from(origin),
@@ -25274,7 +25274,7 @@ fn typeof_import_value_member_applies_generic_instantiation_args() {
 
     let origin = "/consumer.ts";
     let env: rustc_hash::FxHashMap<String, SemanticNodeId> = rustc_hash::FxHashMap::default();
-    let name_resolution: rustc_hash::FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> =
+    let name_resolution: rustc_hash::FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity> =
         rustc_hash::FxHashMap::default();
     let scope = NodeScopeId::File {
         canonical_id: verter_type_expr::OwnedStr::from(origin),
