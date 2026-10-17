@@ -483,17 +483,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let (_connected_guard, preexisting_trip) = self.enter_connected_demand(false);
         let query_depth_guard =
             self.charge_query_entry(key, preexisting_trip, nesting.query_levels() > 0)?;
-        // A result this dispatcher already holds answers before the memo
-        // is looked up.
-        let deliver = |carrier: Option<&mut Option<ReadSetSignature>>, held: ReadSetSignature| {
-            match carrier {
-                Some(slot) => *slot = Some(held),
-                None => held.bubble_via_tls(),
-            }
-        };
+        // A result this dispatcher's build already published answers before
+        // the memo is looked up.
         match self.replay_kept_read(key, nesting) {
             super::KeptReplay::Served(read, held) => {
-                deliver(carrier, held);
+                match carrier {
+                    Some(slot) => *slot = Some(held),
+                    None => held.bubble_via_tls(),
+                }
                 return Err(self.attribute_query_read(
                     key,
                     false,
@@ -501,10 +498,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     &CarrierNormalizationPrelude::none(),
                 ));
             }
-            super::KeptReplay::Refused(_, held) => {
-                if let Some(held) = held {
-                    deliver(carrier, held);
-                }
+            super::KeptReplay::Refused(_) => {
                 let attempt = self
                     .graph()
                     .begin_query_recompute(self.snapshot.flags(), key.clone())?;
@@ -512,25 +506,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             super::KeptReplay::Absent => {}
         }
-        let mut warm = None;
-        let mut warm_roots = None;
-        let begun = self.graph().begin_query_claim(
+        let mut capture = match carrier {
+            Some(slot) => ReadCapture::deferring_carrier(slot),
+            None => ReadCapture::default(),
+        };
+        let attempt = match self.graph().begin_query_claim(
             self.ctx,
             self.snapshot.flags(),
             key.clone(),
-            &mut ReadCapture::deferring_carrier_with_roots(&mut warm, &mut warm_roots),
-        );
-        let attempt = match begun {
+            &mut capture,
+        ) {
             Ok(attempt) => attempt,
             Err(read) => {
-                let served = self.served_read(key, read, nesting);
-                if let Some(held) = warm {
-                    if let Ok(read) = &served {
-                        self.keep_served(key, read, &held, warm_roots.as_ref());
-                    }
-                    deliver(carrier, held);
-                }
-                match served {
+                match self.served_read(key, read, nesting) {
                     Ok(read) => {
                         return Err(self.attribute_query_read(
                             key,

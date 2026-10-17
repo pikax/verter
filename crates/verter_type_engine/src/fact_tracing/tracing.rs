@@ -98,15 +98,19 @@ fn active_cells() -> SmallVec<[*const FactReadSetCell; 8]> {
 fn observing_cells() -> SmallVec<[*const FactReadSetCell; 8]> {
     ACTIVE_TRACERS.with(|slot| {
         let stack = slot.borrow();
-        let first = stack
-            .iter()
-            .rposition(|tracer| tracer.delivers)
-            .unwrap_or(0);
-        stack[first..]
-            .iter()
-            .map(|tracer| tracer.cell)
-            .filter(|cell| !cell.is_null())
-            .collect()
+        // Every observation runs this, so it is written as plain loops.
+        let mut first = stack.len();
+        while first > 0 && !stack[first - 1].delivers {
+            first -= 1;
+        }
+        let first = first.saturating_sub(1);
+        let mut cells = SmallVec::new();
+        for tracer in &stack[first..] {
+            if !tracer.cell.is_null() {
+                cells.push(tracer.cell);
+            }
+        }
+        cells
     })
 }
 

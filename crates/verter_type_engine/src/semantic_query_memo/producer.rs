@@ -71,9 +71,6 @@ pub struct ReadCapture<'a> {
     publication: Option<&'a mut Option<PublishedMemoCandidate>>,
     evidence: Option<&'a mut Option<crate::semantic_query::operand::SemanticOperandEvidence>>,
     carrier: Option<&'a mut Option<verter_session_query::facts::fact_cache::ReadSetSignature>>,
-    /// Beside a deferred carrier: the self-root canonicals the answering
-    /// result validates against strictly.
-    roots: Option<&'a mut Option<Arc<[Arc<str>]>>>,
 }
 
 impl<'a> ReadCapture<'a> {
@@ -83,7 +80,6 @@ impl<'a> ReadCapture<'a> {
             publication: Some(slot),
             evidence: None,
             carrier: None,
-            roots: None,
         }
     }
 
@@ -97,7 +93,6 @@ impl<'a> ReadCapture<'a> {
             publication: None,
             evidence: Some(slot),
             carrier: None,
-            roots: None,
         }
     }
 
@@ -112,22 +107,6 @@ impl<'a> ReadCapture<'a> {
             publication: None,
             evidence: None,
             carrier: Some(slot),
-            roots: None,
-        }
-    }
-
-    /// [`Self::deferring_carrier`], also handing `roots` the self-root
-    /// canonicals the answering result validates against, so its reader
-    /// can validate the result again before reusing it.
-    pub(crate) fn deferring_carrier_with_roots(
-        slot: &'a mut Option<verter_session_query::facts::fact_cache::ReadSetSignature>,
-        roots: &'a mut Option<Arc<[Arc<str>]>>,
-    ) -> Self {
-        Self {
-            publication: None,
-            evidence: None,
-            carrier: Some(slot),
-            roots: Some(roots),
         }
     }
 
@@ -136,7 +115,6 @@ impl<'a> ReadCapture<'a> {
         CaptureParts {
             evidence: self.evidence.as_deref_mut(),
             carrier: self.carrier.as_deref_mut(),
-            roots: self.roots.as_deref_mut(),
         }
     }
 
@@ -145,14 +123,10 @@ impl<'a> ReadCapture<'a> {
     fn deliver_carrier(
         &mut self,
         carrier: &verter_session_query::facts::fact_cache::ReadSetSignature,
-        self_roots: &Arc<[Arc<str>]>,
     ) {
         match self.carrier.as_deref_mut() {
             Some(slot) => *slot = Some(carrier.clone()),
             None => carrier.bubble_via_tls(),
-        }
-        if let Some(roots) = self.roots.as_deref_mut() {
-            *roots = Some(Arc::clone(self_roots));
         }
     }
 
@@ -161,22 +135,7 @@ impl<'a> ReadCapture<'a> {
     ) -> Option<&mut Option<crate::semantic_query::operand::SemanticOperandEvidence>> {
         self.evidence.as_deref_mut()
     }
-
-    /// Take the carrier a deferring capture holds, for the caller to
-    /// deliver, with the self-root canonicals it validates against when the
-    /// capture records them.
-    pub(crate) fn take_deferred_carrier(&mut self) -> Option<DeferredCarrier> {
-        let carrier = self.carrier.as_deref_mut().and_then(Option::take)?;
-        Some((carrier, self.roots.as_deref_mut().and_then(Option::take)))
-    }
 }
-
-/// A deferred carrier taken from a capture, with the self-root canonicals
-/// it validates against when the capture recorded them.
-pub(crate) type DeferredCarrier = (
-    verter_session_query::facts::fact_cache::ReadSetSignature,
-    Option<Arc<[Arc<str>]>>,
-);
 
 /// The slots a warm read fills: the answering result's operand evidence
 /// and its deferred carrier.
@@ -185,7 +144,6 @@ pub(super) struct CaptureParts<'c> {
         Option<&'c mut Option<crate::semantic_query::operand::SemanticOperandEvidence>>,
     pub(super) carrier:
         Option<&'c mut Option<verter_session_query::facts::fact_cache::ReadSetSignature>>,
-    pub(super) roots: Option<&'c mut Option<Arc<[Arc<str>]>>>,
 }
 
 /// One logical claim of one key: the prepared key and what earlier attempts
@@ -842,7 +800,7 @@ impl Subscription<'_> {
         // producer observed — the same rail a cold producer and a warm hit
         // deliver.
         if let Some(ref carrier) = graph_carrier {
-            capture.deliver_carrier(carrier, &producer_self_roots);
+            capture.deliver_carrier(carrier);
             if let Some(slot) = capture.evidence() {
                 *slot = semantic_operand_evidence(carrier, &producer_self_roots, &dep_signature);
             }
@@ -1346,7 +1304,7 @@ impl SettledProducer<'_> {
         // `FileWholeHash` facts live only on the carrier; bubbling here makes
         // a cold-built child, a warm-hit child and a joined child deliver the
         // identical fact set to their parent.
-        capture.deliver_carrier(&carrier, &self_root_canonicals);
+        capture.deliver_carrier(&carrier);
 
         // Complete the flight and wake its subscribers. An abort planted by
         // an invalidation stays: subscribers that wake on it retry rather

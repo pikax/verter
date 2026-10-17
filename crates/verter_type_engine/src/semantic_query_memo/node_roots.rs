@@ -335,10 +335,12 @@ impl ScopeStack {
         self.next_token
     }
 
+    /// Owners usually close innermost first, so the search starts at the
+    /// newest.
     fn position(&self, token: u64) -> usize {
         self.entries
             .iter()
-            .position(|entry| entry.token == token)
+            .rposition(|entry| entry.token == token)
             .expect("an open construction owner is registered on its thread")
     }
 

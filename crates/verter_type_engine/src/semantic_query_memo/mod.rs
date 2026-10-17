@@ -1983,7 +1983,7 @@ impl SemanticGraphStore {
             let requested = crate::semantic_query::demand::MaterializedPoint::new(
                 family::point_for_slot(slot, &requested_path_for_key(key)),
             );
-            self.get_validated_value_impl(&family, slot, &requested, ctx, None, None, None, true)
+            self.get_validated_value_impl(&family, slot, &requested, ctx, None, None, true)
                 .map(narrow_cache_read)
         }
     }
@@ -2002,7 +2002,6 @@ impl SemanticGraphStore {
         let producer::CaptureParts {
             evidence: operand_evidence,
             carrier: deferred_carrier,
-            roots: deferred_roots,
         } = capture.parts();
         self.get_validated_value_impl(
             prepared.family(),
@@ -2011,7 +2010,6 @@ impl SemanticGraphStore {
             ctx,
             operand_evidence,
             deferred_carrier,
-            deferred_roots,
             true,
         )
     }
@@ -2040,7 +2038,6 @@ impl SemanticGraphStore {
         deferred_carrier: Option<
             &mut Option<verter_session_query::facts::fact_cache::ReadSetSignature>,
         >,
-        deferred_roots: Option<&mut Option<Arc<[Arc<str>]>>>,
         record_miss: bool,
     ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
         // Snapshot the candidate list under the lock, then validate
@@ -2085,9 +2082,6 @@ impl SemanticGraphStore {
             match deferred_carrier {
                 Some(slot) => *slot = Some(entry.read_set_signature.clone()),
                 None => entry.read_set_signature.bubble(ctx),
-            }
-            if let Some(roots) = deferred_roots {
-                *roots = Some(Arc::clone(&entry.self_root_canonicals));
             }
             let dep_signature = Arc::clone(&entry.dispatch_dep_signature);
             CacheRead {
@@ -2183,7 +2177,6 @@ impl SemanticGraphStore {
         let producer::CaptureParts {
             evidence: operand_evidence,
             carrier: deferred_carrier,
-            roots: deferred_roots,
         } = capture.parts();
         let key = prepared.key();
         let family = prepared.family();
@@ -2239,9 +2232,6 @@ impl SemanticGraphStore {
         match deferred_carrier {
             Some(slot) => *slot = Some(entry.read_set_signature.clone()),
             None => entry.read_set_signature.bubble_via_tls(),
-        }
-        if let Some(roots) = deferred_roots {
-            *roots = Some(Arc::clone(&entry.self_root_canonicals));
         }
         let hit = CacheRead {
             lease: entry.lease,
@@ -2931,28 +2921,20 @@ pub fn semantic_graph_carrier(
 
     // Collapse the observed self-roots per canonical; a conflicting hash for
     // the same canonical is a torn observation. A build observes a handful
-    // of roots, so they are compared linearly.
+    // of roots, so they are compared linearly, in plain loops: this runs
+    // once per cold build.
     let mut self_root_hashes: smallvec::SmallVec<
         [(&Arc<str>, verter_session_query::analysis::types::Hash16); 4],
     > = smallvec::SmallVec::new();
     for (canonical, observed_hash) in observed_self_roots {
-        match self_root_hashes
-            .iter()
-            .find(|(root, _)| root.as_ref() == canonical.as_ref())
-        {
-            Some((_, existing)) if existing != observed_hash => {
+        match root_position(&self_root_hashes, canonical) {
+            Some(index) if self_root_hashes[index].1 != *observed_hash => {
                 return Err(crate::cache_runtime::NonAdmissionReason::SelfRootConflict)
             }
             Some(_) => {}
             None => self_root_hashes.push((canonical, *observed_hash)),
         }
     }
-    let root_hash = |canonical: &str| {
-        self_root_hashes
-            .iter()
-            .find(|(root, _)| root.as_ref() == canonical)
-            .map(|(_, hash)| hash)
-    };
 
     // Every traced `FileWholeHash` for a self-root canonical MUST agree
     // with the observed hash (else the dependency rail and the observed
@@ -2963,10 +2945,10 @@ pub fn semantic_graph_carrier(
     if !self_root_hashes.is_empty() {
         for fact in verter_session_query::facts::fact_cache::signature_entries(&traced_facts) {
             if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
-                if root_hash(canonical_id.as_str())
-                    .is_some_and(|observed_hash| hash != observed_hash)
-                {
-                    return Err(crate::cache_runtime::NonAdmissionReason::SelfRootConflict);
+                if let Some(index) = root_position(&self_root_hashes, canonical_id) {
+                    if *hash != self_root_hashes[index].1 {
+                        return Err(crate::cache_runtime::NonAdmissionReason::SelfRootConflict);
+                    }
                 }
             }
         }
@@ -2982,33 +2964,23 @@ pub fn semantic_graph_carrier(
     if !self_root_hashes.is_empty() {
         for fact in &traced_facts {
             if let FactVersionRef::FileWholeHash { canonical_id, .. } = fact {
-                if let Some(index) = self_root_hashes
-                    .iter()
-                    .position(|(root, _)| root.as_ref() == canonical_id.as_str())
-                {
+                if let Some(index) = root_position(&self_root_hashes, canonical_id) {
                     named[index] = true;
                 }
             }
         }
     }
     let mut facts = traced_facts;
-    facts.extend(
-        self_root_hashes
-            .iter()
-            .zip(&named)
-            .filter(|(_, named)| !**named)
-            .map(
-                |((canonical, observed_hash), _)| FactVersionRef::FileWholeHash {
-                    canonical_id: canonical.as_ref().to_string(),
-                    hash: *observed_hash,
-                },
-            ),
-    );
-
-    let self_root_canonicals: Vec<Arc<str>> = self_root_hashes
-        .iter()
-        .map(|(canonical, _)| Arc::clone(canonical))
-        .collect();
+    let mut self_root_canonicals: Vec<Arc<str>> = Vec::with_capacity(self_root_hashes.len());
+    for (index, (canonical, observed_hash)) in self_root_hashes.iter().enumerate() {
+        if !named[index] {
+            facts.push(FactVersionRef::FileWholeHash {
+                canonical_id: canonical.as_ref().to_string(),
+                hash: *observed_hash,
+            });
+        }
+        self_root_canonicals.push(Arc::clone(canonical));
+    }
     crate::fact_signature_helpers::bound_completed_structural_carrier(
         view,
         facts,
@@ -3019,6 +2991,19 @@ pub fn semantic_graph_carrier(
 // ──────────────────────────────────────────────────────────────────────────
 // Internal helpers
 // ──────────────────────────────────────────────────────────────────────────
+
+/// The position of `canonical` among collapsed self-roots.
+fn root_position(
+    roots: &[(&Arc<str>, verter_session_query::analysis::types::Hash16)],
+    canonical: &str,
+) -> Option<usize> {
+    for (index, (root, _)) in roots.iter().enumerate() {
+        if root.as_ref() == canonical {
+            return Some(index);
+        }
+    }
+    None
+}
 
 /// The empty dispatch dependency signature: one shared allocation, so a
 /// result that depends on no dispatch fence costs no allocation.

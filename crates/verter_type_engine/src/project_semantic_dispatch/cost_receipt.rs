@@ -307,16 +307,37 @@ impl DemandCostReceipt {
         tail_steps: u32,
     ) -> Arc<Self> {
         let mut unique: Vec<CostDependency> = Vec::with_capacity(prerequisites.len());
-        let mut positions: FxHashMap<CostIdentity, usize> = FxHashMap::default();
-        for dependency in prerequisites {
-            match positions.get(&dependency.receipt.identity) {
-                Some(&position) => {
-                    let kept = &mut unique[position];
-                    kept.nesting = kept.nesting.deeper(dependency.nesting);
+        if prerequisites.len() <= LINEAR_DEDUP_LIMIT {
+            // A short list dedups by scanning: no identity is cloned into a
+            // table, and the stored hash rejects most pairs at once.
+            for dependency in prerequisites {
+                let mut kept_at = None;
+                for (position, kept) in unique.iter().enumerate() {
+                    if kept.receipt.identity == dependency.receipt.identity {
+                        kept_at = Some(position);
+                        break;
+                    }
                 }
-                None => {
-                    positions.insert(dependency.receipt.identity.clone(), unique.len());
-                    unique.push(dependency);
+                match kept_at {
+                    Some(position) => {
+                        let kept = &mut unique[position];
+                        kept.nesting = kept.nesting.deeper(dependency.nesting);
+                    }
+                    None => unique.push(dependency),
+                }
+            }
+        } else {
+            let mut positions: FxHashMap<CostIdentity, usize> = FxHashMap::default();
+            for dependency in prerequisites {
+                match positions.get(&dependency.receipt.identity) {
+                    Some(&position) => {
+                        let kept = &mut unique[position];
+                        kept.nesting = kept.nesting.deeper(dependency.nesting);
+                    }
+                    None => {
+                        positions.insert(dependency.receipt.identity.clone(), unique.len());
+                        unique.push(dependency);
+                    }
                 }
             }
         }
@@ -462,6 +483,10 @@ impl DemandCostReceipt {
         total
     }
 }
+
+/// The prerequisite count up to which a receipt dedups its prerequisites
+/// by scanning rather than through a table.
+const LINEAR_DEDUP_LIMIT: usize = 16;
 
 impl Drop for DemandCostReceipt {
     /// Release the prerequisite DAG iteratively: a receipt reaches the
