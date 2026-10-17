@@ -2257,16 +2257,20 @@ impl SemanticGraphStore {
         // failing any is skipped without bubbling. `validated_at_generation`
         // is recency metadata only.
         let requested = prepared.requested_point();
-        let entry: MemoEntry = snapshot?
+        let snapshot = snapshot?;
+        let candidates = snapshot.len();
+        let (position, entry): (usize, MemoEntry) = snapshot
             .into_iter()
-            .find(|e| self.warm_candidate_serves(e, requested, ctx))?;
+            .enumerate()
+            .find(|(_, e)| self.warm_candidate_serves(e, requested, ctx))?;
         // Brief LRU bookkeeping — reacquire ONLY to move the matching
         // candidate to the back of the slot's LRU order so subsequent
         // lookups treat it as freshest. The match is by discriminant
         // identity; if a concurrent invalidation drained it between
         // snapshot and here, the update is a no-op (the caller still
-        // gets the cloned entry from the snapshot).
-        {
+        // gets the cloned entry from the snapshot). A candidate the
+        // snapshot already held at the back is the freshest already.
+        if position + 1 < candidates {
             let mut entries = self.entries.lock();
             if let Some(slots) = entries.get_mut(family) {
                 slots.mark_validated_freshest(slot, &entry);
