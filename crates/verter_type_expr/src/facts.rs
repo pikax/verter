@@ -146,7 +146,9 @@ impl Default for TopLevelOwnerId {
     serde::Serialize,
     serde::Deserialize,
     NoTypeExpr,
-    NoStoredSpan, verter_retention::heap_size::HeapSize)]
+    NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
+)]
 pub struct DeclBindingKey {
     pub owner: TopLevelOwnerId,
     pub name: Arc<str>,
@@ -178,7 +180,9 @@ impl DeclBindingKey {
     serde::Serialize,
     serde::Deserialize,
     NoTypeExpr,
-    NoStoredSpan, verter_retention::heap_size::HeapSize)]
+    NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum ConstructorBindingOutcome {
     /// No runtime-surviving local declaration binds this name — the spelling
     /// is safe to fold via the shared runtime-constructor mapping (the
@@ -217,7 +221,9 @@ pub enum ConstructorBindingOutcome {
     serde::Serialize,
     serde::Deserialize,
     NoTypeExpr,
-    NoStoredSpan, verter_retention::heap_size::HeapSize)]
+    NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum RuntimeConstructorIdentity {
     String,
     Number,
@@ -351,7 +357,9 @@ impl RuntimeConstructorIdentity {
     serde::Serialize,
     serde::Deserialize,
     NoTypeExpr,
-    NoStoredSpan, verter_retention::heap_size::HeapSize)]
+    NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
+)]
 pub struct ConstructorBindingEntry {
     pub identity: RuntimeConstructorIdentity,
     pub resolution: ConstructorBindingOutcome,

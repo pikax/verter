@@ -630,8 +630,7 @@ fn an_interned_rail_from_a_warm_read_keeps_its_block_charged_through_store_teard
     for rail_survives_store in [true, false] {
         let host = host();
         let account = unbounded();
-        let harness =
-            CountedOwnershipHarness::with_account(StoreAccount::new(Arc::clone(&account)));
+        let harness = GraphFixture::with_account(StoreAccount::new(Arc::clone(&account)));
         let long = format!("/{}.ts", "i".repeat(CANONICAL_LEN));
         let cold = harness.run(|store| {
             store.execute_cooperative(

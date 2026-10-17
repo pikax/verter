@@ -770,7 +770,15 @@ pub struct TemplateAttribute {
 /// carriers WITHOUT a template element IR (Svelte). Each token names one class
 /// with the exact byte span of the authored name (a `class="a b"` value yields
 /// one token per name; a `class:x` directive yields one directive token).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, verter_retention::heap_size::HeapSize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct MarkupClassToken {
     /// The class name.
