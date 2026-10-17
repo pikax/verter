@@ -1383,6 +1383,65 @@ pub fn root_fact_visits_for_tests() -> usize {
 /// root's content, where a witness is bound to the one view that minted it.
 /// Every carrier, however wide, is then sealed whole (paged when wide) —
 /// width is never a refusal.
+/// The completed carrier of a sealed traced set that already holds every
+/// fact the completion would add — each fact of `fence`, and a
+/// `FileWholeHash` at its observed version for each observed self-root —
+/// shared rather than rebuilt: completing it would seal the same facts in
+/// the same order. `None` when the completion adds or rewrites anything (a
+/// missing fact, a self-root observed at two versions or traced at another,
+/// an evidence page, a set wide enough for the strict-root rewrite, or a
+/// set out of canonical order); the caller completes it in full.
+pub(crate) fn shared_completed_structural_carrier(
+    observed_self_roots: &[(Arc<str>, Hash16)],
+    traced: &Arc<[FactVersionRef]>,
+    fence: &[FactVersionRef],
+) -> Option<StructuralCarrierReadSet> {
+    if traced.len() > FACT_PAGE_WIDTH || traced.iter().any(is_paged_entry) {
+        return None;
+    }
+    let mut index = 1;
+    while index < traced.len() {
+        if traced[index - 1] >= traced[index] {
+            return None;
+        }
+        index += 1;
+    }
+    for fact in fence {
+        if traced.binary_search(fact).is_err() {
+            return None;
+        }
+    }
+    let mut canonicals: Vec<Arc<str>> = Vec::with_capacity(observed_self_roots.len());
+    for (position, (canonical, observed)) in observed_self_roots.iter().enumerate() {
+        let mut other = 0;
+        while other < position {
+            let (earlier, earlier_hash) = &observed_self_roots[other];
+            if earlier == canonical && earlier_hash != observed {
+                return None;
+            }
+            other += 1;
+        }
+        let mut named = false;
+        for fact in traced.iter() {
+            if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
+                if canonical_id.as_str() == canonical.as_ref() {
+                    if hash != observed {
+                        return None;
+                    }
+                    named = true;
+                }
+            }
+        }
+        if !named {
+            return None;
+        }
+        canonicals.push(Arc::clone(canonical));
+    }
+    canonicals.sort();
+    canonicals.dedup();
+    Some((Arc::clone(traced), Arc::from(canonicals)))
+}
+
 pub(crate) fn bound_completed_structural_carrier(
     view: &dyn StoreView,
     mut facts: Vec<FactVersionRef>,

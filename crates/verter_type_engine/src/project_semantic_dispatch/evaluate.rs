@@ -2235,9 +2235,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                     _ => None,
                 }));
-                self.ctx
-                    .complete_graph_signature(&roots, facts.to_vec())
-                    .ok()
+                crate::fact_signature_helpers::shared_completed_structural_carrier(
+                    &roots,
+                    &facts,
+                    &[],
+                )
+                .map(Ok)
+                .unwrap_or_else(|| self.ctx.complete_graph_signature(&roots, facts.to_vec()))
+                .ok()
             }
             FactReadSetFinalise::NonCacheable(_) => None,
             FactReadSetFinalise::MutationUnstable => {

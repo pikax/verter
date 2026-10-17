@@ -4891,8 +4891,21 @@ fn finalise_rooted_build_output<T, C: crate::resolver_core::ResolverCapabilities
                         merged
                     }
                 };
-            let completed =
-                ctx.complete_graph_signature(&output.observed_self_roots, merged_facts());
+            // A traced set that already holds the fence and every observed
+            // self-root is its own completed carrier.
+            let shared = if prelude_facts.is_empty() {
+                crate::fact_signature_helpers::shared_completed_structural_carrier(
+                    &output.observed_self_roots,
+                    &traced_facts,
+                    &fence_facts,
+                )
+            } else {
+                None
+            };
+            let completed = match shared {
+                Some(completed) => Ok(completed),
+                None => ctx.complete_graph_signature(&output.observed_self_roots, merged_facts()),
+            };
             match completed {
                 Ok((facts, self_root_canonicals)) => {
                     if finalised_cleanly {
