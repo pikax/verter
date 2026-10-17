@@ -104,8 +104,27 @@ mod carrier {
             /// The engine that produced this payload; every unwrap checks it
             /// against the authority.
             engine: EngineIdentity,
+            /// The tree and its sidecar: one self-charged allocation every
+            /// clone of the carrier shares, so a retaining cache and every
+            /// reader of its value keep one charge, released by the last.
+            tree: verter_session_query::retention::heap_size::OwnedTree<PayloadTree>,
+        }
+
+        #[derive(verter_session_query::retention::heap_size::HeapSize)]
+        pub(super) struct PayloadTree {
             type_expr: TypeExpr,
             degraded_leaves: Vec<DegradedLeaf>,
+        }
+
+        impl verter_session_query::retention::heap_size::HeapSize for OutputPayload {
+            /// The shared tree, charged by its own cell; the engine handle
+            /// is a weak pointer into storage the engine charges.
+            fn heap_size<'t>(
+                &'t self,
+                meter: &mut verter_session_query::retention::heap_size::HeapMeter<'_, 't>,
+            ) -> usize {
+                self.tree.heap_size(meter)
+            }
         }
 
         impl OutputPayload {
@@ -123,25 +142,26 @@ mod carrier {
                 let (type_expr, degraded_leaves) = materialized.into_parts();
                 Self {
                     engine,
-                    type_expr,
-                    degraded_leaves,
+                    tree: verter_session_query::retention::heap_size::owned_tree(PayloadTree {
+                        type_expr,
+                        degraded_leaves,
+                    }),
                 }
             }
 
             /// `true` when the payload carries any degradation leaf.
             pub(super) fn has_degradation(&self) -> bool {
-                !self.degraded_leaves.is_empty()
+                !self.tree.degraded_leaves.is_empty()
             }
 
-            /// Structurally clone the payload (clones BOTH the inner
-            /// [`TypeExpr`] and the degradation sidecar). NOT an unwrap — no
+            /// Structurally clone the payload: the clone shares the one
+            /// tree allocation and its charge. NOT an unwrap — no
             /// [`TypeExpr`] escapes the vault, no capability required; used
             /// by the carrier's [`Clone`] impl.
             pub(super) fn clone_payload(&self) -> Self {
                 Self {
                     engine: self.engine.clone(),
-                    type_expr: self.type_expr.clone(),
-                    degraded_leaves: self.degraded_leaves.clone(),
+                    tree: self.tree.clone(),
                 }
             }
 
@@ -158,12 +178,12 @@ mod carrier {
                 // The payload opens only for the authority of the engine that
                 // produced it.
                 authority.verify_carrier(&self.engine);
-                if !self.degraded_leaves.is_empty() {
+                if !self.tree.degraded_leaves.is_empty() {
                     crate::fact_tracing::note_non_cacheable_read_fan_out(
                         verter_session_query::facts::reuse::NonCacheableReadReason::OutputMaterializationLoss,
                     );
                 }
-                self.type_expr
+                self.tree.type_expr.clone()
             }
 
             /// Test-only borrow of the inner [`TypeExpr`] (no capability). The
@@ -173,7 +193,7 @@ mod carrier {
             /// COMPILE-ABSENT from production builds.
             #[cfg(any(test, feature = "test-support"))]
             pub(super) fn type_expr_for_test(&self) -> &TypeExpr {
-                &self.type_expr
+                &self.tree.type_expr
             }
         }
     }
@@ -187,6 +207,7 @@ mod carrier {
     /// — so code holding only query access cannot unwrap it (it can neither
     /// construct nor recover the authority, and the inner `TypeExpr` is not
     /// even a reachable field outside the vault).
+    #[derive(verter_session_query::retention::heap_size::HeapSize)]
     pub struct OutputTypeExpr(payload::OutputPayload);
 
     impl OutputTypeExpr {
@@ -270,6 +291,7 @@ mod carrier {
     /// `result_is_partial`) are facts-rail signatures, NOT the laundering
     /// surface, so they stay readable by the Kind-A sinks through public
     /// accessors.
+    #[derive(verter_session_query::retention::heap_size::HeapSize)]
     pub struct MaterializedOutputTypeExpr {
         roots: crate::semantic_query_memo::node_roots::IdentityNodeRoots,
         /// The producing reduced [`SemanticNodeId`] (facts-rail metadata).

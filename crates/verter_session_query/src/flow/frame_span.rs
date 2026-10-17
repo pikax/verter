@@ -74,7 +74,18 @@ use verter_no_typeexpr::NoTypeExpr;
 /// the only frame it means anything in. Two `FrameSpan`s from different
 /// frames are not comparable in any meaningful sense, and nothing in the
 /// substrate mixes them: every artifact is per-function.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, NoTypeExpr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    NoTypeExpr,
+    verter_retention::heap_size::HeapSize,
+)]
 pub struct FrameSpan {
     start: u32,
     end: u32,

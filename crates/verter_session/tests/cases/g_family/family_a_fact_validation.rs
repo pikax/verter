@@ -97,7 +97,7 @@ fn family_a_entries_carry_fact_dep_signature() {
     // validity oracle unchanged); its declaration wraps across lines, so the
     // pin matches the wrapped form.
     const SINGLE_ENTRY_STORES: &[&str] = &[
-        "entries: DashMap<DeclarationLookupKey, Arc<CacheEntry<Arc<ResolvedTypeDeclaration>>>>",
+        "entries: DashMap<DeclarationLookupKey, Arc<CacheEntry<OwnedTree<ResolvedTypeDeclaration>>>>",
         "entries: DashMap<ResolvabilityKey, Arc<CacheEntry<bool>>>",
         "entries: DashMap<\n        OwnerCollectionKey,\n        Arc<CacheEntry<Option<verter_type_expr::locators::AuthoredBodyLocator>>>,\n    >",
         "entries: DashMap<ShapeCacheKey, Arc<CacheEntry<MaterializedOutputTypeExpr>>>",

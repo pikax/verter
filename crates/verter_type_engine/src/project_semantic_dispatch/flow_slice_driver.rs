@@ -110,7 +110,10 @@ impl<'a> FlowSliceDriver<'a> {
         )
     }
 
-    pub fn lookup_lowered(&self, key: FlowSliceLoweredKey) -> Option<Arc<FlowSliceIR>> {
+    pub fn lookup_lowered(
+        &self,
+        key: FlowSliceLoweredKey,
+    ) -> Option<verter_session_query::retention::heap_size::OwnedTree<FlowSliceIR>> {
         crate::cache_runtime::lookup(
             &FlowSliceLoweredBodyNodeDemand { driver: self },
             key,
@@ -157,9 +160,11 @@ impl ArtifactNode for FlowSliceHashNodeDemand<'_> {
             Ok(plan) => {
                 let slice_hash = compute_flow_slice_hash(&plan, bundle.graph(), bundle.skeleton());
                 CacheAdmission::Cacheable {
-                    value: FlowSliceHashOutcome::Planned(Arc::new(PlannedFlowSlice::new(
-                        slice_hash, plan,
-                    ))),
+                    value: FlowSliceHashOutcome::Planned(
+                        verter_session_query::retention::heap_size::owned_tree(
+                            PlannedFlowSlice::new(slice_hash, plan),
+                        ),
+                    ),
                     // Content-addressed: the key pins every input, so the
                     // fact rail stays EMPTY — no slice identity ever
                     // enters `ReadSetSignature.facts`.
@@ -169,6 +174,18 @@ impl ArtifactNode for FlowSliceHashNodeDemand<'_> {
                 }
             }
         }
+    }
+
+    fn entry_footprint(
+        &self,
+        key: &Self::Key,
+        value: &Self::Value,
+    ) -> verter_session_query::retention::Footprint {
+        verter_session_query::retention::heap_size::footprint(&(key, value))
+    }
+
+    fn retention_account(&self) -> Arc<verter_session_query::retention::SemanticRetentionAccount> {
+        self.driver.stores.retention_account()
     }
 
     /// Content-addressed warm validity: the key pins the canonical, the
@@ -189,7 +206,7 @@ impl ArtifactNode for FlowSliceHashNodeDemand<'_> {
 
 impl ArtifactNode for FlowSliceLoweredBodyNodeDemand<'_> {
     type Key = FlowSliceLoweredKey;
-    type Value = Arc<FlowSliceIR>;
+    type Value = verter_session_query::retention::heap_size::OwnedTree<FlowSliceIR>;
 
     fn entries(&self) -> &DashMap<Self::Key, Arc<CacheEntry<Self::Value>>> {
         &self.driver.stores.lowered_node().entries
@@ -221,7 +238,7 @@ impl ArtifactNode for FlowSliceLoweredBodyNodeDemand<'_> {
             };
         };
         CacheAdmission::Cacheable {
-            value: Arc::new(lower_slice_plan(
+            value: verter_session_query::retention::heap_size::owned_tree(lower_slice_plan(
                 planned.selection(),
                 bundle.graph(),
                 bundle.skeleton(),
@@ -230,6 +247,18 @@ impl ArtifactNode for FlowSliceLoweredBodyNodeDemand<'_> {
             self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
             validated_at_generation: cx.generation(),
         }
+    }
+
+    fn entry_footprint(
+        &self,
+        key: &Self::Key,
+        value: &Self::Value,
+    ) -> verter_session_query::retention::Footprint {
+        verter_session_query::retention::heap_size::footprint(&(key, value))
+    }
+
+    fn retention_account(&self) -> Arc<verter_session_query::retention::SemanticRetentionAccount> {
+        self.driver.stores.retention_account()
     }
 
     /// Content-addressed warm validity — see

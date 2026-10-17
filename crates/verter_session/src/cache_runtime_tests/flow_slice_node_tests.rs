@@ -1749,3 +1749,64 @@ fn the_two_shift_edits_are_invisible_to_flow_body_stable_hash() {
          makes relative positions insufficient on their own"
     );
 }
+
+/// A retained graph bundle charges its whole structure — the skeleton and
+/// graph of a large body cost their size, not a per-entry figure — and gives
+/// it back when its function's file is evicted; an account with no headroom
+/// serves the bundle to its builder without retaining it.
+#[test]
+fn a_retained_graph_bundle_charges_its_structure_until_its_eviction() {
+    use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
+    let small_source = "function myType() { return 1 }";
+    let large_source = format!(
+        "function myType() {{ {} return 1 }}",
+        (0..400)
+            .map(|index| format!("const v{index} = {index};"))
+            .collect::<String>()
+    );
+    let mut charged = Vec::new();
+    for source in [small_source, large_source.as_str()] {
+        let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+        let store = FunctionFlowGraphStore::charged_to_for_test(Arc::clone(&account));
+        let key = function_key("/graph.ts", "myType", 4, source);
+        let GraphClaim::Produce(lease) = store.claim(&key) else {
+            panic!("an empty store hands out the publication claim");
+        };
+        let bundle = FlowGraphBundle::build(KeyedFunctionStructure::bind_fixture(
+            key.clone(),
+            prepared_of(source),
+        ));
+        drop(lease.publish(bundle).expect("published"));
+        assert!(store.peek(&key).is_some());
+        charged.push(account.snapshot().retained_bytes);
+        store.remove_canonical("/graph.ts");
+        assert_eq!(account.snapshot().total_bytes(), 0, "eviction releases it");
+    }
+    assert!(
+        charged[1] > charged[0] + 400 * std::mem::size_of::<u64>(),
+        "a larger structure costs more: {charged:?}"
+    );
+
+    let tight = SemanticRetentionAccount::new(RetentionLimits {
+        max_entry_bytes: 1,
+        ..RetentionLimits::defaults()
+    });
+    let store = FunctionFlowGraphStore::charged_to_for_test(Arc::clone(&tight));
+    let key = function_key("/graph.ts", "myType", 4, small_source);
+    let GraphClaim::Produce(lease) = store.claim(&key) else {
+        panic!("an empty store hands out the publication claim");
+    };
+    let bundle = FlowGraphBundle::build(KeyedFunctionStructure::bind_fixture(
+        key.clone(),
+        prepared_of(small_source),
+    ));
+    assert!(
+        lease.publish(bundle).is_some(),
+        "the builder still gets its bundle"
+    );
+    assert!(
+        store.peek(&key).is_none(),
+        "a refused bundle is not retained"
+    );
+    assert_eq!(tight.snapshot().total_bytes(), 0);
+}

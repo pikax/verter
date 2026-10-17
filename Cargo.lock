@@ -3834,6 +3834,7 @@ dependencies = [
  "verter_no_storedspan",
  "verter_no_typeexpr",
  "verter_retention_derive",
+ "verter_span",
 ]
 
 [[package]]
@@ -3995,6 +3996,7 @@ dependencies = [
  "verter_parser",
  "verter_protocol",
  "verter_resolution",
+ "verter_retention",
  "verter_scheduler",
  "verter_semantic",
  "verter_semantic_source",
@@ -4189,6 +4191,7 @@ dependencies = [
  "verter_identity",
  "verter_language",
  "verter_no_typeexpr",
+ "verter_retention",
  "verter_session_query",
  "verter_span",
  "verter_type_engine",

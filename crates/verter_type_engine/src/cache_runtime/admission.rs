@@ -212,7 +212,7 @@ pub struct CacheEntry<V> {
     pub self_root_canonicals: Arc<[Arc<str>]>,
     /// World generation the entry was computed under.
     pub validated_at_generation: u64,
-    retention: verter_session_query::retention::RetentionCharge,
+    _retention: verter_session_query::retention::RetentionCharge,
 }
 
 /// An entry the account refused to retain: its complete value, uncached,
@@ -276,7 +276,7 @@ impl<V> CacheEntry<V> {
                 signature,
                 self_root_canonicals,
                 validated_at_generation,
-                retention: charge.holding(holds),
+                _retention: charge.holding(holds),
             }),
             // Dropping the holds hands each cell back to its callers.
             RetentionAdmission::Refused(_) => {
@@ -296,7 +296,7 @@ impl<V> CacheEntry<V> {
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn charge_bytes_for_tests(&self) -> usize {
-        self.retention.bytes()
+        self._retention.bytes()
     }
 }
 

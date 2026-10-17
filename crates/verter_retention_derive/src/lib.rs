@@ -24,7 +24,7 @@ use syn::{parse_quote, Data, DeriveInput, Field, Fields, LitStr};
 #[proc_macro_derive(HeapSize, attributes(heap_size))]
 pub fn derive_heap_size(item: TokenStream) -> TokenStream {
     match syn::parse::<DeriveInput>(item) {
-        Ok(input) => expand(&input)
+        Ok(input) => heap_size_impl(&input)
             .unwrap_or_else(|err| err.to_compile_error())
             .into(),
         Err(err) => err.to_compile_error().into(),
@@ -102,7 +102,7 @@ fn pattern(fields: &Fields) -> (proc_macro2::TokenStream, Vec<(&Field, proc_macr
     }
 }
 
-fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+fn heap_size_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let ident = &input.ident;
     let mut generics = input.generics.clone();
     for param in generics.type_params_mut() {

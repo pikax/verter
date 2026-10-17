@@ -409,7 +409,7 @@ pub enum MemberDomain<T> {
 /// Not a fact status: an aborted computation's partial work is discarded,
 /// and whoever demanded it retries or gives up. It never reaches a cache or
 /// an output as an approximation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum ExecutionAbort {
     /// The request was cancelled.
     Cancelled,
