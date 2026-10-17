@@ -9338,7 +9338,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         name: &str,
         members: &verter_type_expr::ObjectExpr,
         observed_hash: verter_session_query::analysis::types::Hash16,
-        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+        name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
     ) -> Option<SemanticNodeId> {
         if owner != verter_type_expr::TopLevelOwnerId::ordinary_file() {
             return None;
@@ -9414,7 +9414,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     visibility: property.visibility,
                     excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                     spans: verter_type_expr::MemberSpans::default(),
-                    declaration_origin: Some(Arc::from(canonical)),
+                    declaration_origin: Some(Arc::<str>::from(canonical).into()),
                     declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::default(),
                     merge_role: context.stamp_role(crate::semantic_query::MemberMergeRole::OwnBody),
                 })
