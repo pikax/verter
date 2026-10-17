@@ -1802,7 +1802,7 @@ mod arena_intern_tests {
         );
         let recursive_over = |arg: SemanticNodeId| {
             arena.push(SemanticNodeData::Opaque(QueryError::RecursiveRef {
-                name: Arc::from("Tree"),
+                name: verter_type_expr::OwnedStr::from("Tree"),
                 args: [arg].into(),
             }))
         };
@@ -1859,9 +1859,9 @@ mod arena_intern_tests {
         let occurrence = SignatureNodeOccurrence {
             function: FlowFunctionReturnIdentity {
                 anchor: AuthoredAnchor {
-                    canonical_id: Arc::from("/declaring.ts"),
+                    canonical_id: verter_type_expr::OwnedStr::from("/declaring.ts"),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    symbol: Arc::from("f"),
+                    symbol: verter_type_expr::OwnedStr::from("f"),
                     space: LocatorSymbolSpace::Value,
                 },
                 function_part: FunctionPartIdentity::DeclarationBody,
@@ -1989,11 +1989,11 @@ mod arena_intern_tests {
         let instance = |prototype: SemanticNodeId| {
             arena.push(SemanticNodeData::ClassExpressionInstance {
                 identity: Arc::new(ClassExpressionIdentity {
-                    canonical_id: Arc::from("/kept.ts"),
+                    canonical_id: verter_type_expr::OwnedStr::from("/kept.ts"),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     offset: 0,
-                    name: Arc::from("C"),
-                    outer_clauses: Arc::from([]),
+                    name: verter_type_expr::OwnedStr::from("C"),
+                    outer_clauses: verter_type_expr::OwnedSlice::from([]),
                     own_arity: 0,
                     constructor_visibility: None,
                     prototype: Some(prototype),
@@ -2017,7 +2017,7 @@ mod arena_intern_tests {
 
     fn file_scope(canonical: &str) -> NodeScopeId {
         NodeScopeId::File {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: [7u8; 16],
             local_scope: None,

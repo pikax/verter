@@ -138,8 +138,8 @@ impl DispatchTrace {
                 let mut out = Vec::with_capacity(path.len());
                 let caller_mode = context.mode;
                 for k in 1..=path.len() {
-                    let prefix: std::sync::Arc<[verter_type_engine::semantic_query::PathSegment]> =
-                        std::sync::Arc::from(path[..k].to_vec().into_boxed_slice());
+                    let prefix: verter_type_expr::OwnedSlice<verter_type_engine::semantic_query::PathSegment> =
+                        verter_type_expr::OwnedSlice::from(path[..k].to_vec().into_boxed_slice());
                     let is_terminal = k == path.len();
                     let prefix_mode = if is_terminal {
                         caller_mode
@@ -166,7 +166,7 @@ impl DispatchTrace {
                         // a Union/Intersection/Conditional mid-path.
                         let alt_key = verter_type_engine::semantic_query::SemanticQueryKey::ProjectPath {
                             base: *base,
-                            path: std::sync::Arc::from(path[..k].to_vec().into_boxed_slice()),
+                            path: verter_type_expr::OwnedSlice::from(path[..k].to_vec().into_boxed_slice()),
                             context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
                                 caller_mode,
                             ),

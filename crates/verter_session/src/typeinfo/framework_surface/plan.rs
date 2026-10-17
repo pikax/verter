@@ -115,7 +115,7 @@ pub enum PlannedDemand {
         /// The base node handle.
         base: TypeNodeHandle,
         /// The path segments to project.
-        path: Arc<[PathSegment]>,
+        path: verter_type_expr::OwnedSlice<PathSegment>,
         /// The projection mode for the terminal hop.
         mode: ProjectionMode,
     },
@@ -269,7 +269,7 @@ mod tests {
                     owner_canonical: Arc::from("/a.vue"),
                     symbol_name: Arc::from("default"),
                 },
-                path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                path: verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
                 mode: ProjectionMode::Navigate,
             },
             PlannedDemand::ShallowSurface {

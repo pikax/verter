@@ -164,7 +164,7 @@ fn error_any_never_propagation_lattice() {
     let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
     let never = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
     let unknown = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
-    let error = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(Arc::from(
+    let error = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(verter_type_expr::OwnedStr::from(
         "boom",
     ))));
 
@@ -310,7 +310,7 @@ fn error_any_never_propagation_lattice() {
     assert!(ProjectSemanticDispatch::<
         crate::resolver_core::HostCapabilities,
     >::project_path_is_indexed_access(&[
-        PathSegment::Index(IndexKey::String(Arc::from("k")))
+        PathSegment::Index(IndexKey::String(verter_type_expr::OwnedStr::from("k")))
     ]));
     assert!(!ProjectSemanticDispatch::<
         crate::resolver_core::HostCapabilities,
@@ -684,7 +684,7 @@ fn error_type_is_returnonly_prone_any_is_cacheable() {
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
-    let error = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(Arc::from(
+    let error = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(verter_type_expr::OwnedStr::from(
         "boom",
     ))));
 
@@ -751,7 +751,7 @@ fn error_type_is_returnonly_prone_any_is_cacheable() {
     // pick up the wildcard. It keeps its `Unknown` relation so recursion
     // control flow is preserved — never Assignable.
     let recursive = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
-        name: Arc::from("Self"),
+        name: verter_type_expr::OwnedStr::from("Self"),
         args: Default::default(),
     }));
     assert!(

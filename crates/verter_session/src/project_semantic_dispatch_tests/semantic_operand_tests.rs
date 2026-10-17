@@ -88,9 +88,9 @@ pub(super) fn locator_at(
 ) -> AuthoredBodyLocator {
     AuthoredBodyLocator::DeclBody(TypeBodySlot {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner: TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(symbol),
+            symbol: verter_type_expr::OwnedStr::from(symbol),
             space,
         },
         path: path.into(),
@@ -258,9 +258,9 @@ pub(super) fn force_key_at(
     let anchor = verter_type_engine::semantic_query::operand::authored_anchor(authored.locator());
     let (parse, resolve, type_env, lib_env, project) = authored.split_env().parts();
     let slot = DeclarationSlotSeed::new(
-        Arc::clone(&anchor.canonical_id),
+        anchor.canonical_id.clone(),
         anchor.owner,
-        Arc::clone(&anchor.symbol),
+        anchor.symbol.clone(),
         semantic_space_for_locator_space(anchor.space),
     )
     .finalize(SlotEnvIdentity::new(type_env, lib_env, project));
@@ -367,9 +367,9 @@ fn locator_key(
         _ => unreachable!(),
     };
     let slot = dispatch.type_slot_for(
-        Arc::clone(&anchor.canonical_id),
+        anchor.canonical_id.clone(),
         anchor.owner,
-        Arc::clone(&anchor.symbol),
+        anchor.symbol.clone(),
     );
     let env = host.host_view_env_hashes_for(anchor.canonical_id.as_ref());
     SemanticQueryKey::LowerLocator {
@@ -540,12 +540,12 @@ fn alternate_locator_arm_is_forced_by_lower_locator() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let locator = AuthoredBodyLocator::JsdocTypedefBody(JsdocTypedefBodyLocator {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(OWNER),
+            canonical_id: verter_type_expr::OwnedStr::from(OWNER),
             owner: TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("FromDoc"),
+            symbol: verter_type_expr::OwnedStr::from("FromDoc"),
             space: LocatorSymbolSpace::Type,
         },
-        path: Arc::from([]),
+        path: verter_type_expr::OwnedSlice::from([]),
     });
     let node = force(
         &dispatch,
@@ -567,15 +567,15 @@ fn alternate_locator_arm_is_forced_by_lower_locator() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let augmentation = AuthoredBodyLocator::AugmentationBody(AugmentationBodyLocator {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(OWNER),
+            canonical_id: verter_type_expr::OwnedStr::from(OWNER),
             owner: TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("Aug"),
+            symbol: verter_type_expr::OwnedStr::from("Aug"),
             space: LocatorSymbolSpace::Type,
         },
         scope: AuthoredAugmentationScope::Module {
-            specifier: Arc::from("pkg"),
+            specifier: verter_type_expr::OwnedStr::from("pkg"),
         },
-        path: Arc::from([
+        path: verter_type_expr::OwnedSlice::from([
             TypeBodyPathStep::Member { ordinal: 0 },
             TypeBodyPathStep::MemberValue,
         ]),
@@ -594,9 +594,9 @@ fn alternate_locator_arm_is_forced_by_lower_locator() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let macro_annotation = AuthoredBodyLocator::MacroPayload(MacroPayloadLocator {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(OWNER),
+            canonical_id: verter_type_expr::OwnedStr::from(OWNER),
             owner: TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("default"),
+            symbol: verter_type_expr::OwnedStr::from("default"),
             space: LocatorSymbolSpace::Value,
         },
         macro_index: 0,
@@ -687,7 +687,7 @@ fn nested_function_mapper_and_infer_binders_are_not_captured_by_outer_substituti
     };
 
     let inner_function = substituted(
-        Arc::from([
+        verter_type_expr::OwnedSlice::from([
             TypeBodyPathStep::Member { ordinal: 0 },
             TypeBodyPathStep::MemberValue,
             TypeBodyPathStep::FunctionReturn,
@@ -699,7 +699,7 @@ fn nested_function_mapper_and_infer_binders_are_not_captured_by_outer_substituti
         force(&dispatch, &inner_function, ProjectionMode::Identity),
     );
     let outer = substituted(
-        Arc::from([
+        verter_type_expr::OwnedSlice::from([
             TypeBodyPathStep::Member { ordinal: 1 },
             TypeBodyPathStep::MemberValue,
         ]),
@@ -711,9 +711,9 @@ fn nested_function_mapper_and_infer_binders_are_not_captured_by_outer_substituti
         PrimitiveKind::Number,
     );
 
-    let mapper = substituted(Arc::from([TypeBodyPathStep::MappedValue]), "MapBox");
+    let mapper = substituted(verter_type_expr::OwnedSlice::from([TypeBodyPathStep::MappedValue]), "MapBox");
     assert_type_param(&host, force(&dispatch, &mapper, ProjectionMode::Identity));
-    let infer = substituted(Arc::from([TypeBodyPathStep::ConditionalTrue]), "InferBox");
+    let infer = substituted(verter_type_expr::OwnedSlice::from([TypeBodyPathStep::ConditionalTrue]), "InferBox");
     assert_infer_ref(&host, force(&dispatch, &infer, ProjectionMode::Identity));
 }
 
@@ -755,15 +755,15 @@ fn defaults_augmentation_and_structural_child_locators_use_canonical_instantiati
     let augmentation = instantiate(AuthoredBodyLocator::AugmentationBody(
         AugmentationBodyLocator {
             anchor: AuthoredAnchor {
-                canonical_id: Arc::from(OWNER),
+                canonical_id: verter_type_expr::OwnedStr::from(OWNER),
                 owner: TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from("Aug"),
+                symbol: verter_type_expr::OwnedStr::from("Aug"),
                 space: LocatorSymbolSpace::Type,
             },
             scope: AuthoredAugmentationScope::Module {
-                specifier: Arc::from("pkg"),
+                specifier: verter_type_expr::OwnedStr::from("pkg"),
             },
-            path: Arc::from([
+            path: verter_type_expr::OwnedSlice::from([
                 TypeBodyPathStep::Member { ordinal: 0 },
                 TypeBodyPathStep::MemberValue,
             ]),
@@ -776,7 +776,7 @@ fn defaults_augmentation_and_structural_child_locators_use_canonical_instantiati
     );
 
     let paths: [verter_type_expr::OwnedSlice<TypeBodyPathStep>; 4] = [
-        Arc::from(
+        verter_type_expr::OwnedSlice::from(
             [
                 TypeBodyPathStep::TupleElement { ordinal: 0 },
                 TypeBodyPathStep::Member { ordinal: 0 },
@@ -784,9 +784,9 @@ fn defaults_augmentation_and_structural_child_locators_use_canonical_instantiati
             ]
             .as_slice(),
         ),
-        Arc::from([TypeBodyPathStep::TupleElement { ordinal: 1 }].as_slice()),
-        Arc::from([TypeBodyPathStep::FunctionParam { ordinal: 0 }].as_slice()),
-        Arc::from([TypeBodyPathStep::FunctionReturn].as_slice()),
+        verter_type_expr::OwnedSlice::from([TypeBodyPathStep::TupleElement { ordinal: 1 }].as_slice()),
+        verter_type_expr::OwnedSlice::from([TypeBodyPathStep::FunctionParam { ordinal: 0 }].as_slice()),
+        verter_type_expr::OwnedSlice::from([TypeBodyPathStep::FunctionReturn].as_slice()),
     ];
     for path in paths {
         let symbol = if matches!(path.first(), Some(TypeBodyPathStep::TupleElement { .. })) {
@@ -1129,7 +1129,7 @@ fn node_operand_merges_producer_roots_into_active_candidate() {
     assert_eq!(projected, node);
     let key = SemanticQueryKey::ProjectPath {
         base: node,
-        path: Arc::from([]),
+        path: verter_type_expr::OwnedSlice::from([]),
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     };
     let graph = host.project_type_store().semantic_graph();
@@ -1157,7 +1157,7 @@ fn node_operand_merges_producer_roots_into_active_candidate() {
 /// The request-side spelling of a statically-known derived path. A
 /// computed index has no static spelling — it is a sealed operand — so a
 /// precision carrying one cannot round-trip through here.
-pub(super) fn demand_from_known_path(path: &Arc<[PathSegment]>) -> Arc<[ForceProjectionSegment]> {
+pub(super) fn demand_from_known_path(path: &verter_type_expr::OwnedSlice<PathSegment>) -> Arc<[ForceProjectionSegment]> {
     Arc::from(
         path.iter()
             .map(|segment| match segment {
@@ -2074,15 +2074,15 @@ fn sealing_refuses_surplus_arguments_and_out_of_range_bound_ordinals() {
         dispatch.mint_authored_semantic_operand_for_tests(
             AuthoredBodyLocator::AugmentationBody(AugmentationBodyLocator {
                 anchor: AuthoredAnchor {
-                    canonical_id: Arc::from(OWNER),
+                    canonical_id: verter_type_expr::OwnedStr::from(OWNER),
                     owner: TopLevelOwnerId::ordinary_file(),
-                    symbol: Arc::from("Box"),
+                    symbol: verter_type_expr::OwnedStr::from("Box"),
                     space: LocatorSymbolSpace::Type,
                 },
                 scope: AuthoredAugmentationScope::Module {
-                    specifier: Arc::from("pkg"),
+                    specifier: verter_type_expr::OwnedStr::from("pkg"),
                 },
-                path: Arc::from([]),
+                path: verter_type_expr::OwnedSlice::from([]),
             }),
             Arc::from([argument.clone(), argument.clone()]),
         ),
@@ -2218,15 +2218,15 @@ fn an_unreadable_header_arity_is_a_typed_mint_refusal() {
     let augmentation = |symbol: &str, canonical: &str| {
         AuthoredBodyLocator::AugmentationBody(AugmentationBodyLocator {
             anchor: AuthoredAnchor {
-                canonical_id: Arc::from(canonical),
+                canonical_id: verter_type_expr::OwnedStr::from(canonical),
                 owner: TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from(symbol),
+                symbol: verter_type_expr::OwnedStr::from(symbol),
                 space: LocatorSymbolSpace::Type,
             },
             scope: AuthoredAugmentationScope::Module {
-                specifier: Arc::from("pkg"),
+                specifier: verter_type_expr::OwnedStr::from("pkg"),
             },
-            path: Arc::from([]),
+            path: verter_type_expr::OwnedSlice::from([]),
         })
     };
     // The inner declaration is absent from the augmentation scope.
@@ -2403,7 +2403,7 @@ fn a_warm_force_roots_the_enclosing_candidate_at_its_own_operand_producer() {
     let _ = force_with_context(&dispatch, &narrow, context);
     let shared_key = SemanticQueryKey::ProjectPath {
         base: argument_forced.node(),
-        path: Arc::from([]),
+        path: verter_type_expr::OwnedSlice::from([]),
         context,
     };
     let published_roots = host
@@ -2489,8 +2489,8 @@ fn deep_locator() -> AuthoredBodyLocator {
     )
 }
 
-pub(super) fn member_path(names: &[&str]) -> Arc<[PathSegment]> {
-    Arc::from(
+pub(super) fn member_path(names: &[&str]) -> verter_type_expr::OwnedSlice<PathSegment> {
+    verter_type_expr::OwnedSlice::from(
         names
             .iter()
             .map(|name| PathSegment::Member(PropertyKey::identifier(Arc::from(*name))))
@@ -2499,8 +2499,8 @@ pub(super) fn member_path(names: &[&str]) -> Arc<[PathSegment]> {
     )
 }
 
-pub(super) fn empty_path() -> Arc<[PathSegment]> {
-    Arc::from(Vec::<PathSegment>::new().into_boxed_slice())
+pub(super) fn empty_path() -> verter_type_expr::OwnedSlice<PathSegment> {
+    verter_type_expr::OwnedSlice::default()
 }
 
 pub(super) fn candidates(host: &VerterHost, key: &SemanticQueryKey) -> usize {
@@ -2585,7 +2585,7 @@ pub(super) fn force_projecting(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     operand: &SemanticOperand,
     context: ProjectionReductionContext,
-    path: Arc<[PathSegment]>,
+    path: verter_type_expr::OwnedSlice<PathSegment>,
 ) -> ForcedSemanticOperand {
     force_demanding(dispatch, operand, context, demand_from_known_path(&path))
 }
@@ -2648,9 +2648,9 @@ fn a_selective_authored_force_records_its_materialised_point_at_the_residual_pat
         &dispatch,
         &operand,
         context,
-        SemanticOperandForceProjection::Path(Arc::clone(&path)),
+        SemanticOperandForceProjection::Path(path.clone()),
     );
-    let forced = force_projecting(&dispatch, &operand, context, Arc::clone(&path));
+    let forced = force_projecting(&dispatch, &operand, context, path.clone());
     assert_primitive(&host, forced.node(), PrimitiveKind::String);
 
     // The published candidate's recorded materialised set claims exactly
@@ -2671,7 +2671,7 @@ fn a_selective_authored_force_records_its_materialised_point_at_the_residual_pat
     );
     assert_eq!(
         recorded.points()[0].path(),
-        &ProjectionPath::from(Arc::clone(&path)),
+        &ProjectionPath::from(path.clone()),
         "the recorded materialised point must sit at the residual path, not the \
          empty whole-surface path"
     );
@@ -3025,7 +3025,7 @@ fn distinct_force_precisions_never_alias_and_warm_repeats_add_no_candidates() {
                     force_key_domain(&dispatch, &operand, context).node()
                 }
                 SemanticOperandForceProjection::Path(path) => {
-                    force_projecting(&dispatch, &operand, context, Arc::clone(path)).node()
+                    force_projecting(&dispatch, &operand, context, path.clone()).node()
                 }
             });
         }
@@ -3113,14 +3113,14 @@ fn arm_resolve_key(host: &VerterHost, arm: SemanticNodeId) -> SemanticQueryKey {
     };
     SemanticQueryKey::ResolveDecl(verter_type_engine::semantic_query::ResolveDeclKey {
         scope: verter_type_engine::semantic_query::ScopeId {
-            canonical_id: Arc::clone(&identity.canonical_id),
+            canonical_id: identity.canonical_id.clone(),
             owner: identity.owner,
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 identity.owner,
             ),
         },
-        name: Arc::clone(&identity.decl_name),
+        name: identity.decl_name.clone(),
     })
 }
 
@@ -3494,7 +3494,7 @@ fn a_literal_union_index_resolves_its_key_domain_and_distributes_per_key() {
     };
     let unselected_index = SemanticQueryKey::IndexedAccess {
         base: flat_root,
-        index: IndexKey::String(Arc::from("unselected")),
+        index: IndexKey::String(verter_type_expr::OwnedStr::from("unselected")),
         mode: context.mode,
     };
     for key in [&unselected_member, &whole_surface, &unselected_index] {
@@ -3683,7 +3683,7 @@ fn a_computed_index_operands_producer_roots_reach_the_forced_candidate() {
         &dispatch,
         &flat,
         context,
-        SemanticOperandForceProjection::Path(Arc::from(
+        SemanticOperandForceProjection::Path(verter_type_expr::OwnedSlice::from(
             vec![PathSegment::Index(IndexKey::Computed(index_node))].into_boxed_slice(),
         )),
     );

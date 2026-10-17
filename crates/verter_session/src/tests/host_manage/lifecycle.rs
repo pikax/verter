@@ -304,12 +304,12 @@ fn explicit_overlay_materialization_refusal_fails_closed_at_request_boundaries()
 
     let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("Ready"),
+            symbol: verter_type_expr::OwnedStr::from("Ready"),
             space: LocatorSymbolSpace::Type,
         },
-        path: Arc::from([]),
+        path: verter_type_expr::OwnedSlice::from([]),
     });
     let port = crate::query_host_port::SessionQueryHostPort::new(&ctx);
     let answer = port.lower_authored_body(&locator);

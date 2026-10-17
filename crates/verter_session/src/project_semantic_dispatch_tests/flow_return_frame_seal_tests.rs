@@ -115,9 +115,9 @@ fn key_for(
 ) -> FlowReturnKey {
     FlowReturnKey {
         function: dispatch.flow_function_slot_for(
-            Arc::from(SEAL_CANONICAL),
+            verter_type_expr::OwnedStr::from(SEAL_CANONICAL),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(name),
+            verter_type_expr::OwnedStr::from(name),
             FunctionPartIdentity::DeclarationBody,
             0,
         ),
@@ -553,9 +553,9 @@ fn product_key(
 ) -> FlowReturnKey {
     FlowReturnKey {
         function: dispatch.flow_function_slot_for(
-            Arc::from(PRODUCT_CANONICAL),
+            verter_type_expr::OwnedStr::from(PRODUCT_CANONICAL),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(name),
+            verter_type_expr::OwnedStr::from(name),
             FunctionPartIdentity::DeclarationBody,
             0,
         ),

@@ -289,7 +289,7 @@ mod object_spread_program_contract_tests {
             (
                 verter_type_expr::MemberVisibility::Private,
                 verter_type_expr::MemberSpans::default(),
-                Some(Arc::<str>::from("/src/object.ts")),
+                Some(verter_type_expr::OwnedStr::from("/src/object.ts")),
                 MacroOwnBodyStamp::NEUTRAL,
                 MergeRoleStamp::NEUTRAL,
                 verter_type_expr::ExcessPropertyOrigin::FreshOwn,
@@ -335,10 +335,10 @@ mod object_spread_program_contract_tests {
         };
         let unique_symbol = DeclIdentity::synthetic("symbol");
         let unique_symbol_identity = verter_type_expr::facts::ValueDeclIdentityPart {
-            canonical_id: Arc::clone(&unique_symbol.canonical_id),
+            canonical_id: unique_symbol.canonical_id.clone(),
             owner: unique_symbol.owner,
-            symbol: Arc::clone(&unique_symbol.decl_name),
-            member_path: Arc::from([]),
+            symbol: unique_symbol.decl_name.clone(),
+            member_path: verter_type_expr::OwnedSlice::from([]),
         };
         let program = ObjectSpreadProgram {
             effects: crate::semantic_query::PayloadArray::from([
@@ -11976,7 +11976,7 @@ mod tests {
             QueryError::ExecutionAborted(ExecutionAbort::Cancelled),
             QueryError::Miss,
             QueryError::UnsupportedIntrinsic {
-                name: Arc::from("I"),
+                name: OwnedStr::from("I"),
             },
             QueryError::BudgetExceeded(
                 verter_session_query::inputs::budget::BudgetExceededFailure {
@@ -11994,17 +11994,17 @@ mod tests {
                 reasons: PartialReasonSet::PROPAGATED,
             },
             QueryError::AliasCycle {
-                chain: Arc::from(vec![Arc::from("A")].into_boxed_slice()),
+                chain: verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from("A")].into_boxed_slice()),
             },
             QueryError::RecursiveRef {
-                name: Arc::from("R"),
+                name: OwnedStr::from("R"),
                 args: Default::default(),
             },
-            QueryError::Other(Arc::from("x")),
+            QueryError::Other(OwnedStr::from("x")),
             QueryError::DeclPlaceholder {
-                canonical_id: Arc::from("/w/p.ts"),
+                canonical_id: OwnedStr::from("/w/p.ts"),
                 owner: TopLevelOwnerId::ordinary_file(),
-                name: Arc::from("P"),
+                name: OwnedStr::from("P"),
                 whole_hash: [0u8; 16],
             },
             QueryError::ValueDomainMismatch {
@@ -12064,14 +12064,14 @@ mod tests {
         let type_of = SemanticNodeData::new_typeof(
             ValueRootKey {
                 scope: ScopeId {
-                    canonical_id: Arc::from("/m.ts"),
+                    canonical_id: OwnedStr::from("/m.ts"),
                     owner: TopLevelOwnerId::ordinary_file(),
                     local_scope: None,
                     binder_scope_id: BinderScopeId::file_scope(TopLevelOwnerId::ordinary_file()),
                 },
-                name: Arc::from("factory"),
+                name: OwnedStr::from("factory"),
             },
-            Arc::from(vec![Arc::<str>::from("make")].into_boxed_slice()),
+            verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from("make")].into_boxed_slice()),
             Arc::clone(&args),
         );
         assert_eq!(
@@ -12082,7 +12082,7 @@ mod tests {
 
         let import_type = SemanticNodeData::new_import_type(
             Arc::from("./m"),
-            Arc::from(vec![Arc::<str>::from("G")].into_boxed_slice()),
+            verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from("G")].into_boxed_slice()),
             Arc::clone(&args),
             false,
         );
@@ -12107,18 +12107,18 @@ mod tests {
     #[test]
     fn resolve_decl_keys_dedup_by_scope_and_name() {
         let scope = ScopeId {
-            canonical_id: Arc::from("/w/src/types.ts"),
+            canonical_id: OwnedStr::from("/w/src/types.ts"),
             owner: TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: BinderScopeId::file_scope(TopLevelOwnerId::ordinary_file()),
         };
         let a = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: scope.clone(),
-            name: Arc::from("C"),
+            name: OwnedStr::from("C"),
         });
         let b = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope,
-            name: Arc::from("C"),
+            name: OwnedStr::from("C"),
         });
         assert_eq!(a, b);
     }
@@ -12129,21 +12129,21 @@ mod tests {
     fn resolve_decl_keys_disambiguate_by_scope() {
         let a = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: ScopeId {
-                canonical_id: Arc::from("/w/a.ts"),
+                canonical_id: OwnedStr::from("/w/a.ts"),
                 owner: TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
                 binder_scope_id: BinderScopeId::file_scope(TopLevelOwnerId::ordinary_file()),
             },
-            name: Arc::from("Foo"),
+            name: OwnedStr::from("Foo"),
         });
         let b = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: ScopeId {
-                canonical_id: Arc::from("/w/b.ts"),
+                canonical_id: OwnedStr::from("/w/b.ts"),
                 owner: TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
                 binder_scope_id: BinderScopeId::file_scope(TopLevelOwnerId::ordinary_file()),
             },
-            name: Arc::from("Foo"),
+            name: OwnedStr::from("Foo"),
         });
         assert_ne!(a, b);
     }
@@ -12183,12 +12183,12 @@ mod tests {
         let base = SemanticNodeId(42);
         let a = SemanticQueryKey::ProjectMember {
             base,
-            member: Arc::from("foo"),
+            member: OwnedStr::from("foo"),
             mode: ProjectionMode::Navigate,
         };
         let b = SemanticQueryKey::ProjectMember {
             base,
-            member: Arc::from("foo"),
+            member: OwnedStr::from("foo"),
             mode: ProjectionMode::Expanded,
         };
         assert_ne!(a, b);
@@ -12438,16 +12438,16 @@ mod tests {
                 SemanticQueryValueTag::DeclarationAnalysis,
             ),
             (
-                SemanticQueryValue::OverloadSet(verter_session_query::retention::owned::Owned::new(
+                SemanticQueryValue::OverloadSet(verter_session_query::retention::owned::OwnedSlice::new(
                     vec![SignatureRef {
                         node,
                         occurrence: SignatureCandidateOrigin::Authored(
                             SignatureOccurrenceIdentity {
                             function: FlowFunctionSlotIdentity {
                                 declaration_slot: ResolvedDeclSlotIdentity::value_slot(
-                                    Arc::from("/synthetic/callee.ts"),
+                                    verter_type_expr::OwnedStr::from("/synthetic/callee.ts"),
                                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                                    Arc::from("callee"),
+                                    verter_type_expr::OwnedStr::from("callee"),
                                     0,
                                     HashValue::default(),
                                     HashValue::default(),

@@ -481,7 +481,7 @@ fn classify_binding(
     let key = dispatch.typeof_key_for(
         ValueRootKey {
             scope: ScopeId::file(Arc::from(canonical), declaration.owner),
-            name: Arc::clone(&declaration.name),
+            name: verter_type_expr::OwnedStr::from(declaration.name.clone()),
         },
         context,
     );

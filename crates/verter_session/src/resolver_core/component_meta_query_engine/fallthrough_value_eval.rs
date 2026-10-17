@@ -477,7 +477,7 @@ impl ComponentMetaQueryEngine<'_> {
         let result = dispatch.execute_indexed_resolve_call(
             verter_type_engine::semantic_query::ResolveCallKey {
                 point: verter_type_engine::semantic_query::ProgramPointId {
-                    canonical_id: Arc::from(scope_canonical_id),
+                    canonical_id: verter_type_expr::OwnedStr::from(scope_canonical_id),
                     offset: call.point,
                 },
                 callee,

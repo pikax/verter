@@ -34,10 +34,10 @@ use verter_type_engine::semantic_query::{DeclIdentity, HashValue};
 
 fn decl(canonical: &str, name: &str) -> DeclIdentity {
     DeclIdentity {
-        canonical_id: Arc::from(canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
-        decl_name: Arc::from(name),
+        decl_name: verter_type_expr::OwnedStr::from(name),
     }
 }
 

@@ -290,7 +290,7 @@ pub(crate) fn expand_generic_project_path_output(
     owner_canonical: &str,
     macro_index: usize,
     carrier_lower_mode: ProjectionMode,
-    terminal_path: Arc<[verter_type_engine::semantic_query::PathSegment]>,
+    terminal_path: verter_type_expr::OwnedSlice<verter_type_engine::semantic_query::PathSegment>,
     fallback_source: &verter_type_expr::facts::SemanticTypeSource,
 ) -> MacroPathOutputExpansion {
     use verter_type_engine::semantic_query::{

@@ -116,7 +116,7 @@ fn stopped_demands_never_offer_unevaluated_subjects_as_positional_values() {
     let keys = [
         SemanticQueryKey::ProjectPath {
             base: object,
-            path: Arc::from([]),
+            path: verter_type_expr::OwnedSlice::from([]),
             context,
         },
         SemanticQueryKey::KeyOf {
@@ -125,7 +125,7 @@ fn stopped_demands_never_offer_unevaluated_subjects_as_positional_values() {
         },
         SemanticQueryKey::IndexedAccess {
             base: object,
-            index: IndexKey::String(Arc::from("x")),
+            index: IndexKey::String(verter_type_expr::OwnedStr::from("x")),
             mode: ProjectionMode::Navigate,
         },
         SemanticQueryKey::ReduceUnion {

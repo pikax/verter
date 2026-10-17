@@ -374,18 +374,18 @@ pub(crate) fn build_owner_decl_identity(
         .map(|s| s.whole_hash)
         .unwrap_or_default();
     DeclIdentity {
-        canonical_id: Arc::from(owner_canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(owner_canonical),
         owner,
         whole_hash,
-        decl_name: Arc::from(SFC_SCRIPT_SETUP_DECL_NAME),
+        decl_name: verter_type_expr::OwnedStr::from(SFC_SCRIPT_SETUP_DECL_NAME),
     }
 }
 
-/// Convert an `Arc<[PathSegment]>` empty path constant. Cached locally
+/// Convert an `verter_type_expr::OwnedSlice<PathSegment>` empty path constant. Cached locally
 /// so each projector call reuses a shared-ref-counted empty path.
 #[inline]
-pub(crate) fn empty_path() -> Arc<[PathSegment]> {
-    Arc::from(Vec::<PathSegment>::new().into_boxed_slice())
+pub(crate) fn empty_path() -> verter_type_expr::OwnedSlice<PathSegment> {
+    verter_type_expr::OwnedSlice::default()
 }
 
 // =============================================================================
@@ -541,9 +541,9 @@ pub(crate) fn resolve_macro_payload(
 
     let payload_read = dispatch.execute_read(SemanticQueryKey::ResolveMacroPayload {
         owner: dispatch.type_slot_for(
-            Arc::clone(&owner.canonical_id),
+            owner.canonical_id.clone(),
             owner.owner,
-            Arc::clone(&owner.decl_name),
+            owner.decl_name.clone(),
         ),
         macro_index,
         macro_kind,
@@ -690,7 +690,7 @@ pub(crate) fn resolve_macro_payload(
                         let read = dispatch.execute_read(SemanticQueryKey::ResolveDecl(
                                 verter_type_engine::semantic_query::ResolveDeclKey {
                                     scope: verter_type_engine::semantic_query::ScopeId {
-                                        canonical_id: std::sync::Arc::clone(&identity.canonical_id),
+                                        canonical_id: identity.canonical_id.clone(),
                                         owner: identity.owner,
                                         local_scope: None,
                                         binder_scope_id:
@@ -698,7 +698,7 @@ pub(crate) fn resolve_macro_payload(
                                                 identity.owner,
                                             ),
                                     },
-                                    name: std::sync::Arc::clone(&identity.decl_name),
+                                    name: identity.decl_name.clone(),
                                 },
                             ));
                         emit_dispatch_dep_signature_facts(dispatch, read.dep_signature());

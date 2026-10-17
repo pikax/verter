@@ -1142,12 +1142,12 @@ pub fn dispatch_resolve_type_decl_for_tests(
     let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
     match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner,
             local_scope: None,
             binder_scope_id: BinderScopeId::file_scope(owner),
         },
-        name: Arc::from(name),
+        name: verter_type_expr::OwnedStr::from(name),
     })) {
         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
         other => panic!("ResolveDecl({canonical}#{name}) must anchor, got {other:?}"),

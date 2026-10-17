@@ -1861,9 +1861,9 @@ fn r5_key_part(
 ) -> FlowReturnKey {
     FlowReturnKey {
         function: dispatch.flow_function_slot_for(
-            Arc::from(R5_CANONICAL),
+            verter_type_expr::OwnedStr::from(R5_CANONICAL),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(name),
+            verter_type_expr::OwnedStr::from(name),
             part,
             0,
         ),
@@ -3089,7 +3089,7 @@ fn project_member_path(
     base: SemanticNodeId,
     key: &str,
 ) -> SemanticNodeId {
-    let path: Arc<[verter_type_engine::semantic_query::PathSegment]> = Arc::from(
+    let path: verter_type_expr::OwnedSlice<verter_type_engine::semantic_query::PathSegment> = verter_type_expr::OwnedSlice::from(
         vec![verter_type_engine::semantic_query::PathSegment::Member(
             verter_type_engine::semantic_query::PropertyKey::identifier(key),
         )]
@@ -3587,7 +3587,7 @@ fn flow_return_nearest_declaration_wins_between_binders_and_frame_locals() {
                 dispatch,
                 "ClassLocalShadow",
                 FunctionPartIdentity::Member {
-                    member_path: Arc::from(vec![member_ordinal].into_boxed_slice()),
+                    member_path: verter_type_expr::OwnedSlice::from(vec![member_ordinal].into_boxed_slice()),
                 },
             );
             assert_flow_fails_closed(
@@ -3744,7 +3744,7 @@ fn flow_return_class_type_parameter_clause_binds_in_its_members() {
         &host,
         "ClassTP",
         FunctionPartIdentity::Member {
-            member_path: Arc::from(vec![0u32].into_boxed_slice()),
+            member_path: verter_type_expr::OwnedSlice::from(vec![0u32].into_boxed_slice()),
         },
         |dispatch, node| {
             assert_eq!(node_shape(dispatch, node), type_param("OuterTP"));
@@ -3756,7 +3756,7 @@ fn flow_return_class_type_parameter_clause_binds_in_its_members() {
         &host,
         "ClassTP",
         FunctionPartIdentity::Member {
-            member_path: Arc::from(vec![1u32].into_boxed_slice()),
+            member_path: verter_type_expr::OwnedSlice::from(vec![1u32].into_boxed_slice()),
         },
         |dispatch, node| {
             let sig = signature_parts(dispatch, node);
@@ -4016,7 +4016,7 @@ fn flow_return_generic_direct_callee_never_publishes_the_callees_binder() {
         &host,
         "GcHolder",
         FunctionPartIdentity::Member {
-            member_path: Arc::from(vec![0u32].into_boxed_slice()),
+            member_path: verter_type_expr::OwnedSlice::from(vec![0u32].into_boxed_slice()),
         },
         |dispatch, node| {
             assert_eq!(
@@ -4032,7 +4032,7 @@ fn flow_return_generic_direct_callee_never_publishes_the_callees_binder() {
         &host,
         "GcHolder",
         FunctionPartIdentity::Member {
-            member_path: Arc::from(vec![1u32].into_boxed_slice()),
+            member_path: verter_type_expr::OwnedSlice::from(vec![1u32].into_boxed_slice()),
         },
         |dispatch, node| {
             assert_eq!(
@@ -4162,7 +4162,7 @@ fn flow_return_every_call_route_instantiates_the_callees_clause() {
         &host,
         "RvHolder",
         FunctionPartIdentity::Member {
-            member_path: Arc::from(vec![0u32].into_boxed_slice()),
+            member_path: verter_type_expr::OwnedSlice::from(vec![0u32].into_boxed_slice()),
         },
         |dispatch, node| {
             assert_eq!(
@@ -4177,7 +4177,7 @@ fn flow_return_every_call_route_instantiates_the_callees_clause() {
         &host,
         "RvHolder",
         FunctionPartIdentity::Member {
-            member_path: Arc::from(vec![1u32].into_boxed_slice()),
+            member_path: verter_type_expr::OwnedSlice::from(vec![1u32].into_boxed_slice()),
         },
         |dispatch, node| {
             assert_eq!(
@@ -4232,7 +4232,7 @@ fn flow_return_scc_fixed_point_never_republishes_a_foreign_callee_binder() {
         &host,
         "CgHolder",
         FunctionPartIdentity::Member {
-            member_path: Arc::from(vec![0u32].into_boxed_slice()),
+            member_path: verter_type_expr::OwnedSlice::from(vec![0u32].into_boxed_slice()),
         },
         |dispatch, node| {
             assert_eq!(node_shape(dispatch, node), type_param("CT"));
@@ -6317,9 +6317,9 @@ fn r1_eval(host: &Arc<VerterHost>, name: &str) -> Option<R5Outcome> {
     with_dispatch(host, |dispatch| {
         let key = FlowReturnKey {
             function: dispatch.flow_function_slot_for(
-                Arc::from(R1_CANONICAL),
+                verter_type_expr::OwnedStr::from(R1_CANONICAL),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from(name),
+                verter_type_expr::OwnedStr::from(name),
                 FunctionPartIdentity::DeclarationBody,
                 0,
             ),
@@ -6652,9 +6652,9 @@ fn r2_eval(host: &Arc<VerterHost>, name: &str) -> Option<R5Outcome> {
     with_dispatch(host, |dispatch| {
         let key = FlowReturnKey {
             function: dispatch.flow_function_slot_for(
-                Arc::from(R2_CANONICAL),
+                verter_type_expr::OwnedStr::from(R2_CANONICAL),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from(name),
+                verter_type_expr::OwnedStr::from(name),
                 FunctionPartIdentity::DeclarationBody,
                 0,
             ),

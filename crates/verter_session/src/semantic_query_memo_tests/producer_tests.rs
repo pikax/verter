@@ -155,7 +155,7 @@ fn counted_outer_build_keeps_a_consumed_warm_read_through_cache_eviction() {
     });
     let mut outer_key = key();
     if let SemanticQueryKey::ResolveDecl(ref mut key) = outer_key {
-        key.name = Arc::from("Outer");
+        key.name = verter_type_expr::OwnedStr::from("Outer");
     }
     let read = harness.run(|store| {
         store.execute_cooperative(
@@ -355,14 +355,14 @@ fn keyed_host() -> (VerterHost, [u8; 16]) {
 fn key() -> SemanticQueryKey {
     SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::from(KEYED),
+            canonical_id: verter_type_expr::OwnedStr::from(KEYED),
             owner: TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 TopLevelOwnerId::ordinary_file(),
             ),
         },
-        name: Arc::from("Target"),
+        name: verter_type_expr::OwnedStr::from("Target"),
     })
 }
 

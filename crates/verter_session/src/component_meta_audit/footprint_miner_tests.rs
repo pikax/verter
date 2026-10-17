@@ -207,7 +207,7 @@ fn mine_footprint_alias_resolve_emits_one_record_per_hop() {
             hop,
             &[hop + 1],
             CoreOriginEdgeKind::AliasResolve,
-            OriginMeta::AliasName(Arc::from(format!("alias_{hop}"))),
+            OriginMeta::AliasName(verter_type_expr::OwnedStr::from(format!("alias_{hop}"))),
         ));
     }
     let fp = mine_footprint(
@@ -233,7 +233,7 @@ fn mine_footprint_path_segments_preserve_member_index_distinction() {
         PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
             "a",
         )),
-        PathSegment::Index(IndexKey::String(Arc::from("b"))),
+        PathSegment::Index(IndexKey::String(verter_type_expr::OwnedStr::from("b"))),
         PathSegment::Index(IndexKey::Number(
             verter_type_engine::semantic_query::CanonicalIndexInt::from_canonical_i64(7)
                 .expect("canonical"),
@@ -243,7 +243,7 @@ fn mine_footprint_path_segments_preserve_member_index_distinction() {
         1,
         &[10],
         CoreOriginEdgeKind::ProjectPath,
-        OriginMeta::Path(Arc::from(path)),
+        OriginMeta::Path(verter_type_expr::OwnedSlice::from(path)),
     ));
     let fp = mine_footprint(
         &graph,
@@ -302,13 +302,13 @@ fn mine_footprint_multiple_derivations_for_same_result_produce_multiple_edges() 
         42,
         &[10],
         CoreOriginEdgeKind::AliasResolve,
-        OriginMeta::AliasName(Arc::from("path_a")),
+        OriginMeta::AliasName(verter_type_expr::OwnedStr::from("path_a")),
     ));
     state.derivation_edges_raw.push(synth_edge(
         42,
         &[20],
         CoreOriginEdgeKind::AliasResolve,
-        OriginMeta::AliasName(Arc::from("path_b")),
+        OriginMeta::AliasName(verter_type_expr::OwnedStr::from("path_b")),
     ));
     let fp = mine_footprint(
         &graph,
@@ -711,7 +711,7 @@ fn mine_footprint_byte_identical_over_interned_carrier_nodes() {
             kind: CoreOriginEdgeKind::AliasResolve,
             edge: OriginEdge {
                 sources: Arc::from(vec![child].into_boxed_slice()),
-                meta: OriginMeta::AliasName(Arc::from("Foo")),
+                meta: OriginMeta::AliasName(verter_type_expr::OwnedStr::from("Foo")),
                 edge_dep_signature: Arc::new(verter_type_engine::semantic_query::EdgeFence::new(
                     verter_type_engine::semantic_query::DepSignature::default(),
                 )),
@@ -779,10 +779,10 @@ use verter_type_expr::SyntheticCarrierSurfaceKind;
 /// NO `value_node`. Two ids built from the same `(slot, binding)` are `Eq`.
 fn synthetic_binding_id(slot: &str, binding: &str) -> SyntheticBindingId {
     SyntheticBindingId {
-        scope_canonical_id: Arc::from("/Comp.vue"),
+        scope_canonical_id: verter_type_expr::OwnedStr::from("/Comp.vue"),
         surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
-        slot_name: Some(Arc::from(slot)),
-        binding_name: Arc::from(binding),
+        slot_name: Some(verter_type_expr::OwnedStr::from(slot)),
+        binding_name: verter_type_expr::OwnedStr::from(binding),
     }
 }
 

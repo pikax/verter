@@ -26,9 +26,9 @@ const LIB_ENV_HASH: [u8; 16] = [2; 16];
 
 fn type_slot(canonical: &str, name: &str) -> ResolvedDeclSlotIdentity {
     ResolvedDeclSlotIdentity::type_slot(
-        Arc::from(canonical),
+        verter_type_expr::OwnedStr::from(canonical),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::from(name),
+        verter_type_expr::OwnedStr::from(name),
         PROJECT_IDENTITY,
         TYPE_ENV_HASH,
         LIB_ENV_HASH,
@@ -37,9 +37,9 @@ fn type_slot(canonical: &str, name: &str) -> ResolvedDeclSlotIdentity {
 
 fn value_slot(canonical: &str, name: &str) -> ResolvedDeclSlotIdentity {
     ResolvedDeclSlotIdentity::value_slot(
-        Arc::from(canonical),
+        verter_type_expr::OwnedStr::from(canonical),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::from(name),
+        verter_type_expr::OwnedStr::from(name),
         PROJECT_IDENTITY,
         TYPE_ENV_HASH,
         LIB_ENV_HASH,
@@ -213,17 +213,17 @@ fn r7_project_identity_isolates_slots() {
     let name = "Foo";
 
     let slot_p1 = ResolvedDeclSlotIdentity::type_slot(
-        Arc::from(canonical),
+        verter_type_expr::OwnedStr::from(canonical),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::from(name),
+        verter_type_expr::OwnedStr::from(name),
         1, // project 1
         TYPE_ENV_HASH,
         LIB_ENV_HASH,
     );
     let slot_p2 = ResolvedDeclSlotIdentity::type_slot(
-        Arc::from(canonical),
+        verter_type_expr::OwnedStr::from(canonical),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::from(name),
+        verter_type_expr::OwnedStr::from(name),
         2, // project 2
         TYPE_ENV_HASH,
         LIB_ENV_HASH,
@@ -239,16 +239,16 @@ fn r7_project_identity_isolates_slots() {
 #[test]
 fn r7_from_decl_identity_strips_whole_hash() {
     let decl_v1 = DeclIdentity {
-        canonical_id: Arc::from("/src/types.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/src/types.ts"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [10; 16], // version 1 hash
-        decl_name: Arc::from("Foo"),
+        decl_name: verter_type_expr::OwnedStr::from("Foo"),
     };
     let decl_v2 = DeclIdentity {
-        canonical_id: Arc::from("/src/types.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/src/types.ts"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [99; 16], // version 2 hash (different)
-        decl_name: Arc::from("Foo"),
+        decl_name: verter_type_expr::OwnedStr::from("Foo"),
     };
 
     let slot_v1 = ResolvedDeclSlotIdentity::from_decl_identity(
@@ -278,16 +278,16 @@ fn r7_from_decl_identity_strips_whole_hash() {
 #[test]
 fn r7_from_decl_identity_preserves_top_level_owner() {
     let instance_decl = DeclIdentity {
-        canonical_id: Arc::from("/src/App.vue"),
+        canonical_id: verter_type_expr::OwnedStr::from("/src/App.vue"),
         owner: verter_type_expr::TopLevelOwnerId::instance(0),
         whole_hash: [10; 16],
-        decl_name: Arc::from("Foo"),
+        decl_name: verter_type_expr::OwnedStr::from("Foo"),
     };
     let module_decl = DeclIdentity {
-        canonical_id: Arc::clone(&instance_decl.canonical_id),
+        canonical_id: instance_decl.canonical_id.clone(),
         owner: verter_type_expr::TopLevelOwnerId::module(0),
         whole_hash: instance_decl.whole_hash,
-        decl_name: Arc::clone(&instance_decl.decl_name),
+        decl_name: instance_decl.decl_name.clone(),
     };
 
     let instance_slot = ResolvedDeclSlotIdentity::from_decl_identity(

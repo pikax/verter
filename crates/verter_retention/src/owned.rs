@@ -281,9 +281,29 @@ pub(crate) fn hold_node(
 /// ([`AliasSet::take_handles`]): what an owner keeping the carrier pins or
 /// holds, so each is charged by its own cell.
 #[must_use = "an owned allocation an owner reaches must be pinned or held"]
+#[derive(Default)]
 pub struct OwnedHandles(Box<[Arc<dyn Node>]>);
 
 impl OwnedHandles {
+    /// These handles and `other`'s, each allocation once.
+    pub fn merge(self, other: Self) -> Self {
+        if other.0.is_empty() {
+            return self;
+        }
+        if self.0.is_empty() {
+            return other;
+        }
+        let mut seen = rustc_hash::FxHashSet::default();
+        Self(
+            self.0
+                .into_vec()
+                .into_iter()
+                .chain(other.0.into_vec())
+                .filter(|node| seen.insert(Arc::as_ptr(node).cast::<()>() as usize))
+                .collect(),
+        )
+    }
+
     pub(crate) fn from_children(children: Box<[Arc<dyn Node>]>) -> Self {
         Self(children)
     }
@@ -322,6 +342,21 @@ impl OwnedHandles {
     /// holder, charge and class is unchanged.
     pub fn hold(self, ctx: ChargeCtx<'_>) -> Result<Box<[OwnedHold]>, RetentionRefusal> {
         hold_nodes(&self.0, ctx)
+    }
+
+    /// `charge` holding these allocations too: the retaining cache's whole
+    /// footprint as one token ([`RetentionCharge::holding`]).
+    ///
+    /// # Errors
+    ///
+    /// The account's refusal of a hold; `charge` is dropped with it, so
+    /// nothing is retained.
+    pub fn retained_with(
+        self,
+        charge: RetentionCharge,
+        ctx: ChargeCtx<'_>,
+    ) -> Result<RetentionCharge, RetentionRefusal> {
+        Ok(charge.holding(self.hold(ctx)?))
     }
 
     /// Whether the carrier reached no owned allocation.
@@ -685,6 +720,12 @@ impl From<std::sync::Arc<[Arc<str>]>> for OwnedSlice<OwnedStr> {
     /// Owned copies of a raw shared name list: new allocations, each
     /// charged by its own cell.
     fn from(names: std::sync::Arc<[Arc<str>]>) -> Self {
+        names.iter().map(OwnedStr::from).collect()
+    }
+}
+
+impl From<Box<[Arc<str>]>> for OwnedSlice<OwnedStr> {
+    fn from(names: Box<[Arc<str>]>) -> Self {
         names.iter().map(OwnedStr::from).collect()
     }
 }

@@ -132,7 +132,7 @@ fn file_scope(
         .shallow_file_state(canonical)
         .expect("fixture file must be indexed");
     NodeScopeId::File {
-        canonical_id: Arc::from(canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: shallow.whole_hash,
         local_scope: None,
@@ -286,10 +286,10 @@ fn broad_runtime_recognizes_only_shadow_safe_builtin_nominal_identities() {
     let builtin = |name: &'static str| {
         graph.intern_node(SemanticNodeData::DeclRef {
             identity: DeclIdentity {
-                canonical_id: Arc::from("__builtin__"),
+                canonical_id: verter_type_expr::OwnedStr::from("__builtin__"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: HashValue::default(),
-                decl_name: Arc::from(name),
+                decl_name: verter_type_expr::OwnedStr::from(name),
             },
         })
     };
@@ -311,10 +311,10 @@ fn broad_runtime_recognizes_only_shadow_safe_builtin_nominal_identities() {
     for name in ["Date", "WeakMap", "WeakSet"] {
         let user_nominal = graph.intern_node(SemanticNodeData::DeclRef {
             identity: DeclIdentity {
-                canonical_id: Arc::from(format!("/src/{name}.ts")),
+                canonical_id: verter_type_expr::OwnedStr::from(format!("/src/{name}.ts")),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: HashValue::default(),
-                decl_name: Arc::from(name),
+                decl_name: verter_type_expr::OwnedStr::from(name),
             },
         });
         assert_eq!(
@@ -713,7 +713,7 @@ fn opaque_query_fault_is_partial_but_honest_miss_is_complete_unknown() {
     let graph = host.project_type_store().semantic_graph();
     let scope = file_scope(&dispatch, "/query-fault.ts");
     let fault_subject = graph.intern_node_with_scope(
-        SemanticNodeData::Opaque(QueryError::Other(Arc::from("fixture fault"))),
+        SemanticNodeData::Opaque(QueryError::Other(verter_type_expr::OwnedStr::from("fixture fault"))),
         scope.clone(),
     );
     let miss_subject =
@@ -835,7 +835,7 @@ fn recursive_runtime_carrier_is_typed_partial_and_return_only() {
     let graph = host.project_type_store().semantic_graph();
     let subject = graph.intern_node_with_scope(
         SemanticNodeData::Opaque(QueryError::RecursiveRef {
-            name: Arc::from("RuntimeRecursive"),
+            name: verter_type_expr::OwnedStr::from("RuntimeRecursive"),
             args: Default::default(),
         }),
         file_scope(&dispatch, "/recursive-runtime.ts"),

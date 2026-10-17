@@ -2001,7 +2001,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 symbol: verter_type_expr::OwnedStr::from(identity.decl_name.clone()),
                 space: LocatorSymbolSpace::Type,
             },
-            path: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::default(),
         })) {
             QueryResult::Value(body) => Some(body),
             QueryResult::Recursive(_) | QueryResult::Error(_) => None,

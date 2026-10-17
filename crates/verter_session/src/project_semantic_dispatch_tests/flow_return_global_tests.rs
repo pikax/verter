@@ -894,7 +894,7 @@ fn declaring_file(host: &Arc<VerterHost>, canonical: &str, name: &str) -> Option
         return None;
     };
     match dispatch.graph().node_data(result.return_type()).as_deref() {
-        Some(SemanticNodeData::DeclRef { identity }) => Some(Arc::clone(&identity.canonical_id)),
+        Some(SemanticNodeData::DeclRef { identity }) => Some(std::sync::Arc::<str>::from(identity.canonical_id.as_str())),
         _ => None,
     }
 }

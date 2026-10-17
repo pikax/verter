@@ -671,7 +671,7 @@ mod tests {
 
     fn scope() -> NodeScopeId {
         NodeScopeId::File {
-            canonical_id: Arc::from("/fixture/owner.vue"),
+            canonical_id: verter_type_expr::OwnedStr::from("/fixture/owner.vue"),
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
             whole_hash: Default::default(),
             local_scope: None,
@@ -964,10 +964,10 @@ mod tests {
         // `InstantiationRef` head named `Wrapper` differing ONLY in the
         // nested literal argument.
         let wrapper_base = DeclIdentity {
-            canonical_id: Arc::from("/wrapper.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/wrapper.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: Default::default(),
-            decl_name: Arc::from("Wrapper"),
+            decl_name: verter_type_expr::OwnedStr::from("Wrapper"),
         };
         let lit = |text: &str| {
             graph.intern_node_with_scope(

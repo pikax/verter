@@ -604,7 +604,7 @@ fn index_signature_build_uses_declaration_origin_for_scopeless_nodes() {
         },
         // The index signature's DECLARATION file — set from the lowering scope
         // at production time; the only correct span anchor.
-        declaration_origin: Some(std::sync::Arc::from(FILE)),
+        declaration_origin: Some(verter_type_expr::OwnedStr::from(FILE)),
     };
     let view = verter_type_engine::test_surface_view! {
         members: std::sync::Arc::from(Vec::new().into_boxed_slice()),
@@ -708,7 +708,7 @@ fn member_build_uses_declaration_origin_for_scopeless_value() {
         },
         // The member's DECLARATION file — the only correct anchor for a member
         // whose value is scope-less.
-        declaration_origin: Some(std::sync::Arc::from(FILE)),
+        declaration_origin: Some(verter_type_expr::OwnedStr::from(FILE)),
         declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
         merge_role: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             verter_type_engine::semantic_query::ProjectionMode::Shallow,
@@ -1008,7 +1008,7 @@ fn one_level_surface_converts_every_entry_kind_and_generic_roots_stay_open() {
     let host = make_host_with_footprint();
     let graph = { host.project_type_store().semantic_graph() };
     let scope = NodeScopeId::File {
-        canonical_id: Arc::from(FILE),
+        canonical_id: verter_type_expr::OwnedStr::from(FILE),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: Default::default(),
         local_scope: None,
@@ -1052,7 +1052,7 @@ fn one_level_surface_converts_every_entry_kind_and_generic_roots_stay_open() {
             name: Some(Span::new(0, 1)),
             type_annotation: Some(Span::new(4, 10)),
         },
-        declaration_origin: Some(Arc::from(FILE)),
+        declaration_origin: Some(verter_type_expr::OwnedStr::from(FILE)),
         declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
         merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
     };
@@ -1065,7 +1065,7 @@ fn one_level_surface_converts_every_entry_kind_and_generic_roots_stay_open() {
             key: Some(Span::new(14, 20)),
             value: Some(Span::new(23, 29)),
         },
-        declaration_origin: Some(Arc::from(FILE)),
+        declaration_origin: Some(verter_type_expr::OwnedStr::from(FILE)),
     };
     let view = verter_type_engine::test_surface_view! {
         members: Arc::from(vec![member].into_boxed_slice()),
@@ -1105,7 +1105,7 @@ fn one_level_surface_converts_every_entry_kind_and_generic_roots_stay_open() {
             host.as_ref(),
             &dispatch,
             generic,
-            Arc::from([]),
+            verter_type_expr::OwnedSlice::from([]),
             ProjectionReductionContext::published(ProjectionMode::Shallow),
             None,
         )

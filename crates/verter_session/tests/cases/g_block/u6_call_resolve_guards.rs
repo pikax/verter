@@ -86,7 +86,7 @@ fn assert_distinct_identity(a: &SemanticQueryKey, b: &SemanticQueryKey) {
 
 fn point(canonical: &str, offset: u32) -> ProgramPointId {
     ProgramPointId {
-        canonical_id: Arc::from(canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical),
         offset,
     }
 }

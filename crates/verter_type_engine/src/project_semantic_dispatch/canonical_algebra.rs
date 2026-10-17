@@ -117,7 +117,7 @@ mod pairwise_budget_tests {
         let element = graph.intern_node_with_scope(
             SemanticNodeData::Literal(LiteralValue::String("a".into())),
             NodeScopeId::File {
-                canonical_id: Arc::from(format!("/arm-{file}.ts")),
+                canonical_id: verter_type_expr::OwnedStr::from(format!("/arm-{file}.ts")),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: [1; 16],
                 local_scope: None,
@@ -204,7 +204,7 @@ mod literal_provenance_tests {
         graph.intern_node_with_scope(
             SemanticNodeData::Literal(value),
             NodeScopeId::File {
-                canonical_id: Arc::from(file),
+                canonical_id: verter_type_expr::OwnedStr::from(file),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: [1; 16],
                 local_scope: None,

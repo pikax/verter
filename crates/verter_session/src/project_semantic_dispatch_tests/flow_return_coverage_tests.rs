@@ -848,9 +848,9 @@ fn key_full(
 ) -> FlowReturnKey {
     FlowReturnKey {
         function: dispatch.flow_function_slot_for(
-            Arc::from(canonical),
+            verter_type_expr::OwnedStr::from(canonical),
             owner,
-            Arc::from(name),
+            verter_type_expr::OwnedStr::from(name),
             part,
             overload_ordinal,
         ),
@@ -881,7 +881,7 @@ fn key_of(
 
 fn member_part(ordinal: u32) -> FunctionPartIdentity {
     FunctionPartIdentity::Member {
-        member_path: Arc::from(vec![ordinal].into_boxed_slice()),
+        member_path: verter_type_expr::OwnedSlice::from(vec![ordinal].into_boxed_slice()),
     }
 }
 
@@ -7126,7 +7126,7 @@ fn a_member_read_through_a_self_reference_walks_on_through_the_declaration() {
         };
         let projected = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
             base: surface,
-            path: Arc::from(vec![member("next"), member("next"), member("v")].into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::from(vec![member("next"), member("next"), member("v")].into_boxed_slice()),
             context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
                 verter_type_engine::semantic_query::ProjectionMode::Navigate,
             ),

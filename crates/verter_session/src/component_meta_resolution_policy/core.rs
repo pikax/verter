@@ -284,10 +284,10 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
             .map(|state| state.whole_hash)
             .unwrap_or_default();
         DeclIdentity {
-            canonical_id: Arc::from(canonical_source),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical_source),
             owner,
             whole_hash,
-            decl_name: Arc::from(name),
+            decl_name: verter_type_expr::OwnedStr::from(name),
         }
     }
 

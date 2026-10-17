@@ -115,7 +115,7 @@ fn shallow_member_names(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> Vec<String> {
-    let empty_path: Arc<[PathSegment]> = Arc::from(Vec::new().into_boxed_slice());
+    let empty_path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::default();
     let terminal = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: node,
         path: empty_path,
@@ -156,10 +156,10 @@ fn instantiation_ref(
         .graph()
         .intern_node(SemanticNodeData::InstantiationRef {
             base: DeclIdentity {
-                canonical_id: Arc::from(canonical),
+                canonical_id: verter_type_expr::OwnedStr::from(canonical),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: HashValue::default(),
-                decl_name: Arc::from(name),
+                decl_name: verter_type_expr::OwnedStr::from(name),
             },
             args: verter_type_engine::semantic_query::PayloadArray::from(
                 args.to_vec().into_boxed_slice(),
@@ -204,7 +204,7 @@ fn import_type_generic_carrier(
     dispatch.graph().intern_node_with_scope(
         SemanticNodeData::new_import_type(
             Arc::from(specifier),
-            qualifier,
+            verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(qualifier),
             Arc::from(arg_nodes.to_vec().into_boxed_slice()),
             false,
         ),

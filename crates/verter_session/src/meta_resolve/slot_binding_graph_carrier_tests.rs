@@ -35,21 +35,21 @@ fn carrier_wrapping(
         1 => graph.intern_node(SemanticNodeData::new_typeof(
             ValueRootKey {
                 scope: ScopeId {
-                    canonical_id: Arc::from("/v.ts"),
+                    canonical_id: verter_type_expr::OwnedStr::from("/v.ts"),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     local_scope: None,
                     binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                         verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     ),
                 },
-                name: Arc::from("factory"),
+                name: verter_type_expr::OwnedStr::from("factory"),
             },
-            Arc::from(Vec::new().into_boxed_slice()),
+            verter_type_expr::OwnedSlice::default(),
             args,
         )),
         _ => graph.intern_node(SemanticNodeData::new_import_type(
             Arc::from("./m"),
-            Arc::from(vec![Arc::<str>::from("G")].into_boxed_slice()),
+            verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from("G")].into_boxed_slice()),
             args,
             false,
         )),
@@ -76,7 +76,7 @@ fn accumulate_carrier_deps_descends_carrier_args() {
         // whose owner is /owner.vue.
         let dep_id = DeclIdentity::from_scope(
             &NodeScopeId::File {
-                canonical_id: Arc::from("/dep.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/dep.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: [9u8; 16],
                 local_scope: None,
@@ -234,10 +234,10 @@ fn a_non_owner_reference_is_found_at_any_depth() {
     let foreign = |graph: &verter_type_engine::semantic_query_memo::SemanticGraphStore| {
         graph.intern_node(SemanticNodeData::DeclRef {
             identity: DeclIdentity {
-                canonical_id: Arc::from("/elsewhere.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/elsewhere.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: verter_type_engine::semantic_query::HashValue::default(),
-                decl_name: Arc::from("Elsewhere"),
+                decl_name: verter_type_expr::OwnedStr::from("Elsewhere"),
             },
         })
     };

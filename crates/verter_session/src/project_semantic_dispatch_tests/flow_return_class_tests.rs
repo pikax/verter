@@ -984,7 +984,7 @@ fn class_member_clauses_print_class_then_member() {
                 dispatch,
                 "GHolder",
                 FunctionPartIdentity::Member {
-                    member_path: Arc::from(vec![ordinal].into_boxed_slice()),
+                    member_path: verter_type_expr::OwnedSlice::from(vec![ordinal].into_boxed_slice()),
                 },
             );
             constructor_and_instance(dispatch, result.return_type()).1
@@ -1124,18 +1124,18 @@ fn bare_factory_return_reads_each_parameter_at_its_constraint() {
 #[test]
 fn printed_name_qualifies_exactly_the_instantiated_clauses() {
     let identity = verter_type_engine::semantic_query::ClassExpressionIdentity {
-        canonical_id: Arc::from(FILE),
+        canonical_id: verter_type_expr::OwnedStr::from(FILE),
         owner: TopLevelOwnerId::ordinary_file(),
         offset: 0,
-        name: Arc::from("(Anonymous class)"),
-        outer_clauses: Arc::from([
+        name: verter_type_expr::OwnedStr::from("(Anonymous class)"),
+        outer_clauses: verter_type_expr::OwnedSlice::from([
             verter_session_query::flow::policy::ClassExpressionClause {
-                container: Arc::from("outer3"),
-                parameters: Arc::from([Arc::from("U")]),
+                container: verter_type_expr::OwnedStr::from("outer3"),
+                parameters: verter_type_expr::OwnedSlice::from([verter_type_expr::OwnedStr::from("U")]),
             },
             verter_session_query::flow::policy::ClassExpressionClause {
-                container: Arc::from("inner"),
-                parameters: Arc::from([Arc::from("T")]),
+                container: verter_type_expr::OwnedStr::from("inner"),
+                parameters: verter_type_expr::OwnedSlice::from([verter_type_expr::OwnedStr::from("T")]),
             },
         ]),
         own_arity: 0,

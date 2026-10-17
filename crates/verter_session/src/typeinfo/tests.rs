@@ -1003,9 +1003,9 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         .shallow_file_state("/types.ts")
         .expect("shallow state for /types.ts");
     let key = verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
-        Arc::from("/types.ts"),
+        verter_type_expr::OwnedStr::from("/types.ts"),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::from("ColorModeSelectProps"),
+        verter_type_expr::OwnedStr::from("ColorModeSelectProps"),
     );
     let dispatch =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
@@ -1133,7 +1133,7 @@ fn classify_dispatch_error_routes_budget_exceeded_to_err() {
 fn classify_dispatch_error_routes_alias_cycle_to_err() {
     let chain: Arc<[Arc<str>]> = Arc::from(vec![Arc::from("A"), Arc::from("B")]);
     let err = QueryError::AliasCycle {
-        chain: Arc::clone(&chain),
+        chain: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(chain.clone()),
     };
     let out = classify_dispatch_error(&err, None);
     assert!(
@@ -1155,7 +1155,7 @@ fn classify_dispatch_error_routes_unstable_state_to_err() {
 #[test]
 fn classify_dispatch_error_routes_unsupported_intrinsic_to_err() {
     let err = QueryError::UnsupportedIntrinsic {
-        name: Arc::from("NoSuchIntrinsic"),
+        name: verter_type_expr::OwnedStr::from("NoSuchIntrinsic"),
     };
     let out = classify_dispatch_error(&err, None);
     assert!(
@@ -1176,7 +1176,7 @@ fn classify_dispatch_error_routes_miss_to_ok_fallback() {
     assert_eq!(
         classify_dispatch_error(
             &QueryError::RecursiveRef {
-                name: Arc::from("Tree"),
+                name: verter_type_expr::OwnedStr::from("Tree"),
                 args: Default::default(),
             },
             None
@@ -1186,9 +1186,9 @@ fn classify_dispatch_error_routes_miss_to_ok_fallback() {
     assert_eq!(
         classify_dispatch_error(
             &QueryError::DeclPlaceholder {
-                canonical_id: Arc::from("/a.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/a.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                name: Arc::from("Foo"),
+                name: verter_type_expr::OwnedStr::from("Foo"),
                 whole_hash: Default::default(),
             },
             None
@@ -1322,12 +1322,12 @@ fn operator_reduction_step_propagates_fault_opaque_not_masked_as_carrier() {
 
     // The operator carrier the step preserves on a non-fault.
     let carrier = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
-        name: Arc::from("Carrier"),
+        name: verter_type_expr::OwnedStr::from("Carrier"),
         args: Default::default(),
     }));
 
     // (a) FAULT opaque as a Value → MUST propagate as `Err`, never mask.
-    let fault_node = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(Arc::from(
+    let fault_node = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(verter_type_expr::OwnedStr::from(
         "reduction blew up",
     ))));
     let out = classify_operator_reduction_step(graph, QueryResult::Value(fault_node), carrier);

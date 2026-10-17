@@ -140,9 +140,9 @@ fn degradation_of(
     let dispatch = super::ProjectSemanticDispatch::new(&host_ctx);
     let key = verter_type_engine::semantic_query::FlowReturnKey {
         function: dispatch.flow_function_slot_for(
-            std::sync::Arc::from(FILE),
+            verter_type_expr::OwnedStr::from(FILE),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            std::sync::Arc::from(name),
+            verter_type_expr::OwnedStr::from(name),
             verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
             0,
         ),

@@ -205,12 +205,12 @@ fn imported_registry_seed_refresh_keeps_symbolic_imported_surfaces_refreshable()
             verter_type_expr::facts::IndexedAccessFact {
                 object: verter_type_expr::locators::TypeBodySlot {
                     anchor: verter_type_expr::locators::AuthoredAnchor {
-                        canonical_id: Arc::from("/src/types.ts"),
+                        canonical_id: verter_type_expr::OwnedStr::from("/src/types.ts"),
                         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                        symbol: Arc::from("Button"),
+                        symbol: verter_type_expr::OwnedStr::from("Button"),
                         space: verter_type_expr::locators::LocatorSymbolSpace::Type,
                     },
-                    path: Arc::from(Vec::new().into_boxed_slice()),
+                    path: verter_type_expr::OwnedSlice::default(),
                 },
                 index_path: Arc::from(vec!["variants".to_string()]),
             },
@@ -6573,7 +6573,7 @@ defineProps<Props<T>>()
 
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: lowered,
-        path: StdArc::from(vec![PathSegment::Member(
+        path: verter_type_expr::OwnedSlice::from(vec![PathSegment::Member(
             verter_type_engine::semantic_query::PropertyKey::identifier("items"),
         )]),
         context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
@@ -6988,7 +6988,7 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
 
     // Project ["badge"] off the lowered shell. After Step 1.5 dispatch
     // can navigate the Mapped+Conditional pair to extract the badge slot.
-    let badge_path: StdArc<[PathSegment]> = StdArc::from(vec![PathSegment::Member(
+    let badge_path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(vec![PathSegment::Member(
         verter_type_engine::semantic_query::PropertyKey::identifier("badge"),
     )]);
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {

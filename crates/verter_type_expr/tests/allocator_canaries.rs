@@ -119,7 +119,7 @@ mod canary_absolutize_already_absolute_zero_alloc {
                     symbol: verter_type_expr::OwnedStr::from("Anchored"),
                     space: LocatorSymbolSpace::Type,
                 },
-                path: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
+                path: verter_type_expr::OwnedSlice::default(),
             },
             span_origin: MemberSpansOrigin::Synthetic(SourceSynthetic),
         })

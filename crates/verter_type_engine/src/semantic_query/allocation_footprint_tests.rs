@@ -26,15 +26,15 @@ fn a_diagnostic_rail_is_charged_for_the_text_its_diagnostics_name() {
 #[test]
 fn a_nested_error_and_its_declaration_are_charged() {
     let decl = DeclIdentity {
-        canonical_id: Arc::from("/decl.ts"),
+        canonical_id: OwnedStr::from("/decl.ts"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: Default::default(),
-        decl_name: Arc::from("Decl"),
+        decl_name: OwnedStr::from("Decl"),
     };
     let message: Arc<str> = Arc::from("m".repeat(5_000));
     let diagnostic = ShallowDiagnostic::InstantiationError {
         decl,
-        error: DiagnosticError::for_tests(QueryError::Other(Arc::clone(&message))),
+        error: DiagnosticError::for_tests(QueryError::Other(verter_type_expr::OwnedStr::from(message.clone()))),
     };
     assert!(diagnostic.owned_heap_bytes(&mut AliasSet::new()) >= 5_000);
 }
@@ -42,7 +42,7 @@ fn a_nested_error_and_its_declaration_are_charged() {
 #[test]
 fn a_materialised_point_is_charged_for_its_path_text() {
     let path = ProjectionPath::from_segments([PathSegment::Member(PropertyKey::String(
-        Arc::from("p".repeat(4_000)),
+        OwnedStr::from("p".repeat(4_000)),
     ))]);
     let mut demand = Demand::identity();
     demand.projection.path = path;
@@ -151,7 +151,7 @@ fn a_flow_return_is_charged_for_its_nested_backing() {
         .with_independent_member(ExactMemberValue::for_footprint_tests(
             flow_key(Arc::clone(&canonical)),
             SemanticNodeId(1),
-            Arc::from(vec![(long_root, [0; 16])]),
+            Arc::from(vec![(verter_type_expr::OwnedStr::from(long_root), [0; 16])]),
         ));
 
     let small_bytes = value_bytes(SemanticQueryValue::FlowReturn(
@@ -237,7 +237,7 @@ fn a_flow_return_counts_an_allocation_it_reaches_twice_once() {
         .with_independent_member(ExactMemberValue::for_footprint_tests(
             flow_key(Arc::clone(&canonical)),
             SemanticNodeId(1),
-            Arc::from(vec![(Arc::clone(&shared), [0; 16])]),
+            Arc::from(vec![(verter_type_expr::OwnedStr::from(&shared), [0; 16])]),
         ));
     let bytes = value_bytes(SemanticQueryValue::FlowReturn(
         verter_session_query::retention::owned::Owned::new(result),
@@ -296,7 +296,7 @@ fn an_object_projection_is_charged_for_its_excess_candidate_text() {
         ]))
     };
     let eligible = formula(ExcessEligibility::Eligible {
-        direct_candidates: Arc::from(vec![PropertyKey::String(Arc::from("x".repeat(TEXT)))]),
+        direct_candidates: Arc::from(vec![PropertyKey::String(OwnedStr::from("x".repeat(TEXT)))]),
     });
     let indeterminate = formula(ExcessEligibility::Indeterminate);
     assert!(value_bytes(eligible) >= value_bytes(indeterminate) + arc_block_bytes(TEXT));

@@ -1788,7 +1788,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     symbol: verter_type_expr::OwnedStr::from(prepared.root_identity.symbol_name.clone()),
                                     space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                                 },
-                                path: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
+                                path: verter_type_expr::OwnedSlice::default(),
                             },
                         ),
                         verter_session_query::declarations::TypeDeclKind::Alias,
@@ -1817,7 +1817,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             symbol: verter_type_expr::OwnedStr::from(prepared.root_identity.symbol_name.clone()),
                             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                         },
-                        path: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
+                        path: verter_type_expr::OwnedSlice::default(),
                     },
                 ),
                 verter_session_query::declarations::TypeDeclKind::Alias,
@@ -3291,7 +3291,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .ctx
             .prepared_value_decl_return_only(canonical, owner, symbol)
         {
-            return Some((Arc::from(canonical), owner, Arc::from(symbol), prepared));
+            return Some((std::sync::Arc::<str>::from(verter_type_expr::OwnedStr::from(canonical)), owner, std::sync::Arc::<str>::from(verter_type_expr::OwnedStr::from(symbol)), prepared));
         }
         if canonical.is_empty() {
             return None;
@@ -3505,7 +3505,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     symbol: verter_type_expr::OwnedStr::from(symbol),
                     space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                 },
-                path: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
+                path: verter_type_expr::OwnedSlice::default(),
             },
         );
         let QueryResult::Value(shape) = self.lower_locator(source) else {
@@ -5628,7 +5628,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     symbol: verter_type_expr::OwnedStr::from(prepared.root_identity.symbol_name.clone()),
                     space: verter_type_expr::locators::LocatorSymbolSpace::Type,
                 },
-                path: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
+                path: verter_type_expr::OwnedSlice::default(),
             },
         );
         let seam = if build.suspend {
@@ -9066,7 +9066,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             verter_type_expr::TopLevelOwnerId,
             Arc<str>,
             Vec<SemanticNodeId>,
-        ) = (Arc::from(canonical), owner, Arc::from(class), args.to_vec());
+        ) = (std::sync::Arc::<str>::from(verter_type_expr::OwnedStr::from(canonical)), owner, std::sync::Arc::<str>::from(verter_type_expr::OwnedStr::from(class)), args.to_vec());
         // The `extends` arm of the class last followed: what the read
         // answers with when the next class cannot answer selectively.
         let mut through: Option<SemanticNodeId> = None;

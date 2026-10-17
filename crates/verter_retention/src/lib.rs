@@ -300,8 +300,31 @@ impl RetentionAdmission {
 /// that a DIFFERENT charged owner already accounts for are deliberately
 /// left out so one allocation is charged once.
 pub trait RetainedFootprint {
-    /// Estimated bytes this value keeps alive.
+    /// Estimated bytes this value keeps alive, counting nothing an owned
+    /// handle it reaches charges by itself.
     fn retained_footprint_bytes(&self) -> usize;
+
+    /// [`Self::retained_footprint_bytes`] together with the owned
+    /// allocations the value reaches ([`owned::OwnedHandles`]): a cache
+    /// retaining the value holds them beside its own charge
+    /// ([`RetentionCharge::holding`]), so each is charged once, by its own
+    /// cell. A value that reaches no owned handle keeps the default.
+    fn retained_footprint(&self) -> Footprint {
+        Footprint {
+            bytes: self.retained_footprint_bytes(),
+            handles: owned::OwnedHandles::default(),
+        }
+    }
+}
+
+/// What retaining one value costs: the bytes its own charge holds and the
+/// owned allocations it reaches, each charged by its own cell.
+#[must_use = "the owned allocations a retained value reaches must be held"]
+pub struct Footprint {
+    /// Bytes the retaining owner's own charge covers.
+    pub bytes: usize,
+    /// The owned allocations the value reaches.
+    pub handles: owned::OwnedHandles,
 }
 
 /// A payload that owns no heap beyond itself costs exactly its own
@@ -565,6 +588,7 @@ impl SemanticRetentionAccount {
             account: Some(Arc::clone(self)),
             class,
             bytes,
+            held: None,
         }
     }
 
@@ -742,6 +766,9 @@ pub struct RetentionCharge {
     account: Option<Arc<SemanticRetentionAccount>>,
     class: ChargeClass,
     bytes: usize,
+    /// The cache holds on the owned allocations the charged value reaches
+    /// ([`Self::holding`]); released with the charge.
+    held: Option<Box<[owned::OwnedHold]>>,
 }
 
 impl RetentionCharge {
@@ -749,6 +776,18 @@ impl RetentionCharge {
     /// being released.
     pub(crate) fn account(&self) -> Option<&Arc<SemanticRetentionAccount>> {
         self.account.as_ref()
+    }
+
+    /// This cache charge together with the cache's holds on the owned
+    /// allocations its value reaches: the holds live and end with the
+    /// charge, so the cache retains the value's whole footprint as one
+    /// token.
+    #[must_use]
+    pub fn holding(mut self, holds: Box<[owned::OwnedHold]>) -> Self {
+        if !holds.is_empty() {
+            self.held = Some(holds);
+        }
+        self
     }
 
     /// Bytes this charge holds.
@@ -789,6 +828,7 @@ impl RetentionCharge {
             account: self.account.clone(),
             class: self.class,
             bytes,
+            held: None,
         }
     }
 
@@ -808,6 +848,9 @@ impl RetentionCharge {
             account.reclassify(self.class, ChargeClass::Pinned, self.bytes);
         }
         self.class = ChargeClass::Pinned;
+        // No cache keeps the value now: its owned allocations are their
+        // own callers' (each moves to pinned in its cell).
+        self.held = None;
     }
 
     /// Adopt a pinned charge into cache retention: a cache is about to

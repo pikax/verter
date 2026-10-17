@@ -63,9 +63,9 @@ impl CanonicalSpan {
 
     /// Pair a span with a file id, when both the file and the span are present.
     /// `None` when either component is absent (a synthetic / multi-origin fact).
-    fn from_parts(file: Option<&Arc<str>>, span: Option<Span>) -> Option<Self> {
+    fn from_parts(file: Option<&verter_type_expr::OwnedStr>, span: Option<Span>) -> Option<Self> {
         match (file, span) {
-            (Some(file), Some(span)) => Some(Self::new(Arc::clone(file), span)),
+            (Some(file), Some(span)) => Some(Self::new(Arc::from(file.as_str()), span)),
             _ => None,
         }
     }
@@ -177,7 +177,7 @@ impl TypeInfoSurfaceMember {
     /// `None` for symbol / computed keys.
     #[must_use]
     pub fn published_name(&self) -> Option<Arc<str>> {
-        self.key.published_name()
+        self.key.published_name().map(Arc::from)
     }
 }
 
@@ -555,7 +555,7 @@ where
 /// The canonical origin file a node was first lowered in, when it is a
 /// single-declaration-file scope. `None` for `Global` / non-file scopes (a
 /// primitive, a structural composed node).
-fn node_origin_file(graph: &SemanticGraphStore, node: SemanticNodeId) -> Option<Arc<str>> {
+fn node_origin_file(graph: &SemanticGraphStore, node: SemanticNodeId) -> Option<verter_type_expr::OwnedStr> {
     match graph.node_scope_in_scope(node) {
         Some(NodeScopeId::File { canonical_id, .. }) => Some(canonical_id),
         _ => None,
@@ -603,7 +603,7 @@ fn build_member(graph: &SemanticGraphStore, member: &SurfaceMember) -> TypeInfoS
         jsdoc_description_span: None,
         jsdoc_tag_spans: Arc::from(Vec::new().into_boxed_slice()),
         origin: SurfaceMemberOrigin {
-            canonical_file: canonical,
+            canonical_file: canonical.as_ref().map(|file| Arc::from(file.as_str())),
             declaration_span,
             merge_role: member.merge_role.role(),
         },

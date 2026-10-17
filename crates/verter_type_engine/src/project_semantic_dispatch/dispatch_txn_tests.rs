@@ -202,9 +202,9 @@ pub(in crate::project_semantic_dispatch) fn flow_return_key() -> FlowReturnKey {
     FlowReturnKey {
         function: crate::semantic_query::FlowFunctionSlotIdentity {
             declaration_slot: crate::semantic_query::ResolvedDeclSlotIdentity::value_slot(
-                Arc::from("/ws/txn.ts"),
+                verter_type_expr::OwnedStr::from("/ws/txn.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("f"),
+                verter_type_expr::OwnedStr::from("f"),
                 0,
                 crate::semantic_query::HashValue::default(),
                 crate::semantic_query::HashValue::default(),
@@ -238,7 +238,7 @@ pub(in crate::project_semantic_dispatch) fn flow_return_key() -> FlowReturnKey {
 fn resolve_call_key() -> crate::semantic_query::ResolveCallKey {
     crate::semantic_query::ResolveCallKey {
         point: crate::semantic_query::ProgramPointId {
-            canonical_id: Arc::from("/ws/txn.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/ws/txn.ts"),
             offset: 11,
         },
         callee: SemanticNodeId(4),
@@ -567,7 +567,7 @@ fn binding_disabled_barrier_hides_outer_but_allows_nested_call_session() {
 fn redischarge_stability_requires_same_polarity_and_binding_snapshot() {
     let binding = |bound| InferBinding {
         param: SemanticNodeId(710),
-        name: Arc::from("T"),
+        name: verter_type_expr::OwnedStr::from("T"),
         bound: SemanticNodeId(bound),
     };
     let original = PendingVerdict::Assignable {
@@ -783,9 +783,9 @@ fn nearest_relate_walks_past_flow_frames_to_the_nearest_relation_ancestor() {
     let flow_key = |name: &str| FlowReturnKey {
         function: crate::semantic_query::FlowFunctionSlotIdentity {
             declaration_slot: crate::semantic_query::ResolvedDeclSlotIdentity::value_slot(
-                Arc::from("/ws/txn.ts"),
+                verter_type_expr::OwnedStr::from("/ws/txn.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from(name),
+                verter_type_expr::OwnedStr::from(name),
                 0,
                 crate::semantic_query::HashValue::default(),
                 crate::semantic_query::HashValue::default(),

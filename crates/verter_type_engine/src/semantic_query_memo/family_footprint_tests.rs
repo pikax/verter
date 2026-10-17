@@ -35,9 +35,9 @@ fn project_member(member: Arc<str>) -> FamilyKey {
 fn instantiate(args: usize) -> FamilyKey {
     FamilyKey::Instantiate {
         base: ResolvedDeclSlotIdentity::type_slot_unscoped(
-            Arc::from("/a.ts"),
+            verter_type_expr::OwnedStr::from("/a.ts"),
             owner(),
-            Arc::from("A"),
+            verter_type_expr::OwnedStr::from("A"),
         ),
         args: (0..args as u64).map(SemanticNodeId).collect(),
         resolve_env_hash: HashValue::default(),
@@ -53,13 +53,13 @@ fn type_of(canonical: Arc<str>, name: Arc<str>, path: Vec<Arc<str>>) -> FamilyKe
         value_root: ValueRootSlotIdentity::new(
             ValueRootKey {
                 scope: ScopeId::file(canonical, owner()),
-                name,
+                name: name.into(),
             },
             0,
             HashValue::default(),
             HashValue::default(),
         ),
-        path: Box::new(Arc::from(path)),
+        path: Box::new(verter_type_expr::OwnedSlice::from(path)),
         resolve_env_hash: HashValue::default(),
         provenance: Default::default(),
         merge_role: Default::default(),
@@ -187,7 +187,7 @@ fn a_cost_identity_pays_for_the_member_name_its_prepared_key_retains() {
     const NAME: usize = 20_000;
     let member = |member: Arc<str>| crate::semantic_query::SemanticQueryKey::ProjectMember {
         base: SemanticNodeId(1),
-        member,
+        member: member.into(),
         mode: crate::semantic_query::ProjectionMode::Navigate,
     };
     let small = prepared_identity_bytes(member(text(1)));

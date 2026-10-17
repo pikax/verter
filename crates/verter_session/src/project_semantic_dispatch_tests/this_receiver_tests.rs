@@ -220,15 +220,15 @@ fn served_return(
     let dispatch = super::ProjectSemanticDispatch::new(&host_ctx);
     let part = match member {
         Some(ordinal) => verter_type_expr::facts::FunctionPartIdentity::Member {
-            member_path: std::sync::Arc::from([ordinal]),
+            member_path: verter_type_expr::OwnedSlice::from([ordinal]),
         },
         None => verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
     };
     let key = verter_type_engine::semantic_query::FlowReturnKey {
         function: dispatch.flow_function_slot_for(
-            std::sync::Arc::from(FILE),
+            verter_type_expr::OwnedStr::from(FILE),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            std::sync::Arc::from(name),
+            verter_type_expr::OwnedStr::from(name),
             part,
             0,
         ),

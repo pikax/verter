@@ -273,7 +273,7 @@ fn production_constructor_keeps_sweeps_authoritative_and_old_drops_safe() {
     let root = arena.intern_owned(
         SemanticNodeData::Literal(LiteralValue::String("closed".into())),
         NodeScopeId::File {
-            canonical_id: Arc::from("/closed.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/closed.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: [7; 16],
             local_scope: None,

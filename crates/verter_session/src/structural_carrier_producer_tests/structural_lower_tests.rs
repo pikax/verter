@@ -35,7 +35,7 @@ use verter_type_engine::structural_carrier_producer::{
 /// invariant: the scope is the owner-supplied lexical root).
 fn fixture_scope() -> NodeScopeId {
     NodeScopeId::File {
-        canonical_id: Arc::from("/fixture.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/fixture.ts"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [7u8; 16],
         local_scope: None,

@@ -203,12 +203,12 @@ impl ComponentMetaQueryEngine<'_> {
         Some(SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(
             TypeBodySlot {
                 anchor: AuthoredAnchor {
-                    canonical_id: Arc::from(declaration.canonical_source.as_str()),
+                    canonical_id: verter_type_expr::OwnedStr::from(declaration.canonical_source.as_str()),
                     owner: declaration.owner,
-                    symbol: Arc::from(symbol),
+                    symbol: verter_type_expr::OwnedStr::from(symbol),
                     space: LocatorSymbolSpace::Type,
                 },
-                path: Arc::from(Vec::new().into_boxed_slice()),
+                path: verter_type_expr::OwnedSlice::default(),
             },
         )))
     }
@@ -343,7 +343,7 @@ fn member_value_source(
     if let Some(leaf) = dispatch.node_leaf_fact(value) {
         return SemanticTypeSource::Closed(ClosedTypeFact::Leaf(leaf));
     }
-    let key = || FactPropertyKey::String(Arc::from(name));
+    let key = || FactPropertyKey::String(verter_type_expr::OwnedStr::from(name));
     let (base, mut path) = match parent {
         Some(SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(slot))) => {
             (AuthoredBodyLocator::DeclBody(slot.clone()), Vec::new())
@@ -352,7 +352,7 @@ fn member_value_source(
             AuthoredBodyLocator::DeclBody(fact.object.clone()),
             fact.index_path
                 .iter()
-                .map(|hop| FactPropertyKey::String(Arc::from(hop.as_str())))
+                .map(|hop| FactPropertyKey::String(verter_type_expr::OwnedStr::from(hop.as_str())))
                 .collect(),
         ),
         Some(SemanticTypeSource::Projected(ProjectedTypeFact::MemberPath { base, path })) => {

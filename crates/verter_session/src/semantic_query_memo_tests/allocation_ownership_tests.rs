@@ -42,14 +42,14 @@ fn host() -> VerterHost {
 fn key() -> SemanticQueryKey {
     SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::from(FILE),
+            canonical_id: OwnedStr::from(FILE),
             owner: TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 TopLevelOwnerId::ordinary_file(),
             ),
         },
-        name: Arc::from("Target"),
+        name: OwnedStr::from("Target"),
     })
 }
 

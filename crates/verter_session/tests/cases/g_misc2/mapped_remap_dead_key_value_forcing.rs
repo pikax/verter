@@ -156,7 +156,7 @@ fn project(
 ) -> SemanticNodeId {
     let query = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(path.into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::from(path.into_boxed_slice()),
         context: ProjectionReductionContext::published(mode),
     };
     match for_tests::dispatch_execute_type_node_for_tests(host, query) {
@@ -1095,7 +1095,7 @@ fn project_result(
         host,
         SemanticQueryKey::ProjectPath {
             base,
-            path: Arc::from(Vec::new().into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::default(),
             context: ProjectionReductionContext::published(mode),
         },
     )
@@ -1255,13 +1255,13 @@ fn value_shape(host: &Arc<VerterHost>, node: SemanticNodeId) -> String {
             // to the demanded key's type is invisible, which is precisely
             // the staleness this parity check exists to catch.
             let object = *object;
-            let name = Arc::clone(name);
+            let name = name.clone();
             drop(data);
             match for_tests::dispatch_execute_type_node_for_tests(
                 host,
                 SemanticQueryKey::IndexedAccess {
                     base: object,
-                    index: IndexKey::String(Arc::clone(&name)),
+                    index: IndexKey::String(name.clone()),
                     mode: ProjectionMode::Expanded,
                 },
             ) {

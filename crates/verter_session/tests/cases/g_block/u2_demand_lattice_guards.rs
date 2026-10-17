@@ -980,28 +980,28 @@ fn projection_path_prefix_and_join_semantics() {
 
 #[test]
 fn projection_path_is_the_arc_representation_round_trips_identity() {
-    // `ProjectionPath` IS the `Arc<[PathSegment]>` representation (§3.1) — a
+    // `ProjectionPath` IS the `verter_type_expr::OwnedSlice<PathSegment>` representation (§3.1) — a
     // thin newtype, NOT a parallel datum. The conversions are O(1) Arc
     // clones/moves so `SemanticQueryKey::ProjectPath` shares this exact
     // representation with zero conversion tax.
-    let segments: Arc<[PathSegment]> = vec![seg("c"), seg("full")].into();
+    let segments: verter_type_expr::OwnedSlice<PathSegment> = vec![seg("c"), seg("full")].into();
 
-    let pp = ProjectionPath::from(Arc::clone(&segments));
+    let pp = ProjectionPath::from(segments.clone());
     // as_arc borrows the SAME allocation — no copy, no re-interning.
     assert!(
-        Arc::ptr_eq(pp.as_arc(), &segments),
-        "as_arc must expose the wrapped Arc verbatim"
+        verter_type_expr::OwnedSlice::ptr_eq(pp.as_owned(), &segments),
+        "as_owned must expose the wrapped allocation verbatim"
     );
 
     // Arc -> ProjectionPath -> Arc is identity (same allocation back out).
-    let back: Arc<[PathSegment]> = pp.into_arc();
+    let back: verter_type_expr::OwnedSlice<PathSegment> = pp.into_owned();
     assert!(
-        Arc::ptr_eq(&back, &segments),
-        "into_arc must hand back the same Arc allocation"
+        verter_type_expr::OwnedSlice::ptr_eq(&back, &segments),
+        "into_owned must hand back the same allocation"
     );
 
     // The `Into` direction agrees on contents too.
-    let pp2: ProjectionPath = Arc::clone(&segments).into();
-    let back2: Arc<[PathSegment]> = pp2.into();
+    let pp2: ProjectionPath = segments.clone().into();
+    let back2: verter_type_expr::OwnedSlice<PathSegment> = pp2.into();
     assert_eq!(&back2[..], &segments[..]);
 }

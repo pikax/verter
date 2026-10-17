@@ -2065,9 +2065,9 @@ fn a_retry_after_a_cancellation_anywhere_answers_what_a_fresh_host_answers() {
     let source = sibling_chains(4, 8);
     let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: Arc::from(PATH),
+            canonical_id: verter_type_expr::OwnedStr::from(PATH),
             owner: TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("witness"),
+            symbol: verter_type_expr::OwnedStr::from("witness"),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
         function_part: FunctionPartIdentity::DeclarationBody,

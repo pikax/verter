@@ -11739,10 +11739,10 @@ mod overload_carrier_exclusion_tests {
 
         let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
         let identity = DeclIdentity {
-            canonical_id: Arc::from("/carrier.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/carrier.ts"),
             owner,
             whole_hash: Default::default(),
-            decl_name: Arc::from(name),
+            decl_name: verter_type_expr::OwnedStr::from(name),
         };
         let empty_args: Arc<[crate::semantic_query::SemanticNodeId]> =
             Arc::from(Vec::new().into_boxed_slice());
@@ -11760,21 +11760,21 @@ mod overload_carrier_exclusion_tests {
             }
             "ImportType" => SemanticNodeData::new_import_type(
                 Arc::from("./m"),
-                Arc::from(vec![Arc::<str>::from(name)].into_boxed_slice()),
+                verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from(name)].into_boxed_slice()),
                 empty_args,
                 false,
             ),
             "TypeOf" => SemanticNodeData::new_typeof(
                 ValueRootKey {
                     scope: ScopeId {
-                        canonical_id: Arc::from("/carrier.ts"),
+                        canonical_id: verter_type_expr::OwnedStr::from("/carrier.ts"),
                         owner,
                         local_scope: None,
                         binder_scope_id: BinderScopeId::file_scope(owner),
                     },
-                    name: Arc::from(name),
+                    name: verter_type_expr::OwnedStr::from(name),
                 },
-                Arc::from(Vec::new().into_boxed_slice()),
+                verter_type_expr::OwnedSlice::default(),
                 empty_args,
             ),
             other => unreachable!("unknown reference carrier kind `{other}`"),

@@ -440,13 +440,13 @@ fn a_module_const_bound_to_a_tagged_template_is_the_tag_return() {
                     Arc::from(TAGS),
                     TopLevelOwnerId::ordinary_file(),
                 ),
-                name: Arc::from("moduleTag"),
+                name: verter_type_expr::OwnedStr::from("moduleTag"),
             },
             project_identity,
             env.type_env_hash,
             env.lib_env_hash,
         ),
-        path: Arc::from([]),
+        path: verter_type_expr::OwnedSlice::from([]),
         context: verter_type_engine::semantic_query::TypeOfContext::new(
             verter_type_engine::semantic_query::ProjectionReductionContext::published(
                 verter_type_engine::semantic_query::ProjectionMode::Expanded,

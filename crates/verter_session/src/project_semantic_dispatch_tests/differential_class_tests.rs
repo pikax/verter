@@ -121,11 +121,11 @@ fn generic_method_return_inference_precedes_enclosing_specialization() {
     super::flow_return_class_tests::with_dispatch(MEMBERS, |dispatch| {
         let key = verter_type_engine::semantic_query::FlowReturnKey {
             function: dispatch.flow_function_slot_for(
-                Arc::from("/ws/cls/classes.ts"),
+                verter_type_expr::OwnedStr::from("/ws/cls/classes.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("Box"),
+                verter_type_expr::OwnedStr::from("Box"),
                 verter_type_expr::facts::FunctionPartIdentity::Member {
-                    member_path: Arc::from([0u32]),
+                    member_path: verter_type_expr::OwnedSlice::from([0u32]),
                 },
                 0,
             ),

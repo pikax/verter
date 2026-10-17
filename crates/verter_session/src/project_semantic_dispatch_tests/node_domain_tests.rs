@@ -22,7 +22,7 @@ fn opaque_sentinel_summary_is_typed_only_genuine_unknown_is_always_materialized(
     let reachable = [
         QueryError::Miss,
         QueryError::UnsupportedIntrinsic {
-            name: std::sync::Arc::from("FixtureIntrinsic"),
+            name: verter_type_expr::OwnedStr::from("FixtureIntrinsic"),
         },
         QueryError::BudgetExceeded(
             verter_session_query::inputs::budget::BudgetExceededFailure {
@@ -34,7 +34,7 @@ fn opaque_sentinel_summary_is_typed_only_genuine_unknown_is_always_materialized(
         ),
         QueryError::UnstableState { attempts: 3 },
         QueryError::AliasCycle {
-            chain: std::sync::Arc::from(
+            chain: verter_type_expr::OwnedSlice::from(
                 vec![std::sync::Arc::from("A"), std::sync::Arc::from("B")].into_boxed_slice(),
             ),
         },
@@ -49,10 +49,10 @@ fn opaque_sentinel_summary_is_typed_only_genuine_unknown_is_always_materialized(
         QueryError::UnrepresentableSurface,
         QueryError::UnrepresentableSurfaceMember,
         // Adversarial text-bearing payloads: INERT (never sentinels).
-        QueryError::Other(std::sync::Arc::from("semanticMiss")),
-        QueryError::Other(std::sync::Arc::from("semanticObjectSurface")),
-        QueryError::Other(std::sync::Arc::from("budgetExceeded(x)")),
-        QueryError::Other(std::sync::Arc::from("genuinely free text")),
+        QueryError::Other(verter_type_expr::OwnedStr::from("semanticMiss")),
+        QueryError::Other(verter_type_expr::OwnedStr::from("semanticObjectSurface")),
+        QueryError::Other(verter_type_expr::OwnedStr::from("budgetExceeded(x)")),
+        QueryError::Other(verter_type_expr::OwnedStr::from("genuinely free text")),
     ];
     for variant in &reachable {
         let typed = summary::opaque_sentinel(variant);
@@ -73,7 +73,7 @@ fn opaque_sentinel_summary_is_typed_only_genuine_unknown_is_always_materialized(
     // The tag discriminator, FLIPPED: `Other("semanticObjectSurface")` is
     // INERT — it must NOT tag `ObjectSurfaceSentinel` (only the typed
     // `UnrepresentableSurface` carrier does).
-    let object_surface_text = summary::opaque_sentinel(&QueryError::Other(std::sync::Arc::from(
+    let object_surface_text = summary::opaque_sentinel(&QueryError::Other(verter_type_expr::OwnedStr::from(
         "semanticObjectSurface",
     )));
     assert_eq!(
@@ -171,21 +171,21 @@ fn root_only_projection_root_kind_matches_full_fold() {
     let dummy = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
     let indexed = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: dummy,
-        index: IndexKey::String(StdArc::from("x")),
+        index: IndexKey::String(verter_type_expr::OwnedStr::from(StdArc::from("x"))),
     });
     let typeof_node = graph.intern_node(SemanticNodeData::new_typeof(
         ValueRootKey {
             scope: ScopeId {
-                canonical_id: StdArc::from("/p.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from(StdArc::from("/p.ts")),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
                 binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
             },
-            name: StdArc::from("v"),
+            name: verter_type_expr::OwnedStr::from("v"),
         },
-        StdArc::from(Vec::new().into_boxed_slice()),
+        verter_type_expr::OwnedSlice::default(),
         StdArc::from(Vec::new().into_boxed_slice()),
     ));
     let keyof = graph.intern_node(SemanticNodeData::KeyOf { base: open_obj });
@@ -387,14 +387,14 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
     });
 
     let reference = graph.intern_node(SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
-        canonical_id: StdArc::from("/p.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from(StdArc::from("/p.ts")),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        name: StdArc::from("Foo"),
+        name: verter_type_expr::OwnedStr::from(StdArc::from("Foo")),
         whole_hash: HashValue::default(),
     }));
     let import = graph.intern_node(SemanticNodeData::new_import_type(
         StdArc::from("./m"),
-        StdArc::from(Vec::new().into_boxed_slice()),
+        verter_type_expr::OwnedSlice::default(),
         StdArc::from(Vec::new().into_boxed_slice()),
         false,
     ));
@@ -441,10 +441,10 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
     });
     let type_param = graph.intern_node(SemanticNodeData::TypeParam {
         decl: DeclIdentity {
-            canonical_id: StdArc::from("/p.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from(StdArc::from("/p.ts")),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
-            decl_name: StdArc::from("Owner"),
+            decl_name: verter_type_expr::OwnedStr::from(StdArc::from("Owner")),
         },
         param_index: 0,
         constraint: None,
@@ -453,10 +453,10 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
     });
     let synthetic = graph.intern_node(SemanticNodeData::SyntheticBinding {
         id: SyntheticBindingId {
-            scope_canonical_id: StdArc::from("/p.ts"),
+            scope_canonical_id: verter_type_expr::OwnedStr::from(StdArc::from("/p.ts")),
             surface_kind: verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding,
             slot_name: None,
-            binding_name: StdArc::from("b"),
+            binding_name: verter_type_expr::OwnedStr::from(StdArc::from("b")),
         },
         value_node: 0,
     });
@@ -464,18 +464,18 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
     // (`RaisedRootKind::Reference`).
     let decl_ref = graph.intern_node(SemanticNodeData::DeclRef {
         identity: DeclIdentity {
-            canonical_id: StdArc::from("/p.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from(StdArc::from("/p.ts")),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
-            decl_name: StdArc::from("Foo"),
+            decl_name: verter_type_expr::OwnedStr::from(StdArc::from("Foo")),
         },
     });
     let instantiation_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: DeclIdentity {
-            canonical_id: StdArc::from("/p.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from(StdArc::from("/p.ts")),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
-            decl_name: StdArc::from("Gen"),
+            decl_name: verter_type_expr::OwnedStr::from(StdArc::from("Gen")),
         },
         args: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(
             vec![string].into_boxed_slice(),
@@ -501,7 +501,7 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
     // The `Opaque(RecursiveRef)` sub-arm (distinct from the `_` Opaque conduit) —
     // raises to a materialized/expanded leaf (root `Other`).
     let recursive_ref = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
-        name: StdArc::from("Rec"),
+        name: verter_type_expr::OwnedStr::from(StdArc::from("Rec")),
         args: Default::default(),
     }));
 
@@ -699,7 +699,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
             "indexed.object",
             graph.intern_node(SemanticNodeData::IndexedAccess {
                 object: dangling,
-                index: IndexKey::String(StdArc::from("x")),
+                index: IndexKey::String(verter_type_expr::OwnedStr::from(StdArc::from("x"))),
             }),
         ),
         (
@@ -912,10 +912,10 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
             "typeparam.constraint",
             graph.intern_node(SemanticNodeData::TypeParam {
                 decl: verter_type_engine::semantic_query::DeclIdentity {
-                    canonical_id: StdArc::from("/w/tp.ts"),
+                    canonical_id: verter_type_expr::OwnedStr::from(StdArc::from("/w/tp.ts")),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     whole_hash: [0u8; 16],
-                    decl_name: StdArc::from("T"),
+                    decl_name: verter_type_expr::OwnedStr::from(StdArc::from("T")),
                 },
                 param_index: 0,
                 constraint: Some(dangling),
@@ -927,10 +927,10 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
             "typeparam.default",
             graph.intern_node(SemanticNodeData::TypeParam {
                 decl: verter_type_engine::semantic_query::DeclIdentity {
-                    canonical_id: StdArc::from("/w/tp.ts"),
+                    canonical_id: verter_type_expr::OwnedStr::from(StdArc::from("/w/tp.ts")),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     whole_hash: [0u8; 16],
-                    decl_name: StdArc::from("T"),
+                    decl_name: verter_type_expr::OwnedStr::from(StdArc::from("T")),
                 },
                 param_index: 0,
                 constraint: None,

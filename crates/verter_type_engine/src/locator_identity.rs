@@ -948,12 +948,12 @@ mod tests {
         );
         let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
             anchor: AuthoredAnchor {
-                canonical_id: Arc::from("/env/a.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/env/a.ts"),
                 owner: TopLevelOwnerId::module(3),
-                symbol: Arc::from("Foo"),
+                symbol: verter_type_expr::OwnedStr::from("Foo"),
                 space: LocatorSymbolSpace::Type,
             },
-            path: Arc::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
         });
         (slot, locator)
     }
@@ -982,12 +982,12 @@ mod tests {
         let (slot, _) = matching_slot_and_locator();
         let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
             anchor: AuthoredAnchor {
-                canonical_id: Arc::from("/env/other.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/env/other.ts"),
                 owner: TopLevelOwnerId::module(3),
-                symbol: Arc::from("Foo"),
+                symbol: verter_type_expr::OwnedStr::from("Foo"),
                 space: LocatorSymbolSpace::Type,
             },
-            path: Arc::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
         });
         let err = LocatorLoweringKey::new_unsubstituted(
             slot,
@@ -1009,12 +1009,12 @@ mod tests {
         let (slot, _) = matching_slot_and_locator();
         let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
             anchor: AuthoredAnchor {
-                canonical_id: Arc::from("/env/a.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/env/a.ts"),
                 owner: TopLevelOwnerId::instance(3),
-                symbol: Arc::from("Foo"),
+                symbol: verter_type_expr::OwnedStr::from("Foo"),
                 space: LocatorSymbolSpace::Type,
             },
-            path: Arc::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
         });
         let err = LocatorLoweringKey::new_unsubstituted(
             slot,
@@ -1036,12 +1036,12 @@ mod tests {
         let (slot, _) = matching_slot_and_locator();
         let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
             anchor: AuthoredAnchor {
-                canonical_id: Arc::from("/env/a.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/env/a.ts"),
                 owner: TopLevelOwnerId::module(3),
-                symbol: Arc::from("Bar"),
+                symbol: verter_type_expr::OwnedStr::from("Bar"),
                 space: LocatorSymbolSpace::Type,
             },
-            path: Arc::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
         });
         let err = LocatorLoweringKey::new_unsubstituted(
             slot,
@@ -1063,12 +1063,12 @@ mod tests {
         let (slot, _) = matching_slot_and_locator();
         let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
             anchor: AuthoredAnchor {
-                canonical_id: Arc::from("/env/a.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/env/a.ts"),
                 owner: TopLevelOwnerId::module(3),
-                symbol: Arc::from("Foo"),
+                symbol: verter_type_expr::OwnedStr::from("Foo"),
                 space: LocatorSymbolSpace::Value,
             },
-            path: Arc::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
         });
         let err = LocatorLoweringKey::new_unsubstituted(
             slot,

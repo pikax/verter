@@ -280,9 +280,9 @@ fn evaluate(host: &Arc<VerterHost>, name: &str) -> (Option<FlowReturnDegradation
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let key = FlowReturnKey {
         function: dispatch.flow_function_slot_for(
-            Arc::from(CANONICAL),
+            verter_type_expr::OwnedStr::from(CANONICAL),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(name),
+            verter_type_expr::OwnedStr::from(name),
             FunctionPartIdentity::DeclarationBody,
             0,
         ),

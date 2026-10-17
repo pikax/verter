@@ -25,9 +25,9 @@ fn request(basis: u8) -> FlowDemandRequest {
         query: SemanticQueryKey::FlowReturn(Box::new(FlowReturnKey {
             function: FlowFunctionSlotIdentity {
                 declaration_slot: ResolvedDeclSlotIdentity::value_slot(
-                    Arc::from("/flow_solve_fixture.ts"),
+                    verter_type_expr::OwnedStr::from("/flow_solve_fixture.ts"),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    Arc::from("products"),
+                    verter_type_expr::OwnedStr::from("products"),
                     0,
                     [0; 16],
                     [0; 16],

@@ -239,9 +239,9 @@ impl<'a> SignatureSourceHeaderGuard<'a> {
         symbol: &str,
     ) -> Self {
         headers.borrow_mut().push((
-            std::sync::Arc::from(canonical),
+            std::sync::Arc::<str>::from(verter_type_expr::OwnedStr::from(canonical)),
             owner,
-            std::sync::Arc::from(symbol),
+            std::sync::Arc::<str>::from(verter_type_expr::OwnedStr::from(symbol)),
         ));
         Self(headers)
     }

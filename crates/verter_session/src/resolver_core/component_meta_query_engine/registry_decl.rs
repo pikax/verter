@@ -501,9 +501,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 .as_deref()
             {
                 Some(SemanticNodeData::DeclRef { identity }) => heritage.push((
-                    std::sync::Arc::clone(&identity.canonical_id),
+                    std::sync::Arc::<str>::from(identity.canonical_id.as_str()),
                     identity.owner,
-                    std::sync::Arc::clone(&identity.decl_name),
+                    std::sync::Arc::<str>::from(identity.decl_name.as_str()),
                 )),
                 Some(SemanticNodeData::Object(_)) => own_object_arms += 1,
                 _ => return None,
@@ -598,7 +598,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 let _scope = self.semantic_dispatch().enter_construction_scope();
                 let root =
                     self.dispatch_root_instantiated(scope_canonical_id, scope_owner, root_symbol)?;
-                let query_path: std::sync::Arc<[PathSegment]> = std::sync::Arc::from(
+                let query_path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(
                     path.iter()
                         .cloned()
                         .map(PathSegment::Member)
