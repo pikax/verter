@@ -2155,6 +2155,61 @@ mod cached_result_footprint {
         );
     }
 
+    /// A JSDoc tag's resolved type graph is charged by its tables: a long
+    /// literal in the captured string table adds its backing to the cached
+    /// result's footprint.
+    #[test]
+    fn a_jsdoc_type_graph_is_charged_by_its_tables() {
+        use verter_type_expr::{LiteralValue, TypeExpr};
+        let with_tag = |literal: String| {
+            let ty = TypeExpr::Literal(LiteralValue::String(literal));
+            let mut builder = verter_protocol::graph::GraphBuilder::new();
+            let root = builder.node_id(&ty);
+            let graph = verter_protocol::graph::snapshot::ResolvedTypeGraphSnapshot::from_builder(
+                builder, root,
+            )
+            .expect("a literal captures");
+            let mut result = base();
+            let declaration = registry_meta("t".to_string()).declaration;
+            result.resolution_template.resolved_macros.push(
+                crate::meta_resolve::ResolvedMacroMeta {
+                    macro_index: 0,
+                    macro_kind:
+                        verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps,
+                    type_name: "Props".to_string(),
+                    import_source: String::new(),
+                    surface_is_authoritative: true,
+                    declaration,
+                    native_props: Vec::new(),
+                    jsdoc: Some(crate::resolver_core::ResolvedJsdocBlock {
+                        description: None,
+                        tags: vec![crate::resolver_core::ResolvedJsdocTag {
+                            name: "type".to_string(),
+                            text: None,
+                            raw_type: None,
+                            subject_name: None,
+                            resolved_type: Some(
+                                verter_protocol::graph::snapshot::ResolvedJsdocTypeOutput {
+                                    display: None,
+                                    graph,
+                                },
+                            ),
+                        }],
+                    }),
+                },
+            );
+            result
+        };
+        let small = with_tag("s".to_string()).retained_footprint_bytes();
+        let large = with_tag("s".repeat(LARGE)).retained_footprint_bytes();
+        let expected = heap_block_bytes(LARGE) - heap_block_bytes(1);
+        assert!(
+            large >= small + expected,
+            "a {LARGE}-byte literal in the tag's type graph must add at least its \
+             {expected}-byte backing ({small} -> {large})"
+        );
+    }
+
     /// A collection costs its backing capacity, not its length.
     #[test]
     fn record_collection_is_charged_by_capacity() {

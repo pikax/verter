@@ -20,10 +20,7 @@
 //! * graph nodes named by [`verter_type_engine::semantic_query::SemanticNodeId`]
 //!   — the node arena owns their storage;
 //! * interned language identities inside a registered source snapshot id —
-//!   pooled identity strings carry their own charge;
-//! * the heap behind a JSDoc tag's resolved type-graph snapshot and behind a
-//!   publication's symbolic-equivalence proof: both owners keep it private
-//!   and expose no borrow of it, so only their inline bytes are charged.
+//!   pooled identity strings carry their own charge.
 
 use std::sync::Arc;
 
@@ -485,11 +482,11 @@ impl PayloadHeap for crate::resolver_core::ResolvedJsdocTag {
 }
 
 impl PayloadHeap for verter_protocol::graph::snapshot::ResolvedJsdocTypeOutput {
-    /// The display text; the graph snapshot keeps its tables private (see
-    /// the module docs) and is charged inline only.
+    /// The display text and the graph snapshot's tables, which clones of
+    /// one snapshot share.
     fn heap(&self, m: &mut Meter) -> usize {
-        let Self { display, graph: _ } = self;
-        display.heap(m)
+        let Self { display, graph } = self;
+        display.heap(m) + graph.owned_heap_bytes(&mut m.aliases)
     }
 }
 
@@ -1599,17 +1596,24 @@ impl PayloadHeap for publ::PublicationReason {
             | Self::ResolvedExactSymbolic
             | Self::ResolvedIncomplete => 0,
             Self::AuthoredForIncomplete { policy } => policy.heap(m),
-            // The proof keeps its sources private (see the module docs).
-            Self::AuthoredSymbolicRepresentation { proof: _ } => 0,
+            Self::AuthoredSymbolicRepresentation { proof } => proof.heap(m),
         }
     }
 }
 
 impl PayloadHeap for publ::PublicationPolicy {
-    /// Fields are private; the symbolic-equivalence proof is not reachable
-    /// (see the module docs).
     fn heap(&self, m: &mut Meter) -> usize {
         self.incomplete_reason().heap(m)
+            + self.symbolic_equivalence().map_or(0, |proof| proof.heap(m))
+    }
+}
+
+impl PayloadHeap for publ::SymbolicEquivalenceProof {
+    /// Both bound sources; the kind is inline.
+    fn heap(&self, m: &mut Meter) -> usize {
+        inline(&self.kind())
+            + self.resolved_source().heap(m)
+            + self.authored_source().locator().heap(m)
     }
 }
 

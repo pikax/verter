@@ -500,6 +500,18 @@ impl SymbolicEquivalenceProof {
         self.kind
     }
 
+    /// The resolved source the proof binds.
+    #[must_use]
+    pub fn resolved_source(&self) -> &SemanticTypeSource {
+        &self.resolved_source
+    }
+
+    /// The authored representation the proof binds.
+    #[must_use]
+    pub fn authored_source(&self) -> &AuthoredTypeSource {
+        &self.authored_source
+    }
+
     fn matches(
         &self,
         resolved_source: &SemanticTypeSource,
@@ -557,6 +569,12 @@ impl PublicationPolicy {
     #[must_use]
     pub fn incomplete_reason(&self) -> Option<PublicationPolicyReason> {
         self.incomplete_reason
+    }
+
+    /// The symbolic-equivalence proof the policy carries, if any.
+    #[must_use]
+    pub fn symbolic_equivalence(&self) -> Option<&SymbolicEquivalenceProof> {
+        self.symbolic_equivalence.as_ref()
     }
 }
 

@@ -410,6 +410,104 @@ impl ResolvedTypeGraphSnapshot {
     pub(crate) fn root_node_id(&self) -> u32 {
         self.root_node_id
     }
+
+    /// Heap the snapshot keeps reachable beyond its inline bytes: both
+    /// tables' `Arc` blocks — each counted once per `aliases`, so clones of
+    /// one snapshot share them — and every string's and node list's
+    /// backing by capacity. The snapshot's owner charges it inline.
+    #[must_use]
+    pub fn owned_heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        use verter_session_query::retention::allocation::{arc_slice_block_bytes, string_bytes};
+        let Self {
+            strings,
+            nodes,
+            root_node_id: _,
+            stable_key: _,
+        } = self;
+        let strings_bytes = arc_slice_block_bytes(strings, aliases).map_or(0, |block| {
+            block + strings.iter().map(string_bytes).sum::<usize>()
+        });
+        let nodes_bytes = arc_slice_block_bytes(nodes, aliases).map_or(0, |block| {
+            block
+                + nodes
+                    .iter()
+                    .map(PersistedGraphNode::heap_bytes)
+                    .sum::<usize>()
+        });
+        strings_bytes + nodes_bytes
+    }
+}
+
+impl PersistedGraphNode {
+    /// Every list backing this node owns, by capacity. Every other field
+    /// is an inline id or flag.
+    fn heap_bytes(&self) -> usize {
+        use verter_session_query::retention::allocation::vec_bytes;
+        match self {
+            Self::Union { types } | Self::Intersection { types } => vec_bytes(types),
+            Self::Tuple {
+                readonly: _,
+                elements,
+            } => vec_bytes(elements),
+            Self::Object { members } => {
+                vec_bytes(members)
+                    + members
+                        .iter()
+                        .map(|member| member.key.as_ref().map_or(0, property_key_heap_bytes))
+                        .sum::<usize>()
+            }
+            Self::Function {
+                parameters,
+                return_type: _,
+                type_parameters,
+            } => vec_bytes(parameters) + vec_bytes(type_parameters),
+            Self::Ref {
+                name: _,
+                type_arguments,
+            } => vec_bytes(type_arguments),
+            Self::IntrinsicApplication { op: _, arguments } => vec_bytes(arguments),
+            Self::TypeOf { path } => vec_bytes(path),
+            Self::TemplateLiteral {
+                quasis,
+                expressions,
+            } => vec_bytes(quasis) + vec_bytes(expressions),
+            Self::RecursiveRef {
+                name: _,
+                type_arguments,
+                conditional_context,
+            } => vec_bytes(type_arguments) + vec_bytes(conditional_context),
+            Self::Primitive { .. }
+            | Self::LiteralString { .. }
+            | Self::LiteralNumber { .. }
+            | Self::LiteralBoolean { .. }
+            | Self::LiteralBigInt { .. }
+            | Self::Array { .. }
+            | Self::TypeParameter { .. }
+            | Self::KeyOf { .. }
+            | Self::IndexedAccess { .. }
+            | Self::Conditional { .. }
+            | Self::Mapped { .. }
+            | Self::Parenthesized { .. }
+            | Self::Unknown { .. }
+            | Self::Infer { .. }
+            | Self::Rest { .. } => 0,
+        }
+    }
+}
+
+/// The member path list a unique-symbol key owns.
+fn property_key_heap_bytes(key: &GraphPropertyKey) -> usize {
+    match key {
+        GraphPropertyKey::UniqueSymbol { member_path, .. } => {
+            verter_session_query::retention::allocation::vec_bytes(member_path)
+        }
+        GraphPropertyKey::String { .. }
+        | GraphPropertyKey::Number { .. }
+        | GraphPropertyKey::Computed { .. } => 0,
+    }
 }
 
 /// The sealed OUTPUT value of a resolved JSDoc `{Type}` tag payload: an

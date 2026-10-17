@@ -837,3 +837,54 @@ fn synthetic_slot_binding_is_live_wire_only_and_capture_fails_closed() {
         "the present scope / binding fields of the sentinel carrier still intern"
     );
 }
+
+/// A snapshot's footprint follows what its tables keep alive: a long
+/// literal in the string table and a wide union's member list each add at
+/// least their backing, and a clone of one snapshot shares both tables.
+#[test]
+fn snapshot_heap_counts_its_strings_and_node_lists_once_per_shared_table() {
+    use verter_session_query::retention::allocation::{heap_block_bytes, AliasSet};
+    const LONG: usize = 40_000;
+    const ARMS: u32 = 2_000;
+    let capture = |ty: &TypeExpr| {
+        let mut producer = GraphBuilder::new();
+        let root = producer.node_id(ty);
+        crate::graph::snapshot::ResolvedTypeGraphSnapshot::from_builder(producer, root)
+            .expect("valid non-synthetic snapshot")
+    };
+    let literal = |text: String| TypeExpr::Literal(LiteralValue::String(text));
+    let heap = |snapshot: &crate::graph::snapshot::ResolvedTypeGraphSnapshot| {
+        snapshot.owned_heap_bytes(&mut AliasSet::new())
+    };
+
+    let short = heap(&capture(&literal("s".to_string())));
+    let long = heap(&capture(&literal("s".repeat(LONG))));
+    assert!(
+        long >= short + heap_block_bytes(LONG) - heap_block_bytes(1),
+        "a {LONG}-byte literal must add its string backing ({short} -> {long})"
+    );
+
+    let union = |arms: u32| {
+        TypeExpr::Union(Arc::from(
+            (0..arms)
+                .map(|arm| TypeExpr::Literal(LiteralValue::Number(f64::from(arm))))
+                .collect::<Vec<_>>(),
+        ))
+    };
+    let narrow = heap(&capture(&union(2)));
+    let wide = heap(&capture(&union(ARMS)));
+    assert!(
+        wide >= narrow + heap_block_bytes(ARMS as usize * std::mem::size_of::<u32>()),
+        "a {ARMS}-arm union must add its member list backing ({narrow} -> {wide})"
+    );
+
+    let snapshot = capture(&literal("s".repeat(LONG)));
+    let clone = snapshot.clone();
+    let mut aliases = AliasSet::new();
+    assert_eq!(snapshot.owned_heap_bytes(&mut aliases), long);
+    assert_eq!(
+        clone.owned_heap_bytes(&mut aliases),
+        0,
+        "a clone shares both tables"
+    );
+}
