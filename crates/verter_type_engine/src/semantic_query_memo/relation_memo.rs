@@ -104,6 +104,7 @@ impl SemanticGraphStore {
                 ctx,
                 None,
                 None,
+                None,
                 false,
             )?;
             Some(hit.map_value(|value| match value {

@@ -1983,7 +1983,7 @@ impl SemanticGraphStore {
             let requested = crate::semantic_query::demand::MaterializedPoint::new(
                 family::point_for_slot(slot, &requested_path_for_key(key)),
             );
-            self.get_validated_value_impl(&family, slot, &requested, ctx, None, None, true)
+            self.get_validated_value_impl(&family, slot, &requested, ctx, None, None, None, true)
                 .map(narrow_cache_read)
         }
     }
@@ -2002,6 +2002,7 @@ impl SemanticGraphStore {
         let producer::CaptureParts {
             evidence: operand_evidence,
             carrier: deferred_carrier,
+            roots: deferred_roots,
         } = capture.parts();
         self.get_validated_value_impl(
             prepared.family(),
@@ -2010,6 +2011,7 @@ impl SemanticGraphStore {
             ctx,
             operand_evidence,
             deferred_carrier,
+            deferred_roots,
             true,
         )
     }
@@ -2038,6 +2040,7 @@ impl SemanticGraphStore {
         deferred_carrier: Option<
             &mut Option<verter_session_query::facts::fact_cache::ReadSetSignature>,
         >,
+        deferred_roots: Option<&mut Option<Arc<[Arc<str>]>>>,
         record_miss: bool,
     ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
         // Snapshot the candidate list under the lock, then validate
@@ -2082,6 +2085,9 @@ impl SemanticGraphStore {
             match deferred_carrier {
                 Some(slot) => *slot = Some(entry.read_set_signature.clone()),
                 None => entry.read_set_signature.bubble(ctx),
+            }
+            if let Some(roots) = deferred_roots {
+                *roots = Some(Arc::clone(&entry.self_root_canonicals));
             }
             let dep_signature = Arc::clone(&entry.dispatch_dep_signature);
             CacheRead {
@@ -2177,6 +2183,7 @@ impl SemanticGraphStore {
         let producer::CaptureParts {
             evidence: operand_evidence,
             carrier: deferred_carrier,
+            roots: deferred_roots,
         } = capture.parts();
         let key = prepared.key();
         let family = prepared.family();
@@ -2233,6 +2240,9 @@ impl SemanticGraphStore {
             Some(slot) => *slot = Some(entry.read_set_signature.clone()),
             None => entry.read_set_signature.bubble_via_tls(),
         }
+        if let Some(roots) = deferred_roots {
+            *roots = Some(Arc::clone(&entry.self_root_canonicals));
+        }
         let hit = CacheRead {
             lease: entry.lease,
             value: entry.result,
@@ -2242,7 +2252,45 @@ impl SemanticGraphStore {
             fact_status: crate::semantic_query::FactStatus::Complete,
             receipt: crate::semantic_query::ReadReceipt::Priced(entry.cost_receipt),
         };
+        self.note_warm_hit(key);
+        Some(hit)
+    }
 
+    /// The observations of one family-memo lookup entry, warm or cold.
+    pub(crate) fn note_lookup_entry(&self) {
+        crate::loop5_instrumentation::EXECUTE_COOPERATIVE_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The observations a family-memo lookup that missed `key` makes.
+    pub(crate) fn note_lookup_miss(&self, key: &SemanticQueryKey) {
+        crate::loop5_instrumentation::FAMILY_MEMO_MISSES.fetch_add(1, Ordering::Relaxed);
+        #[cfg(any(test, feature = "test-support"))]
+        crate::project_semantic_dispatch::raise::record_dispatch_cold(key);
+        #[cfg(any(test, feature = "test-support"))]
+        crate::capture_token::with_active_capture(|t| t.record_dispatch(key, /* hit */ false));
+        tracing::debug!(
+            target: "verter::memo::miss",
+            ?key,
+            "memo_miss"
+        );
+    }
+
+    /// The observations of a lookup of `key` a dispatcher answers from a
+    /// result it already holds, in place of a family-memo lookup: the
+    /// lookup entry, then the warm hit a lookup of a result the memo holds
+    /// (`resident`) makes, else the miss a lookup of a result completed for
+    /// one request alone makes.
+    pub(crate) fn note_replayed_lookup(&self, key: &SemanticQueryKey, resident: bool) {
+        self.note_lookup_entry();
+        if resident {
+            self.note_warm_hit(key);
+        } else {
+            self.note_lookup_miss(key);
+        }
+    }
+
+    /// The observations a family-memo lookup answered warm for `key` makes.
+    fn note_warm_hit(&self, key: &SemanticQueryKey) {
         // Instrumentation — fast-path attribution.
         crate::loop5_instrumentation::WARM_HIT_FAST_PATH_HITS
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2289,8 +2337,6 @@ impl SemanticGraphStore {
             ?key,
             "memo_hit"
         );
-
-        Some(hit)
     }
 
     /// Abort and retire one canceled cold owner without publishing a result.

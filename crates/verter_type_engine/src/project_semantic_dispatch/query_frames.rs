@@ -483,19 +483,54 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let (_connected_guard, preexisting_trip) = self.enter_connected_demand(false);
         let query_depth_guard =
             self.charge_query_entry(key, preexisting_trip, nesting.query_levels() > 0)?;
-        let mut capture = match carrier {
-            Some(slot) => ReadCapture::deferring_carrier(slot),
-            None => ReadCapture::default(),
+        // A result this dispatcher already holds answers before the memo
+        // is looked up.
+        let deliver = |carrier: Option<&mut Option<ReadSetSignature>>, held: ReadSetSignature| {
+            match carrier {
+                Some(slot) => *slot = Some(held),
+                None => held.bubble_via_tls(),
+            }
         };
-        let attempt = match self.graph().begin_query_claim(
+        match self.replay_kept_read(key, nesting) {
+            super::KeptReplay::Served(read, held) => {
+                deliver(carrier, held);
+                return Err(self.attribute_query_read(
+                    key,
+                    false,
+                    read,
+                    &CarrierNormalizationPrelude::none(),
+                ));
+            }
+            super::KeptReplay::Refused(_, held) => {
+                if let Some(held) = held {
+                    deliver(carrier, held);
+                }
+                let attempt = self
+                    .graph()
+                    .begin_query_recompute(self.snapshot.flags(), key.clone())?;
+                return Ok((attempt, query_depth_guard));
+            }
+            super::KeptReplay::Absent => {}
+        }
+        let mut warm = None;
+        let mut warm_roots = None;
+        let begun = self.graph().begin_query_claim(
             self.ctx,
             self.snapshot.flags(),
             key.clone(),
-            &mut capture,
-        ) {
+            &mut ReadCapture::deferring_carrier_with_roots(&mut warm, &mut warm_roots),
+        );
+        let attempt = match begun {
             Ok(attempt) => attempt,
             Err(read) => {
-                match self.served_read(key, read, nesting) {
+                let served = self.served_read(key, read, nesting);
+                if let Some(held) = warm {
+                    if let Ok(read) = &served {
+                        self.keep_served(key, read, &held, warm_roots.as_ref());
+                    }
+                    deliver(carrier, held);
+                }
+                match served {
                     Ok(read) => {
                         return Err(self.attribute_query_read(
                             key,
@@ -770,7 +805,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             let published = settled.published_carrier();
                             let read = settled.complete(self.ctx, &mut capture);
                             if let Some(carrier) = published {
-                                self.keep_published(&frame.key, &read, carrier, frame.computed_at);
+                                self.keep_published(
+                                    &frame.key,
+                                    &read,
+                                    carrier,
+                                    frame.computed_at,
+                                    true,
+                                );
                             }
                             read
                         }
