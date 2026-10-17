@@ -637,6 +637,7 @@ pub type ResolvedJsdocTag = crate::resolver_core::ResolvedJsdocTag;
 /// `Expanded` mode carries materialized surfaces; `Type` mode carries
 /// identity/location only.
 #[derive(Debug, Clone)]
+#[derive(verter_retention::heap_size::HeapSize)]
 pub struct ResolvedComponentMetaComputeAudit {
     pub timings: crate::component_meta_audit::RequestTimingAudit,
     pub solver: crate::component_meta_audit::ComponentMetaPayload,
