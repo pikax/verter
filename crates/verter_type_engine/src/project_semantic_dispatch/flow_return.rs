@@ -9672,8 +9672,12 @@ use contextual::ContextualSignature;
 mod correlation;
 #[path = "flow_return_destructure.rs"]
 mod destructure;
+#[path = "flow_return_disjunction.rs"]
+mod disjunction;
 #[path = "flow_return_footprint.rs"]
 mod footprint;
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+pub use disjunction::{disjunction_work_observed, DisjunctionWork};
 
 #[path = "flow_return_schedule.rs"]
 pub mod schedule;
@@ -12216,45 +12220,6 @@ pub fn standing_narrowings(
         .into_iter()
         .map(|(_, subject, node)| (subject.clone(), node))
         .collect()
-}
-
-/// Fold a ledger `window` into `standing`, the facts standing one per
-/// subject: a fact about a subject already standing replaces it where it
-/// stands, and a kill drops what it names. Per subject, the newest fact and
-/// the place the subject first stood are those of [`standing_narrowings`]
-/// over the same entries.
-fn fold_standing_narrowings(
-    standing: &mut Vec<(
-        FlowProductSubject,
-        verter_session_query::flow::slice::SliceNarrowSubject,
-        SemanticNodeId,
-    )>,
-    window: &[NarrowingLedgerEntry],
-) {
-    for entry in window {
-        match entry {
-            NarrowingLedgerEntry::Established {
-                root,
-                subject,
-                node,
-            } => match standing
-                .iter_mut()
-                .find(|(_, candidate, _)| candidate == subject)
-            {
-                Some(fact) => *fact = (root.clone(), subject.clone(), *node),
-                None => standing.push((root.clone(), subject.clone(), *node)),
-            },
-            NarrowingLedgerEntry::Cleared { root } => {
-                standing.retain(|(candidate, _, _)| candidate != root);
-            }
-            NarrowingLedgerEntry::ClearedBelow { root, path } => {
-                standing.retain(|(candidate, subject, _)| {
-                    candidate != root
-                        || !(subject.path.len() > path.len() && subject.path.starts_with(path))
-                });
-            }
-        }
-    }
 }
 
 /// Parameter initialization also establishes its hoisted declaration aliases.
@@ -18995,131 +18960,6 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 verter_session_query::flow::policy::FlowGap::GuardNarrowing,
             )),
         }
-    }
-
-    /// The union-of-facts reading of a disjunction: each disjunct's
-    /// narrow is computed against the starting overlay as the operands
-    /// before it LEFT it — `a || b` is true through `a`, or through `b`
-    /// once `a` is false, exactly as the checker narrows the right operand
-    /// by the left's other edge — and a subject narrowed by every disjunct
-    /// lands the union of the per-disjunct narrows. A subject some
-    /// disjunct leaves unnarrowed contributes its ORIGINAL type to that
-    /// union — which is the original type, so no narrow is established
-    /// for it.
-    fn apply_guard_union(
-        &mut self,
-        parts: &[verter_session_query::flow::slice::SliceGuard],
-        positive: bool,
-    ) {
-        let mut alternatives: Vec<
-            Vec<(
-                verter_session_query::flow::slice::SliceNarrowSubject,
-                SemanticNodeId,
-            )>,
-        > = Vec::with_capacity(parts.len());
-        // Each alternative reads every earlier part the other way, then its
-        // own part. The earlier parts' readings are applied once, as a
-        // prefix that grows by one part per alternative, and the prefix's
-        // standing facts are kept one per subject (the newest, where the
-        // subject first stood — all the union reads), so a chain of `n`
-        // conjuncts costs `n` applications here rather than `n²`.
-        let base = self.narrowing_snapshot();
-        let mut prefix_standing = Vec::new();
-        for (index, part) in parts.iter().enumerate() {
-            let prefix = self.narrowing_snapshot();
-            self.apply_guard_scoped(part, positive);
-            let mut alternative = prefix_standing.clone();
-            fold_standing_narrowings(
-                &mut alternative,
-                &self.narrowing_writes[prefix.writes.min(self.narrowing_writes.len())..],
-            );
-            alternatives.push(
-                alternative
-                    .into_iter()
-                    .map(|(_, subject, node)| (subject, node))
-                    .collect(),
-            );
-            self.restore_narrowings(prefix);
-            if index + 1 < parts.len() {
-                let extension = self.narrowing_writes.len();
-                self.apply_guard_scoped(part, !positive);
-                fold_standing_narrowings(&mut prefix_standing, &self.narrowing_writes[extension..]);
-            }
-        }
-        self.restore_narrowings(base);
-        for (subject, node) in self.union_of_alternatives(alternatives) {
-            self.push_narrowing(&subject, node);
-        }
-    }
-
-    /// The per-reference union over `alternatives`, each the facts one
-    /// path established in write order (the newest fact about a reference
-    /// is the one standing at its end): a reference every alternative
-    /// narrowed, with the union of its per-alternative narrows. A
-    /// reference some alternative leaves unnarrowed has its original type
-    /// on that path, which the union would be, so it is left out.
-    fn union_of_alternatives(
-        &mut self,
-        alternatives: Vec<
-            Vec<(
-                verter_session_query::flow::slice::SliceNarrowSubject,
-                SemanticNodeId,
-            )>,
-        >,
-    ) -> Vec<(
-        verter_session_query::flow::slice::SliceNarrowSubject,
-        SemanticNodeId,
-    )> {
-        let alternatives: Vec<Vec<_>> = alternatives
-            .into_iter()
-            .map(|applied| {
-                let mut final_overlay: Vec<(
-                    verter_session_query::flow::slice::SliceNarrowSubject,
-                    SemanticNodeId,
-                )> = Vec::with_capacity(applied.len());
-                for (subject, node) in applied {
-                    match final_overlay
-                        .iter_mut()
-                        .find(|(candidate, _)| *candidate == subject)
-                    {
-                        Some((_, current)) => *current = node,
-                        None => final_overlay.push((subject, node)),
-                    }
-                }
-                final_overlay
-            })
-            .collect();
-        let mut unions = Vec::new();
-        let mut subjects: Vec<verter_session_query::flow::slice::SliceNarrowSubject> = Vec::new();
-        for alternative in &alternatives {
-            for (subject, _) in alternative {
-                if !subjects.contains(subject) {
-                    subjects.push(subject.clone());
-                }
-            }
-        }
-        for subject in subjects {
-            let narrowed_in_all = alternatives.iter().all(|alternative| {
-                alternative
-                    .iter()
-                    .any(|(candidate, _)| *candidate == subject)
-            });
-            if !narrowed_in_all {
-                continue;
-            }
-            let nodes: Vec<SemanticNodeId> = alternatives
-                .iter()
-                .flat_map(|alternative| {
-                    alternative
-                        .iter()
-                        .filter(|(candidate, _)| *candidate == subject)
-                        .map(|(_, node)| *node)
-                })
-                .collect();
-            let node = self.union(&nodes);
-            unions.push((subject, node));
-        }
-        unions
     }
 
     /// Read the type predicate the function's single return establishes

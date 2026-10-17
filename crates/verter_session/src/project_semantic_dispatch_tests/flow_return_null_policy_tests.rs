@@ -11635,6 +11635,249 @@ fn a_2000_operand_and_chain_lowers_and_evaluates_on_a_small_stack() {
     );
 }
 
+/// `anyMissing`, testing an `||` chain of `subjects` independent
+/// parameters for `undefined` and returning the first parameter on the
+/// chain's true edge, the last one past it.
+fn independent_or(subjects: usize) -> String {
+    let parameters: Vec<String> = (0..subjects)
+        .map(|subject| format!("a{subject}: string | undefined"))
+        .collect();
+    let disjuncts: Vec<String> = (0..subjects)
+        .map(|subject| format!("a{subject} === undefined"))
+        .collect();
+    format!(
+        "export function anyMissing({}) {{ if ({}) {{ return a0; }} return a{}; }}\n",
+        parameters.join(", "),
+        disjuncts.join(" || "),
+        subjects - 1
+    )
+}
+
+/// The disjunction work `anyMissing` over `subjects` parameters does on
+/// one fresh host, with its answer: the environment entries the guard
+/// union wrote and the subject identities it probed.
+fn independent_or_work(subjects: usize) -> (String, usize, usize) {
+    let host = four_policy_host();
+    let path = format!("{STRICT_ROOT}/independent-or-{subjects}.ts");
+    upsert(&host, &path, &independent_or(subjects));
+    let before = super::flow_return::disjunction_work_observed();
+    let answer = observe(&host, &path, "anyMissing");
+    let after = super::flow_return::disjunction_work_observed();
+    (
+        answer,
+        after.environment_entries - before.environment_entries,
+        after.subject_probes - before.subject_probes,
+    )
+}
+
+/// An `||` guard over independent references reads every disjunct
+/// against ONE prefix environment the earlier disjuncts' false readings
+/// extend in place, and joins the per-reference union by subject index,
+/// so the entries it writes and the subject identities it probes grow
+/// linearly with the chain: doubling the chain at most doubles them,
+/// with slack for per-guard constants. Copying the prefix into every
+/// alternative grew the entries with the square of the chain, and
+/// rescanning each alternative's subjects for the union grew the probes
+/// with its cube.
+///
+/// Measured on TypeScript 7.0.2 (`--declaration --emitDeclarationOnly`)
+/// over 4 and 128 subjects: `string | undefined` with `strictNullChecks`.
+#[test]
+fn an_or_guard_over_independent_subjects_does_linear_environment_work() {
+    let measured: Vec<(usize, (String, usize, usize))> = [128, 256, 512, 1024]
+        .into_iter()
+        .map(|subjects| (subjects, independent_or_work(subjects)))
+        .collect();
+    for (subjects, (answer, entries, probes)) in &measured {
+        assert_eq!(answer, "string | undefined", "{subjects} subjects");
+        assert!(
+            *entries >= *subjects && *probes >= *subjects,
+            "{subjects} subjects: every disjunct is read ({entries} entries, {probes} probes)"
+        );
+    }
+    for pair in measured.windows(2) {
+        let (small, (_, small_entries, small_probes)) = &pair[0];
+        let (large, (_, large_entries, large_probes)) = &pair[1];
+        assert!(
+            4 * large_entries <= 9 * small_entries,
+            "entries grow linearly: {small_entries} over {small} subjects, {large_entries} over {large}"
+        );
+        assert!(
+            4 * large_probes <= 9 * small_probes,
+            "probes grow linearly: {small_probes} over {small} subjects, {large_probes} over {large}"
+        );
+    }
+}
+
+/// Union-of-facts controls: a conjunct's newest fact about a reference
+/// shadows its earlier one inside the alternative (`shadow`,
+/// `shadowMember`); each disjunct reads the earlier ones' false edge
+/// (`shortCircuit`, `shortCircuitUnknown`, `sharedSubject`); a nested
+/// disjunction restores its own environment before its conjunction
+/// continues (`nestedUnion`, `negatedConjunction`); a block-scoped
+/// binding is its own reference however it is spelled (`lexical`); and a
+/// guard reads the newest write that reaches it (`newestWrite`,
+/// `rewrittenBetween`).
+const DISJUNCTION_CONTROLS: &str = r#"
+export function shadow(a: string | number | object | null) {
+  if ((typeof a === "object" && a !== null) || typeof a === "string") { return a; }
+  return null;
+}
+export function shadowMember(o: { k: "a"; v: string | null } | { k: "b"; v: number }) {
+  if ((o.k === "a" && o.v !== null) || typeof o.v === "number") { return o.v; }
+  return undefined;
+}
+export function shortCircuit(o: { v: string | number } | undefined) {
+  if (o === undefined || typeof o.v === "string") { return o; }
+  return null;
+}
+export function shortCircuitUnknown(x: unknown) {
+  if (typeof x === "string" || typeof x === "number") { return x; }
+  return null;
+}
+export function sharedSubject(x: "a" | "b" | "c" | "d") {
+  if (x === "a" || x === "b" || x === "c") { return x; }
+  return null;
+}
+export function nestedUnion(a: string | number | boolean, b: string | undefined) {
+  if ((typeof a === "string" || typeof a === "number") && (b === undefined || typeof a === "string")) { return a; }
+  return null;
+}
+export function negatedConjunction(a: string | number | boolean, b: "x" | "y") {
+  if (!(typeof a === "string" && b === "x")) { return a; }
+  return null;
+}
+export function lexical(x: string | number, y: string | boolean) {
+  if (typeof x === "string" || typeof y === "string") {
+    { const x = y; if (typeof x === "boolean" || typeof y === "boolean") { return x; } }
+  }
+  return null;
+}
+export function newestWrite(a: string | number | boolean) {
+  let b = a;
+  if (typeof b === "string") { b = 1; }
+  if (typeof b === "number" || typeof b === "boolean") { return b; }
+  return null;
+}
+export function rewrittenBetween(a: string | number, c: boolean) {
+  let b: string | number | undefined = a;
+  if (c) { b = undefined; }
+  if (b === undefined || typeof b === "number") { return b; }
+  return true;
+}
+"#;
+
+/// Measured on TypeScript 7.0.2 (`--declaration --emitDeclarationOnly`,
+/// with and without `strictNullChecks`; every function is annotated, so
+/// `noImplicitAny` does not move a row).
+const DISJUNCTION_CONTROLS_TABLE: &[(&str, &str, &str, &str, &str)] = &[
+    (
+        "shadow",
+        "null | object | string",
+        "object | string",
+        "null | object | string",
+        "object | string",
+    ),
+    (
+        "shadowMember",
+        "number | string | undefined",
+        "number | string",
+        "number | string | undefined",
+        "number | string",
+    ),
+    (
+        "shortCircuit",
+        "null | undefined | { v: number | string }",
+        "{ v: number | string }",
+        "null | undefined | { v: number | string }",
+        "{ v: number | string }",
+    ),
+    (
+        "shortCircuitUnknown",
+        "null | number | string",
+        "number | string",
+        "null | number | string",
+        "number | string",
+    ),
+    (
+        "sharedSubject",
+        "\"a\" | \"b\" | \"c\" | null",
+        "\"a\" | \"b\" | \"c\"",
+        "\"a\" | \"b\" | \"c\" | null",
+        "\"a\" | \"b\" | \"c\"",
+    ),
+    (
+        "nestedUnion",
+        "null | number | string",
+        "number | string",
+        "null | number | string",
+        "number | string",
+    ),
+    (
+        "negatedConjunction",
+        "boolean | null | number | string",
+        "boolean | number | string",
+        "boolean | null | number | string",
+        "boolean | number | string",
+    ),
+    (
+        "lexical",
+        "boolean | null | string",
+        "boolean | string",
+        "boolean | null | string",
+        "boolean | string",
+    ),
+    (
+        "newestWrite",
+        "boolean | null | number",
+        "boolean | number",
+        "boolean | null | number",
+        "boolean | number",
+    ),
+    (
+        "rewrittenBetween",
+        "number | true | undefined",
+        "number | string | true",
+        "number | true | undefined",
+        "number | string | true",
+    ),
+];
+
+/// The disjunction controls answer the checker's types, and a warm read
+/// of every row on the same host and a fresh host's cold read agree with
+/// the first read.
+#[test]
+fn disjunction_controls_match_the_checker_fresh_and_warm() {
+    assert_measured_matrix(
+        "disjunction-controls.ts",
+        DISJUNCTION_CONTROLS,
+        DISJUNCTION_CONTROLS_TABLE,
+    );
+    let roots = [
+        STRICT_ROOT,
+        LOOSE_ROOT,
+        STRICT_IMPLICIT_ROOT,
+        LOOSE_IMPLICIT_ROOT,
+    ];
+    let warm_host = four_policy_host();
+    let fresh_host = four_policy_host();
+    for root in roots {
+        let canonical = format!("{root}/disjunction-controls.ts");
+        upsert(&warm_host, &canonical, DISJUNCTION_CONTROLS);
+        upsert(&fresh_host, &canonical, DISJUNCTION_CONTROLS);
+    }
+    for (symbol, ..) in DISJUNCTION_CONTROLS_TABLE {
+        for root in roots {
+            let canonical = format!("{root}/disjunction-controls.ts");
+            let cold = observe(&warm_host, &canonical, symbol);
+            let warm = observe(&warm_host, &canonical, symbol);
+            let fresh = observe(&fresh_host, &canonical, symbol);
+            assert_eq!(warm, cold, "{canonical} `{symbol}` warm read");
+            assert_eq!(fresh, cold, "{canonical} `{symbol}` fresh read");
+        }
+    }
+}
+
 /// A return nested in 2,000 parentheses lowers on the declaration-lowering
 /// worker: each parenthesis is re-entered from the lowering's loop, not a
 /// native level each (about 15 KiB per level unoptimized, which overflowed
