@@ -54,7 +54,7 @@ fn family_test_path() -> Arc<[PathSegment]> {
 fn dep_sig_for(canonical: &str, hash: u8) -> DepSignature {
     crate::semantic_query::DepSignature::new(
         vec![crate::semantic_query::DepEntry::new(
-            &*canonical,
+            canonical,
             crate::semantic_query::DepVersion::WholeHash([hash; 16]),
         )]
         .into_boxed_slice(),

@@ -3769,7 +3769,7 @@ fn family_cancelled_does_not_backfill_any_slot() {
 fn dep_sig_for(canonical: &str, hash: u8) -> DepSignature {
     verter_type_engine::semantic_query::DepSignature::new(
         vec![verter_type_engine::semantic_query::DepEntry::new(
-            &*canonical,
+            canonical,
             verter_type_engine::semantic_query::DepVersion::WholeHash([hash; 16]),
         )]
         .into_boxed_slice(),

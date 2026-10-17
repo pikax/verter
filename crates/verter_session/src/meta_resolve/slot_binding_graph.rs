@@ -450,7 +450,7 @@ fn accumulate_lowered_node_carrier_deps(
         .into_iter()
         .map(|(canonical, hash)| {
             verter_type_engine::semantic_query::DepEntry::new(
-                &*canonical,
+                &canonical,
                 DepVersion::WholeHash(hash),
             )
         })

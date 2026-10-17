@@ -104,7 +104,7 @@ fn multiple_whole_hashes_all_convert() {
     let entries: Vec<DepEntry> = (0u8..5)
         .map(|i| {
             let canon: &'static str = Box::leak(format!("file_{i}.ts").into_boxed_str());
-            DepEntry::new(&*canon, DepVersion::WholeHash([i; 16]))
+            DepEntry::new(canon, DepVersion::WholeHash([i; 16]))
         })
         .collect();
 

@@ -50,7 +50,7 @@ fn formula() -> verter_type_engine::semantic_query::ObjectProjectionFormula {
 fn dep(canonical: &str, seed: u8) -> DepSignature {
     verter_type_engine::semantic_query::DepSignature::new([
         verter_type_engine::semantic_query::DepEntry::new(
-            &*canonical,
+            canonical,
             DepVersion::WholeHash([seed; 16]),
         ),
     ])

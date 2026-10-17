@@ -576,13 +576,13 @@ fn combine_dep_signatures(
 ) -> verter_type_engine::semantic_query::DepSignature {
     let mut out: Vec<verter_type_engine::semantic_query::DepEntry> =
         Vec::with_capacity(a.len() + b.len());
-    let mut seen: rustc_hash::FxHashSet<&verter_type_engine::semantic_query::DepEntry> =
+    let mut seen: rustc_hash::FxHashSet<(&str, &verter_type_engine::semantic_query::DepVersion)> =
         rustc_hash::FxHashSet::default();
     for entry in a.iter().chain(b.iter()) {
         if entry.canonical() == scope_canonical_id || entry.canonical().is_empty() {
             continue;
         }
-        if seen.insert(entry) {
+        if seen.insert((entry.canonical(), entry.version())) {
             // The clone shares the entry's owned canonical.
             out.push(entry.clone());
         }

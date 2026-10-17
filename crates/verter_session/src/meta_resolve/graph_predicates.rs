@@ -405,7 +405,7 @@ pub(crate) fn node_root_reaches_transitive_cycle_with_fence(
             && identity.canonical_id.as_ref() != scope_canonical_id
         {
             fence.push(verter_type_engine::semantic_query::DepEntry::new(
-                &*identity.canonical_id,
+                &identity.canonical_id,
                 verter_type_engine::semantic_query::DepVersion::WholeHash(identity.whole_hash),
             ));
         }

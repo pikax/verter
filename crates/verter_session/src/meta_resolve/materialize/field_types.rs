@@ -104,7 +104,7 @@ fn push_decl_scope_fence(
     }
     match ctx.authoritative_current_content_hash(canonical) {
         Some(whole_hash) => fence.push(verter_type_engine::semantic_query::DepEntry::new(
-            &*canonical,
+            canonical,
             verter_type_engine::semantic_query::DepVersion::WholeHash(whole_hash),
         )),
         None => *refused = true,

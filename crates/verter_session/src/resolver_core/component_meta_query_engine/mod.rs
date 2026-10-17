@@ -260,7 +260,7 @@ pub(crate) fn engine_dep_signature_for_two_canonicals(
             .map(|state| state.whole_hash)
             .unwrap_or_default();
         entries.push(verter_type_engine::semantic_query::DepEntry::new(
-            &*c,
+            c,
             verter_type_engine::semantic_query::DepVersion::WholeHash(whole_hash),
         ));
     };

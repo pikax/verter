@@ -782,7 +782,7 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
     let dep_sig: verter_type_engine::semantic_query::DepSignature =
         verter_type_engine::semantic_query::DepSignature::new(vec![
             verter_type_engine::semantic_query::DepEntry::new(
-                &*dep,
+                dep,
                 DepVersion::WholeHash(dep_indexed.whole_hash),
             ),
         ]);
@@ -1562,10 +1562,7 @@ fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() 
     // dependency — route generation has no validating source.
     let dep_sig: verter_type_engine::semantic_query::DepSignature =
         verter_type_engine::semantic_query::DepSignature::new(vec![
-            verter_type_engine::semantic_query::DepEntry::new(
-                &*dep,
-                DepVersion::RouteGeneration(1),
-            ),
+            verter_type_engine::semantic_query::DepEntry::new(dep, DepVersion::RouteGeneration(1)),
         ]);
 
     // The signature builder MUST refuse admission — `None`. The scope's
@@ -1722,7 +1719,7 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
     let dep_sig: verter_type_engine::semantic_query::DepSignature =
         verter_type_engine::semantic_query::DepSignature::new(vec![
             verter_type_engine::semantic_query::DepEntry::new(
-                &*dep,
+                dep,
                 DepVersion::ProjectGeneration(g_observed),
             ),
         ]);
@@ -1885,7 +1882,7 @@ fn materialize_memo_db_observed_whole_hash_dependency_preserves_observed_hash() 
     let dep_sig: verter_type_engine::semantic_query::DepSignature =
         verter_type_engine::semantic_query::DepSignature::new(vec![
             verter_type_engine::semantic_query::DepEntry::new(
-                &*dep,
+                dep,
                 DepVersion::WholeHash(observed_hash_h1),
             ),
         ]);
@@ -2262,7 +2259,7 @@ fn materialize_memo_db_mixed_scope_observation_refuses_admission() {
     let dep_sig: verter_type_engine::semantic_query::DepSignature =
         verter_type_engine::semantic_query::DepSignature::new(vec![
             verter_type_engine::semantic_query::DepEntry::new(
-                &*scope,
+                scope,
                 DepVersion::WholeHash(h_disagree),
             ),
         ]);

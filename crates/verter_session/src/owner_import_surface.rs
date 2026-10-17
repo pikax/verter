@@ -372,7 +372,7 @@ where
     let mut bindings: FxHashMap<Arc<str>, ResolvedOwnerImport> = FxHashMap::default();
     let mut sig_entries: Vec<verter_type_engine::semantic_query::DepEntry> = Vec::new();
     sig_entries.push(verter_type_engine::semantic_query::DepEntry::new(
-        &*owner_canonical.clone(),
+        &owner_canonical,
         DepVersion::WholeHash(owner_whole_hash),
     ));
 
@@ -384,7 +384,7 @@ where
         };
         if let Some(hash) = target_whole_hash {
             sig_entries.push(verter_type_engine::semantic_query::DepEntry::new(
-                &*canonical_id.clone(),
+                &canonical_id,
                 DepVersion::WholeHash(hash),
             ));
         }
