@@ -1442,6 +1442,57 @@ pub(crate) fn shared_completed_structural_carrier(
     Some((Arc::clone(traced), Arc::from(canonicals)))
 }
 
+/// [`shared_completed_structural_carrier`] for a completion whose
+/// self-roots are `observed_self_roots` together with every file the traced
+/// set reads whole: each of those files is named by its own fact, so the set
+/// is its own carrier when it reads each file at one version and names every
+/// observed self-root at its observed version. The self-root canonicals are
+/// the whole-read files, in canonical order.
+pub(crate) fn shared_completed_carrier_rooting_traced_files(
+    observed_self_roots: &[(Arc<str>, Hash16)],
+    traced: &Arc<[FactVersionRef]>,
+) -> Option<StructuralCarrierReadSet> {
+    if traced.len() > FACT_PAGE_WIDTH {
+        return None;
+    }
+    // Canonical order puts one file's whole-file facts side by side, so a
+    // file read at two versions shows as two adjacent facts of one file.
+    let mut files: Vec<(&str, &Hash16)> = Vec::new();
+    let mut index = 0;
+    while index < traced.len() {
+        let fact = &traced[index];
+        if (index > 0 && traced[index - 1] >= *fact) || is_paged_entry(fact) {
+            return None;
+        }
+        if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
+            if files
+                .last()
+                .is_some_and(|(last, _)| *last == canonical_id.as_str())
+            {
+                return None;
+            }
+            files.push((canonical_id.as_str(), hash));
+        }
+        index += 1;
+    }
+    for (position, (canonical, observed)) in observed_self_roots.iter().enumerate() {
+        let mut other = 0;
+        while other < position {
+            let (earlier, earlier_hash) = &observed_self_roots[other];
+            if earlier == canonical && earlier_hash != observed {
+                return None;
+            }
+            other += 1;
+        }
+        match files.iter().find(|(file, _)| *file == canonical.as_ref()) {
+            Some((_, hash)) if *hash == observed => {}
+            _ => return None,
+        }
+    }
+    let canonicals: Vec<Arc<str>> = files.iter().map(|(file, _)| Arc::from(*file)).collect();
+    Some((Arc::clone(traced), Arc::from(canonicals)))
+}
+
 pub(crate) fn bound_completed_structural_carrier(
     view: &dyn StoreView,
     mut facts: Vec<FactVersionRef>,

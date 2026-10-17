@@ -2229,19 +2229,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // This memo has no single file owner. Every consumed
                 // declaration and augmentation contributor is a strict root,
                 // including whole-file facts retained on evidence pages.
-                roots.extend(signature_entries(&facts).filter_map(|fact| match fact {
-                    FactVersionRef::FileWholeHash { canonical_id, hash } => {
-                        Some((Arc::from(canonical_id.as_str()), *hash))
-                    }
-                    _ => None,
-                }));
-                crate::fact_signature_helpers::shared_completed_structural_carrier(
-                    &roots,
-                    &facts,
-                    &[],
+                crate::fact_signature_helpers::shared_completed_carrier_rooting_traced_files(
+                    &roots, &facts,
                 )
                 .map(Ok)
-                .unwrap_or_else(|| self.ctx.complete_graph_signature(&roots, facts.to_vec()))
+                .unwrap_or_else(|| {
+                    roots.extend(signature_entries(&facts).filter_map(|fact| match fact {
+                        FactVersionRef::FileWholeHash { canonical_id, hash } => {
+                            Some((Arc::from(canonical_id.as_str()), *hash))
+                        }
+                        _ => None,
+                    }));
+                    self.ctx.complete_graph_signature(&roots, facts.to_vec())
+                })
                 .ok()
             }
             FactReadSetFinalise::NonCacheable(_) => None,
