@@ -67,9 +67,11 @@
 //!
 //! Installations NEST: the installer pushes onto a per-thread tracer
 //! STACK, and every observation fans out to ALL active cells (see
-//! `resolver_context`'s fan-out chokepoints). An inner cold compute
-//! therefore records its facts into its own cell AND into every
-//! enclosing one, so an outer compute's observation set stays complete
+//! `resolver_context`'s fan-out chokepoints) — directly, or below a
+//! delivering scope through the completed read set that scope's owner
+//! hands down. An inner cold compute therefore records its facts into its
+//! own cell AND into every enclosing one, so an outer compute's
+//! observation set stays complete
 //! while the inner one can make its OWN admission decision (a nested
 //! non-cacheable read or nested mutation instability refuses the inner
 //! entry without silently laundering into the outer signature). The
@@ -499,6 +501,17 @@ impl FactReadSet {
         }
     }
 
+    /// [`Self::observe`] for a borrowed fact: it is copied only when the
+    /// recent window does not already hold it.
+    #[inline]
+    pub fn observe_ref(&mut self, fact: &FactVersionRef) {
+        let (seen, comparisons) = self.recently_observed(fact);
+        record_signature_work(comparisons);
+        if !seen {
+            self.observations.push(fact.clone());
+        }
+    }
+
     /// Bulk-record a previously finalised signature.
     ///
     /// Used when a higher-tier cold compute consumes a lower-tier
@@ -673,6 +686,49 @@ impl FactReadSet {
         self.observations.is_empty() && self.canonical_runs.is_empty()
     }
 
+    /// The absorbed run that holds every fact this scope observed, when its
+    /// own seal reproduces it ([`seals_unchanged`]): the widest run, every
+    /// other run a subset of it and every local observation in it.
+    fn covering_run(&self) -> Option<usize> {
+        let mut widest = 0;
+        let mut index = 1;
+        while index < self.canonical_runs.len() {
+            if self.canonical_runs[index].len() > self.canonical_runs[widest].len() {
+                widest = index;
+            }
+            index += 1;
+        }
+        let run = self.canonical_runs.get(widest)?;
+        if !seals_unchanged(run) {
+            return None;
+        }
+        let mut compared = 0;
+        let mut covered = true;
+        for observed in &self.observations {
+            match run.binary_search_by(|held| {
+                compared += 1;
+                held.cmp(observed)
+            }) {
+                Ok(_) => {}
+                Err(_) => {
+                    covered = false;
+                    break;
+                }
+            }
+        }
+        let mut other = 0;
+        while covered && other < self.canonical_runs.len() {
+            if other != widest {
+                let (contained, work) = run_contains(run, &self.canonical_runs[other]);
+                compared += work;
+                covered = contained;
+            }
+            other += 1;
+        }
+        record_signature_work(compared);
+        covered.then_some(widest)
+    }
+
     /// Collapse the tracer into ONE strictly-increasing observation vector:
     /// sort + dedup the local observations, then merge every absorbed
     /// canonical run into them.
@@ -716,13 +772,11 @@ impl FactReadSet {
         if self.mutation_unstable {
             return FactReadSetFinalise::MutationUnstable;
         }
-        // A scope that only replayed one completed witness seals as that
-        // witness: canonicalising it again would rebuild the same facts.
-        if self.observations.is_empty()
-            && self.canonical_runs.len() == 1
-            && seals_unchanged(&self.canonical_runs[0])
-        {
-            let arc = self.canonical_runs.pop().expect("exactly one absorbed run");
+        // A scope whose every observation lies in one completed witness it
+        // replayed seals as that witness: the union is the witness, and
+        // canonicalising it again would rebuild the same facts.
+        if let Some(widest) = self.covering_run() {
+            let arc = self.canonical_runs.swap_remove(widest);
             return if self.non_cacheable_propagation.is_some() {
                 FactReadSetFinalise::NonCacheable(arc)
             } else {
@@ -821,6 +875,13 @@ impl FactReadSetCell {
     #[inline]
     pub fn observe(&self, fact: FactVersionRef) {
         self.0.borrow_mut().observe(fact);
+    }
+
+    /// Record one borrowed observation through `&self`. See
+    /// [`FactReadSet::observe_ref`].
+    #[inline]
+    pub fn observe_ref(&self, fact: &FactVersionRef) {
+        self.0.borrow_mut().observe_ref(fact);
     }
 
     /// Bulk-record a previously finalised signature through `&self`.
@@ -962,6 +1023,34 @@ fn seals_unchanged(run: &[FactVersionRef]) -> bool {
             .any(|fact| matches!(fact, FactVersionRef::DomainGeneration(_)))
 }
 
+/// Whether every fact of the canonical `part` is in the canonical `whole`,
+/// with the comparisons the walk made. Both are strictly increasing, so one
+/// forward walk over each decides it.
+fn run_contains(whole: &[FactVersionRef], part: &[FactVersionRef]) -> (bool, usize) {
+    if part.len() > whole.len() {
+        return (false, 0);
+    }
+    let mut compared = 0;
+    let mut at = 0;
+    for fact in part {
+        loop {
+            let Some(held) = whole.get(at) else {
+                return (false, compared);
+            };
+            compared += 1;
+            match held.cmp(fact) {
+                std::cmp::Ordering::Less => at += 1,
+                std::cmp::Ordering::Equal => {
+                    at += 1;
+                    break;
+                }
+                std::cmp::Ordering::Greater => return (false, compared),
+            }
+        }
+    }
+    (true, compared)
+}
+
 fn page_canonical(entries: Vec<FactVersionRef>) -> Vec<FactVersionRef> {
     page_canonical_at_width(entries, FACT_PAGE_WIDTH)
 }
@@ -991,10 +1080,41 @@ fn page_canonical_at_width(mut entries: Vec<FactVersionRef>, width: usize) -> Ve
 /// tracer. It never compacts: compaction needs a tracer's live basis.
 #[must_use]
 pub fn seal_canonical_signature(mut facts: Vec<FactVersionRef>) -> Arc<[FactVersionRef]> {
-    facts.sort_unstable_by(compare_fact_refs);
-    facts.dedup();
+    sort_dedup_facts(&mut facts);
     crate::facts::fact_cache::drop_subsumed_receipts(&mut facts);
     Arc::from(page_canonical(facts))
+}
+
+/// The most facts appended past a canonical prefix that are placed into it
+/// one by one rather than by sorting the whole collection.
+const APPENDED_TAIL_MAX: usize = 8;
+
+/// Sort `facts` into canonical order and drop duplicates. A hand-assembled
+/// signature is usually a canonical set with a few facts appended (a
+/// self-root beside the traced set): those are placed into the strictly
+/// increasing prefix by binary search, which is the same set in the same
+/// order as a full sort and deduplication.
+fn sort_dedup_facts(facts: &mut Vec<FactVersionRef>) {
+    let mut prefix = facts.len().min(1);
+    while prefix < facts.len()
+        && compare_fact_refs(&facts[prefix - 1], &facts[prefix]) == std::cmp::Ordering::Less
+    {
+        prefix += 1;
+    }
+    if prefix == facts.len() {
+        return;
+    }
+    if facts.len() - prefix > APPENDED_TAIL_MAX {
+        facts.sort_unstable_by(compare_fact_refs);
+        facts.dedup();
+        return;
+    }
+    let tail = facts.split_off(prefix);
+    for fact in tail {
+        if let Err(at) = facts.binary_search_by(|held| compare_fact_refs(held, &fact)) {
+            facts.insert(at, fact);
+        }
+    }
 }
 
 /// Canonical ordering for [`FactVersionRef`] values. Used by
@@ -1060,8 +1180,14 @@ pub fn signature_work_for_tests() -> usize {
 /// lane verifies the precondition it depends on and a non-canonical input
 /// falls back to the ordinary observation path, which sorts it.
 fn is_canonical_run(run: &[FactVersionRef]) -> bool {
-    run.windows(2)
-        .all(|pair| compare_fact_refs(&pair[0], &pair[1]) == std::cmp::Ordering::Less)
+    let mut index = 1;
+    while index < run.len() {
+        if compare_fact_refs(&run[index - 1], &run[index]) != std::cmp::Ordering::Less {
+            return false;
+        }
+        index += 1;
+    }
+    true
 }
 
 /// A signature verified to be a canonical run — strictly increasing under
@@ -1079,50 +1205,72 @@ impl<'a> VerifiedCanonicalRun<'a> {
     }
 }
 
-/// Merge two strictly-increasing runs into one strictly-increasing run,
-/// dropping cross-run duplicates. `O(left.len() + right.len())`
-/// comparisons, one allocation for the output.
-fn merge_canonical_runs<'a>(
-    left: &[&'a FactVersionRef],
-    right: &[&'a FactVersionRef],
-) -> Vec<&'a FactVersionRef> {
+/// One operand of a [`merge_canonical_batch`] round: an absorbed run, or the
+/// borrowed output of an earlier round. Both are strictly increasing.
+enum MergeLevel<'a> {
+    Run(&'a [FactVersionRef]),
+    Merged(Vec<&'a FactVersionRef>),
+}
+
+impl<'a> MergeLevel<'a> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Run(run) => run.len(),
+            Self::Merged(merged) => merged.len(),
+        }
+    }
+
+    fn get(&self, index: usize) -> &'a FactVersionRef {
+        match self {
+            Self::Run(run) => &run[index],
+            Self::Merged(merged) => merged[index],
+        }
+    }
+}
+
+/// Merge two strictly-increasing operands into one strictly-increasing
+/// borrowed run, dropping cross-run duplicates. `O(left.len() +
+/// right.len())` comparisons and one pointer allocation; no fact is copied.
+fn merge_canonical_runs<'a>(left: &MergeLevel<'a>, right: &MergeLevel<'a>) -> MergeLevel<'a> {
     use std::cmp::Ordering;
-    let mut out = Vec::with_capacity(left.len() + right.len());
+    let (left_len, right_len) = (left.len(), right.len());
+    let mut out = Vec::with_capacity(left_len + right_len);
     let (mut i, mut j) = (0usize, 0usize);
-    while i < left.len() && j < right.len() {
-        match compare_fact_refs(left[i], right[j]) {
+    while i < left_len && j < right_len {
+        let (l, r) = (left.get(i), right.get(j));
+        match compare_fact_refs(l, r) {
             Ordering::Less => {
-                out.push(left[i]);
+                out.push(l);
                 i += 1;
             }
             Ordering::Greater => {
-                out.push(right[j]);
+                out.push(r);
                 j += 1;
             }
             Ordering::Equal => {
-                out.push(left[i]);
+                out.push(l);
                 i += 1;
                 j += 1;
             }
         }
     }
-    out.extend_from_slice(&left[i..]);
-    out.extend_from_slice(&right[j..]);
-    out
+    out.extend((i..left_len).map(|index| left.get(index)));
+    out.extend((j..right_len).map(|index| right.get(index)));
+    MergeLevel::Merged(out)
 }
 
-/// Merge in balanced rounds: a run's prefix is copied once per round,
-/// rather than once for every later child witness. The rounds move
-/// references; each surviving fact is cloned once, into the result.
+/// Merge in balanced rounds over borrowed facts, then copy each distinct
+/// fact once: a fact shared by several runs, or carried through several
+/// rounds, is compared as often as before but cloned exactly once.
 fn merge_canonical_batch(
     local: &[FactVersionRef],
     runs: &[Arc<[FactVersionRef]>],
 ) -> Vec<FactVersionRef> {
-    let mut level: Vec<Vec<&FactVersionRef>> = Vec::with_capacity(runs.len() + 1);
+    let mut level: Vec<MergeLevel<'_>> = Vec::with_capacity(runs.len() + 1);
     if !local.is_empty() {
-        level.push(local.iter().collect());
+        level.push(MergeLevel::Run(local));
     }
-    level.extend(runs.iter().map(|run| run.iter().collect()));
+    level.extend(runs.iter().map(|run| MergeLevel::Run(run.as_ref())));
     while level.len() > 1 {
         let mut next = Vec::with_capacity(level.len().div_ceil(2));
         let mut pairs = level.into_iter();
@@ -1134,10 +1282,11 @@ fn merge_canonical_batch(
         }
         level = next;
     }
-    level
-        .pop()
-        .map(|merged| merged.into_iter().cloned().collect())
-        .unwrap_or_default()
+    match level.pop() {
+        Some(MergeLevel::Run(run)) => run.to_vec(),
+        Some(MergeLevel::Merged(merged)) => merged.into_iter().cloned().collect(),
+        None => Vec::new(),
+    }
 }
 
 #[cfg(test)]

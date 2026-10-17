@@ -58,8 +58,8 @@ fn execute_read_cold_build_persists_traced_facts() {
         "shared cold-build helper must exist on ProjectSemanticDispatch"
     );
     assert!(
-        mod_src.contains("install_fact_tracer(&basis_source, || {"),
-        "shared cold-build helper must wrap the cold-build closure with install_fact_tracer, \
+        mod_src.contains("install_delivering_fact_tracer(&basis_source, || {"),
+        "shared cold-build helper must wrap the cold-build closure with its fact tracer, \
          seeded from the request-bound basis source it captured before the closure — a \
          host-only or unbound tracer disarms the cold build's compaction basis"
     );

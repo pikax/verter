@@ -958,6 +958,112 @@ not grow the outer tracer per read. The window bounds insertion work; it
 does not bound the answer or replace final canonicalization. Distinct versions
 of the same fact remain distinct observations.
 
+Per-query frame cost: every cold query seals its tracer, builds its completed
+carrier and registers its memo candidate, so these steps copy nothing per fact
+beyond the output they own. `FactReadSet::finalise` merges absorbed canonical
+runs over borrowed facts (comparison count unchanged) and clones each distinct
+fact once; fan-out to an enclosing tracer copies a fact only when its recent
+window lacks it; `semantic_graph_read_set_signature` keys self-roots in a sorted
+small list and leaves sorting to the one seal. A sealed traced set that
+already holds the build's fence and every observed self-root at its observed
+version is shared as the completed carrier rather than copied and sealed
+again. The reverse index is registered when it is READ, not at publish: a
+publish leaves its candidate unindexed (`MemoEntry::reverse_indexed`) and every
+read of `canonical_to_entries` — `invalidate_canonical` and the diagnostic
+counts — first registers every unindexed resident candidate under the same
+`entries` hold (`index_unregistered_candidates_locked`), so a read sees every
+resident candidate and a candidate displaced or FIFO-evicted before any read
+is dropped with nothing to prune. Registration and every drain go through ONE
+borrowed projection (`RegisteredCanonicals` over
+`ReadSetSignature::for_each_canonical_id` ∪ the dispatch-fence canonicals), so
+they stay symmetric without allocating a canonical per call; an existing shard
+is reached by a read guard (which excludes the outer `remove_if` like the
+write-locked `entry` path), and a prune attempts the outer drop only when it
+emptied the inner map. The
+allocation canary `recursive_paths_allocations_per_entity_stay_flat` guards the
+per-entity allocation ceiling and its flat growth across layouts.
+
+Delivering tracer scopes: an observation fans out from the innermost tracer
+down to the first DELIVERING scope inclusive (`fact_tracing::tracing::
+install_delivering`), not to every level. A scope is delivering only when its
+owner hands its whole completed read set, or a carrier holding at least those
+facts, to the scopes active when it completes: the semantic-memo cold build
+(`install_delivering_fact_tracer`; `ProducerLease`/`SettledProducer::complete`
+bubbles the carrier — traced facts, fence and prelude facts, self-roots —
+whether or not the result is admitted, and a joiner receives the same carrier)
+and the stepwise continuation tracers (`OwnedFactTracer`: an evaluation frame
+replays its sealed set into its parent frame, the root frame and every frame of
+a stopped evaluation into the tracers around the evaluation; an instantiation
+frame's carrier is replayed by the consuming frame or the drive's entry).
+Every other installer stays eager. Non-cacheability marks and recorders still
+reach every level. A scope below a delivering one therefore receives that
+scope's facts once, deduplicated, instead of once per observation at every
+depth. The fact-work canary `recursive_paths_fact_work_per_entity_stays_flat`
+guards the per-entity fact work and its flat growth.
+
+Root self-evaluation: a deferred-evaluation ROOT that finishes as itself
+(`evaluates_to_itself`) is admitted without a frame, tracer or memo entry: its
+cold run is one step under its own `(node, context, demand)` identity with an
+empty read set, so the dispatcher admits a receipt of exactly that cost
+(cached per dispatcher, one per identity) — charged once per connected demand,
+request operations marked paid, recorded as the consumer's prerequisite in
+place. A demand that cannot pay runs the evaluation and reports its limit as a
+cold one does.
+
+Construction ownership: an intern records its construction count on the
+innermost construction owner of its arena as a bare ordinal, released in one
+batch when that owner closes. A delivery lease is held by the OLDEST open
+owner of its arena (`NodeRootScope::capture_delivery`; the innermost owner
+when the lease names no arena): a closing owner hands its deliveries to
+another open owner of the arena, so a delivery lives until no owner of its
+arena is open on the thread whichever owner holds it, and holding it at the
+oldest spares the hand-on at every nested scope's close. A closing owner that
+does hold deliveries merges the smaller holding into the larger.
+
+Kept results: a dispatcher keeps the results its builds published
+(`keep_published`: admitted results, and request-local completions) under the
+workspace edit clocks they were computed at. A later read first performs the
+family memo's validated lookup. After a miss, `own_published_read` can answer
+from a kept result before a producer claim is installed, provided its edit
+clocks are current and its nodes and kernel epochs remain live. The read
+replays the result's receipt into the active demand (`served_read`) and
+delivers its carrier. A result the demand cannot pay for is recomputed, never
+served. Results a lookup SERVED are not kept: a memo candidate is validated
+against the live view on every read, and the edit clocks alone miss a file the
+host reloads mid-request (`invalidation_imported_prop_type_file_edit`).
+
+Request-local completion: a NESTED read of a cheap intermediate family —
+`Conditional`, `TemplateLiteralReduce`, `ProjectPath` (`completes_request_locally`
+in `project_semantic_dispatch/mod.rs`) — outside every checker obligation
+(`ObligationRuntime::decides_root`), uncaptured, with no operand force active
+and no family-memo producer of the key open on this task, completes for the
+requesting dispatcher alone. It makes the family memo's validated lookup
+exactly as a claim does (`begin_query_claim`: a stored result answers, one the
+demand cannot pay for is recomputed, a result the dispatcher kept answers a
+miss), then runs the same traced build under the producer's cost identity
+(`ClaimAttempt::cost_identity`) and settles its output through the SAME
+`settle_output` the memo's `ProducerLease::settle` uses
+(`SemanticGraphStore::complete_request_local`): the carrier is bubbled, the
+read carries its receipt, and a complete priced result is kept on the
+dispatcher (`keep_published`) for repeated reads. It registers no flight and is
+never admitted: the evaluation or build that reads it is itself retained (the
+deferred-evaluation memo, the enclosing instantiation or root query), so an
+entry of its own would be claimed, admitted, reverse-indexed and FIFO-evicted
+without a later request reaching it. A re-entry of a key whose local
+completion is open answers the same-path recursion carrier on either path.
+Root reads, obligation-frame reads (relation, flow, call — whose decisions are
+shared through the memo) and captured reads keep the family memo. Guarded by
+`recursive_paths_admit_their_instantiations_not_their_nested_steps`.
+
+Instantiation serves: every instantiation reads its declaration file's
+`IndexedReady` record (`ProjectSemanticDispatch::transaction_indexed_record`), as do its global-interface, member-index and augmentation-candidate reads.
+The first serve of a canonical on a transaction is recorded with
+`record_transaction_read` and kept in `CheckerDispatchTransaction::indexed_serves`
+under the workspace edit clocks it was served at; a later instantiation under
+the same clocks replays that read (`replay_transaction_read`: its facts,
+refusal and self-roots) instead of re-serving. An edit moves the clocks and the
+file is served afresh; a refused or non-reusable serve is never kept.
+
 Paged signature evidence: a `fact_dep_signature` is never refused for its
 width. `FactReadSet::finalise` (and `seal_canonical_signature` for a signature
 a producer assembles by hand) cuts a canonical set wider than

@@ -288,6 +288,7 @@ impl SemanticGraphStore {
             retention_charge: None,
             validated_at_generation,
             admission_seq,
+            reverse_indexed: false,
             cost_receipt: super::scc_publish::fixture_receipt(&family),
         };
         let cap = family.candidate_cap();
@@ -310,7 +311,6 @@ impl SemanticGraphStore {
         for (displaced_slot, displaced_entry) in &outcome.displaced {
             reverse_index::drain_candidate_reverse_index_registrations(
                 &self.canonical_to_entries,
-                &family,
                 *displaced_slot,
                 displaced_entry,
             );
@@ -318,13 +318,9 @@ impl SemanticGraphStore {
         if family_was_new && !populated_slots.is_empty() {
             self.record_family_admission_locked(&mut entries, &family);
         }
-        reverse_index::register_reverse_index(
-            &self.canonical_to_entries,
-            &family,
-            &populated_slots,
-            &reverse_index::ReverseIndexInputs::new(&read_set_signature, &dispatch_dep_signature),
-            admission_seq,
-        );
+        if !populated_slots.is_empty() {
+            self.defer_reverse_index_registration();
+        }
         drop(entries);
         populated_slots.len()
     }
@@ -424,11 +420,7 @@ impl SemanticGraphStore {
         let Some(slots) = entries.remove(&family) else {
             return false;
         };
-        reverse_index::drain_family_slots_registrations(
-            &self.canonical_to_entries,
-            &family,
-            &slots,
-        );
+        reverse_index::drain_family_slots_registrations(&self.canonical_to_entries, &slots);
         true
     }
 

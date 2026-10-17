@@ -179,7 +179,6 @@ impl SemanticGraphStore {
             if let Some(slots) = entries.remove(&victim) {
                 let drained = reverse_index::drain_family_slots_registrations(
                     &self.canonical_to_entries,
-                    &victim,
                     &slots,
                 );
                 #[cfg(any(test, feature = "test-support"))]

@@ -748,3 +748,6 @@ mod construction_bytes_allocation;
 
 #[path = "allocation_cases/expression_source_selection.rs"]
 mod expression_source_selection_allocation;
+
+#[path = "allocation_cases/recursive_paths.rs"]
+mod recursive_paths_allocation;

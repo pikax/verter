@@ -9,8 +9,12 @@ use crate::semantic_query::{QueryError, SemanticNodeId};
 
 struct RootOwner {
     arena: Arc<NodeArenaCore>,
-    ids: Vec<SemanticNodeId>,
+    ids: RootIds,
 }
+
+/// The operands one root set holds. Most sets hold a node or two, so they
+/// are stored in place rather than in an allocation of their own.
+pub(crate) type RootIds = smallvec::SmallVec<[SemanticNodeId; 4]>;
 
 /// Storage acquired for a freshly interned node's construction root: the
 /// Arc owner and its one-element operand allocation, plus the scope vector's
@@ -131,15 +135,25 @@ impl NodeRootSet {
             .as_ref()
             .map_or(0, |owner| owner.arena.ownership_counts().live_nodes)
     }
-    pub(crate) fn acquire(
-        arena: Arc<NodeArenaCore>,
-        ids: Vec<SemanticNodeId>,
-    ) -> Result<Self, QueryError> {
+    pub(crate) fn acquire(arena: Arc<NodeArenaCore>, ids: RootIds) -> Result<Self, QueryError> {
         if ids.is_empty() {
             return Ok(Self::default());
         }
         arena.retain(&ids)?;
         Ok(Self(Some(Arc::new(RootOwner { arena, ids }))))
+    }
+
+    /// Retain the live operands of `ids` from `arena`, dropping any id that
+    /// names no live node.
+    pub(crate) fn acquire_live(arena: Arc<NodeArenaCore>, mut ids: RootIds) -> Self {
+        if ids.is_empty() {
+            return Self::default();
+        }
+        arena.retain_live(&mut ids);
+        if ids.is_empty() {
+            return Self::default();
+        }
+        Self(Some(Arc::new(RootOwner { arena, ids })))
     }
 
     pub fn operands(&self) -> &[SemanticNodeId] {
@@ -202,7 +216,7 @@ impl<'a> NodeRef<'a> {
     /// Read the payload under a new owning root. A slot a legacy close
     /// already released is stale; it never reads as a live payload.
     pub fn read(self) -> Result<super::node_data_lease::NodeDataLease, QueryError> {
-        let roots = NodeRootSet::acquire(Arc::clone(self.arena), vec![self.id])?;
+        let roots = NodeRootSet::acquire(Arc::clone(self.arena), smallvec::smallvec![self.id])?;
         let data = self
             .arena
             .live_payload(self.id)
@@ -215,7 +229,7 @@ impl<'a> NodeRef<'a> {
 
     /// Acquire an owning root that outlives this borrow.
     pub fn to_root(self) -> Result<NodeRoot, QueryError> {
-        let roots = NodeRootSet::acquire(Arc::clone(self.arena), vec![self.id])?;
+        let roots = NodeRootSet::acquire(Arc::clone(self.arena), smallvec::smallvec![self.id])?;
         Ok(NodeRoot::from_roots(self.id, roots))
     }
 }
@@ -244,7 +258,7 @@ impl NodeRoot {
             id,
             roots: NodeRootSet(Some(Arc::new(RootOwner {
                 arena,
-                ids: vec![id],
+                ids: smallvec::smallvec![id],
             }))),
         }
     }
@@ -335,10 +349,12 @@ impl ScopeStack {
         self.next_token
     }
 
+    /// Owners usually close innermost first, so the search starts at the
+    /// newest.
     fn position(&self, token: u64) -> usize {
         self.entries
             .iter()
-            .position(|entry| entry.token == token)
+            .rposition(|entry| entry.token == token)
             .expect("an open construction owner is registered on its thread")
     }
 
@@ -363,6 +379,13 @@ impl ScopeStack {
             });
         if let Some(heir) = heir {
             let heir = &mut self.entries[heir];
+            // The heir keeps the union, so merge the smaller holding into
+            // the larger: an attachment that rises through every enclosing
+            // owner of a deep evaluation is moved, not re-adopted, at each.
+            if heir.deliveries.len() < owners.deliveries.len() {
+                std::mem::swap(&mut heir.deliveries, &mut owners.deliveries);
+                std::mem::swap(&mut heir.delivered, &mut owners.delivered);
+            }
             for lease in owners.deliveries.drain(..) {
                 // A repeat is another handle on an owner the heir keeps.
                 let _ = heir.adopt(lease);
@@ -379,6 +402,10 @@ struct ConstructionOwners {
     /// How many dispatchers share this owner; `0` for a lexical scope.
     dispatchers: usize,
     roots: Vec<NodeRoot>,
+    /// The ordinals interned while this owner was the innermost one of its
+    /// arena: each holds the one count its intern took, released together
+    /// when the owner closes.
+    constructed: Vec<SemanticNodeId>,
     deliveries: Vec<super::delivery_lease::SemanticDeliveryLease>,
     /// The shared delivery owners `deliveries` already holds. Every clone
     /// of one delivery names the same owner, so an owner keeps it once
@@ -386,7 +413,27 @@ struct ConstructionOwners {
     delivered: rustc_hash::FxHashSet<usize>,
 }
 
+impl Drop for ConstructionOwners {
+    fn drop(&mut self) {
+        if !self.constructed.is_empty() {
+            self.arena.release_roots(&self.constructed);
+        }
+    }
+}
+
 impl ConstructionOwners {
+    fn new(token: u64, arena: &Arc<NodeArenaCore>) -> Self {
+        Self {
+            token,
+            arena: Arc::clone(arena),
+            dispatchers: 0,
+            roots: Vec::new(),
+            constructed: Vec::new(),
+            deliveries: Vec::new(),
+            delivered: Default::default(),
+        }
+    }
+
     /// Keep `lease` unless this owner already holds its delivery; a
     /// repeat is handed back for the caller to drop.
     fn adopt(
@@ -436,14 +483,7 @@ impl DispatchConstructionScope {
                 Some(position) => scopes.entries.remove(position),
                 None => {
                     let token = scopes.mint();
-                    ConstructionOwners {
-                        token,
-                        arena: Arc::clone(arena),
-                        dispatchers: 0,
-                        roots: Vec::new(),
-                        deliveries: Vec::new(),
-                        delivered: Default::default(),
-                    }
+                    ConstructionOwners::new(token, arena)
                 }
             };
             owners.dispatchers += 1;
@@ -485,14 +525,7 @@ impl NodeRootScope {
         let token = SCOPES.with(|scopes| {
             let mut scopes = scopes.borrow_mut();
             let token = scopes.mint();
-            scopes.entries.push(ConstructionOwners {
-                token,
-                arena: Arc::clone(arena),
-                dispatchers: 0,
-                roots: Vec::new(),
-                deliveries: Vec::new(),
-                delivered: Default::default(),
-            });
+            scopes.entries.push(ConstructionOwners::new(token, arena));
             token
         });
         Self {
@@ -505,7 +538,7 @@ impl NodeRootScope {
     /// Borrow a construction ordinal of this scope's arena. The scope roots
     /// the node until it closes, so the capability cannot outlive its owner.
     pub fn node_ref(&self, id: SemanticNodeId) -> Result<NodeRef<'_>, QueryError> {
-        let roots = NodeRootSet::acquire(Arc::clone(&self.core), vec![id])?;
+        let roots = NodeRootSet::acquire(Arc::clone(&self.core), smallvec::smallvec![id])?;
         // Root it in THIS scope, not an inner one of the same arena that
         // could close while the borrow is still live.
         SCOPES.with(|scopes| {
@@ -549,22 +582,49 @@ impl NodeRootScope {
         drop(root);
     }
 
+    /// Hand the count a fresh intern of `id` took in `arena` to the
+    /// innermost construction owner of that arena on this thread, which
+    /// releases it when it closes; with no such owner the count is released
+    /// now.
+    pub(crate) fn capture_constructed(arena: &Arc<NodeArenaCore>, id: SemanticNodeId) {
+        let held = SCOPES.with(|scopes| {
+            scopes
+                .borrow_mut()
+                .entries
+                .iter_mut()
+                .rev()
+                .find(|candidate| Arc::ptr_eq(&candidate.arena, arena))
+                .map(|scope| scope.constructed.push(id))
+                .is_some()
+        });
+        if !held {
+            arena.release_roots(&[id]);
+        }
+    }
+
+    /// Hand a delivery lease to a construction owner on this thread: the
+    /// OLDEST owner of its arena, or the innermost owner when the lease
+    /// names no arena. A closing owner hands its deliveries to another open
+    /// owner of the arena, so a delivery stays held until no owner of its
+    /// arena is open on the thread, whichever owner holds it; the oldest is
+    /// the one least likely to close first, so the delivery is not handed on
+    /// again at every nested scope's close.
     pub(crate) fn capture_delivery(
         lease: super::delivery_lease::SemanticDeliveryLease,
         arena: Option<usize>,
     ) {
         let mut lease = Some(lease);
         SCOPES.with(|scopes| {
-            if let Some(scope) = scopes
-                .borrow_mut()
-                .entries
-                .iter_mut()
-                .rev()
-                .find(|candidate| {
-                    arena.is_none_or(|arena| Arc::as_ptr(&candidate.arena) as usize == arena)
-                })
-            {
-                lease = scope.adopt(lease.take().unwrap());
+            let mut scopes = scopes.borrow_mut();
+            let owner = match arena {
+                Some(arena) => scopes
+                    .entries
+                    .iter_mut()
+                    .find(|candidate| Arc::as_ptr(&candidate.arena) as usize == arena),
+                None => scopes.entries.last_mut(),
+            };
+            if let Some(owner) = owner {
+                lease = owner.adopt(lease.take().unwrap());
             }
         });
         drop(lease);

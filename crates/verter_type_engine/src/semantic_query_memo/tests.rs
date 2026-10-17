@@ -17,7 +17,7 @@ fn production_relation_admission_is_semantic_store_owned() {
         .expect("SemanticGraphStore must own the batched SCC member publish");
     let owner_body = &store_source[owner_start..];
     assert!(
-        owner_body.contains("reverse_index::register_reverse_index("),
+        owner_body.contains("self.defer_reverse_index_registration()"),
         "the member publish must land the (entries, memo_budget, reverse-index) consistency cluster"
     );
     assert!(

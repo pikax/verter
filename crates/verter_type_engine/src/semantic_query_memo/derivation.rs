@@ -119,7 +119,7 @@ pub const DERIVATION_EDGES_PER_BUCKET_CAP: usize = 64;
 /// edge lifetime — see the module docs. Both maps are dropped wholesale
 /// by [`DerivationStore::clear`] on a project-generation reset.
 pub(crate) struct DerivationStore {
-    edges: FxHashMap<(SemanticNodeId, OriginEdgeKind), Vec<OriginEdge>>,
+    edges: FxHashMap<(SemanticNodeId, OriginEdgeKind), EdgeBucket>,
     /// Dep-signature interner. Maps a signature value to a [`Weak`]
     /// reference to the canonical `Arc<DepSignature>` handed to edges.
     /// `intern_signature` upgrades the `Weak`: a live upgrade reuses the
@@ -215,6 +215,7 @@ impl DerivationStore {
         &mut self,
         result: SemanticNodeId,
         kind: OriginEdgeKind,
+        identity: u64,
         edge: OriginEdge,
     ) {
         let bucket_key = (result, kind);
@@ -240,12 +241,12 @@ impl DerivationStore {
         // the oldest edge degrades only the audit trace, never
         // correctness.
         let bucket = self.edges.entry(bucket_key).or_default();
-        bucket.push(edge);
+        bucket.push(identity, edge);
         self.total_edges += 1;
         while bucket.len() > DERIVATION_EDGES_PER_BUCKET_CAP {
             // Oldest = front (insertion order). Dropping it releases its
             // dep-signature `Arc`.
-            bucket.remove(0);
+            bucket.evict_oldest();
             self.total_edges -= 1;
         }
         // Bounded retention: a newly-keyed `(result, kind)` bucket
@@ -337,7 +338,7 @@ impl DerivationStore {
         &self,
         result: SemanticNodeId,
         kind: OriginEdgeKind,
-    ) -> Option<&Vec<OriginEdge>> {
+    ) -> Option<&EdgeBucket> {
         self.edges.get(&(result, kind))
     }
 
@@ -355,7 +356,7 @@ impl DerivationStore {
         self.edges
             .get(&(result, kind))
             .into_iter()
-            .flat_map(|v| v.iter())
+            .flat_map(|bucket| bucket.edges.iter())
     }
 
     pub(super) fn origins(
@@ -366,7 +367,7 @@ impl DerivationStore {
             .iter()
             .filter_map(move |((r, kind), edges)| {
                 if *r == result {
-                    Some(edges.iter().map(move |e| (*kind, e)))
+                    Some(edges.edges.iter().map(move |e| (*kind, e)))
                 } else {
                     None
                 }
@@ -381,7 +382,7 @@ impl DerivationStore {
     pub(super) fn edge_count(&self) -> usize {
         verter_debug_assert_eq!(
             self.total_edges,
-            self.edges.values().map(Vec::len).sum::<usize>(),
+            self.edges.values().map(EdgeBucket::len).sum::<usize>(),
             "total_edges counter desynced from the actual bucket edge sum",
         );
         self.total_edges
@@ -392,20 +393,94 @@ impl DerivationStore {
     /// percentiles without exposing the underlying map shape.
     pub(super) fn iter_edges(
         &self,
-    ) -> impl Iterator<Item = (&SemanticNodeId, &OriginEdgeKind, &Vec<OriginEdge>)> {
+    ) -> impl Iterator<Item = (&SemanticNodeId, &OriginEdgeKind, &[OriginEdge])> {
         self.edges
             .iter()
-            .map(|((node, kind), edges)| (node, kind, edges))
+            .map(|((node, kind), bucket)| (node, kind, bucket.edges.as_slice()))
     }
 
     pub(super) fn all_edges(&self) -> Vec<(SemanticNodeId, OriginEdgeKind, OriginEdge)> {
         self.edges
             .iter()
-            .flat_map(|((node, kind), edges)| {
-                edges.iter().map(move |edge| (*node, *kind, edge.clone()))
+            .flat_map(|((node, kind), bucket)| {
+                bucket
+                    .edges
+                    .iter()
+                    .map(move |edge| (*node, *kind, edge.clone()))
             })
             .collect()
     }
+}
+
+/// One `(result, kind)` bucket: its edges in insertion order, beside each
+/// edge's identity key ([`edge_identity_key`]). The duplicate-edge probe
+/// compares the keys and confirms only a matching key on the whole edge.
+#[derive(Default)]
+pub(super) struct EdgeBucket {
+    edges: Vec<OriginEdge>,
+    identities: Vec<u64>,
+}
+
+impl EdgeBucket {
+    fn push(&mut self, identity: u64, edge: OriginEdge) {
+        self.edges.push(edge);
+        self.identities.push(identity);
+    }
+
+    fn evict_oldest(&mut self) {
+        self.edges.remove(0);
+        self.identities.remove(0);
+    }
+
+    fn len(&self) -> usize {
+        self.edges.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.edges.is_empty()
+    }
+
+    fn retain(&mut self, mut keep: impl FnMut(&OriginEdge) -> bool) {
+        let mut index = 0;
+        while index < self.edges.len() {
+            if keep(&self.edges[index]) {
+                index += 1;
+            } else {
+                self.edges.remove(index);
+                self.identities.remove(index);
+            }
+        }
+    }
+
+    /// Whether the bucket already holds `edge`, whose identity key is
+    /// `identity`: the same interned signature, sources and metadata.
+    pub(super) fn holds(&self, identity: u64, edge: &OriginEdge) -> bool {
+        for index in 0..self.identities.len() {
+            if self.identities[index] == identity {
+                let held = &self.edges[index];
+                if Arc::ptr_eq(&held.edge_dep_signature, &edge.edge_dep_signature)
+                    && held.sources == edge.sources
+                    && held.meta == edge.meta
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
+/// The identity key of an edge with interned signature `signature` over
+/// `sources`: equal edges have equal keys. It narrows the duplicate-edge
+/// probe; a key match is confirmed on the whole edge.
+pub(super) fn edge_identity_key(signature: &Arc<DepSignature>, sources: &[SemanticNodeId]) -> u64 {
+    const MIX: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut key = (Arc::as_ptr(signature) as *const u8 as usize as u64).wrapping_mul(MIX);
+    key = (key.rotate_left(5) ^ sources.len() as u64).wrapping_mul(MIX);
+    for source in sources {
+        key = (key.rotate_left(5) ^ source.0).wrapping_mul(MIX);
+    }
+    key
 }
 
 /// Pick the percentile-`p` value out of an already-sorted ascending

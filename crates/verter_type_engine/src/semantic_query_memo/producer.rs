@@ -166,6 +166,17 @@ pub struct ClaimAttempt {
 }
 
 impl ClaimAttempt {
+    /// The identity of the computation this claim names, for its cost
+    /// recording: the identity its producer records under
+    /// ([`ProducerLease::cost_identity`]).
+    pub(crate) fn cost_identity(
+        &self,
+    ) -> crate::project_semantic_dispatch::cost_receipt::CostIdentity {
+        crate::project_semantic_dispatch::cost_receipt::CostIdentity::of_producer(
+            self.prepared.as_task_producer(),
+        )
+    }
+
     /// Compute the key on the next claim instead of reading it warm: the
     /// claimant was refused the stored result's receipt.
     pub(crate) fn recompute(&mut self) {
@@ -377,7 +388,7 @@ impl SemanticGraphStore {
             capture: &mut ReadCapture<'_>,
         ) -> Result<ClaimAttempt, ValueRead> {
             // Count every logical entry, warm and cold alike.
-            crate::loop5_instrumentation::EXECUTE_COOPERATIVE_CALLS.fetch_add(1, Ordering::Relaxed);
+            self.note_lookup_entry();
 
             // Request cancellation is a typed ReturnOnly terminal and must be
             // observed before even a warm probe: canceled requests do not consume
@@ -403,7 +414,7 @@ impl SemanticGraphStore {
             // producer registration, the panic guard and the publish. See the
             // `prepared` module for the equality contract (token equality ⟺
             // key equality).
-            let prepared = self.prepare_rooted_key(key);
+            let mut prepared = self.prepare_probe_key(key);
 
             // Warm lookup. One lock acquisition snapshots the slot; the
             // candidate's carrier is validated strictly (self-roots through
@@ -421,18 +432,9 @@ impl SemanticGraphStore {
             // One logical miss per claim. A producer that publishes between
             // this lookup and the claim's own warm re-read is credited as a
             // hit there; that race is benign.
-            crate::loop5_instrumentation::FAMILY_MEMO_MISSES.fetch_add(1, Ordering::Relaxed);
-            #[cfg(any(test, feature = "test-support"))]
-            crate::project_semantic_dispatch::raise::record_dispatch_cold(prepared.key());
-            #[cfg(any(test, feature = "test-support"))]
-            crate::capture_token::with_active_capture(|t| {
-                t.record_dispatch(prepared.key(), /* hit */ false)
-            });
-            tracing::debug!(
-                target: "verter::memo::miss",
-                key = ?prepared.key(),
-                "memo_miss"
-            );
+            self.note_lookup_miss(prepared.key());
+            // The claim outlives the caller's hold on the key's operands.
+            self.root_prepared_key(&mut prepared);
             Ok(ClaimAttempt {
                 prepared,
                 independent,
@@ -821,6 +823,199 @@ impl Subscription<'_> {
     }
 }
 
+/// A build's output settled into the rails every read of it carries, however
+/// the build was claimed: its value with the projection shape and any
+/// execution abort applied, the carrier it broadcasts, and the retention
+/// verdict. Shared by the family memo's producer ([`ProducerLease::settle`])
+/// and a request-local completion
+/// ([`SemanticGraphStore::complete_request_local`]), so the two can never
+/// derive different rails from the same output.
+struct SettledOutput {
+    result: QueryResult<SemanticQueryValue>,
+    dep_signature: DepSignature,
+    walker_diagnostics: Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
+    carrier: verter_session_query::facts::fact_cache::ReadSetSignature,
+    self_root_canonicals: Arc<[Arc<str>]>,
+    satisfied_projection: MaterializedSet,
+    pending_prefix_backfills: Vec<crate::project_semantic_dispatch::walk::PrefixBackfill>,
+    cache_suppress: bool,
+    fact_status: FactStatus,
+    /// Complete, cacheable and priced: the result may be kept and served.
+    admissible: bool,
+}
+
+fn settle_output(
+    store: &SemanticGraphStore,
+    key: &SemanticQueryKey,
+    output: BuildOutput,
+    priced: bool,
+) -> SettledOutput {
+    let BuildOutput {
+        result,
+        dep_signature,
+        walker_diagnostics,
+        cache_suppress,
+        completeness,
+        approximation,
+        taint: _, // §18 taint already consumed upstream by `admit_decision`.
+        observed_self_roots: _,
+        graph_carrier,
+        self_root_canonicals,
+        pending_prefix_backfills,
+        satisfied_projection,
+        flow_completion,
+    } = output;
+    let result_is_partial = completeness.is_partial();
+    let partial_reasons = completeness.reasons();
+    let result = prepared::enforce_projection_value_shape(key, result);
+    let result = match crate::request_context::current_execution_abort() {
+        Some(abort) => crate::semantic_query::result_under_execution_abort(result, abort),
+        None => result,
+    };
+    let aborted = match &result {
+        QueryResult::Error(error) => crate::semantic_query::ExecutionAbort::from_query_error(error),
+        _ => None,
+    };
+    let cache_suppress = cache_suppress || aborted.is_some();
+    let result_is_partial = result_is_partial || aborted.is_some();
+    let partial_reasons = match aborted {
+        Some(abort) => partial_reasons.union(abort.reason_class()),
+        None => partial_reasons,
+    };
+    let walker_diagnostics: Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]> =
+        Arc::from(walker_diagnostics.into_boxed_slice());
+    // The carrier is always broadcast — bubbled into the producer's outer
+    // tracers and recorded on the flight for subscribers — whether or not
+    // the result is admitted.
+    let carrier = match graph_carrier {
+        Some(boxed) => *boxed,
+        None => verter_session_query::facts::fact_cache::ReadSetSignature::new(
+            crate::fact_signature_helpers::empty_fact_signature(),
+        ),
+    };
+    // §2 admission invariant: a partial result is never admissible, so
+    // it must already be non-cacheable (`finalise_traced_build_output`
+    // enforces `result_is_partial ⟹ cache_suppress`).
+    verter_debug_assert!(
+        !result_is_partial || cache_suppress,
+        "§1 invariant violated at memo admission: result_is_partial \
+         without cache_suppress would launder a partial into the family memo"
+    );
+    // The flow-proof gate: a `FlowReturn` result is admissible ONLY with
+    // the finalizer's proof token naming THIS key (which embeds the
+    // result contract) and THIS value. The token is the sole positive
+    // completeness authority; this gate may veto, never promote.
+    let flow_proof_ok = match key {
+        SemanticQueryKey::FlowReturn(key) => match (&flow_completion, &result) {
+            (Some(proof), QueryResult::Value(SemanticQueryValue::FlowReturn(value))) => {
+                proof.key() == key.as_ref() && proof.value() == value.as_ref()
+            }
+            _ => false,
+        },
+        _ => true,
+    };
+    // A vetoed value is UNPROVEN, not merely unpublished: force the
+    // partial and suppression rails onto the read so the producer's
+    // returned read — and every subscriber's — carries the taint. A
+    // build that already reported partiality keeps its own classes.
+    let (cache_suppress, result_is_partial, partial_reasons) =
+        if !flow_proof_ok && !result_is_partial && matches!(result, QueryResult::Value(_)) {
+            (
+                true,
+                true,
+                partial_reasons.union(PartialReasonSet::FLOW_RETURN_UNVERIFIED),
+            )
+        } else {
+            (cache_suppress, result_is_partial, partial_reasons)
+        };
+    let admissible = !(cache_suppress || result_is_partial || !flow_proof_ok) && priced;
+    let result = match result {
+        QueryResult::Value(SemanticQueryValue::FlowReturn(value)) if result_is_partial => {
+            QueryResult::Value(SemanticQueryValue::FlowReturn(Arc::new(
+                (*value).clone().with_observed_completeness(
+                    crate::semantic_query::ResultCompleteness::partial(partial_reasons),
+                ),
+            )))
+        }
+        other => other,
+    };
+    let (result, fact_status) =
+        crate::project_semantic_dispatch::projection_fact::adopt_projection_result(
+            store,
+            key,
+            result,
+            if result_is_partial {
+                crate::semantic_query::ResultCompleteness::partial(partial_reasons)
+            } else {
+                crate::semantic_query::ResultCompleteness::Complete
+            },
+            approximation,
+        );
+    SettledOutput {
+        result,
+        dep_signature,
+        walker_diagnostics,
+        carrier,
+        self_root_canonicals,
+        satisfied_projection,
+        pending_prefix_backfills,
+        cache_suppress: cache_suppress || !fact_status.is_complete(),
+        fact_status,
+        admissible: admissible && fact_status.is_complete(),
+    }
+}
+
+impl SemanticGraphStore {
+    /// Complete a build the requesting dispatcher ran for itself after the
+    /// lookup `attempt` missed, outside the family memo's claim: the key's
+    /// computation was never registered as a flight and its result never
+    /// enters the family memo. The output
+    /// settles exactly as a producer's does ([`ProducerLease::settle`]),
+    /// its carrier is bubbled into the tracers active now, and the read
+    /// carries the receipt its recording sealed. The returned carrier is
+    /// `Some` when the result is complete, cacheable and priced — what the
+    /// dispatcher may keep and serve again — and `None` otherwise. A
+    /// cancelled request answers with the cancellation read.
+    pub(crate) fn complete_request_local(
+        &self,
+        attempt: ClaimAttempt,
+        flags: &crate::resolver_core::resolver_context::RequestFlags,
+        output: BuildOutput,
+        cost_receipt: Option<
+            Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
+        >,
+    ) -> (
+        ValueRead,
+        Option<verter_session_query::facts::fact_cache::ReadSetSignature>,
+    ) {
+        if !attempt.miss_recorded {
+            // The one miss a claim of the key records.
+            self.stats.misses.fetch_add(1, Ordering::Relaxed);
+            if let Some(ctx) = verter_execution::request_context::current_context() {
+                ctx.0
+                    .record_cache_event(verter_execution::request_context::CacheEventKind::Miss);
+            }
+        }
+        if flags.is_cancelled() {
+            return (cancelled_cache_read(), None);
+        }
+        let settled = settle_output(self, attempt.prepared.key(), output, cost_receipt.is_some());
+        settled.carrier.bubble_via_tls();
+        let read = CacheRead {
+            lease: self
+                .lease_delivery(&settled.result, &settled.walker_diagnostics)
+                .expect("settled output owns live operands"),
+            value: settled.result,
+            dep_signature: settled.dep_signature,
+            walker_diagnostics: settled.walker_diagnostics,
+            cache_suppress: settled.cache_suppress,
+            fact_status: settled.fact_status,
+            receipt: cost_receipt.into(),
+        };
+        (read, settled.admissible.then_some(settled.carrier))
+    }
+}
+
 impl<'s> ProducerLease<'s> {
     /// The identity of the computation this producer runs, for its cost
     /// recording: the prepared key, shared.
@@ -870,55 +1065,6 @@ impl<'s> ProducerLease<'s> {
             started,
         } = self;
         let build_held_ns = started.elapsed().as_nanos() as u64;
-        let BuildOutput {
-            result,
-            dep_signature,
-            walker_diagnostics,
-            cache_suppress,
-            completeness,
-            approximation,
-            taint: _, // §18 taint already consumed upstream by `admit_decision`.
-            observed_self_roots: _,
-            graph_carrier,
-            self_root_canonicals,
-            pending_prefix_backfills,
-            satisfied_projection,
-            flow_completion,
-        } = output;
-        let result_is_partial = completeness.is_partial();
-        let partial_reasons = completeness.reasons();
-        let result = prepared::enforce_projection_value_shape(prepared.key(), result);
-        let result = match crate::request_context::current_execution_abort() {
-            Some(abort) => crate::semantic_query::result_under_execution_abort(result, abort),
-            None => result,
-        };
-        let aborted = match &result {
-            QueryResult::Error(error) => {
-                crate::semantic_query::ExecutionAbort::from_query_error(error)
-            }
-            _ => None,
-        };
-        let cache_suppress = cache_suppress || aborted.is_some();
-        let result_is_partial = result_is_partial || aborted.is_some();
-        let partial_reasons = match aborted {
-            Some(abort) => partial_reasons.union(abort.reason_class()),
-            None => partial_reasons,
-        };
-        // §3.4 default: a non-path build (`Instantiate`, `KeyOf`, `TypeOf`,
-        // …) records no path-walk hops, so its satisfied projection defaults
-        // to the single terminal point the slot's mode denotes at the key's
-        // path — exactly what a single-terminal compute produced. The point
-        // comes from `requested_path_for_key`, which carries an authored
-        // selective force's residual path, so a `Path(["wanted","leaf"])`
-        // force records that path rather than the whole surface. A modeless
-        // family yields `Demand::identity()`, a trivial pass.
-        let satisfied_projection = if satisfied_projection.is_empty() {
-            MaterializedSet::single(prepared.requested_point().clone())
-        } else {
-            satisfied_projection
-        };
-        let walker_diagnostics: Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]> =
-            Arc::from(walker_diagnostics.into_boxed_slice());
         panic_guard.mark_finished();
         drop(panic_guard);
         drop(open);
@@ -936,76 +1082,31 @@ impl<'s> ProducerLease<'s> {
             return Err(cancelled_cache_read());
         }
 
-        // The carrier is always broadcast — bubbled into this producer's
-        // outer tracers and recorded on the flight for subscribers — whether
-        // or not the result is admitted.
-        let carrier = match graph_carrier {
-            Some(boxed) => *boxed,
-            None => verter_session_query::facts::fact_cache::ReadSetSignature::new(
-                crate::fact_signature_helpers::empty_fact_signature(),
-            ),
+        let SettledOutput {
+            result,
+            dep_signature,
+            walker_diagnostics,
+            carrier,
+            self_root_canonicals,
+            satisfied_projection,
+            pending_prefix_backfills,
+            cache_suppress,
+            fact_status,
+            admissible,
+        } = settle_output(store, prepared.key(), output, cost_receipt.is_some());
+        // §3.4 default: a non-path build (`Instantiate`, `KeyOf`, `TypeOf`,
+        // …) records no path-walk hops, so its satisfied projection defaults
+        // to the single terminal point the slot's mode denotes at the key's
+        // path — exactly what a single-terminal compute produced. The point
+        // comes from `requested_path_for_key`, which carries an authored
+        // selective force's residual path, so a `Path(["wanted","leaf"])`
+        // force records that path rather than the whole surface. A modeless
+        // family yields `Demand::identity()`, a trivial pass.
+        let satisfied_projection = if satisfied_projection.is_empty() {
+            MaterializedSet::single(prepared.requested_point().clone())
+        } else {
+            satisfied_projection
         };
-        // §2 admission invariant: a partial result is never admissible, so
-        // it must already be non-cacheable (`finalise_traced_build_output`
-        // enforces `result_is_partial ⟹ cache_suppress`).
-        verter_debug_assert!(
-            !result_is_partial || cache_suppress,
-            "§1 invariant violated at memo admission: result_is_partial \
-             without cache_suppress would launder a partial into the family memo"
-        );
-        // The flow-proof gate: a `FlowReturn` result is admissible ONLY with
-        // the finalizer's proof token naming THIS key (which embeds the
-        // result contract) and THIS value. The token is the sole positive
-        // completeness authority; this gate may veto, never promote.
-        let flow_proof_ok = match prepared.key() {
-            SemanticQueryKey::FlowReturn(key) => match (&flow_completion, &result) {
-                (Some(proof), QueryResult::Value(SemanticQueryValue::FlowReturn(value))) => {
-                    proof.key() == key.as_ref() && proof.value() == value.as_ref()
-                }
-                _ => false,
-            },
-            _ => true,
-        };
-        // A vetoed value is UNPROVEN, not merely unpublished: force the
-        // partial and suppression rails onto the read so the producer's
-        // returned read — and every subscriber's — carries the taint. A
-        // build that already reported partiality keeps its own classes.
-        let (cache_suppress, result_is_partial, partial_reasons) =
-            if !flow_proof_ok && !result_is_partial && matches!(result, QueryResult::Value(_)) {
-                (
-                    true,
-                    true,
-                    partial_reasons.union(PartialReasonSet::FLOW_RETURN_UNVERIFIED),
-                )
-            } else {
-                (cache_suppress, result_is_partial, partial_reasons)
-            };
-        let admissible =
-            !(cache_suppress || result_is_partial || !flow_proof_ok) && cost_receipt.is_some();
-        let result = match result {
-            QueryResult::Value(SemanticQueryValue::FlowReturn(value)) if result_is_partial => {
-                QueryResult::Value(SemanticQueryValue::FlowReturn(Arc::new(
-                    (*value).clone().with_observed_completeness(
-                        crate::semantic_query::ResultCompleteness::partial(partial_reasons),
-                    ),
-                )))
-            }
-            other => other,
-        };
-        let (result, fact_status) =
-            crate::project_semantic_dispatch::projection_fact::adopt_projection_result(
-                store,
-                prepared.key(),
-                result,
-                if result_is_partial {
-                    crate::semantic_query::ResultCompleteness::partial(partial_reasons)
-                } else {
-                    crate::semantic_query::ResultCompleteness::Complete
-                },
-                approximation,
-            );
-        let cache_suppress = cache_suppress || !fact_status.is_complete();
-        let admissible = admissible && fact_status.is_complete();
         Ok(SettledProducer {
             lease: store
                 .lease_delivery(&result, &walker_diagnostics)
