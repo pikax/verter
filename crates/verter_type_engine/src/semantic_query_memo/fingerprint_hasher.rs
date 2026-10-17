@@ -24,7 +24,10 @@ fn fingerprint_key() -> (u64, u64) {
     static KEY: OnceLock<(u64, u64)> = OnceLock::new();
     *KEY.get_or_init(|| {
         let seed = std::collections::hash_map::RandomState::new();
-        (seed.hash_one(0x5eed_0u64), seed.hash_one(0x5eed_1u64))
+        (
+            seed.hash_one(0x0005_eed0_u64),
+            seed.hash_one(0x0005_eed1_u64),
+        )
     })
 }
 

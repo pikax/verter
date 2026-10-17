@@ -876,6 +876,13 @@ impl<T: Measured> WeakOwned<T> {
     pub fn strong_count(&self) -> usize {
         self.0.strong_count()
     }
+
+    /// Whether `owned` is the allocation this view names. The view keeps
+    /// the block allocated, so its address is never reused while it lives.
+    #[must_use]
+    pub fn is(&self, owned: &Owned<T>) -> bool {
+        std::ptr::eq(self.0.as_ptr(), Arc::as_ptr(&owned.0))
+    }
 }
 
 impl<T: Measured> Clone for WeakOwned<T> {
@@ -961,6 +968,18 @@ impl std::fmt::Debug for OwnedHold {
     }
 }
 
+/// A weak view of an [`OwnedStr`] allocation (see [`OwnedStr::downgrade`]).
+#[derive(Clone)]
+pub struct WeakOwnedStr(WeakOwned<Box<str>>);
+
+impl WeakOwnedStr {
+    /// Whether `owned` is the string allocation this view names.
+    #[must_use]
+    pub fn is(&self, owned: &OwnedStr) -> bool {
+        self.0.is(&owned.0)
+    }
+}
+
 /// An owned string: a sealed, self-charged text allocation.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct OwnedStr(Owned<Box<str>>);
@@ -1013,6 +1032,13 @@ impl OwnedStr {
     #[must_use]
     pub fn ptr_eq(this: &Self, other: &Self) -> bool {
         Owned::ptr_eq(&this.0, &other.0)
+    }
+
+    /// A weak view that names this string's allocation without keeping its
+    /// text or its charge: an identity check that outlives no owner.
+    #[must_use]
+    pub fn downgrade(this: &Self) -> WeakOwnedStr {
+        WeakOwnedStr(Owned::downgrade(&this.0))
     }
 
     /// Bytes one owned string of `len` bytes is charged.

@@ -921,12 +921,13 @@ fn keyed_scope_hash(scope: &NodeScopeId) -> u64 {
 
 /// The seeded hash of `scope`. Nodes are interned in runs under one
 /// declaration scope, so the thread keeps the digest of the last file scope
-/// it hashed, holding that scope's canonical id so the allocation that
-/// recognises it stays its own: an equal scope behind another allocation is
+/// it hashed, holding a weak view of that scope's canonical id so the
+/// allocation that recognises it stays its own without keeping its text or
+/// its charge past its owners: an equal scope behind another allocation is
 /// hashed again, to the same digest.
 fn scope_digest(scope: &NodeScopeId) -> u64 {
     type LastScope = (
-        verter_type_expr::OwnedStr,
+        verter_session_query::retention::owned::WeakOwnedStr,
         verter_type_expr::TopLevelOwnerId,
         crate::semantic_query::HashValue,
         Option<u32>,
@@ -948,17 +949,13 @@ fn scope_digest(scope: &NodeScopeId) -> u64 {
     LAST_FILE_SCOPE.with(|last| {
         let mut last = last.borrow_mut();
         if let Some((held, o, h, l, digest)) = last.as_ref() {
-            if verter_type_expr::OwnedStr::ptr_eq(held, canonical_id)
-                && o == owner
-                && h == whole_hash
-                && l == local_scope
-            {
+            if held.is(canonical_id) && o == owner && h == whole_hash && l == local_scope {
                 return *digest;
             }
         }
         let digest = keyed_scope_hash(scope);
         *last = Some((
-            canonical_id.clone(),
+            verter_type_expr::OwnedStr::downgrade(canonical_id),
             *owner,
             *whole_hash,
             *local_scope,
