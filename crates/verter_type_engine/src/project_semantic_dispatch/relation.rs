@@ -12023,13 +12023,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .into_iter()
                 .next()
             {
-                Some((canonical, owner, name, _)) => {
-                    current = (
-                        verter_type_expr::OwnedStr::from(canonical),
-                        owner,
-                        verter_type_expr::OwnedStr::from(name),
-                    )
-                }
+                Some((canonical, owner, name, _)) => current = (canonical, owner, name),
                 None => break,
             }
         }

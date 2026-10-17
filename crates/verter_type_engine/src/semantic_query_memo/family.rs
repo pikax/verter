@@ -254,7 +254,7 @@ pub enum FamilyKey {
     },
     ProjectMember {
         base: SemanticNodeId,
-        member: Arc<str>,
+        member: verter_type_expr::OwnedStr,
     },
     IndexedAccess {
         base: SemanticNodeId,
@@ -2130,7 +2130,7 @@ pub(crate) fn family_and_slot_in(
         SemanticQueryKey::ProjectMember { base, member, mode } => (
             FamilyKey::ProjectMember {
                 base: *base,
-                member: std::sync::Arc::<str>::from(member.as_str()),
+                member: member.clone(),
             },
             mode_to_slot(*mode),
         ),

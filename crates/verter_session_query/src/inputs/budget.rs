@@ -9,8 +9,9 @@ pub struct BudgetExceededFailure {
     pub limit: usize,
     /// Actual count at the time of failure.
     pub actual: u64,
-    /// Context about what was being resolved when the budget tripped.
-    pub context: String,
+    /// Context about what was being resolved when the budget tripped: an
+    /// owned name a delivered error shares with every clone.
+    pub context: verter_type_expr::OwnedStr,
 }
 
 /// Which resolution domain hit its budget.

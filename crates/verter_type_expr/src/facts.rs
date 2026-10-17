@@ -778,7 +778,7 @@ impl TypeDependencyPathFact {
 )]
 pub enum DeclarationOrigin {
     /// The member's declaration lives in this canonical file.
-    Declared(Arc<str>),
+    Declared(crate::OwnedStr),
     /// Genuinely synthetic or multi-origin — no single declaring file (the
     /// `None`/empty case in the untyped `declaration_origin` carriers).
     Synthetic,

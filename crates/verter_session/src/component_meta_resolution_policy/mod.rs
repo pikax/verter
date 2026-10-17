@@ -387,13 +387,9 @@ fn build_policy_macro_role_identities(
             verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
                 verter_type_expr::locators::TypeBodySlot {
                     anchor: verter_type_expr::locators::AuthoredAnchor {
-                        canonical_id: verter_type_expr::OwnedStr::from(std::sync::Arc::clone(
-                            &identity.canonical_id,
-                        )),
+                        canonical_id: identity.canonical_id.clone(),
                         owner: identity.owner,
-                        symbol: verter_type_expr::OwnedStr::from(std::sync::Arc::clone(
-                            &identity.symbol_name,
-                        )),
+                        symbol: identity.symbol_name.clone(),
                         space: verter_type_expr::locators::LocatorSymbolSpace::Type,
                     },
                     path: verter_type_expr::OwnedSlice::default(),

@@ -1953,7 +1953,7 @@ mod cached_result_footprint {
         AcceptedSurfaceCompleteness, ComponentMetaAnalysis, ComponentMetaFlags, FallthroughSurface,
         NoFallthroughReason, PropAnalysis, RootReachability, StyleAnalysis,
     };
-    use verter_session_query::retention::allocation::{arc_block_bytes, heap_block_bytes};
+    use verter_session_query::retention::allocation::heap_block_bytes;
     use verter_session_query::retention::RetainedFootprint;
     use verter_type_expr::facts::{SemanticTypeSource, SourcePosition, TopLevelOwnerId};
     use verter_type_expr::locators::{
@@ -2141,30 +2141,57 @@ mod cached_result_footprint {
         }
     }
 
+    /// Everything retaining `result` charges: its own bytes and the owned
+    /// allocations it reaches, each charged once by its own cell.
+    fn charged(result: &CachedComponentMetaResult) -> usize {
+        let account = verter_session_query::retention::SemanticRetentionAccount::new(
+            verter_session_query::retention::RetentionLimits {
+                aggregate_ceiling_bytes: usize::MAX,
+                active_ceiling_bytes: usize::MAX,
+                max_entry_bytes: usize::MAX,
+                pin_threshold_bytes: usize::MAX,
+            },
+        );
+        let footprint = result.retained_footprint();
+        let holds = footprint
+            .handles
+            .hold(verter_session_query::retention::owned::ChargeCtx::new(
+                &account,
+            ))
+            .expect("unbounded");
+        let total = footprint.bytes + account.snapshot().retained_bytes;
+        drop(holds);
+        total
+    }
+
     /// Nested type data counts: a long canonical id inside a prop's
-    /// published source costs its `Arc<str>` block, and a second prop that
-    /// shares the same published source does not count it again.
+    /// published source is an owned name charged by its own cell, and a
+    /// second prop that shares the same published source does not charge
+    /// it again.
     #[test]
     fn nested_type_text_is_charged_once_per_shared_allocation() {
-        let small = base().retained_footprint_bytes();
+        use verter_session_query::retention::owned::OwnedStr;
+        let small = charged(&base());
+        // Each result names its own copy of the source: a charged cell
+        // stays charged where it was first charged.
         let long: Arc<str> = Arc::from("y".repeat(LARGE));
-        let shared = publication(Arc::clone(&long));
-        let one = result(vec![prop("d".to_string(), shared.clone())]);
+        let one = result(vec![prop("d".to_string(), publication(Arc::clone(&long)))]);
+        let shared = publication(long);
         let two = result(vec![
             prop("d".to_string(), shared.clone()),
             prop("d".to_string(), shared),
         ]);
-        let one_bytes = one.retained_footprint_bytes();
-        let expected = arc_block_bytes(LARGE) - arc_block_bytes("/a.ts".len());
+        let one_bytes = charged(&one);
+        let expected = OwnedStr::charge_for_len(LARGE) - OwnedStr::charge_for_len("/a.ts".len());
         assert!(
             one_bytes >= small + expected,
             "a {LARGE}-byte canonical in the published source must add at least \
              {expected} bytes ({small} -> {one_bytes})"
         );
-        let two_bytes = two.retained_footprint_bytes();
+        let two_bytes = charged(&two);
         assert!(
-            two_bytes > one_bytes && two_bytes - one_bytes < arc_block_bytes(LARGE),
-            "a second prop sharing the published source must not recount its \
+            two_bytes > one_bytes && two_bytes - one_bytes < OwnedStr::charge_for_len(LARGE),
+            "a second prop sharing the published source must not recharge its \
              {LARGE}-byte canonical ({one_bytes} -> {two_bytes})"
         );
     }

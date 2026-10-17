@@ -5799,7 +5799,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             scope_payload.as_ref(),
         );
         let name_resolution: rustc_hash::FxHashMap<
-            std::sync::Arc<str>,
+            verter_type_expr::OwnedStr,
             verter_session_query::type_solver::host::ResolvedRootIdentity,
         > = rustc_hash::FxHashMap::default();
         // Seed from the ENCLOSING environment, then let this clause
@@ -9154,7 +9154,7 @@ pub(super) struct FlowBinderEnv {
     shadowing: crate::resolver_core::scope_shadowing::ScopeShadowing,
     /// The (empty) explicit name-resolution overlay.
     name_resolution: rustc_hash::FxHashMap<
-        Arc<str>,
+        verter_type_expr::OwnedStr,
         verter_session_query::type_solver::host::ResolvedRootIdentity,
     >,
     /// Binder name → interned `TypeParam` node.
@@ -10010,7 +10010,7 @@ pub(super) trait FlowDemandDriver {
         expr: &TypeExpr,
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
-        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+        name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
         shadowing: &ScopeShadowing,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
@@ -10600,7 +10600,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         expr: &TypeExpr,
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
-        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+        name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
         shadowing: &ScopeShadowing,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
@@ -11266,7 +11266,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         expr: &TypeExpr,
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
-        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+        name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
         shadowing: &ScopeShadowing,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,

@@ -61,7 +61,7 @@ pub struct CarrierResolverContext<'a> {
     /// The prepared-decl `name_resolution` fast-path map (already-resolved
     /// imports from the body-file scope). Consulted before the host-owned
     /// bare-name resolver fallback.
-    name_resolution: &'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+    name_resolution: &'a FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
     /// The owner declaration-scope payload (scope-local type names /
     /// bindings), consulted by the bare-name resolver fallback. `None` for a
     /// global scope or a pre-bundle fixture.
@@ -94,7 +94,7 @@ pub struct CarrierResolverContext<'a> {
 /// `finish` must be called on every non-panicking exit. The drop assertion makes
 /// that discipline structural while allowing unwind cleanup to remain inert.
 pub struct AuthoredResolutionDebtFrame {
-    canonical_id: Arc<str>,
+    canonical_id: verter_type_expr::OwnedStr,
     owner: verter_type_expr::TopLevelOwnerId,
     outstanding: Cell<bool>,
     finished: Cell<bool>,
@@ -103,7 +103,7 @@ pub struct AuthoredResolutionDebtFrame {
 impl AuthoredResolutionDebtFrame {
     pub(super) fn new(root_identity: &ResolvedRootIdentity) -> Self {
         Self {
-            canonical_id: Arc::clone(&root_identity.canonical_id),
+            canonical_id: root_identity.canonical_id.clone(),
             owner: root_identity.owner,
             outstanding: Cell::new(false),
             finished: Cell::new(false),
@@ -178,7 +178,7 @@ impl<'a> CarrierResolverContext<'a> {
     pub fn new(
         env: &'a FxHashMap<String, SemanticNodeId>,
         scope: &'a NodeScopeId,
-        name_resolution: &'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+        name_resolution: &'a FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
         scope_payload: Option<&'a DeclarationScopePayload>,
         shadowing: &'a ScopeShadowing,
         reduction_context: ProjectionReductionContext,
@@ -221,7 +221,9 @@ impl<'a> CarrierResolverContext<'a> {
     }
 
     /// The prepared-decl `name_resolution` fast-path map.
-    pub(crate) fn name_resolution(&self) -> &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> {
+    pub(crate) fn name_resolution(
+        &self,
+    ) -> &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity> {
         self.name_resolution
     }
 
@@ -1066,12 +1068,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .map_or(HashValue::default(), |s| s.whole_hash);
             return CarrierResolutionPlan::complete(self.recursive_ref_sentinel(
                 &DeclIdentity {
-                    canonical_id: verter_type_expr::OwnedStr::from(
-                        resolved_root.canonical_id.clone(),
-                    ),
+                    canonical_id: resolved_root.canonical_id.clone(),
                     owner: resolved_root.owner,
                     whole_hash,
-                    decl_name: verter_type_expr::OwnedStr::from(resolved_root.symbol_name.clone()),
+                    decl_name: resolved_root.symbol_name.clone(),
                 },
                 Arc::from([]),
             ));
@@ -1082,10 +1082,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .shallow_file_state(resolved_root.canonical_id.as_ref())
             .map_or(HashValue::default(), |s| s.whole_hash);
         let decl_identity = DeclIdentity {
-            canonical_id: verter_type_expr::OwnedStr::from(resolved_root.canonical_id.clone()),
+            canonical_id: resolved_root.canonical_id.clone(),
             owner: resolved_root.owner,
             whole_hash,
-            decl_name: verter_type_expr::OwnedStr::from(resolved_root.symbol_name.clone()),
+            decl_name: resolved_root.symbol_name.clone(),
         };
 
         // Carrier modes (Navigate / Skeleton / Shallow) intern a transparent
@@ -1128,14 +1128,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // short-circuits to the bare `ResolveDecl` result.
         let anchor = self.carrier_resolution_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: ScopeId {
-                canonical_id: verter_type_expr::OwnedStr::from(resolved_root.canonical_id.clone()),
+                canonical_id: resolved_root.canonical_id.clone(),
                 owner: resolved_root.owner,
                 local_scope: None,
                 binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
                     resolved_root.owner,
                 ),
             },
-            name: verter_type_expr::OwnedStr::from(resolved_root.symbol_name.clone()),
+            name: resolved_root.symbol_name.clone(),
         }));
         if matches!(anchor.status, FactStatus::Unavailable(_)) {
             return CarrierResolutionPlan::Ready(anchor);
@@ -1312,7 +1312,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // lazily by the head resolver); a multi-hop resolves the head bare and
         // projects the tail.
         let mut injected = ctx.name_resolution().clone();
-        let head_name: Arc<str> = Arc::from(first.as_ref());
+        let head_name = verter_type_expr::OwnedStr::from(first.as_ref());
         let (resolved_head, route_facts) = self
             .ctx
             .resolve_imported_type_root_with_facts(dep_canonical.as_str(), head_name.as_ref());
@@ -1320,7 +1320,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some(resolved_head) = resolved_head else {
             return CarrierResolutionPlan::complete(self.opaque(QueryError::Miss));
         };
-        injected.insert(Arc::clone(&head_name), resolved_head);
+        injected.insert(head_name.clone(), resolved_head);
         // Single-segment terminal carries the args; a multi-hop head is bare (its
         // args, if any, were rejected by the error above).
         let head_arg_count = if rest.is_empty() { arg_count } else { 0 };
@@ -1616,7 +1616,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
         // Rehydrate the value-side resolution inputs from the carrier's scope.
         let env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
-        let name_resolution: FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> =
+        let name_resolution: FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity> =
             FxHashMap::default();
         let resolved = if is_bare {
             let (name, scope) = {

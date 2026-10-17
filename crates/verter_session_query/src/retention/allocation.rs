@@ -69,8 +69,8 @@ pub fn fact_heap_bytes(fact: &FactVersionRef, aliases: &mut AliasSet) -> usize {
             resolution_key_heap_bytes(&resolution.key)
         }
         FactVersionRef::ProgramAnalysis(ProgramAnalysisFactRef::FlowBody { function, .. }) => {
-            arc_str_bytes(&function.canonical_id, aliases)
-                + arc_str_bytes(&function.merged_symbol_name, aliases)
+            function.canonical_id.offer(aliases)
+                + function.merged_symbol_name.offer(aliases)
                 + match &function.function_part {
                     verter_type_expr::facts::FunctionPartIdentity::Member { member_path } => {
                         member_path.offer(aliases)

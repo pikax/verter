@@ -115,7 +115,10 @@ impl SemanticGraphStore {
         if !node_roots::NodeRootScope::holds(&self.arena.core) {
             return None;
         }
-        match node_roots::NodeRootSet::acquire(Arc::clone(&self.arena.core), vec![id]) {
+        match node_roots::NodeRootSet::acquire(
+            Arc::clone(&self.arena.core),
+            smallvec::smallvec![id],
+        ) {
             Ok(roots) => Some(node_data_lease::NodeDataLease {
                 data: self.arena.get(id)?,
                 root: node_roots::NodeRoot::from_roots(id, roots),

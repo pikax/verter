@@ -903,7 +903,7 @@ mod tests {
     use crate::locators::{
         AuthoredAnchor, LocatorSymbolSpace, MacroPayloadLocator, MacroPayloadPosition,
     };
-    use crate::{OwnedStr, PrimitiveName, TopLevelOwnerId};
+    use crate::{PrimitiveName, TopLevelOwnerId};
 
     use super::*;
 
@@ -916,9 +916,9 @@ mod tests {
     fn locator(field_index: u32) -> MacroPayloadLocator {
         MacroPayloadLocator {
             anchor: AuthoredAnchor {
-                canonical_id: OwnedStr::from("/ws/Comp.vue"),
+                canonical_id: crate::OwnedStr::from("/ws/Comp.vue"),
                 owner: TopLevelOwnerId::instance(0),
-                symbol: OwnedStr::from("defineProps"),
+                symbol: crate::OwnedStr::from("defineProps"),
                 space: LocatorSymbolSpace::Type,
             },
             macro_index: 0,

@@ -186,7 +186,7 @@ fn register_locator_object_member_alias(
 }
 
 impl AnchorPreparedDecl {
-    fn name_resolution(&self) -> &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> {
+    fn name_resolution(&self) -> &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity> {
         match self {
             Self::Type(prepared) => &prepared.name_resolution,
             Self::Value(prepared) => &prepared.name_resolution,
@@ -409,7 +409,7 @@ pub struct LocatorShapeCtx<'a> {
     /// namespace-sibling aware) — the SAME fast path the reducing entry
     /// consults first. `None` when no prepared declaration exists for the
     /// anchor (the in-scope resolver below is then the whole authority).
-    name_resolution: Option<&'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>>,
+    name_resolution: Option<&'a FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>>,
     /// The anchor scope's declaration-scope payload (scope-local names +
     /// import bindings), threaded to the shared in-scope resolver.
     scope_payload: Option<&'a DeclarationScopePayload>,
@@ -425,7 +425,7 @@ impl<'a> LocatorShapeCtx<'a> {
     pub fn new(
         scope: &'a NodeScopeId,
         binders: &'a [LocatorBinderFrame],
-        name_resolution: Option<&'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>>,
+        name_resolution: Option<&'a FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>>,
         scope_payload: Option<&'a DeclarationScopePayload>,
     ) -> Self {
         Self::on(
@@ -440,7 +440,7 @@ impl<'a> LocatorShapeCtx<'a> {
     fn on(
         scope: &'a NodeScopeId,
         binders: BinderStack<'a>,
-        name_resolution: Option<&'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>>,
+        name_resolution: Option<&'a FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>>,
         scope_payload: Option<&'a DeclarationScopePayload>,
     ) -> Self {
         Self {
@@ -468,7 +468,7 @@ impl<'a> LocatorShapeCtx<'a> {
 struct ShapeLowerCtx<'a> {
     scope: &'a NodeScopeId,
     binders: BinderStack<'a>,
-    name_resolution: Option<&'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>>,
+    name_resolution: Option<&'a FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>>,
     scope_payload: Option<&'a DeclarationScopePayload>,
     infer_binders: &'a crate::semantic_query::InferBinderFactory,
     infer_source: Option<&'a AuthoredBodyLocator>,
@@ -2632,10 +2632,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         use crate::project_semantic_dispatch::carrier::RefHeadResolution;
         if let Some((ri, whole_hash)) = resolved {
             let identity = DeclIdentity {
-                canonical_id: verter_type_expr::OwnedStr::from(ri.canonical_id.clone()),
+                canonical_id: ri.canonical_id.clone(),
                 owner: ri.owner,
                 whole_hash,
-                decl_name: verter_type_expr::OwnedStr::from(ri.symbol_name.clone()),
+                decl_name: ri.symbol_name.clone(),
             };
             return LocatorRefPlan::Carrier(RefHeadResolution::Resolved(identity));
         }

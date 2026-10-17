@@ -153,9 +153,9 @@ fn route_surface_fact() -> FactVersionRef {
 fn program_analysis_fact() -> FactVersionRef {
     FactVersionRef::ProgramAnalysis(ProgramAnalysisFactRef::FlowBody {
         function: verter_session_query::facts::fact_cache::ProgramAnalysisFunctionRef {
-            canonical_id: std::sync::Arc::from("/a.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/a.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            merged_symbol_name: std::sync::Arc::from("flow"),
+            merged_symbol_name: verter_type_expr::OwnedStr::from("flow"),
             symbol_space: SymbolSpace::Value,
             function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
             overload_ordinal: 0,

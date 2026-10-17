@@ -194,3 +194,51 @@ fn graph_storage_charges_payload_heap_once_per_shared_allocation() {
     drop(harness);
     assert_eq!(account.snapshot().total_bytes(), 0);
 }
+
+/// A payload a reader still holds when its last owner destroys its slot
+/// stays allocated, so it stays charged with graph storage; the reader's
+/// drop lets the arena release it at its next mutation, and the store's
+/// teardown restores the baseline.
+#[test]
+fn a_released_payload_a_reader_still_holds_stays_charged_until_the_reader_lets_go() {
+    use crate::semantic_query::NodeScopeId;
+    const TEXT: usize = 1 << 20;
+    const FILE: &str = "/held.ts";
+    let account = account();
+    let store = SemanticGraphStore::with_account(StoreAccount::new(Arc::clone(&account)));
+    let scope = |canonical: &str| NodeScopeId::File {
+        canonical_id: verter_type_expr::OwnedStr::from(canonical),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        whole_hash: [0; 16],
+        local_scope: None,
+    };
+    let owner = store.enter_node_root_scope();
+    let node = store.intern_node_with_scope(
+        SemanticNodeData::Literal(LiteralValue::String("h".repeat(TEXT))),
+        scope(FILE),
+    );
+    let held = store
+        .arena
+        .core
+        .live_payload(node)
+        .expect("a live node reads");
+    let charged = store.graph_storage_charge_for_tests();
+    assert!(charged >= TEXT);
+    drop(owner);
+    assert!(!store.arena.is_live(node));
+    assert!(
+        store.graph_storage_charge_for_tests() >= TEXT,
+        "the held payload is still allocated, so still charged"
+    );
+    drop(held);
+    let _ = store.intern_node_with_scope(
+        SemanticNodeData::Literal(LiteralValue::String("next".into())),
+        scope("/other.ts"),
+    );
+    assert!(
+        store.graph_storage_charge_for_tests() < TEXT,
+        "once its reader lets go the payload is released with the next mutation"
+    );
+    drop(store);
+    assert_eq!(account.snapshot().total_bytes(), 0);
+}

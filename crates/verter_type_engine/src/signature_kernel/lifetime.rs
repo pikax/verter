@@ -759,9 +759,9 @@ impl SignatureStore {
                 .map(|arena| {
                     let nodes =
                         if Self::is_binder_token(node) {
-                            Vec::new()
+                            crate::semantic_query_memo::node_roots::RootIds::new()
                         } else {
-                            vec![node]
+                            smallvec::smallvec![node]
                         };
                     crate::semantic_query_memo::node_roots::NodeRootSet::acquire(arena, nodes)
                         .map_err(|_| StoreError::Missing)

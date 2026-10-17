@@ -303,8 +303,11 @@ fn production_constructor_destroys_a_node_on_its_last_release() {
         &arena.released_placeholder
     ));
     assert_eq!(
-        super::super::node_roots::NodeRootSet::acquire(Arc::clone(&arena.core), vec![child_id])
-            .err(),
+        super::super::node_roots::NodeRootSet::acquire(
+            Arc::clone(&arena.core),
+            smallvec::smallvec![child_id]
+        )
+        .err(),
         Some(crate::semantic_query::QueryError::StaleSemanticOperand),
         "a destroyed ordinal can never be rooted again"
     );
