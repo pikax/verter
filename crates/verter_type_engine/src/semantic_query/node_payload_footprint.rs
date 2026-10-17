@@ -10,8 +10,14 @@
 //! * a `Box` / `Vec` / `String` backing belongs to whoever holds it and is
 //!   reported through [`PayloadHeapVisitor::owned`] by capacity; its contents
 //!   are always visited;
-//! * every `Arc` allocation (`Arc<str>`, `Arc<[T]>`, [`PayloadArray`],
-//!   `Arc<T>`) may be shared between payloads, so it is reported through
+//! * an allocation a borrower could clone out of the payload — a name, a
+//!   quasi list, a pending substitution frame — is an owned handle charged
+//!   by its own cell and reported through [`PayloadHeapVisitor::handle`];
+//!   there is no `PayloadHeap` for a bare `Arc`, so a public raw `Arc` field
+//!   fails to compile here;
+//! * a raw `Arc` a payload keeps only behind a borrow ([`PayloadArray`], a
+//!   carrier's private name and arguments, a surface's private lists) may be
+//!   shared between payloads, so it is reported through
 //!   [`PayloadHeapVisitor::shared`] keyed by its address with its own block
 //!   cost, and its contents are visited only when the visitor asks;
 //! * `SemanticNodeId` operands are graph edges, not heap: the arena charges
