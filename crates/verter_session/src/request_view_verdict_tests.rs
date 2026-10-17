@@ -276,6 +276,159 @@ fn uncertain_torn_and_refused_failures_settle_nothing() {
     );
 }
 
+/// A fact whose read was refused its lease proves nothing about the fact: it
+/// fails without a verdict, for it or for the receipts that reach it, and a
+/// probe once the lease can be had reads it again. The function-program
+/// index walk is refused its walk-stack lease once (the fault is armed for
+/// this source's reservation size alone, and the source is forced onto the
+/// region path so the walk reserves on any thread's stack); the retry
+/// through the same view at the same completion state validates.
+#[test]
+fn a_refused_index_walk_settles_nothing_and_its_retry_validates() {
+    use oxc_span::SourceType;
+    use verter_parser::oxc_parse::faults::{
+        fail_reservations_needing, force_reservations, reservations_needing, Reservation,
+    };
+    use verter_session_query::facts::fact_cache::{
+        ProgramAnalysisFactRef, ProgramAnalysisFunctionRef,
+    };
+
+    const ID: &str = "/ws/refused_flow.ts";
+    // A nesting no other test in this binary forces, so the armed fault
+    // reaches this source's walk alone.
+    let source = format!(
+        "export function alpha(n: number) {{\n  return {}n{};\n}}\n",
+        "(".repeat(73),
+        ")".repeat(73)
+    );
+    let upsert = |host: &VerterHost| {
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: Some(ID.to_string()),
+                input_id: ID.to_string(),
+                source: Arc::from(source.as_str()),
+                file_language: FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert must succeed");
+    };
+    let function = ProgramAnalysisFunctionRef {
+        canonical_id: Arc::from(ID),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        merged_symbol_name: Arc::from("alpha"),
+        symbol_space: verter_session_query::facts::SymbolSpace::Value,
+        function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+        overload_ordinal: 0,
+    };
+    let live_hash = {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        upsert(&host);
+        host.ensure_indexed_ready(ID)
+            .expect("indexed")
+            .shallow_state
+            .decl_bodies()
+            .function_program_index()
+            .value
+            .value_function(
+                function.owner,
+                "alpha",
+                &function.function_part,
+                function.overload_ordinal,
+            )
+            .expect("alpha is indexed")
+            .entry()
+            .flow_body_stable_hash()
+    };
+    let needed = verter_parser::oxc_parse::parse_stack_bytes(&source, SourceType::ts());
+    let _forcing = force_reservations(&[Reservation::Lease], needed);
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert(&host);
+    host.ensure_indexed_ready(ID).expect("indexed");
+    let base = host.resolver_store_view_read().into_owned_view();
+    let receipt = ResultReceipt::new(vec![
+        FactVersionRef::ProgramAnalysis(ProgramAnalysisFactRef::FlowBody {
+            function,
+            flow_body_stable_hash: live_hash,
+        }),
+        whole(1),
+    ]);
+    let signature = [FactVersionRef::Receipt(receipt)];
+    let view = RequestStoreView::new(&base, overlay_through(2));
+
+    let leases = reservations_needing(Reservation::Lease, needed);
+    fail_reservations_needing(Reservation::Lease, needed, 1);
+    let refused = reads(&view, &signature, &[]);
+    fail_reservations_needing(Reservation::Lease, needed, 0);
+    assert!(
+        reservations_needing(Reservation::Lease, needed) > leases,
+        "the index walk asked for its lease"
+    );
+    assert_eq!(refused, (Err(0), 2), "the refused walk fails the receipt");
+    assert_eq!(
+        view.settled_receipts_for_tests(true),
+        0,
+        "a refused read is not negative validity"
+    );
+    assert_eq!(
+        reads(&view, &signature, &[]),
+        (Ok(()), 2),
+        "the retry reads the fact again and validates"
+    );
+    assert_eq!(reads(&view, &signature, &[]), (Ok(()), 0));
+}
+
+/// A parse fact whose lazy declaration-body read misses its lease reads as
+/// absent without being absent: it fails, settles nothing, and is read
+/// again.
+#[test]
+fn a_parse_fact_whose_body_read_misses_its_lease_settles_nothing() {
+    use verter_session_query::facts::fact_cache::ParseFactRef;
+    use verter_session_query::facts::registry::{FactLane, InternedName};
+    use verter_session_query::facts::{FactKey, SymbolSpace};
+
+    const ID: &str = "/ws/lease_missed.ts";
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(ID.to_string()),
+            input_id: ID.to_string(),
+            source: Arc::from("export type A = { x: number };\nexport type B = { y: string };\n"),
+            file_language: FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert must succeed");
+    let indexed = host.ensure_indexed_ready(ID).expect("indexed");
+    assert!(
+        indexed.shallow_state.type_decl("A").is_some(),
+        "A lowers under a live lease, pinning the retained snapshot"
+    );
+    indexed
+        .shallow_state
+        .decl_bodies()
+        .release_retained_snapshot_for_test();
+    let base = host.resolver_store_view_read().into_owned_view();
+    let signature = [FactVersionRef::Receipt(ResultReceipt::new(vec![
+        FactVersionRef::Parse(ParseFactRef {
+            canonical_id: ID.to_string(),
+            key: FactKey::Export {
+                name: InternedName(Arc::from("B")),
+                space: SymbolSpace::Type,
+            },
+            lane: FactLane::Semantic,
+            expected_hash: [7; 16],
+        }),
+    ]))];
+    let view = RequestStoreView::new(&base, overlay_through(1));
+    for probe in 0..2 {
+        assert_eq!(
+            reads(&view, &signature, &[]),
+            (Err(0), 1),
+            "probe {probe} reads the lease-missed fact"
+        );
+    }
+    assert_eq!(view.settled_receipts_for_tests(true), 0);
+}
+
 /// Settled verdicts belong to the request: they keep the evidence they
 /// name alive while the view lives and release every byte of it with the
 /// view.

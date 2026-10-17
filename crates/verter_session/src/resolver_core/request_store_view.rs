@@ -85,7 +85,7 @@ use verter_session_query::facts::fact_cache::{CompletionOverlayState, OverlayId}
 use crate::file_artifact_store::FileFacts;
 use crate::resolver_core::bracketed_generation::BracketedGeneration;
 use crate::resolver_core::prepared_decl::PreparedDeclBundle;
-use crate::resolver_store::HostStoreView;
+use crate::resolver_store::{HostStoreView, LeafCheck};
 use verter_session_query::analysis::types::Hash16;
 use verter_session_query::facts::fact_cache::{
     DerivedFactKind, FactVersionRef, ParseFactRef, ResolveImportsFactRef, RouteSurfaceFactRef,
@@ -953,9 +953,10 @@ pub(crate) struct RequestStoreView<'a> {
 /// Only an answer that is a function of what this view captured is
 /// settled. A refused validation (a base not proven current, a completion
 /// writer in flight, a state that moved while the facts were read) has no
-/// verdict, and neither has a failure read from a store the request shares
-/// with live writers (see [`failure_is_settled`]): either can answer
-/// differently on the next read, so neither is negative validity.
+/// verdict; neither has a failure whose read was refused its lease
+/// ([`LeafCheck::Refused`]), nor one read from a store the request shares
+/// with live writers (see [`failure_is_settled`]): each can answer
+/// differently on the next read, so none is negative validity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Verdict {
     /// Every fact reached validates.
@@ -969,7 +970,11 @@ enum Verdict {
 ///
 /// Settled arms read only the base this view captured (its roots and its
 /// memoised per-canonical views) or the completion overlay at its exact
-/// state. Two consult stores shared with live writers: a per-canonical
+/// state. A parse or program-analysis fact can be read lazily, through a
+/// declaration-body or walk-stack lease that may be refused; that refusal
+/// is reported by the read ([`LeafCheck::Refused`]) and never reaches
+/// here, so a failure of either that does reach here was read in full.
+/// Two consult stores shared with live writers: a per-canonical
 /// resolved-import fact reads the shared resolved-import store, whose
 /// missing slot a concurrent cold compute can fill, and a route-surface
 /// fact reads the augmentation index and program file order, which can gain
@@ -997,7 +1002,8 @@ enum FactOutcome<'r> {
     /// It does not validate, and will not at this state; `chain` names the
     /// receipts the walk proved reach the failure, innermost first.
     Stale(Vec<&'r verter_session_query::facts::fact_cache::ResultReceipt>),
-    /// It failed against a live store: no verdict.
+    /// It failed against a live store, or a read it rested on was refused:
+    /// no verdict.
     Uncertain,
 }
 
@@ -1422,12 +1428,10 @@ impl<'a> RequestStoreView<'a> {
         use verter_session_query::facts::fact_cache::ReceiptVerdict;
 
         let FactVersionRef::Receipt(receipt) = fact else {
-            return if self.validates_leaf_or_self_root(fact, self_root_canonicals, state) {
-                FactOutcome::Valid
-            } else if failure_is_settled(fact) {
-                FactOutcome::Stale(Vec::new())
-            } else {
-                FactOutcome::Uncertain
+            return match self.check_leaf_or_self_root(fact, self_root_canonicals, state) {
+                LeafCheck::Valid => FactOutcome::Valid,
+                LeafCheck::Invalid if failure_is_settled(fact) => FactOutcome::Stale(Vec::new()),
+                LeafCheck::Invalid | LeafCheck::Refused => FactOutcome::Uncertain,
             };
         };
         let mut settled_failure = true;
@@ -1442,11 +1446,11 @@ impl<'a> RequestStoreView<'a> {
                 }
             },
             |leaf| {
-                let valid = self.validates_leaf_or_self_root(leaf, self_root_canonicals, state);
-                if !valid {
-                    settled_failure = failure_is_settled(leaf);
+                let check = self.check_leaf_or_self_root(leaf, self_root_canonicals, state);
+                if !check.validates() {
+                    settled_failure = check == LeafCheck::Invalid && failure_is_settled(leaf);
                 }
-                valid
+                check.validates()
             },
         );
         match outcome {
@@ -1574,21 +1578,21 @@ impl<'a> RequestStoreView<'a> {
 
     /// One fact that is not a receipt: a strict self-root when its file is
     /// listed in `self_root_canonicals`, otherwise validated at `state`.
-    fn validates_leaf_or_self_root(
+    fn check_leaf_or_self_root(
         &self,
         fact: &FactVersionRef,
         self_root_canonicals: &[&str],
         state: CompletionOverlayState,
-    ) -> bool {
+    ) -> LeafCheck {
         #[cfg(test)]
         self.leaf_validations.fetch_add(1, Ordering::Relaxed);
         match fact {
             FactVersionRef::FileWholeHash { canonical_id, hash }
                 if self_root_canonicals.contains(&canonical_id.as_str()) =>
             {
-                self.validates_self_root_at_completion_state(canonical_id, hash)
+                LeafCheck::of(self.validates_self_root_at_completion_state(canonical_id, hash))
             }
-            other => self.validates_leaf_at_completion_state(other, state),
+            other => self.check_leaf_at_completion_state(other, state),
         }
     }
 
@@ -1599,9 +1603,23 @@ impl<'a> RequestStoreView<'a> {
     }
 
     /// One fact that is not a receipt, validated at `state`. A receipt
-    /// never reaches here: [`Self::validates_with_receipts_at_completion_state`] reads it
+    /// never reaches here: [`Self::validate_at_completion_state`] reads it
     /// through to the facts it reaches.
-    fn validates_leaf_at_completion_state(
+    fn check_leaf_at_completion_state(
+        &self,
+        fact: &FactVersionRef,
+        state: CompletionOverlayState,
+    ) -> LeafCheck {
+        match fact {
+            FactVersionRef::Parse(p) => self.check_parse_domain(p),
+            FactVersionRef::ProgramAnalysis(fact) => self.check_program_analysis_domain(fact),
+            other => LeafCheck::of(self.validates_settled_leaf_at_completion_state(other, state)),
+        }
+    }
+
+    /// A fact that is not a receipt, whose reads cannot be refused,
+    /// validated at `state`.
+    fn validates_settled_leaf_at_completion_state(
         &self,
         fact: &FactVersionRef,
         state: CompletionOverlayState,
@@ -1633,10 +1651,8 @@ impl<'a> RequestStoreView<'a> {
                     self.base.validates(fact)
                 }
             },
-            FactVersionRef::Parse(p) => self.validates_parse_domain(p),
             FactVersionRef::ResolveImports(r) => self.validates_resolve_imports_domain(r),
             FactVersionRef::RouteSurface(r) => self.validates_route_surface_domain(r),
-            FactVersionRef::ProgramAnalysis(fact) => self.validates_program_analysis_domain(fact),
             FactVersionRef::FileSourceEnv {
                 canonical_id,
                 parse_env_hash,
@@ -1678,9 +1694,46 @@ impl<'a> RequestStoreView<'a> {
             FactVersionRef::StrictSelfRootWorld(world) => self
                 .strict_self_root_world_at_completion_state(state)
                 .is_some_and(|current| current == *world),
-            // Read through by the caller; fails closed if one ever arrives.
-            FactVersionRef::Receipt(_) => false,
+            // Checked by `check_leaf_at_completion_state`, and a receipt is
+            // read through by the caller; fail closed if one ever arrives.
+            FactVersionRef::Parse(_)
+            | FactVersionRef::ProgramAnalysis(_)
+            | FactVersionRef::Receipt(_) => false,
         }
+    }
+
+    /// The parse-domain fact, checked against the overlay's facts when the
+    /// overlay shadows the canonical, otherwise against the base.
+    fn check_parse_domain(&self, fact: &ParseFactRef) -> LeafCheck {
+        if !self.base_is_current {
+            return LeafCheck::Invalid;
+        }
+        match self.overlay.lookup_file_facts(fact.canonical_id.as_str()) {
+            // Shadowing: overlay `FileFacts` are authoritative for the
+            // canonical. A registered fact must match; an absent fact
+            // matches only the zero-sentinel observation.
+            Some(overlay_facts) => crate::resolver_store::check_parse_fact(
+                overlay_facts.lookup_or_compute_read(&fact.key),
+                fact,
+            ),
+            None => self.base.check_parse_domain(fact),
+        }
+    }
+
+    /// The program-analysis fact, checked against the base.
+    fn check_program_analysis_domain(
+        &self,
+        fact: &verter_session_query::facts::fact_cache::ProgramAnalysisFactRef,
+    ) -> LeafCheck {
+        if !self.base_is_current {
+            return LeafCheck::Invalid;
+        }
+        // The `FunctionProgramIndex` authority is the base view's
+        // per-canonical snapshot: an overlay-only function body has no
+        // base artifact to validate against, so an overlay-recorded
+        // ProgramAnalysis fact can never validate against the base
+        // (overlay results never populate base-only caches).
+        self.base.check_program_analysis_domain(fact)
     }
 
     fn strict_self_root_world_at_completion_state(
@@ -1905,30 +1958,7 @@ impl<'a> StoreView for RequestStoreView<'a> {
     }
 
     fn validates_parse_domain(&self, fact: &ParseFactRef) -> bool {
-        if !self.base_is_current {
-            return false;
-        }
-        const ZERO_HASH: Hash16 = [0u8; 16];
-        if let Some(overlay_facts) = self.overlay.lookup_file_facts(fact.canonical_id.as_str()) {
-            // Shadowing: overlay `FileFacts` are authoritative for the
-            // canonical. A registered fact must match; an absent fact
-            // matches only the zero-sentinel observation.
-            match overlay_facts.lookup_or_compute(&fact.key) {
-                Some(stored) => {
-                    let stored_hash = match fact.lane {
-                        verter_session_query::facts::registry::FactLane::Semantic => {
-                            stored.semantic_hash
-                        }
-                        verter_session_query::facts::registry::FactLane::Display => {
-                            stored.display_hash
-                        }
-                    };
-                    return stored_hash == fact.expected_hash;
-                }
-                None => return fact.expected_hash == ZERO_HASH,
-            }
-        }
-        self.base.validates_parse_domain(fact)
+        self.check_parse_domain(fact).validates()
     }
 
     fn validates_resolve_imports_domain(&self, fact: &ResolveImportsFactRef) -> bool {
@@ -1995,15 +2025,7 @@ impl<'a> StoreView for RequestStoreView<'a> {
         &self,
         fact: &verter_session_query::facts::fact_cache::ProgramAnalysisFactRef,
     ) -> bool {
-        if !self.base_is_current {
-            return false;
-        }
-        // The `FunctionProgramIndex` authority is the base view's
-        // per-canonical snapshot: an overlay-only function body has no
-        // base artifact to validate against, so an overlay-recorded
-        // ProgramAnalysis fact can never validate against the base
-        // (overlay results never populate base-only caches).
-        self.base.validates_program_analysis_domain(fact)
+        self.check_program_analysis_domain(fact).validates()
     }
 
     fn promote_route_completion(
