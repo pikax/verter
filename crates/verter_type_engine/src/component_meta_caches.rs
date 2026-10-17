@@ -1282,7 +1282,7 @@ impl ShapeCacheDb {
             value: MaterializedOutputTypeExpr::from_type_expr_for_test(
                 None,
                 TypeExpr::Unknown(verter_type_expr::UnknownValue::missing_output()),
-                Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+                crate::semantic_query::DepSignature::default(),
                 false,
             ),
             signature: ReadSetSignature::empty(),
@@ -1347,7 +1347,7 @@ impl ShapeCacheDb {
             value: MaterializedOutputTypeExpr::from_type_expr_for_test(
                 None,
                 deep_type,
-                Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+                crate::semantic_query::DepSignature::default(),
                 false,
             ),
             signature: ReadSetSignature::empty(),

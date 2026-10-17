@@ -204,8 +204,8 @@ pub enum ShallowDiagnostic {
     /// a root-level miss is the caller's missing-dependency channel and
     /// must not double-report.
     UnresolvedSurfaceArm {
-        name: Arc<str>,
-        owner_canonical: Arc<str>,
+        name: verter_session_query::retention::owned::OwnedStr,
+        owner_canonical: verter_session_query::retention::owned::OwnedStr,
         owner: verter_type_expr::TopLevelOwnerId,
     },
     /// A flow-bearing root whose reducer is still pending
@@ -288,6 +288,93 @@ impl ShallowDiagnostic {
                 target: target.clone(),
             },
         }
+    }
+}
+
+/// The walker diagnostics a read delivers.
+///
+/// A sealed, self-charged list: clones share one allocation and its one
+/// charge, released with the last handle, and the diagnostics are reachable
+/// only by borrow. Every empty list is the one process-static empty list,
+/// which no owner charges.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct WalkerDiagnostics(
+    verter_session_query::retention::owned::Owned<Box<[ShallowDiagnostic]>>,
+);
+
+impl WalkerDiagnostics {
+    /// A list of `diagnostics`, in order.
+    #[must_use]
+    pub fn new(diagnostics: impl Into<Vec<ShallowDiagnostic>>) -> Self {
+        let diagnostics: Vec<ShallowDiagnostic> = diagnostics.into();
+        if diagnostics.is_empty() {
+            return crate::semantic_query_memo::empty_diagnostics();
+        }
+        Self(verter_session_query::retention::owned::Owned::new(
+            diagnostics.into_boxed_slice(),
+        ))
+    }
+
+    /// The process-static empty list. Only its static initialiser calls
+    /// this.
+    pub(crate) fn static_empty() -> Self {
+        Self(verter_session_query::retention::owned::Owned::new(
+            Box::new([]),
+        ))
+    }
+
+    /// The owned allocation behind a nonempty list; `None` for the static
+    /// empty list.
+    pub(crate) fn owned(
+        &self,
+    ) -> Option<&verter_session_query::retention::owned::Owned<Box<[ShallowDiagnostic]>>> {
+        (!self.is_empty()).then_some(&self.0)
+    }
+
+    /// Whether two lists share one allocation.
+    #[must_use]
+    pub fn ptr_eq(this: &Self, other: &Self) -> bool {
+        verter_session_query::retention::owned::Owned::ptr_eq(&this.0, &other.0)
+    }
+
+    /// Bytes this list's charge holds; `None` while no owner charged it.
+    #[must_use]
+    pub fn charge_bytes(&self) -> Option<usize> {
+        self.0.charge_bytes()
+    }
+}
+
+impl std::ops::Deref for WalkerDiagnostics {
+    type Target = [ShallowDiagnostic];
+    fn deref(&self) -> &[ShallowDiagnostic] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for WalkerDiagnostics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+impl Default for WalkerDiagnostics {
+    fn default() -> Self {
+        crate::semantic_query_memo::empty_diagnostics()
+    }
+}
+
+impl From<Vec<ShallowDiagnostic>> for WalkerDiagnostics {
+    fn from(diagnostics: Vec<ShallowDiagnostic>) -> Self {
+        Self::new(diagnostics)
+    }
+}
+
+impl verter_session_query::retention::owned::Measured for ShallowDiagnostic {
+    fn heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        crate::semantic_query::allocation_footprint::OwnedHeap::owned_heap_bytes(self, aliases)
     }
 }
 
@@ -2237,7 +2324,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             edge_kind,
             Arc::from(vec![object].into_boxed_slice()),
             meta,
-            Arc::clone(self.fence),
+            self.fence.clone(),
         );
         self.record_intermediate(Some(value));
         value
@@ -3042,7 +3129,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 else {
                     let miss = QueryBuildOutput::from((
                         QueryResult::Error(QueryError::Miss),
-                        Arc::clone(self.fence),
+                        self.fence.clone(),
                     ));
                     return self.stop_finite_mapped_with(miss, object, index_node);
                 };
@@ -3058,7 +3145,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     OriginEdgeKind::ProjectIndex,
                     Arc::from([source, source_object, argument]),
                     OriginMeta::Index(key.clone()),
-                    Arc::clone(self.fence),
+                    self.fence.clone(),
                 );
                 for &read in &source_reads {
                     selected_mapper.value_expr = self.dispatch.substitute_semantic_type_param(
@@ -3098,7 +3185,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 OriginEdgeKind::ProjectIndex,
                 Arc::from([object, source, mapper.key_space]),
                 OriginMeta::Index(key.clone()),
-                Arc::clone(self.fence),
+                self.fence.clone(),
             );
             self.visited_aliases.clear();
             self.visited_nodes.clear();
@@ -3116,7 +3203,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             ) {
                 let miss = QueryBuildOutput::from((
                     QueryResult::Error(QueryError::Miss),
-                    Arc::clone(self.fence),
+                    self.fence.clone(),
                 ));
                 return self.stop_finite_mapped_with(miss, object, index_node);
             }
@@ -3164,12 +3251,11 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 index: IndexKey::Computed(index),
             },
         );
-        let mut output =
-            QueryBuildOutput::from((QueryResult::Value(carrier), Arc::clone(self.fence)))
-                .with_observed_self_roots(
-                    self.dispatch
-                        .observed_self_roots_from_nodes([object, index]),
-                );
+        let mut output = QueryBuildOutput::from((QueryResult::Value(carrier), self.fence.clone()))
+            .with_observed_self_roots(
+                self.dispatch
+                    .observed_self_roots_from_nodes([object, index]),
+            );
         output.merge_completeness(self.completeness);
         output.cache_suppress = true;
         output.walker_diagnostics = std::mem::take(&mut self.walker_diagnostics);
@@ -3215,7 +3301,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 OriginEdgeKind::ProjectIndex,
                 Arc::from([object]),
                 OriginMeta::Index(key.clone()),
-                Arc::clone(self.fence),
+                self.fence.clone(),
             );
         }
         let values: Vec<_> = values
@@ -3733,7 +3819,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         edge_kind,
                         Arc::from([current]),
                         meta,
-                        Arc::clone(self.fence),
+                        self.fence.clone(),
                     );
                     current = member_value;
                     index += 1;
@@ -3884,7 +3970,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                 edge_kind,
                                 Arc::from(vec![current].into_boxed_slice()),
                                 meta,
-                                Arc::clone(self.fence),
+                                self.fence.clone(),
                             );
                             current = member_value;
                             index += 1;
@@ -4257,7 +4343,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         OriginEdgeKind::ConditionalSelect,
                         Arc::from(vec![check, extends].into_boxed_slice()),
                         OriginMeta::Branch(BranchSelection::Deferred),
-                        Arc::clone(self.fence),
+                        self.fence.clone(),
                     );
                     self.graph().record_conditional_deferred();
                     results.push(wrapper);
@@ -4592,7 +4678,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                     vec![current, *source, mapper.key_space].into_boxed_slice(),
                                 ),
                                 meta,
-                                Arc::clone(self.fence),
+                                self.fence.clone(),
                             );
                             current = narrowed;
                             index += 1;
@@ -4979,7 +5065,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             edge_kind,
                             Arc::from(vec![current, *source, mapper.key_space].into_boxed_slice()),
                             meta,
-                            Arc::clone(self.fence),
+                            self.fence.clone(),
                         );
                         current = value;
                         index += 1;
@@ -5170,7 +5256,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         OriginEdgeKind::AliasResolve,
                         Arc::from(vec![current].into_boxed_slice()),
                         OriginMeta::None,
-                        Arc::clone(self.fence),
+                        self.fence.clone(),
                     );
                     current = target_id;
                     // Do not consume a segment; we unwrapped an alias.
@@ -5378,7 +5464,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                 edge_kind,
                                 Arc::from([current]),
                                 meta,
-                                Arc::clone(self.fence),
+                                self.fence.clone(),
                             );
                             current = member_node;
                             index += 1;
@@ -5487,7 +5573,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             edge_kind,
                             Arc::from(vec![current].into_boxed_slice()),
                             meta,
-                            Arc::clone(self.fence),
+                            self.fence.clone(),
                         );
                         current = length;
                         index += 1;
@@ -5611,7 +5697,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                 OriginEdgeKind::ProjectIndex,
                                 Arc::from(vec![current].into_boxed_slice()),
                                 meta,
-                                Arc::clone(self.fence),
+                                self.fence.clone(),
                             );
                             current = value;
                             index += 1;
@@ -5675,7 +5761,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                 OriginEdgeKind::ProjectIndex,
                                 Arc::from(vec![current].into_boxed_slice()),
                                 meta,
-                                Arc::clone(self.fence),
+                                self.fence.clone(),
                             );
                             current = element;
                             index += 1;
@@ -8664,8 +8750,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         };
         self.walker_diagnostics
             .push(ShallowDiagnostic::UnresolvedSurfaceArm {
-                name,
-                owner_canonical,
+                name: name.as_ref().into(),
+                owner_canonical: owner_canonical.as_ref().into(),
                 owner,
             });
     }

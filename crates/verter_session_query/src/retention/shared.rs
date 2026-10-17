@@ -142,27 +142,32 @@ impl SharedCharge {
     /// registry lock, so it never drops a hold whose release could take it.
     fn add_cache_hold(state: &mut SharedState) -> Result<(), RetentionRefusal> {
         if state.cache_holds == 0 {
-            if let LeafHolds::Caller(callers) = &state.leaves {
-                // The leaves are adopted first; a refusal of any of them, or
-                // of the allocation itself, drops the adopted leaf holds,
-                // which hand those leaves straight back to the callers still
-                // holding them through this allocation — none is released.
-                let adopted = callers
-                    .iter()
-                    .map(CallerHold::adopt)
-                    .collect::<Result<Box<[CacheHold]>, _>>()?;
-                state
-                    .charge
-                    .as_mut()
-                    .expect("a reachable charge is not yet released")
-                    .try_adopt_retained()?;
+            // The leaves are adopted first; a refusal of any of them, or of
+            // the allocation itself, drops the adopted leaf holds, which
+            // hand those leaves straight back to the callers still holding
+            // them through this allocation — none is released. Leaves still
+            // held as a cache's belong to an allocation whose last cache
+            // hold is releasing it with no caller left: the revival keeps
+            // them, and its charge is still retained.
+            let adopted = match &state.leaves {
+                LeafHolds::Caller(callers) => Some(
+                    callers
+                        .iter()
+                        .map(CallerHold::adopt)
+                        .collect::<Result<Box<[CacheHold]>, _>>()?,
+                ),
+                LeafHolds::Cache(_) => None,
+            };
+            state
+                .charge
+                .as_mut()
+                .expect("a reachable charge is not yet released")
+                .try_adopt_retained()?;
+            if let Some(adopted) = adopted {
                 // The callers' leaf holds drop after their leaves gained a
                 // cache hold: nothing is released.
                 state.leaves = LeafHolds::Cache(adopted);
             }
-            // Otherwise the last cache hold is releasing an allocation no
-            // caller took: its charge is still retained and its leaves are
-            // still held as a cache's, so the revival keeps both.
         }
         state.cache_holds += 1;
         Ok(())

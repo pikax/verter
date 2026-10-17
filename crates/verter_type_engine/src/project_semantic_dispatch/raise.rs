@@ -2146,7 +2146,7 @@ fn rebuild_function<C: crate::resolver_core::ResolverCapabilities>(
 struct ReduceState {
     visited: FxHashSet<(SemanticNodeId, ProjectionReductionContext)>,
     mapping: MappingMap,
-    dep_facts: Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
+    dep_facts: Vec<crate::semantic_query::DepEntry>,
     /// OR-fold of every `read.result_is_partial()` observed by `reduce_one`
     /// during this reduce pass. Propagated into the returned
     /// `MaterializedTypeExpr.result_is_partial()` so direct consumers
@@ -2183,27 +2183,19 @@ struct ReduceState {
 // per-member projectors.
 impl ReduceState {
     fn merge_dep_signature(&mut self, sig: &DepSignature) {
-        for (canonical, version) in sig.iter() {
+        for entry in sig.iter() {
             // Light dedup on (canonical, version) — keeps the
             // accumulated list O(unique_facts) rather than
             // O(num_dispatches × facts_per_dispatch).
-            if !self
-                .dep_facts
-                .iter()
-                .any(|(c, v)| Arc::ptr_eq(c, canonical) && v == version)
-                && !self
-                    .dep_facts
-                    .iter()
-                    .any(|(c, v)| c.as_ref() == canonical.as_ref() && v == version)
-            {
-                self.dep_facts
-                    .push((Arc::clone(canonical), version.clone()));
+            if !self.dep_facts.contains(entry) {
+                // The clone shares the entry's owned canonical.
+                self.dep_facts.push(entry.clone());
             }
         }
     }
 
     fn into_dep_signature(self) -> DepSignature {
-        Arc::from(self.dep_facts.into_boxed_slice())
+        DepSignature::new(self.dep_facts)
     }
 }
 

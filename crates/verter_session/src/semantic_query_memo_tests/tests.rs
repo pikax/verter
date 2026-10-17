@@ -298,9 +298,9 @@ fn dep_signature_is_returned_with_warm_hits() {
         scope: scope("/w/a.ts"),
         name: Arc::from("Foo"),
     });
-    let sig: DepSignature = Arc::from(
-        vec![(
-            Arc::<str>::from("/w/a.ts"),
+    let sig: DepSignature = verter_type_engine::semantic_query::DepSignature::new(
+        vec![verter_type_engine::semantic_query::DepEntry::new(
+            "/w/a.ts",
             verter_type_engine::semantic_query::DepVersion::WholeHash([1u8; 16]),
         )]
         .into_boxed_slice(),
@@ -519,9 +519,8 @@ fn warm_publish_one_inserts_warm_map_and_registers_reverse_index() {
     );
 
     // Direct invocation of the extracted helper.
-    let walker_diagnostics: std::sync::Arc<
-        [verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic],
-    > = std::sync::Arc::from([]);
+    let walker_diagnostics: verter_type_engine::project_semantic_dispatch::walk::WalkerDiagnostics =
+        verter_type_engine::project_semantic_dispatch::walk::WalkerDiagnostics::default();
     // The carrier's fact rail names the test canonical via a
     // `FileWholeHash` fact — `register_reverse_index` registers under
     // every canonical `read_set_signature.canonical_ids()` yields.
@@ -595,14 +594,14 @@ fn family_map_invalidate_canonical_propagates_cross_canonical_cleanup() {
         name: Arc::from("Bar"),
     });
     // Compose a dep_sig referencing two canonicals.
-    let dep_sig: DepSignature = Arc::from(
+    let dep_sig: DepSignature = verter_type_engine::semantic_query::DepSignature::new(
         vec![
-            (
-                Arc::<str>::from("/w/a.ts"),
+            verter_type_engine::semantic_query::DepEntry::new(
+                "/w/a.ts",
                 DepVersion::WholeHash([1u8; 16]),
             ),
-            (
-                Arc::<str>::from("/w/b.ts"),
+            verter_type_engine::semantic_query::DepEntry::new(
+                "/w/b.ts",
                 DepVersion::WholeHash([2u8; 16]),
             ),
         ]
@@ -614,7 +613,7 @@ fn family_map_invalidate_canonical_propagates_cross_canonical_cleanup() {
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || {
             let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
-            (QueryResult::Value(id), Arc::clone(&dep_sig))
+            (QueryResult::Value(id), dep_sig.clone())
         },
     );
     assert!(
@@ -1024,9 +1023,8 @@ fn warm_publish_one_debug_asserts_against_sub_slot_mode_terminal() {
         ),
     };
     let value = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
-    let walker_diagnostics: std::sync::Arc<
-        [verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic],
-    > = std::sync::Arc::from([]);
+    let walker_diagnostics: verter_type_engine::project_semantic_dispatch::walk::WalkerDiagnostics =
+        verter_type_engine::project_semantic_dispatch::walk::WalkerDiagnostics::default();
     let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(
         verter_type_engine::fact_signature_helpers::empty_fact_signature(),
     );
@@ -1380,14 +1378,14 @@ fn backfilled_slot_with_wider_dep_sig_over_invalidates_conservatively_not_incorr
 
     // Expanded build reads both /w/wide.ts and /w/narrow.ts —
     // its dep-sig spans both canonicals.
-    let wide_dep_sig: DepSignature = Arc::from(
+    let wide_dep_sig: DepSignature = verter_type_engine::semantic_query::DepSignature::new(
         vec![
-            (
-                Arc::<str>::from("/w/wide.ts"),
+            verter_type_engine::semantic_query::DepEntry::new(
+                "/w/wide.ts",
                 verter_type_engine::semantic_query::DepVersion::WholeHash([1u8; 16]),
             ),
-            (
-                Arc::<str>::from("/w/narrow.ts"),
+            verter_type_engine::semantic_query::DepEntry::new(
+                "/w/narrow.ts",
                 verter_type_engine::semantic_query::DepVersion::WholeHash([2u8; 16]),
             ),
         ]
@@ -3139,7 +3137,7 @@ fn warm_publish_one_if_absent_skips_publish_when_parent_inflight_aborted() {
         aborted_key.clone(),
         QueryResult::Value(node),
         verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
-        Arc::from(Vec::new()),
+        verter_type_engine::semantic_query::DepSignature::default(),
         Arc::from([]),
         verter_type_engine::semantic_query::demand::MaterializedSet::single(
             super::family::requested_point_for_key(&aborted_key),
@@ -3169,7 +3167,7 @@ fn warm_publish_one_if_absent_skips_publish_when_parent_inflight_aborted() {
         healthy_key.clone(),
         QueryResult::Value(node),
         verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
-        Arc::from(Vec::new()),
+        verter_type_engine::semantic_query::DepSignature::default(),
         Arc::from([]),
         verter_type_engine::semantic_query::demand::MaterializedSet::single(
             super::family::requested_point_for_key(&healthy_key),
@@ -3463,9 +3461,9 @@ fn family_test_key(base: SemanticNodeId, mode: ProjectionMode) -> SemanticQueryK
 }
 
 fn family_test_dep_signature() -> DepSignature {
-    Arc::from(
-        vec![(
-            Arc::<str>::from("/w/family.ts"),
+    verter_type_engine::semantic_query::DepSignature::new(
+        vec![verter_type_engine::semantic_query::DepEntry::new(
+            "/w/family.ts",
             verter_type_engine::semantic_query::DepVersion::WholeHash([7u8; 16]),
         )]
         .into_boxed_slice(),
@@ -3769,9 +3767,9 @@ fn family_cancelled_does_not_backfill_any_slot() {
 // ──────────────────────────────────────────────────────────────────
 
 fn dep_sig_for(canonical: &str, hash: u8) -> DepSignature {
-    Arc::from(
-        vec![(
-            Arc::<str>::from(canonical),
+    verter_type_engine::semantic_query::DepSignature::new(
+        vec![verter_type_engine::semantic_query::DepEntry::new(
+            &*canonical,
             verter_type_engine::semantic_query::DepVersion::WholeHash([hash; 16]),
         )]
         .into_boxed_slice(),
@@ -4675,7 +4673,7 @@ fn prefix_backfill_carries_traced_facts() {
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || QueryBuildOutput {
             result: QueryResult::Value(parent_value),
-            dep_signature: Arc::clone(&parent_dep_signature),
+            dep_signature: parent_dep_signature.clone(),
             walker_diagnostics: Vec::new(),
             cache_suppress: false,
             completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
@@ -5018,7 +5016,9 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
                 );
                 verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Value(id),
-                    dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+                    dep_signature: verter_type_engine::semantic_query::DepSignature::new(
+                        Vec::new().into_boxed_slice(),
+                    ),
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
                     completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
@@ -5057,7 +5057,7 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
                             .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
                         (
                             QueryResult::Value(id),
-                            Arc::from(Vec::new().into_boxed_slice()),
+                            verter_type_engine::semantic_query::DepSignature::default(),
                         )
                     },
                 );
@@ -5229,7 +5229,9 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
                 );
                 verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Value(id),
-                    dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+                    dep_signature: verter_type_engine::semantic_query::DepSignature::new(
+                        Vec::new().into_boxed_slice(),
+                    ),
                     walker_diagnostics: Vec::new(),
                     cache_suppress: true,
                     // A2 taxonomy: this is a BENIGN non-cacheable winner — a
@@ -5276,7 +5278,7 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
                                 .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
                             (
                                 QueryResult::Value(id),
-                                Arc::from(Vec::new().into_boxed_slice()),
+                                verter_type_engine::semantic_query::DepSignature::default(),
                             )
                         },
                     );
@@ -5485,7 +5487,9 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
                 let carrier = ReadSetSignature::new(Arc::from(vec![winner_fact_for_build.clone()]));
                 verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Value(id),
-                    dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+                    dep_signature: verter_type_engine::semantic_query::DepSignature::new(
+                        Vec::new().into_boxed_slice(),
+                    ),
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
                     completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
@@ -5558,7 +5562,7 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
                 follower_cold_flag.store(true, Ordering::SeqCst);
                 (
                     QueryResult::Value(recompute_id),
-                    Arc::from(Vec::new().into_boxed_slice()),
+                    verter_type_engine::semantic_query::DepSignature::default(),
                 )
             },
         );
@@ -5701,7 +5705,9 @@ fn same_view_joiner_still_coalesces_onto_winner() {
                 let carrier = ReadSetSignature::new(Arc::from(vec![winner_fact_for_build.clone()]));
                 verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Value(winner_node),
-                    dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+                    dep_signature: verter_type_engine::semantic_query::DepSignature::new(
+                        Vec::new().into_boxed_slice(),
+                    ),
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
                     completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
@@ -5741,7 +5747,7 @@ fn same_view_joiner_still_coalesces_onto_winner() {
                 follower_cold_flag.store(true, Ordering::SeqCst);
                 (
                     QueryResult::Value(recompute_id),
-                    Arc::from(Vec::new().into_boxed_slice()),
+                    verter_type_engine::semantic_query::DepSignature::default(),
                 )
             },
         );
@@ -5899,7 +5905,9 @@ fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
                 // warms a component-meta final cache).
                 verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Value(winner_node),
-                    dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+                    dep_signature: verter_type_engine::semantic_query::DepSignature::new(
+                        Vec::new().into_boxed_slice(),
+                    ),
                     walker_diagnostics: Vec::new(),
                     cache_suppress: true,
                     completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
@@ -5970,7 +5978,7 @@ fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
                 follower_cold_flag.store(true, Ordering::SeqCst);
                 (
                     QueryResult::Value(recompute_id),
-                    Arc::from(Vec::new().into_boxed_slice()),
+                    verter_type_engine::semantic_query::DepSignature::default(),
                 )
             },
         );
@@ -6178,7 +6186,9 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
                     ReadSetSignature::new(Arc::from(vec![winner_dep_fact_for_build.clone()]));
                 verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Value(winner_node),
-                    dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+                    dep_signature: verter_type_engine::semantic_query::DepSignature::new(
+                        Vec::new().into_boxed_slice(),
+                    ),
                     walker_diagnostics: Vec::new(),
                     cache_suppress: true,
                     completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
@@ -6245,7 +6255,7 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
                 follower_cold_flag.store(true, Ordering::SeqCst);
                 (
                     QueryResult::Value(recompute_id),
-                    Arc::from(Vec::new().into_boxed_slice()),
+                    verter_type_engine::semantic_query::DepSignature::default(),
                 )
             },
         );
@@ -6471,7 +6481,9 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
                     ReadSetSignature::new(Arc::from(vec![winner_dep_fact_for_build.clone()]));
                 verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Error(QueryError::Miss),
-                    dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+                    dep_signature: verter_type_engine::semantic_query::DepSignature::new(
+                        Vec::new().into_boxed_slice(),
+                    ),
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
                     completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
@@ -6541,7 +6553,7 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
                 follower_cold_flag.store(true, Ordering::SeqCst);
                 (
                     QueryResult::Value(recompute_id),
-                    Arc::from(Vec::new().into_boxed_slice()),
+                    verter_type_engine::semantic_query::DepSignature::default(),
                 )
             },
         );

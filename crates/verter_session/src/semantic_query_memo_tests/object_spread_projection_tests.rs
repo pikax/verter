@@ -48,14 +48,16 @@ fn formula() -> verter_type_engine::semantic_query::ObjectProjectionFormula {
 }
 
 fn dep(canonical: &str, seed: u8) -> DepSignature {
-    Arc::from([(
-        Arc::<str>::from(canonical),
-        DepVersion::WholeHash([seed; 16]),
-    )])
+    verter_type_engine::semantic_query::DepSignature::new([
+        verter_type_engine::semantic_query::DepEntry::new(
+            &*canonical,
+            DepVersion::WholeHash([seed; 16]),
+        ),
+    ])
 }
 
 fn empty_dep() -> DepSignature {
-    Arc::from([])
+    verter_type_engine::semantic_query::DepSignature::default()
 }
 
 fn join_within<T: Send + 'static>(handle: thread::JoinHandle<T>, label: &str) -> T {
@@ -482,7 +484,9 @@ fn cross_view_projection_joiner_forks_when_winner_carrier_fails_follower_validat
                     result: QueryResult::Value(SemanticQueryValue::ObjectProjection(
                         formula_with_key(base_value),
                     )),
-                    dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+                    dep_signature: verter_type_engine::semantic_query::DepSignature::new(
+                        Vec::new().into_boxed_slice(),
+                    ),
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
                     completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,

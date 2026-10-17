@@ -370,9 +370,9 @@ where
     I: IntoIterator<Item = (Arc<str>, Arc<str>, Arc<str>, Option<Hash16>)>,
 {
     let mut bindings: FxHashMap<Arc<str>, ResolvedOwnerImport> = FxHashMap::default();
-    let mut sig_entries: Vec<(Arc<str>, DepVersion)> = Vec::new();
-    sig_entries.push((
-        owner_canonical.clone(),
+    let mut sig_entries: Vec<verter_type_engine::semantic_query::DepEntry> = Vec::new();
+    sig_entries.push(verter_type_engine::semantic_query::DepEntry::new(
+        &*owner_canonical.clone(),
         DepVersion::WholeHash(owner_whole_hash),
     ));
 
@@ -383,7 +383,10 @@ where
             target_whole_hash,
         };
         if let Some(hash) = target_whole_hash {
-            sig_entries.push((canonical_id.clone(), DepVersion::WholeHash(hash)));
+            sig_entries.push(verter_type_engine::semantic_query::DepEntry::new(
+                &*canonical_id.clone(),
+                DepVersion::WholeHash(hash),
+            ));
         }
         bindings.insert(local_name, binding);
     }
@@ -393,7 +396,8 @@ where
     sig_entries.sort_by(|a, b| a.0.cmp(&b.0));
     sig_entries.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
 
-    let owner_target_fence: DepSignature = Arc::from(sig_entries.into_boxed_slice());
+    let owner_target_fence: DepSignature =
+        verter_type_engine::semantic_query::DepSignature::new(sig_entries.into_boxed_slice());
 
     // Path-precise fact signature: start from the owner + final-target
     // whole-hash facts (`fact_signature_from_fence` lowers the

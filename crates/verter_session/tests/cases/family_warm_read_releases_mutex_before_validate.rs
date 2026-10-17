@@ -67,7 +67,7 @@ fn warm_read_validates_outside_entries_mutex() {
         QueryResult::Value(value),
         ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
-        Arc::from(Vec::new().into_boxed_slice()),
+        verter_type_engine::semantic_query::DepSignature::new(Vec::new().into_boxed_slice()),
         0,
     );
 

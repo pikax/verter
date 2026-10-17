@@ -79,7 +79,7 @@ fn count_for_b_after_publishing_a(a: &SemanticQueryKey, b: &SemanticQueryKey) ->
         QueryResult::Value(node),
         ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
-        Arc::from(Vec::new().into_boxed_slice()),
+        verter_type_engine::semantic_query::DepSignature::new(Vec::new().into_boxed_slice()),
         100,
     );
     graph.slot_candidate_count_for_tests(b)

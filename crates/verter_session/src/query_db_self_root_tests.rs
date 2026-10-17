@@ -437,10 +437,9 @@ fn materialized(
 }
 
 fn empty_dep_signature() -> verter_type_engine::semantic_query::DepSignature {
-    Arc::from(Vec::<(
-        Arc<str>,
-        verter_type_engine::semantic_query::DepVersion,
-    )>::new())
+    verter_type_engine::semantic_query::DepSignature::new(Vec::<
+        verter_type_engine::semantic_query::DepEntry,
+    >::new())
 }
 
 /// Observe `canonical`'s `ShallowFileState::whole_hash` — the
@@ -780,10 +779,13 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
     // The materialized value observed `dep` during materialization —
     // recorded on its `dep_signature`. The producer helper merges that
     // into the fact signature.
-    let dep_sig: verter_type_engine::semantic_query::DepSignature = Arc::from(vec![(
-        Arc::<str>::from(dep),
-        DepVersion::WholeHash(dep_indexed.whole_hash),
-    )]);
+    let dep_sig: verter_type_engine::semantic_query::DepSignature =
+        verter_type_engine::semantic_query::DepSignature::new(vec![
+            verter_type_engine::semantic_query::DepEntry::new(
+                &*dep,
+                DepVersion::WholeHash(dep_indexed.whole_hash),
+            ),
+        ]);
     // The materialize write-through establishes ONE tear-free scope
     // observation and threads it into the provenance-pure signature
     // builder; the keyed-scope whole hash and the keyed-scope parse
@@ -794,7 +796,7 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
         scope_indexed.whole_hash,
         "fixture invariant: the scope observation pins the scope's current IndexedReady",
     );
-    let primed_dep_sig = Arc::clone(&dep_sig);
+    let primed_dep_sig = dep_sig.clone();
     let primed = db
         .fixture(ctx)
         .get_or_compute_traced_for_test(&key, move || {
@@ -809,7 +811,7 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
             )
             .into_cacheable()?
             .facts;
-            Some((materialized("stale", Arc::clone(&primed_dep_sig)), sig))
+            Some((materialized("stale", primed_dep_sig.clone()), sig))
         })
         .expect("cold publish succeeds");
     assert!(
@@ -1517,7 +1519,7 @@ fn materialize_memo_db_self_root_sibling_edit_rejects_warm_entry() {
 /// test is rewritten to assert the new, correct behavior.
 ///
 /// Discriminating property: the `materialized_dep_signature` carries a
-/// `(dep, DepVersion::RouteGeneration(_))` entry.
+/// `verter_type_engine::semantic_query::DepEntry::new(&*dep, DepVersion::RouteGeneration(_))` entry.
 /// `engine_fact_signature_for_materialize_memo` MUST return `None`. A
 /// producer that re-reads `dep`'s current-content hash (the old body)
 /// returns `Some` and admits the entry — this test FAILS against that
@@ -1558,10 +1560,13 @@ fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() 
 
     // The materialisation walk observed `dep` via a `RouteGeneration`
     // dependency — route generation has no validating source.
-    let dep_sig: verter_type_engine::semantic_query::DepSignature = Arc::from(vec![(
-        Arc::<str>::from(dep),
-        DepVersion::RouteGeneration(1),
-    )]);
+    let dep_sig: verter_type_engine::semantic_query::DepSignature =
+        verter_type_engine::semantic_query::DepSignature::new(vec![
+            verter_type_engine::semantic_query::DepEntry::new(
+                &*dep,
+                DepVersion::RouteGeneration(1),
+            ),
+        ]);
 
     // The signature builder MUST refuse admission — `None`. The scope's
     // observed identity is supplied (the builder is provenance-pure),
@@ -1592,7 +1597,7 @@ fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() 
     // does: the closure threads the `None` signature through `?`, so
     // `get_or_compute`'s compute returns `None` and nothing is
     // admitted.
-    let primed_dep_sig = Arc::clone(&dep_sig);
+    let primed_dep_sig = dep_sig.clone();
     let cold_value = db
         .fixture(ctx)
         .get_or_compute_traced_for_test(&key, move || {
@@ -1604,7 +1609,7 @@ fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() 
             )
             .into_cacheable()?
             .facts;
-            Some((materialized("fresh", Arc::clone(&primed_dep_sig)), fact_sig))
+            Some((materialized("fresh", primed_dep_sig.clone()), fact_sig))
         });
     // The publish path declined the entry — `get_or_compute` returns
     // `None` because its compute closure short-circuited.
@@ -1714,10 +1719,13 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
     // The materialiser observed `dep` against the project-wide
     // generation `g_observed` — the host's current project generation.
     let g_observed = host.project_type_store().project_generation();
-    let dep_sig: verter_type_engine::semantic_query::DepSignature = Arc::from(vec![(
-        Arc::<str>::from(dep),
-        DepVersion::ProjectGeneration(g_observed),
-    )]);
+    let dep_sig: verter_type_engine::semantic_query::DepSignature =
+        verter_type_engine::semantic_query::DepSignature::new(vec![
+            verter_type_engine::semantic_query::DepEntry::new(
+                &*dep,
+                DepVersion::ProjectGeneration(g_observed),
+            ),
+        ]);
 
     // Half 1 — signature shape.
     let observed_scope = observe_scope(ctx, scope);
@@ -1753,7 +1761,7 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
     );
 
     // Prime the memo with the production signature.
-    let primed_dep_sig = Arc::clone(&dep_sig);
+    let primed_dep_sig = dep_sig.clone();
     let primed = db
         .fixture(ctx)
         .get_or_compute_traced_for_test(&key, move || {
@@ -1765,7 +1773,7 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
             )
             .into_cacheable()?
             .facts;
-            Some((materialized("stale", Arc::clone(&primed_dep_sig)), fact_sig))
+            Some((materialized("stale", primed_dep_sig.clone()), fact_sig))
         })
         .expect("cold publish succeeds");
     assert!(
@@ -1874,10 +1882,13 @@ fn materialize_memo_db_observed_whole_hash_dependency_preserves_observed_hash() 
     // The materialiser observed `dep` at content hash H1 and recorded a
     // `DepVersion::WholeHash(H1)` entry on the materialised value's
     // `dep_signature`.
-    let dep_sig: verter_type_engine::semantic_query::DepSignature = Arc::from(vec![(
-        Arc::<str>::from(dep),
-        DepVersion::WholeHash(observed_hash_h1),
-    )]);
+    let dep_sig: verter_type_engine::semantic_query::DepSignature =
+        verter_type_engine::semantic_query::DepSignature::new(vec![
+            verter_type_engine::semantic_query::DepEntry::new(
+                &*dep,
+                DepVersion::WholeHash(observed_hash_h1),
+            ),
+        ]);
 
     // The dependency is edited AFTER materialisation but BEFORE the
     // memo signature is built — the race window. Its current content
@@ -2210,7 +2221,7 @@ fn materialize_memo_db_scope_edit_in_race_window_rejects_stale_entry_end_to_end(
 /// scope hash — a torn / mixed observation of the scope.
 ///
 /// Discrimination property: the `materialized_dep_signature` carries a
-/// `(scope, DepVersion::WholeHash(h_disagree))` entry where
+/// `verter_type_engine::semantic_query::DepEntry::new(&*scope, DepVersion::WholeHash(h_disagree))` entry where
 /// `h_disagree != observed_scope_whole_hash`. The builder's
 /// scope-collapse branch MUST detect the disagreement and return
 /// `None`. A builder that unconditionally `continue`s on a
@@ -2248,10 +2259,13 @@ fn materialize_memo_db_mixed_scope_observation_refuses_admission() {
 
     // The materialisation walk recorded the scope itself with a
     // WholeHash that disagrees with the observed scope hash.
-    let dep_sig: verter_type_engine::semantic_query::DepSignature = Arc::from(vec![(
-        Arc::<str>::from(scope),
-        DepVersion::WholeHash(h_disagree),
-    )]);
+    let dep_sig: verter_type_engine::semantic_query::DepSignature =
+        verter_type_engine::semantic_query::DepSignature::new(vec![
+            verter_type_engine::semantic_query::DepEntry::new(
+                &*scope,
+                DepVersion::WholeHash(h_disagree),
+            ),
+        ]);
 
     let sig = engine_fact_signature_for_materialize_memo(
         &observed_scope,
@@ -4105,7 +4119,9 @@ fn materialize_memo_failed_revalidation_does_not_leak_live_counter() {
             MaterializedOutputTypeExpr::from_type_expr_for_test(
                 None,
                 TypeExpr::Unknown(UnknownValue::missing_output()),
-                Arc::from([] as [(Arc<str>, verter_type_engine::semantic_query::DepVersion); 0]),
+                verter_type_engine::semantic_query::DepSignature::new(
+                    [] as [verter_type_engine::semantic_query::DepEntry; 0]
+                ),
                 false,
             ),
             empty_fact_signature(),
@@ -4222,8 +4238,8 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
                 MaterializedOutputTypeExpr::from_type_expr_for_test(
                     None,
                     TypeExpr::Unknown(UnknownValue::missing_output()),
-                    Arc::from(
-                        [] as [(Arc<str>, verter_type_engine::semantic_query::DepVersion); 0],
+                    verter_type_engine::semantic_query::DepSignature::new(
+                        [] as [verter_type_engine::semantic_query::DepEntry; 0]
                     ),
                     false,
                 ),

@@ -137,8 +137,10 @@ defineProps<Props>()
             [VueMacroDependencyFailure::UnresolvedSurfaceArm {
                 macro_index: 0,
                 macro_owner: verter_type_expr::TopLevelOwnerId::instance(0),
-                name: Arc::from("MissingBase"),
-                owner_canonical: Arc::from("/src/types.ts"),
+                name: verter_session_query::retention::owned::OwnedStr::from("MissingBase"),
+                owner_canonical: verter_session_query::retention::owned::OwnedStr::from(
+                    "/src/types.ts"
+                ),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             }],
             "the dropped surface arm must ride as one typed, deterministic failure"

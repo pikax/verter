@@ -53,8 +53,7 @@ use verter_session_query::facts::{
 use verter_type_engine::fact_signature_helpers::ReadSetSignatureExt;
 use verter_type_engine::resolver_core::ResolverContext;
 use verter_type_engine::semantic_query::{
-    DepSignature, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryApi,
-    SemanticQueryKey,
+    ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
 };
 use verter_type_engine::semantic_query_memo::{
     semantic_graph_read_set_signature, SemanticGraphStore,
@@ -1045,7 +1044,7 @@ fn execute_cooperative_fast_path_validates_self_root() {
             cold_ran = true;
             (
                 verter_type_engine::semantic_query::QueryResult::Value(recompute_node),
-                Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
+                verter_type_engine::semantic_query::DepSignature::default(),
             )
         },
     );
@@ -2258,7 +2257,7 @@ fn session_overlay_warm_validation_matrix() {
                     cold_ran = true;
                     (
                         QueryResult::Value(recompute_node),
-                        Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
+                        verter_type_engine::semantic_query::DepSignature::default(),
                     )
                 },
             );
@@ -2596,7 +2595,7 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
                     cold_ran = true;
                     (
                         QueryResult::Value(recompute_node),
-                        Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
+                        verter_type_engine::semantic_query::DepSignature::default(),
                     )
                 },
             );
@@ -2859,7 +2858,7 @@ fn session_tombstone_rejects_base_rooted_warm_entry() {
                     cold_ran = true;
                     (
                         QueryResult::Value(recompute_node),
-                        Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
+                        verter_type_engine::semantic_query::DepSignature::default(),
                     )
                 },
             );
@@ -3125,7 +3124,7 @@ fn session_tombstone_rejects_cross_file_dependency_whole_hash() {
                     cold_ran = true;
                     (
                         QueryResult::Value(recompute_node),
-                        Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
+                        verter_type_engine::semantic_query::DepSignature::default(),
                     )
                 },
             );

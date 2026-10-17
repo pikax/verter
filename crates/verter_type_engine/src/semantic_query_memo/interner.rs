@@ -10,28 +10,27 @@
 //! dead `Weak` on next lookup and prunes it. `sweep()` can be called
 //! periodically to reclaim empty buckets.
 //!
-//! **Storage charge.** A `Weak` keeps its allocation's block allocated
-//! after the last strong holder drops (only the elements are dropped), so
-//! an interned rail's block lives exactly as long as its entry here, never
-//! shorter. The interner therefore charges, pinned against its store's
-//! account, every entry's block, every bucket's backing and its tables'
-//! buckets, settled as entries are added and pruned; a holder of an
-//! interned rail pays only for the names its elements hold
-//! ([`interned_rail_heap_bytes`]).
+//! **Storage charge.** A `Weak` keeps its rail's cell block allocated
+//! after the last handle drops (the entries and their charge go with the
+//! handle), so an interned rail's block lives exactly as long as its entry
+//! here, never shorter. The interner therefore charges, pinned against its
+//! store's account, every entry's block, every bucket's backing and its
+//! tables' buckets, settled as entries are added and pruned; an interned
+//! rail's own charge covers its entries only
+//! ([`DepSignature::interned_rail`]).
 
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 
-use crate::semantic_query::{DepSignature, DepVersion};
+use verter_session_query::retention::owned::{Owned, WeakOwned};
 
-/// One interned rail's element.
-type RailEntry = (Arc<str>, DepVersion);
+use crate::semantic_query::{DepEntry, DepRail, DepSignature, DepVersion};
 
 /// `Weak` view of an interned `DepSignature` payload — see
 /// [`DepSignatureInterner`].
-type DepSignatureWeak = Weak<[RailEntry]>;
+type DepSignatureWeak = WeakOwned<DepRail>;
 
 /// Shards the interner's buckets are spread over.
 const SHARDS: usize = 16;
@@ -95,12 +94,9 @@ impl Storage {
     }
 }
 
-/// The block an entry's allocation holds, read from its handle's slice
-/// length — alive or not.
-fn entry_block_bytes(entry: &DepSignatureWeak) -> usize {
-    verter_session_query::retention::allocation::arc_block_bytes(
-        entry.as_ptr().len() * std::mem::size_of::<RailEntry>(),
-    )
+/// The block an entry's allocation holds — alive or not.
+fn entry_block_bytes(_entry: &DepSignatureWeak) -> usize {
+    Owned::<DepRail>::cell_block_bytes()
 }
 
 /// The backing one bucket's entry list holds.
@@ -118,26 +114,6 @@ fn shard_bytes(shard: &FxHashMap<u64, Vec<DepSignatureWeak>>) -> usize {
                 bucket_list_bytes(bucket) + bucket.iter().map(entry_block_bytes).sum::<usize>()
             })
             .sum::<usize>()
-}
-
-/// The heap a holder of an interned rail pays for: the names its elements
-/// hold. The rail's block is the interner's (see the module docs).
-pub(crate) fn interned_rail_heap_bytes(
-    rail: &DepSignature,
-    aliases: &mut verter_session_query::retention::allocation::AliasSet,
-) -> usize {
-    rail.iter()
-        .map(|(canonical, _)| {
-            verter_session_query::retention::allocation::arc_str_bytes(canonical, aliases)
-        })
-        .sum()
-}
-
-/// Whether `rail` is an interned rail, whose block the interner charges.
-/// Only the interner downgrades a rail, and it keeps that `Weak` for as
-/// long as any strong holder lives.
-pub(crate) fn is_interned_rail(rail: &DepSignature) -> bool {
-    Arc::weak_count(rail) > 0
 }
 
 impl Default for DepSignatureInterner {
@@ -185,10 +161,10 @@ impl DepSignatureInterner {
     /// removed. This ensures `intern([(a, v1), (b, v2)])` returns the
     /// same `Arc` as `intern([(b, v2), (a, v1), (a, v1)])`. An empty
     /// payload interns to the process-static empty rail.
-    pub fn intern(&self, payload: &[RailEntry]) -> DepSignature {
+    pub fn intern(&self, payload: &[DepEntry]) -> DepSignature {
         // Normalise: sort + dedup so equivalent content collapses.
-        let mut normalised: Vec<RailEntry> = payload.to_vec();
-        normalised.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()).then_with(|| a.1.cmp(&b.1)));
+        let mut normalised: Vec<DepEntry> = payload.to_vec();
+        normalised.sort_by(|a, b| a.canonical().cmp(b.canonical()).then_with(|| a.1.cmp(&b.1)));
         normalised.dedup();
         // Every empty rail is the one process-static empty rail.
         if normalised.is_empty() {
@@ -198,7 +174,7 @@ impl DepSignatureInterner {
             use std::hash::{Hash, Hasher};
             let mut hasher = rustc_hash::FxHasher::default();
             normalised.len().hash(&mut hasher);
-            for (canonical, version) in &normalised {
+            for DepEntry(canonical, version) in &normalised {
                 canonical.hash(&mut hasher);
                 version.hash(&mut hasher);
             }
@@ -219,21 +195,23 @@ impl DepSignatureInterner {
             }
             live
         });
-        let hit = bucket
-            .iter()
-            .find_map(|w| w.upgrade().filter(|arc| arc.iter().eq(normalised.iter())));
+        let hit = bucket.iter().find_map(|w| {
+            w.upgrade()
+                .map(DepSignature::from_owned)
+                .filter(|rail| rail.iter().eq(normalised.iter()))
+        });
         let (rail, added_block) = match hit {
-            Some(arc) => {
+            Some(rail) => {
                 crate::request_observers::record_dep_signature_intern_hit();
-                (arc, 0)
+                (rail, 0)
             }
             None => {
-                // Miss: insert a fresh Arc and downgrade for the bucket.
-                let fresh: DepSignature = Arc::from(normalised.into_boxed_slice());
-                let entry = Arc::downgrade(&fresh);
+                // Miss: insert a fresh rail and downgrade for the bucket.
+                let fresh = DepSignature::interned_rail(normalised);
+                let entry = Owned::downgrade(&fresh);
                 let block = entry_block_bytes(&entry);
                 bucket.push(entry);
-                (fresh, block)
+                (DepSignature::from_owned(fresh), block)
             }
         };
         let list_after = bucket_list_bytes(bucket);
@@ -260,12 +238,12 @@ impl DepSignatureInterner {
 
     /// Intern a single `(canonical, version)` pair. Convenience for
     /// call sites that build dep_signatures incrementally.
-    pub fn intern_canonical(&self, canonical: Arc<str>, version: DepVersion) -> DepSignature {
+    pub fn intern_canonical(&self, canonical: &str, version: DepVersion) -> DepSignature {
         verter_debug_assert!(
-            !canonical.as_ref().is_empty(),
+            !canonical.is_empty(),
             "intern_canonical: canonical id must be non-empty"
         );
-        self.intern(&[(canonical, version)])
+        self.intern(&[DepEntry::new(canonical, version)])
     }
 
     /// Periodic sweep — removes empty buckets and dead `Weak`s, and

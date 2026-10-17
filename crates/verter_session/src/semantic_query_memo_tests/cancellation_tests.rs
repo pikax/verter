@@ -27,9 +27,9 @@ fn key(name: &'static str) -> SemanticQueryKey {
 }
 
 fn dep_signature(canonical: &'static str, hash: u8) -> DepSignature {
-    Arc::from(
-        vec![(
-            Arc::<str>::from(canonical),
+    verter_type_engine::semantic_query::DepSignature::new(
+        vec![verter_type_engine::semantic_query::DepEntry::new(
+            &*canonical,
             verter_type_engine::semantic_query::DepVersion::WholeHash([hash; 16]),
         )]
         .into_boxed_slice(),

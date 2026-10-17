@@ -87,7 +87,7 @@ impl<'a> RegisteredCanonicals<'a> {
             wide: None,
         };
         read_set_signature.for_each_canonical_id(|canonical| canonicals.insert(canonical));
-        for (canonical, _) in dispatch_dep_signature.iter() {
+        for crate::semantic_query::DepEntry(canonical, _) in dispatch_dep_signature.iter() {
             canonicals.insert(canonical);
         }
         canonicals

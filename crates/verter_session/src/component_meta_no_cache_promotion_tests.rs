@@ -1402,7 +1402,7 @@ fn warm_gate_keys_on_result_is_partial_not_value_kind_or_cache_suppress() {
     ));
 
     let empty_sig: verter_type_engine::semantic_query::DepSignature =
-        Arc::from(Vec::new().into_boxed_slice());
+        verter_type_engine::semantic_query::DepSignature::new(Vec::new().into_boxed_slice());
 
     // (1) The Value-partial: a COMPLETE `Value` with
     // `result_is_partial = true`. A value-kind gate
@@ -1410,7 +1410,7 @@ fn warm_gate_keys_on_result_is_partial_not_value_kind_or_cache_suppress() {
     let value_partial: CacheRead<QueryResult<SemanticNodeId>> = CacheRead::unleased_for_tests(
         QueryResult::Value(value_node),
         empty_sig.clone(),
-        Arc::from([]),
+        verter_type_engine::project_semantic_dispatch::walk::WalkerDiagnostics::default(),
         true,
         verter_type_engine::semantic_query::FactStatus::unavailable(
             verter_type_engine::semantic_query::PartialReasonSet::PROPAGATED,
@@ -1432,7 +1432,7 @@ fn warm_gate_keys_on_result_is_partial_not_value_kind_or_cache_suppress() {
         CacheRead::unleased_for_tests(
             QueryResult::Value(value_node),
             empty_sig,
-            Arc::from([]),
+            verter_type_engine::project_semantic_dispatch::walk::WalkerDiagnostics::default(),
             true,
             verter_type_engine::semantic_query::FactStatus::Complete,
             verter_type_engine::semantic_query::ReadReceipt::Unpriced,
@@ -1512,7 +1512,7 @@ fn benign_non_cacheable_complete_results_still_warm_component_meta_final() {
         verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
     let empty_sig: verter_type_engine::semantic_query::DepSignature =
-        Arc::from(Vec::new().into_boxed_slice());
+        verter_type_engine::semantic_query::DepSignature::new(Vec::new().into_boxed_slice());
 
     // Each benign non-cacheable production shape: a COMPLETE `Value`
     // (`Primitive(String)`), `cache_suppress = true`, `result_is_partial =
@@ -1525,7 +1525,7 @@ fn benign_non_cacheable_complete_results_still_warm_component_meta_final() {
             CacheRead::unleased_for_tests(
                 QueryResult::Value(value_node),
                 empty_sig.clone(),
-                Arc::from([]),
+                verter_type_engine::project_semantic_dispatch::walk::WalkerDiagnostics::default(),
                 true,
                 verter_type_engine::semantic_query::FactStatus::Complete,
                 verter_type_engine::semantic_query::ReadReceipt::Unpriced,
@@ -1536,7 +1536,7 @@ fn benign_non_cacheable_complete_results_still_warm_component_meta_final() {
             CacheRead::unleased_for_tests(
                 QueryResult::Value(value_node),
                 empty_sig.clone(),
-                Arc::from([]),
+                verter_type_engine::project_semantic_dispatch::walk::WalkerDiagnostics::default(),
                 true,
                 verter_type_engine::semantic_query::FactStatus::Complete,
                 verter_type_engine::semantic_query::ReadReceipt::Unpriced,
@@ -1547,7 +1547,7 @@ fn benign_non_cacheable_complete_results_still_warm_component_meta_final() {
             CacheRead::unleased_for_tests(
                 QueryResult::Value(value_node),
                 empty_sig,
-                Arc::from([]),
+                verter_type_engine::project_semantic_dispatch::walk::WalkerDiagnostics::default(),
                 true,
                 verter_type_engine::semantic_query::FactStatus::Complete,
                 verter_type_engine::semantic_query::ReadReceipt::Unpriced,

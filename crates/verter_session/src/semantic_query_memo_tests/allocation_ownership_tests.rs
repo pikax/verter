@@ -7,10 +7,10 @@ use std::sync::Arc;
 
 use super::*;
 use crate::{HostConfig, UpsertRequest, VerterHost};
-use verter_session_query::retention::allocation::arc_block_bytes;
-use verter_session_query::retention::shared::registration_bytes;
+use verter_session_query::retention::allocation::heap_block_bytes;
+use verter_session_query::retention::owned::{Owned, OwnedStr};
 use verter_session_query::retention::{
-    RetentionAccountSnapshot, RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    ChargeClass, RetentionAccountSnapshot, RetentionLimits, SemanticRetentionAccount, StoreAccount,
 };
 use verter_type_engine::project_semantic_dispatch::walk::{QueryBuildOutput, ShallowDiagnostic};
 use verter_type_engine::semantic_query::{
@@ -75,22 +75,31 @@ fn build(store: &SemanticGraphStore) -> QueryBuildOutput<SemanticNodeId> {
     )
         .into();
     output.walker_diagnostics = vec![ShallowDiagnostic::UnresolvedSurfaceArm {
-        name: Arc::from("n".repeat(NAME_LEN)),
-        owner_canonical: Arc::from(OWNER),
+        name: verter_session_query::retention::owned::OwnedStr::from("n".repeat(NAME_LEN)),
+        owner_canonical: verter_session_query::retention::owned::OwnedStr::from(OWNER),
         owner: TopLevelOwnerId::ordinary_file(),
     }];
     output
 }
 
-/// What the delivered rail costs, from its allocations alone: the slice
-/// block holding the one diagnostic and the two texts it names, each its
-/// own registered allocation. A charge missing the name, or a second
-/// registration of any of them, misses this figure.
+/// What the delivered rail costs, from its allocations alone: the list's
+/// cell and the backing holding the one diagnostic, and the two texts it
+/// names, each its own self-charged allocation. A charge missing the name,
+/// or a second charge of any of them, misses this figure.
 fn rail_charge() -> usize {
-    arc_block_bytes(std::mem::size_of::<ShallowDiagnostic>())
-        + arc_block_bytes(NAME_LEN)
-        + arc_block_bytes(OWNER.len())
-        + 3 * registration_bytes()
+    Owned::<Box<[ShallowDiagnostic]>>::cell_block_bytes()
+        + heap_block_bytes(std::mem::size_of::<ShallowDiagnostic>())
+        + OwnedStr::charge_for_len(NAME_LEN)
+        + OwnedStr::charge_for_len(OWNER.len())
+}
+
+/// The oversized name the delivered diagnostic carries: an owning clone of
+/// its allocation.
+fn delivered_name<T>(read: &CacheRead<T>) -> OwnedStr {
+    match read.walker_diagnostics() {
+        [ShallowDiagnostic::UnresolvedSurfaceArm { name, .. }] => name.clone(),
+        other => panic!("one delivered arm diagnostic, got {other:?}"),
+    }
 }
 
 fn read(
@@ -172,8 +181,8 @@ fn a_read_outliving_its_candidate_keeps_exactly_the_delivered_rail_charged() {
     );
     assert_eq!(
         registrations(&harness),
-        3,
-        "only the held rail and its two names stay registered"
+        0,
+        "the held rail and its names carry their own charges: nothing stays registered"
     );
     assert!(
         held.retained_bytes + caller_pinned(&harness, &account) < retained.retained_bytes,
@@ -252,7 +261,11 @@ fn a_refused_admission_returns_the_complete_value_charged_to_its_caller() {
         "the delivered rail, oversized name included, and the delivery's metadata are \
          the caller's, charged despite the refusal"
     );
-    assert_eq!(registrations(&harness), 3, "the rail and its two names");
+    assert_eq!(
+        registrations(&harness),
+        0,
+        "the rail and its two names carry their own charges"
+    );
     let clone = delivered.clone();
     drop(delivered);
     assert_eq!(
@@ -264,6 +277,122 @@ fn a_refused_admission_returns_the_complete_value_charged_to_its_caller() {
     assert_eq!(caller_pinned(&harness, &account), 0);
     assert_eq!(registrations(&harness), 0);
     assert_eq!(harness.live_nodes(), 0);
+}
+
+/// An owning clone of a delivered name — a leaf of the diagnostic list —
+/// that outlives the read, the cache and the whole store keeps exactly that
+/// name charged, pinned, and its own drop restores the baseline at once:
+/// no sweep, no reap. Holds in both release orders and with no headroom at
+/// all, where the read was refused admission.
+#[test]
+fn a_cloned_delivered_name_alone_keeps_its_charge_until_its_own_drop() {
+    for (ceiling, read_first) in [(usize::MAX / 2, true), (usize::MAX / 2, false), (0, true)] {
+        let host = host();
+        let account = SemanticRetentionAccount::new(RetentionLimits {
+            aggregate_ceiling_bytes: ceiling,
+            active_ceiling_bytes: ceiling,
+            max_entry_bytes: ceiling,
+            pin_threshold_bytes: ceiling,
+        });
+        let harness =
+            CountedOwnershipHarness::with_account(StoreAccount::new(Arc::clone(&account)));
+        let read = read(&harness, &host);
+        let cached = harness.run(|store| store.memo_entry_count()) == 1;
+        assert_eq!(
+            cached,
+            ceiling > 0,
+            "admitted exactly when there is headroom"
+        );
+        let name = delivered_name(&read);
+        assert_eq!(
+            name.charge_bytes(),
+            Some(OwnedStr::charge_for_len(NAME_LEN))
+        );
+
+        if read_first {
+            drop(read);
+            harness.run(|store| store.invalidate_all());
+        } else {
+            harness.run(|store| store.invalidate_all());
+            drop(read);
+        }
+        drop(harness);
+        assert_eq!(
+            account.snapshot().retained_bytes,
+            0,
+            "no cache retains anything once its store is gone"
+        );
+        assert_eq!(
+            account.snapshot().pinned_bytes,
+            OwnedStr::charge_for_len(NAME_LEN),
+            "the clone alone keeps its name charged, exactly once"
+        );
+        assert_eq!(name.charge_class(), Some(ChargeClass::Pinned));
+        drop(name);
+        assert_eq!(
+            account.snapshot().total_bytes(),
+            0,
+            "the final holder's drop restores the baseline"
+        );
+    }
+}
+
+/// An owning clone of a delivered dependency rail keeps the rail and every
+/// canonical it names charged after the read and the store are gone; a
+/// clone of one entry then keeps that canonical alone, and its drop
+/// restores the baseline.
+#[test]
+fn a_cloned_dependency_rail_and_entry_keep_their_charges_through_their_last_holder() {
+    use verter_type_engine::semantic_query::{DepEntry, DepSignature, DepVersion};
+    const CANONICAL_LEN: usize = 12_000;
+    let host = host();
+    let account = unbounded();
+    let harness = CountedOwnershipHarness::with_account(StoreAccount::new(Arc::clone(&account)));
+    let long = format!("/{}.ts", "d".repeat(CANONICAL_LEN));
+    let read = harness.run(|store| {
+        store.execute_cooperative(
+            &host,
+            key(),
+            || panic!("no recursion"),
+            || {
+                let mut output = build(store);
+                output.walker_diagnostics.clear();
+                output.dep_signature = DepSignature::new(vec![
+                    DepEntry::new(&long, DepVersion::ProjectGeneration(0)),
+                    DepEntry::new("/short.ts", DepVersion::ProjectGeneration(0)),
+                ]);
+                output
+            },
+        )
+    });
+    let rail = read.dep_signature().clone();
+    assert_eq!(rail.len(), 2);
+    let entry = rail[0].clone();
+    let rail_bytes = rail.charge_bytes().expect("the delivery charged its rail");
+    assert_eq!(
+        rail_bytes,
+        Owned::<verter_type_engine::semantic_query::DepRail>::cell_block_bytes()
+            + heap_block_bytes(2 * std::mem::size_of::<DepEntry>()),
+        "the rail pays its own cell and entry backing; each canonical pays its own"
+    );
+    let names = OwnedStr::charge_for_len(long.len()) + OwnedStr::charge_for_len("/short.ts".len());
+
+    drop(read);
+    harness.run(|store| store.invalidate_all());
+    drop(harness);
+    assert_eq!(
+        account.snapshot().pinned_bytes,
+        rail_bytes + names,
+        "the rail clone keeps the rail and both canonicals charged, once each"
+    );
+    drop(rail);
+    assert_eq!(
+        account.snapshot().pinned_bytes,
+        OwnedStr::charge_for_len(long.len()),
+        "the entry clone keeps its own canonical, and nothing else"
+    );
+    drop(entry);
+    assert_eq!(account.snapshot().total_bytes(), 0);
 }
 
 /// A substitution answer is charged for as long as the memo keeps it and

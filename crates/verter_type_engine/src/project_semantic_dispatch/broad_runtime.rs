@@ -400,7 +400,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             self.fold_local_partial_completeness(PartialReasonSet::SEMANTIC_QUERY_FAULT);
             return RehydratedRuntimeSubject {
                 node: self.opaque(QueryError::Miss),
-                dep_signature: Arc::from(dep_facts.into_boxed_slice()),
+                dep_signature: crate::semantic_query::DepSignature::new(dep_facts),
                 observed_self_roots: Vec::new(),
                 cache_suppress: true,
                 fact_status: FactStatus::unavailable(PartialReasonSet::SEMANTIC_QUERY_FAULT),
@@ -414,7 +414,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 node: self.opaque(QueryError::Other(Arc::from(
                     "broad-runtime macro index exceeds host index width",
                 ))),
-                dep_signature: Arc::from(dep_facts.into_boxed_slice()),
+                dep_signature: crate::semantic_query::DepSignature::new(dep_facts),
                 observed_self_roots: vec![owner_root],
                 cache_suppress: true,
                 fact_status: FactStatus::unavailable(PartialReasonSet::SEMANTIC_QUERY_FAULT),
@@ -429,7 +429,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             self.fold_local_partial_completeness(PartialReasonSet::SEMANTIC_QUERY_FAULT);
             return RehydratedRuntimeSubject {
                 node: self.opaque(QueryError::Miss),
-                dep_signature: Arc::from(dep_facts.into_boxed_slice()),
+                dep_signature: crate::semantic_query::DepSignature::new(dep_facts),
                 observed_self_roots: vec![owner_root],
                 cache_suppress: true,
                 fact_status: FactStatus::unavailable(PartialReasonSet::SEMANTIC_QUERY_FAULT),
@@ -439,7 +439,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             self.fold_local_partial_completeness(PartialReasonSet::SEMANTIC_QUERY_FAULT);
             return RehydratedRuntimeSubject {
                 node: self.opaque(QueryError::Miss),
-                dep_signature: Arc::from(dep_facts.into_boxed_slice()),
+                dep_signature: crate::semantic_query::DepSignature::new(dep_facts),
                 observed_self_roots: vec![owner_root],
                 cache_suppress: true,
                 fact_status: FactStatus::unavailable(PartialReasonSet::SEMANTIC_QUERY_FAULT),
@@ -611,7 +611,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
         RehydratedRuntimeSubject {
             node,
-            dep_signature: Arc::from(dep_facts.into_boxed_slice()),
+            dep_signature: crate::semantic_query::DepSignature::new(dep_facts),
             observed_self_roots,
             cache_suppress,
             fact_status,

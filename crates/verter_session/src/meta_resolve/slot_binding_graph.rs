@@ -446,11 +446,17 @@ fn accumulate_lowered_node_carrier_deps(
     if carriers.is_empty() {
         return;
     }
-    let entries: Vec<(Arc<str>, DepVersion)> = carriers
+    let entries: Vec<verter_type_engine::semantic_query::DepEntry> = carriers
         .into_iter()
-        .map(|(canonical, hash)| (canonical, DepVersion::WholeHash(hash)))
+        .map(|(canonical, hash)| {
+            verter_type_engine::semantic_query::DepEntry::new(
+                &*canonical,
+                DepVersion::WholeHash(hash),
+            )
+        })
         .collect();
-    let signature: DepSignature = Arc::from(entries.into_boxed_slice());
+    let signature: DepSignature =
+        verter_type_engine::semantic_query::DepSignature::new(entries.into_boxed_slice());
     emit_slot_binding_graph_dispatch_facts(dispatch, &signature);
 }
 

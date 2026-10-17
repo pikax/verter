@@ -74,6 +74,55 @@ impl<A: OwnedHeap, B: OwnedHeap> OwnedHeap for (A, B) {
     }
 }
 
+/// Charge an owned allocation of each listed carrier by its [`OwnedHeap`].
+macro_rules! measured_by_owned_heap {
+    ($($t:ty),* $(,)?) => {
+        $(impl verter_session_query::retention::owned::Measured for $t {
+            fn heap_bytes(&self, aliases: &mut AliasSet) -> usize {
+                OwnedHeap::owned_heap_bytes(self, aliases)
+            }
+        })*
+    };
+}
+
+measured_by_owned_heap!(
+    super::SemanticNodeId,
+    super::SignatureRef,
+    super::BroadRuntimeKind,
+    super::InferBinding,
+    super::FlowReturnResult,
+    super::ResolvedCallResult,
+    super::RecursionIdentities,
+    super::MaterializationCycleGateFallbackReason,
+    super::object_spread_projection::ObjectProjectionAlternative,
+    super::CheckerDiagnostic,
+    crate::project_semantic_dispatch::flow_return::ExactMemberValue,
+    crate::project_semantic_dispatch::flow_return::ExactReturnKeyDomain,
+);
+
+impl OwnedHeap for crate::project_semantic_dispatch::walk::WalkerDiagnostics {
+    /// The list's owned allocation; the static empty list is never charged.
+    fn owned_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
+        self.owned().map_or(0, |list| list.offer(aliases))
+    }
+}
+
+impl OwnedHeap for super::DepSignature {
+    /// The rail's owned allocation; the static empty rail is never charged.
+    fn owned_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
+        self.owned().map_or(0, |rail| rail.offer(aliases))
+    }
+}
+
+impl<T: verter_session_query::retention::owned::Measured> OwnedHeap
+    for verter_session_query::retention::owned::Owned<T>
+{
+    /// A nested owned allocation: charged by its own cell.
+    fn owned_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
+        self.offer(aliases)
+    }
+}
+
 /// Values whose every byte is inline.
 macro_rules! inline_only {
     ($($t:ty),* $(,)?) => {
@@ -86,6 +135,8 @@ macro_rules! inline_only {
 }
 
 inline_only!(
+    super::MaterializationCycleGateFallbackReason,
+    super::CheckerDiagnostic,
     super::SemanticNodeId,
     super::DepVersion,
     u32,
@@ -205,7 +256,7 @@ impl OwnedHeap for ShallowDiagnostic {
                 name,
                 owner_canonical,
                 ..
-            } => name.owned_heap_bytes(aliases) + owner_canonical.owned_heap_bytes(aliases),
+            } => name.offer(aliases) + owner_canonical.offer(aliases),
             ShallowDiagnostic::ProjectionWorkLimit { .. }
             | ShallowDiagnostic::ConnectedQueryDepthLimit { .. }
             | ShallowDiagnostic::ConnectedMemoryLimit { .. }
@@ -253,8 +304,8 @@ impl OwnedHeap for SemanticQueryValue {
             SemanticQueryValue::BroadRuntime(classification) => {
                 classification.owned_heap_bytes(aliases)
             }
-            SemanticQueryValue::FlowReturn(result) => arc_value_bytes(result, aliases),
-            SemanticQueryValue::ResolveCall(result) => arc_value_bytes(result, aliases),
+            SemanticQueryValue::FlowReturn(result) => result.offer(aliases),
+            SemanticQueryValue::ResolveCall(result) => result.offer(aliases),
             SemanticQueryValue::SignatureSet(value) => value.owned_heap_bytes(aliases),
             // The epoch lease and the applied result live in the signature
             // epoch's tables.

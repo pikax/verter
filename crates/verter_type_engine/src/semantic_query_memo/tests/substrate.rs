@@ -52,9 +52,9 @@ fn family_test_path() -> Arc<[PathSegment]> {
 // ──────────────────────────────────────────────────────────────────
 
 fn dep_sig_for(canonical: &str, hash: u8) -> DepSignature {
-    Arc::from(
-        vec![(
-            Arc::<str>::from(canonical),
+    crate::semantic_query::DepSignature::new(
+        vec![crate::semantic_query::DepEntry::new(
+            &*canonical,
             crate::semantic_query::DepVersion::WholeHash([hash; 16]),
         )]
         .into_boxed_slice(),
@@ -475,45 +475,30 @@ fn shard_routing_is_deterministic_per_payload_and_scope() {
 fn dep_signature_interner_returns_same_arc_for_equivalent_payloads() {
     let interner = DepSignatureInterner::new();
     let payload_a = vec![
-        (
-            Arc::<str>::from("/w/a.ts"),
-            DepVersion::WholeHash([1u8; 16]),
-        ),
-        (
-            Arc::<str>::from("/w/b.ts"),
-            DepVersion::WholeHash([2u8; 16]),
-        ),
+        crate::semantic_query::DepEntry::new("/w/a.ts", DepVersion::WholeHash([1u8; 16])),
+        crate::semantic_query::DepEntry::new("/w/b.ts", DepVersion::WholeHash([2u8; 16])),
     ];
     // Reordered with a duplicate — must normalise to the same
     // canonical form.
     let payload_b = vec![
-        (
-            Arc::<str>::from("/w/b.ts"),
-            DepVersion::WholeHash([2u8; 16]),
-        ),
-        (
-            Arc::<str>::from("/w/a.ts"),
-            DepVersion::WholeHash([1u8; 16]),
-        ),
-        (
-            Arc::<str>::from("/w/a.ts"),
-            DepVersion::WholeHash([1u8; 16]),
-        ),
+        crate::semantic_query::DepEntry::new("/w/b.ts", DepVersion::WholeHash([2u8; 16])),
+        crate::semantic_query::DepEntry::new("/w/a.ts", DepVersion::WholeHash([1u8; 16])),
+        crate::semantic_query::DepEntry::new("/w/a.ts", DepVersion::WholeHash([1u8; 16])),
     ];
     let arc_a = interner.intern(&payload_a);
     let arc_b = interner.intern(&payload_b);
     assert!(
-        Arc::ptr_eq(&arc_a, &arc_b),
+        crate::semantic_query::DepSignature::ptr_eq(&arc_a, &arc_b),
         "equivalent payloads (modulo order + dups) must intern to the same Arc"
     );
     // Different content → different Arc.
-    let payload_c = vec![(
-        Arc::<str>::from("/w/c.ts"),
+    let payload_c = vec![crate::semantic_query::DepEntry::new(
+        "/w/c.ts",
         DepVersion::WholeHash([3u8; 16]),
     )];
     let arc_c = interner.intern(&payload_c);
     assert!(
-        !Arc::ptr_eq(&arc_a, &arc_c),
+        !crate::semantic_query::DepSignature::ptr_eq(&arc_a, &arc_c),
         "different payloads must intern to different Arcs"
     );
 }
@@ -525,8 +510,8 @@ fn dep_signature_interner_returns_same_arc_for_equivalent_payloads() {
 #[test]
 fn dep_signature_intern_sweep_removes_empty_buckets() {
     let interner = DepSignatureInterner::new();
-    let payload = vec![(
-        Arc::<str>::from("/w/sweep.ts"),
+    let payload = vec![crate::semantic_query::DepEntry::new(
+        "/w/sweep.ts",
         DepVersion::WholeHash([7u8; 16]),
     )];
 
@@ -572,7 +557,7 @@ fn dep_signature_intern_auto_sweep_keeps_bucket_count_bounded() {
     // counter hits SWEEP_INTERVAL.
     for i in 0..(SWEEP_INTERVAL + 1) {
         let canonical: Arc<str> = Arc::from(format!("/w/n{i}.ts"));
-        let _arc = interner.intern_canonical(canonical, DepVersion::ProjectGeneration(i));
+        let _arc = interner.intern_canonical(&canonical, DepVersion::ProjectGeneration(i));
     }
     // After auto-sweep, dead-Weak buckets should be reclaimed.
     // Tolerate up to SWEEP_INTERVAL stragglers (the buckets that
@@ -1396,9 +1381,9 @@ fn fifo_eviction_prunes_dispatch_only_reverse_index_registration() {
     // normalization-builder dispatch shape — every such builder emits
     // a `project_generation_signature()` fence on top of whatever the
     // carrier's traced cross-file facts capture).
-    let dispatch_fence_a: DepSignature = Arc::from(
-        vec![(
-            Arc::<str>::from("<project>"),
+    let dispatch_fence_a: DepSignature = crate::semantic_query::DepSignature::new(
+        vec![crate::semantic_query::DepEntry::new(
+            "<project>",
             DepVersion::ProjectGeneration(0),
         )]
         .into_boxed_slice(),
@@ -1690,7 +1675,11 @@ fn multiple_derivations_of_same_node_all_contribute_their_edges() {
     assert_eq!(edges.len(), 2);
     let canonicals: Vec<&str> = edges
         .iter()
-        .flat_map(|e| e.edge_dep_signature.iter().map(|(c, _)| c.as_ref()))
+        .flat_map(|e| {
+            e.edge_dep_signature
+                .iter()
+                .map(|crate::semantic_query::DepEntry(c, _)| c.as_ref())
+        })
         .collect();
     assert!(canonicals.contains(&"/w/p1.ts"));
     assert!(canonicals.contains(&"/w/p2.ts"));
@@ -2902,13 +2891,15 @@ fn display_and_union_by_ordinal_answer_only_inside_a_construction_lane() {
     ));
 }
 
-/// The interner keeps every interned rail's block allocated for as long as
-/// its entry lives, so it charges those blocks, its entry lists and its
-/// tables — sized by the rails, not by a fixed figure — and gives every
-/// byte back once the rails drain and are swept.
+/// The interner keeps every interned rail's cell block allocated for as
+/// long as its entry lives, so it charges those blocks, its entry lists and
+/// its tables, and gives every byte back once the rails drain and are
+/// swept. A rail's entries are the rail's own: charged by its cell once an
+/// owner keeps it, never by the interner.
 #[test]
 fn dep_signature_interner_charges_the_rail_blocks_it_keeps_until_swept() {
-    use verter_session_query::retention::allocation::arc_block_bytes;
+    use verter_session_query::retention::owned::{ChargeCtx, Owned};
+    use verter_session_query::retention::shared::AliasCharges;
     use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
 
     const RAILS: usize = 64;
@@ -2919,8 +2910,8 @@ fn dep_signature_interner_charges_the_rail_blocks_it_keeps_until_swept() {
         .map(|rail| {
             let payload: Vec<_> = (0..WIDTH)
                 .map(|entry| {
-                    (
-                        Arc::<str>::from(format!("/w/{rail}/{entry}.ts")),
+                    crate::semantic_query::DepEntry::new(
+                        &format!("/w/{rail}/{entry}.ts"),
                         DepVersion::ProjectGeneration(entry as u64),
                     )
                 })
@@ -2928,7 +2919,7 @@ fn dep_signature_interner_charges_the_rail_blocks_it_keeps_until_swept() {
             interner.intern(&payload)
         })
         .collect();
-    let blocks = RAILS * arc_block_bytes(WIDTH * std::mem::size_of::<(Arc<str>, DepVersion)>());
+    let blocks = RAILS * Owned::<crate::semantic_query::DepRail>::cell_block_bytes();
     assert!(
         interner.storage_charge_bytes() >= blocks,
         "every interned rail's block is charged: {} < {blocks}",
@@ -2938,6 +2929,17 @@ fn dep_signature_interner_charges_the_rail_blocks_it_keeps_until_swept() {
         account.snapshot().pinned_bytes,
         interner.storage_charge_bytes()
     );
+
+    // A caller keeping a rail pays for its entries, never its block again.
+    let registry = AliasCharges::new();
+    rails[0]
+        .owned()
+        .expect("a nonempty rail")
+        .pin(ChargeCtx::new(&account, &registry));
+    let entries = verter_session_query::retention::allocation::heap_block_bytes(
+        WIDTH * std::mem::size_of::<crate::semantic_query::DepEntry>(),
+    );
+    assert_eq!(rails[0].charge_bytes(), Some(entries));
 
     drop(rails);
     assert!(

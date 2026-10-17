@@ -4081,7 +4081,7 @@ pub mod forwarding_tests {
             availability: FactStatus::Approximate(causes, Some(FactInterpretation::PresenceOnly)),
             cache_suppress: true,
         };
-        let output = outcome.forwarded_output(node, Arc::from([]));
+        let output = outcome.forwarded_output(node, crate::semantic_query::DepSignature::default());
         assert_eq!(
             output.approximation,
             Some(FactInterpretation::PresenceOnly),
@@ -4103,7 +4103,10 @@ pub mod forwarding_tests {
             status.interpretation(),
             Some(FactInterpretation::PresenceOnly)
         );
-        let mut read = CacheRead::from_value_and_signature(1u8, Arc::from([]));
+        let mut read = CacheRead::from_value_and_signature(
+            1u8,
+            crate::semantic_query::DepSignature::default(),
+        );
         read.fact_status = status;
         let copied = read.clone().map_value(|value| value + 1);
         assert_eq!(

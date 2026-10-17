@@ -946,3 +946,49 @@ fn a_cloned_signature_set_owns_its_candidate_nodes_through_its_final_holder() {
         "the final copy releases the candidate topology"
     );
 }
+
+/// A cloned signature set keeps its candidate table charged — pinned, once
+/// — after the dispatch, the memo and the epoch that delivered it are gone,
+/// and the clone's own drop releases that charge at once.
+#[test]
+fn a_cloned_signature_set_keeps_its_candidate_table_charged_through_its_final_holder() {
+    use verter_session_query::retention::{
+        ChargeClass, RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+    use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+    let host = host();
+    let account = SemanticRetentionAccount::new(RetentionLimits {
+        aggregate_ceiling_bytes: usize::MAX / 2,
+        active_ceiling_bytes: usize::MAX / 2,
+        max_entry_bytes: usize::MAX / 2,
+        pin_threshold_bytes: usize::MAX / 2,
+    });
+    let d = ProjectSemanticDispatch::with_ownership_harness(
+        host.as_ref(),
+        CountedOwnershipHarness::with_account(StoreAccount::new(Arc::clone(&account))),
+    );
+    let graph = Arc::clone(d.graph());
+    let [overloaded, _] = subjects(&d);
+    let value = d
+        .signature_set_value(overloaded, SignatureKind::Call)
+        .expect("an overloaded callable answers")
+        .clone();
+    drop(d);
+    graph.invalidate_all();
+    graph.signature_store().replace_epoch().unwrap();
+    let (table, class) = value
+        .candidate_table_charge_for_tests()
+        .expect("the delivery charged the candidate table");
+    assert!(table > 0);
+    assert_eq!(
+        class,
+        ChargeClass::Pinned,
+        "no cache holds the table any more: the clone's charge is pinned"
+    );
+    let before = account.snapshot().pinned_bytes;
+    drop(value);
+    assert!(
+        before - account.snapshot().pinned_bytes >= table,
+        "the final clone's drop releases the table's charge"
+    );
+}

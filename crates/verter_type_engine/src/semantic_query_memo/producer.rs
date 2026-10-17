@@ -260,7 +260,7 @@ pub struct SettledProducer<'s> {
     independent: bool,
     result: QueryResult<SemanticQueryValue>,
     dep_signature: DepSignature,
-    walker_diagnostics: Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
+    walker_diagnostics: crate::project_semantic_dispatch::walk::WalkerDiagnostics,
     carrier: verter_session_query::facts::fact_cache::ReadSetSignature,
     self_root_canonicals: Arc<[Arc<str>]>,
     satisfied_projection: MaterializedSet,
@@ -844,7 +844,7 @@ impl Subscription<'_> {
 struct SettledOutput {
     result: QueryResult<SemanticQueryValue>,
     dep_signature: DepSignature,
-    walker_diagnostics: Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
+    walker_diagnostics: crate::project_semantic_dispatch::walk::WalkerDiagnostics,
     carrier: verter_session_query::facts::fact_cache::ReadSetSignature,
     self_root_canonicals: Arc<[Arc<str>]>,
     satisfied_projection: MaterializedSet,
@@ -893,8 +893,8 @@ fn settle_output(
         Some(abort) => partial_reasons.union(abort.reason_class()),
         None => partial_reasons,
     };
-    let walker_diagnostics: Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]> =
-        Arc::from(walker_diagnostics.into_boxed_slice());
+    let walker_diagnostics =
+        crate::project_semantic_dispatch::walk::WalkerDiagnostics::new(walker_diagnostics);
     // The carrier is always broadcast — bubbled into the producer's outer
     // tracers and recorded on the flight for subscribers — whether or not
     // the result is admitted.
@@ -942,11 +942,13 @@ fn settle_output(
     let admissible = !(cache_suppress || result_is_partial || !flow_proof_ok) && priced;
     let result = match result {
         QueryResult::Value(SemanticQueryValue::FlowReturn(value)) if result_is_partial => {
-            QueryResult::Value(SemanticQueryValue::FlowReturn(Arc::new(
-                (*value).clone().with_observed_completeness(
-                    crate::semantic_query::ResultCompleteness::partial(partial_reasons),
+            QueryResult::Value(SemanticQueryValue::FlowReturn(
+                verter_session_query::retention::owned::Owned::new(
+                    (*value).clone().with_observed_completeness(
+                        crate::semantic_query::ResultCompleteness::partial(partial_reasons),
+                    ),
                 ),
-            )))
+            ))
         }
         other => other,
     };
@@ -1345,7 +1347,7 @@ impl SettledProducer<'_> {
                 state.self_root_canonicals = Arc::clone(&self_root_canonicals);
                 state.cache_suppress = cache_suppress;
                 state.fact_status = fact_status;
-                state.walker_diagnostics = Some(Arc::clone(&walker_diagnostics));
+                state.walker_diagnostics = Some(walker_diagnostics.clone());
                 state.cost_receipt = cost_receipt.clone();
                 false
             } else {

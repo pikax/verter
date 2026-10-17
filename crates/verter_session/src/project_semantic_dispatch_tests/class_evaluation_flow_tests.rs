@@ -149,7 +149,7 @@ fn observe(host: &Arc<VerterHost>, name: &str) -> (verter_type_expr::TypeExpr, b
     else {
         panic!("{name} must produce a value");
     };
-    let result: Arc<FlowReturnResult> = result;
+    let result: verter_session_query::retention::owned::Owned<FlowReturnResult> = result;
     let projected = host
         .project_node_to_type_expr_for_test(result.return_type())
         .unwrap_or_else(|| panic!("{name} must project"));

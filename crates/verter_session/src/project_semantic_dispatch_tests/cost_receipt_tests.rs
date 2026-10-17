@@ -2167,7 +2167,7 @@ fn the_refusal_table_keeps_the_newest_and_refuses_torn_evaluations() {
                 verter_type_engine::semantic_query::QueryError::Miss,
             ),
             verter_type_engine::semantic_query_memo::empty_signature(),
-            Arc::from([]),
+            verter_type_engine::project_semantic_dispatch::walk::WalkerDiagnostics::default(),
             true,
             verter_type_engine::semantic_query::FactStatus::unavailable(
                 PartialReasonSet::PROJECTION_WORK_LIMIT,

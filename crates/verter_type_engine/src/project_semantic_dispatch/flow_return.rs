@@ -3261,7 +3261,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     None => result,
                 };
                 let mut output: QueryBuildOutput<SemanticQueryValue> = QueryBuildOutput::from((
-                    QueryResult::Value(SemanticQueryValue::FlowReturn(Arc::new(published))),
+                    QueryResult::Value(SemanticQueryValue::FlowReturn(
+                        verter_session_query::retention::owned::Owned::new(published),
+                    )),
                     fence,
                 ))
                 .with_observed_self_roots(scc_self_roots);
@@ -3584,7 +3586,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 )),
                 result.fresh_literal_arms(),
             )
-            .with_checker_diagnostics(Arc::clone(result.checker_diagnostics()))
+            .with_checker_diagnostics(result.checker_diagnostics_owned().clone())
         } else {
             result
         };
@@ -3898,7 +3900,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             result.degradation(),
             &[],
         )
-        .with_checker_diagnostics(Arc::clone(result.checker_diagnostics()))
+        .with_checker_diagnostics(result.checker_diagnostics_owned().clone())
     }
 
     /// The typed-gap arm of the wrap materialization: the whole return
@@ -3913,7 +3915,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             None,
             &[],
         )
-        .with_checker_diagnostics(Arc::clone(result.checker_diagnostics()))
+        .with_checker_diagnostics(result.checker_diagnostics_owned().clone())
     }
 
     /// Close the machinery ROOT frame.
@@ -5627,7 +5629,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     next = next.with_inferred_predicate(predicate);
                 }
                 if let Some(seed) = current[i].as_ref() {
-                    next = next.with_checker_diagnostics(Arc::clone(seed.checker_diagnostics()));
+                    next = next.with_checker_diagnostics(seed.checker_diagnostics_owned().clone());
                     if next.return_type() == seed.return_type() {
                         if let Some(keys) = seed.exact_return_keys() {
                             next = next.with_exact_return_keys(keys.clone());
@@ -6883,7 +6885,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let (result, fresh_seed) = joined;
                 let result = self
                     .attach_inferred_predicate(result, inferred_predicate)
-                    .with_checker_diagnostics(Arc::from(checker_diagnostics.into_boxed_slice()));
+                    .with_checker_diagnostics(checker_diagnostics.into());
                 let result = if whole_return_point {
                     self.attach_function_kind_wrap(
                         result,
@@ -27956,7 +27958,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         self.call_fresh_literal_returns.push(FreshCallReturn {
                             span: site.span(),
                             node: *return_type,
-                            values: Arc::clone(fresh_literal_returns),
+                            values: Arc::from(&fresh_literal_returns[..]),
                         });
                     }
                 }
@@ -28387,7 +28389,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                     self.call_fresh_literal_returns.push(FreshCallReturn {
                                         span: site.span(),
                                         node: value.node(),
-                                        values: Arc::clone(result.fresh_literal_arms()),
+                                        values: Arc::from(&result.fresh_literal_arms()[..]),
                                     });
                                 }
                                 Positional::Value(value)

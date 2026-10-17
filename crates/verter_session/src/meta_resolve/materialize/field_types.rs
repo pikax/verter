@@ -96,18 +96,15 @@ fn push_decl_scope_fence(
     >,
     canonical: &str,
     scope_canonical_id: &str,
-    fence: &mut Vec<(
-        std::sync::Arc<str>,
-        verter_type_engine::semantic_query::DepVersion,
-    )>,
+    fence: &mut Vec<verter_type_engine::semantic_query::DepEntry>,
     refused: &mut bool,
 ) {
     if *refused || canonical == scope_canonical_id || canonical.is_empty() {
         return;
     }
     match ctx.authoritative_current_content_hash(canonical) {
-        Some(whole_hash) => fence.push((
-            std::sync::Arc::<str>::from(canonical),
+        Some(whole_hash) => fence.push(verter_type_engine::semantic_query::DepEntry::new(
+            &*canonical,
             verter_type_engine::semantic_query::DepVersion::WholeHash(whole_hash),
         )),
         None => *refused = true,
@@ -129,9 +126,9 @@ pub(crate) fn package_backed_object_like_root_identity_with_fence(
     Option<verter_type_engine::semantic_query::DepSignature>,
 ) {
     let dispatch = query_engine.dispatch;
-    use std::sync::Arc;
 
-    let empty_fence: verter_type_engine::semantic_query::DepSignature = Arc::from(Vec::new());
+    let empty_fence: verter_type_engine::semantic_query::DepSignature =
+        verter_type_engine::semantic_query::DepSignature::default();
     let declaration_scope = root_identity.canonical_id.as_ref();
     if !query_engine
         .ctx
@@ -140,7 +137,7 @@ pub(crate) fn package_backed_object_like_root_identity_with_fence(
         return (false, Some(empty_fence));
     }
 
-    let mut fence: Vec<(Arc<str>, verter_type_engine::semantic_query::DepVersion)> = Vec::new();
+    let mut fence: Vec<verter_type_engine::semantic_query::DepEntry> = Vec::new();
     let mut refused = false;
     push_decl_scope_fence(
         query_engine.ctx,
@@ -163,7 +160,12 @@ pub(crate) fn package_backed_object_like_root_identity_with_fence(
         return if refused {
             (true, None)
         } else {
-            (true, Some(Arc::from(fence.into_boxed_slice())))
+            (
+                true,
+                Some(verter_type_engine::semantic_query::DepSignature::new(
+                    fence.into_boxed_slice(),
+                )),
+            )
         };
     }
 
@@ -210,5 +212,10 @@ pub(crate) fn package_backed_object_like_root_identity_with_fence(
     if refused {
         return (verdict, None);
     }
-    (verdict, Some(Arc::from(fence.into_boxed_slice())))
+    (
+        verdict,
+        Some(verter_type_engine::semantic_query::DepSignature::new(
+            fence.into_boxed_slice(),
+        )),
+    )
 }

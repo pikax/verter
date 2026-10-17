@@ -81,7 +81,7 @@ fn clean_result(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     name: &str,
     part: FunctionPartIdentity,
-) -> Arc<FlowReturnResult> {
+) -> verter_session_query::retention::owned::Owned<FlowReturnResult> {
     let key = flow_key(dispatch, name, part);
     let QueryResult::Value(SemanticQueryOutput {
         value: SemanticQueryValue::FlowReturn(result),

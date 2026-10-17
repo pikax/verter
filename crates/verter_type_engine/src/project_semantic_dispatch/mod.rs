@@ -1572,7 +1572,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         root: SemanticNodeId,
         reasons: crate::semantic_query::PartialReasonSet,
-    ) -> Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]> {
+    ) -> crate::project_semantic_dispatch::walk::WalkerDiagnostics {
         use crate::project_semantic_dispatch::walk::ShallowDiagnostic;
 
         let mut diagnostics = Vec::with_capacity(2);
@@ -1585,7 +1585,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if reasons.contains(crate::semantic_query::PartialReasonSet::CONNECTED_MEMORY_LIMIT) {
             diagnostics.push(ShallowDiagnostic::ConnectedMemoryLimit { root });
         }
-        Arc::from(diagnostics.into_boxed_slice())
+        crate::project_semantic_dispatch::walk::WalkerDiagnostics::new(diagnostics)
     }
 
     fn append_connected_limit_diagnostics<T>(
@@ -1609,7 +1609,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 diagnostics.push(diagnostic.clone());
             }
         }
-        read.walker_diagnostics = Arc::from(diagnostics.into_boxed_slice());
+        read.walker_diagnostics =
+            crate::project_semantic_dispatch::walk::WalkerDiagnostics::new(diagnostics);
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -2180,7 +2181,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// through a poisoned synthetic publish) AND for any candidate whose
     /// node carries no occurrence — an occurrence-less candidate is an
     /// honest `Miss`, never a fabricated occurrence.
-    fn overload_set_refs_for(&self, node: SemanticNodeId) -> Option<Arc<[SignatureRef]>> {
+    fn overload_set_refs_for(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<verter_session_query::retention::owned::OwnedSlice<SignatureRef>> {
         let graph = self.graph();
         let data = graph.node_data(node)?;
         let to_ref = |sig: SemanticNodeId| -> Option<SignatureRef> {
@@ -2247,7 +2251,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .collect::<Option<Vec<_>>>()?,
             _ => return None,
         };
-        Some(Arc::from(refs.into_boxed_slice()))
+        Some(refs.into())
     }
 
     /// The env-bearing occurrence identity of one candidate — the env-free
@@ -2516,16 +2520,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         hash: [u8; 16],
     ) -> DepSignature {
         let project_gen = self.snapshot.current_project_generation();
-        Arc::from(
-            vec![
-                (canonical_id.clone(), DepVersion::WholeHash(hash)),
-                (
-                    canonical_id.clone(),
-                    DepVersion::ProjectGeneration(project_gen),
-                ),
-            ]
-            .into_boxed_slice(),
-        )
+        let canonical = verter_session_query::retention::owned::OwnedStr::new(canonical_id);
+        DepSignature::new(vec![
+            crate::semantic_query::DepEntry(canonical.clone(), DepVersion::WholeHash(hash)),
+            crate::semantic_query::DepEntry(canonical, DepVersion::ProjectGeneration(project_gen)),
+        ])
     }
 
     /// Build a dep-signature fragment that records only the project
@@ -2535,13 +2534,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// caller already supplied.
     pub(super) fn project_generation_signature(&self) -> DepSignature {
         let project_gen = self.snapshot.current_project_generation();
-        Arc::from(
-            vec![(
-                Arc::<str>::from("<project>"),
-                DepVersion::ProjectGeneration(project_gen),
-            )]
-            .into_boxed_slice(),
-        )
+        DepSignature::new(vec![crate::semantic_query::DepEntry::new(
+            "<project>",
+            DepVersion::ProjectGeneration(project_gen),
+        )])
     }
 
     /// Emit a `ProjectMember` origin-graph edge tagged
@@ -5372,7 +5368,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             path: binding_path,
             context: crate::semantic_query::ProjectionReductionContext::published(mode),
         });
-        let merged: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = slot_read
+        let merged: Vec<crate::semantic_query::DepEntry> = slot_read
             .dep_signature
             .iter()
             .cloned()
@@ -5399,7 +5395,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         CacheRead {
             lease: binding_read.lease,
             value,
-            dep_signature: Arc::from(merged.into_boxed_slice()),
+            dep_signature: DepSignature::new(merged),
             walker_diagnostics: binding_read.walker_diagnostics,
             cache_suppress: binding_read.cache_suppress,
             // Fold the partial signal across BOTH hops: a budget/walker

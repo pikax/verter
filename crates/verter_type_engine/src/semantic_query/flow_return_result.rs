@@ -56,12 +56,18 @@ use verter_session_query::{flow::completion::NormalCompletion, transports_comple
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlowReturnResult {
     /// A separate producer proof for a selected member; never promotes fact().
-    independent_member:
-        Option<std::sync::Arc<crate::project_semantic_dispatch::flow_return::ExactMemberValue>>,
+    independent_member: Option<
+        verter_session_query::retention::owned::Owned<
+            crate::project_semantic_dispatch::flow_return::ExactMemberValue,
+        >,
+    >,
     /// Quality of the reads supporting this independently valid evaluation.
     observed_completeness: super::ResultCompleteness,
-    exact_return_keys:
-        Option<std::sync::Arc<crate::project_semantic_dispatch::flow_return::ExactReturnKeyDomain>>,
+    exact_return_keys: Option<
+        verter_session_query::retention::owned::Owned<
+            crate::project_semantic_dispatch::flow_return::ExactReturnKeyDomain,
+        >,
+    >,
     /// The whole-function return type (widened join of every contributor).
     ///
     /// PRIVATE for the same reason as [`Self::degradation`]: the
@@ -108,7 +114,7 @@ pub struct FlowReturnResult {
     /// literal constituents — [`Self::new`] filters by literal VALUE, so
     /// a widened or substituted rebuild can never list a value the
     /// return no longer carries.
-    fresh_literal_arms: std::sync::Arc<[SemanticNodeId]>,
+    fresh_literal_arms: verter_session_query::retention::owned::OwnedSlice<SemanticNodeId>,
     /// The PENDING function-kind return wrap (async / generator /
     /// async-generator), carried as a deferred fact until the value
     /// leaves the frame for publication. While set, `return_type` is the
@@ -138,7 +144,8 @@ pub struct FlowReturnResult {
     /// these ride with it so it is never a silent success. They are the
     /// body's own — a caller of this function reads its signature, not
     /// its errors. Every rebuild carries them.
-    checker_diagnostics: std::sync::Arc<[super::CheckerDiagnostic]>,
+    checker_diagnostics:
+        verter_session_query::retention::owned::OwnedSlice<super::CheckerDiagnostic>,
 }
 
 /// What a function's authored kind adds to its body join — see
@@ -236,7 +243,7 @@ impl FlowReturnResult {
             degradation,
             fresh_literal_arms: retained_fresh_literal_arms(graph, return_type, fresh_literal_arms),
             facet: FunctionKindFacet::None,
-            checker_diagnostics: std::sync::Arc::from([]),
+            checker_diagnostics: Vec::new().into(),
         }
     }
 
@@ -275,7 +282,7 @@ impl FlowReturnResult {
         mut self,
         proof: crate::project_semantic_dispatch::flow_return::ExactMemberValue,
     ) -> Self {
-        self.independent_member = Some(std::sync::Arc::new(proof));
+        self.independent_member = Some(verter_session_query::retention::owned::Owned::new(proof));
         self
     }
 
@@ -290,7 +297,15 @@ impl FlowReturnResult {
 
     /// The diagnostics riding with the value (see the field).
     #[must_use]
-    pub fn checker_diagnostics(&self) -> &std::sync::Arc<[super::CheckerDiagnostic]> {
+    pub fn checker_diagnostics(&self) -> &[super::CheckerDiagnostic] {
+        &self.checker_diagnostics
+    }
+
+    /// The diagnostics' owned allocation, for a rebuild that carries them
+    /// over: a clone shares their one charge.
+    pub(crate) fn checker_diagnostics_owned(
+        &self,
+    ) -> &verter_session_query::retention::owned::OwnedSlice<super::CheckerDiagnostic> {
         &self.checker_diagnostics
     }
 
@@ -299,7 +314,7 @@ impl FlowReturnResult {
     #[must_use]
     pub(crate) fn with_checker_diagnostics(
         mut self,
-        diagnostics: std::sync::Arc<[super::CheckerDiagnostic]>,
+        diagnostics: verter_session_query::retention::owned::OwnedSlice<super::CheckerDiagnostic>,
     ) -> Self {
         self.checker_diagnostics = diagnostics;
         self
@@ -322,7 +337,7 @@ impl FlowReturnResult {
         mut self,
         proof: crate::project_semantic_dispatch::flow_return::ExactReturnKeyDomain,
     ) -> Self {
-        self.exact_return_keys = Some(std::sync::Arc::new(proof));
+        self.exact_return_keys = Some(verter_session_query::retention::owned::Owned::new(proof));
         self
     }
     pub(crate) fn exact_return_keys(
@@ -369,7 +384,9 @@ impl FlowReturnResult {
     /// The surviving FRESH literal constituents at the return's top
     /// level (see the field). Empty means every kept literal is pinned.
     #[must_use]
-    pub(crate) fn fresh_literal_arms(&self) -> &std::sync::Arc<[SemanticNodeId]> {
+    pub(crate) fn fresh_literal_arms(
+        &self,
+    ) -> &verter_session_query::retention::owned::OwnedSlice<SemanticNodeId> {
         &self.fresh_literal_arms
     }
 
@@ -445,7 +462,7 @@ impl FlowReturnResult {
                 .then(|| self.independent_member.clone())
                 .flatten(),
             facet: self.facet,
-            checker_diagnostics: std::sync::Arc::clone(&self.checker_diagnostics),
+            checker_diagnostics: self.checker_diagnostics.clone(),
             ..rebuilt
         }
     }
@@ -459,10 +476,10 @@ fn retained_fresh_literal_arms(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     return_type: SemanticNodeId,
     fresh_literal_arms: &[SemanticNodeId],
-) -> std::sync::Arc<[SemanticNodeId]> {
+) -> verter_session_query::retention::owned::OwnedSlice<SemanticNodeId> {
     use crate::semantic_query::SemanticNodeData;
     if fresh_literal_arms.is_empty() {
-        return std::sync::Arc::from([]);
+        return Vec::new().into();
     }
     let mut top_level: Vec<SemanticNodeId> = Vec::new();
     match graph.node_data(return_type).as_deref() {
@@ -489,7 +506,7 @@ fn retained_fresh_literal_arms(
             retained.push(kept);
         }
     }
-    std::sync::Arc::from(retained.into_boxed_slice())
+    retained.into()
 }
 
 /// Whether a flow-return VALUE reaches a semantic-miss carrier — a node

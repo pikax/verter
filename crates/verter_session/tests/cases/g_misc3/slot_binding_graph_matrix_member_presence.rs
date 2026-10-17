@@ -83,13 +83,9 @@ fn slot_binding_graph_fact_tracer_carries_member_presence() {
     // `dep_signature_to_fact_signature` from the public for_tests
     // surface.
     let bridged_empty: Vec<verter_session_query::facts::fact_cache::FactVersionRef> =
-        dep_signature_to_fact_signature_for_tests(&std::sync::Arc::from(
-            Vec::<(
-                std::sync::Arc<str>,
-                verter_type_engine::semantic_query::DepVersion,
-            )>::new()
-            .into_boxed_slice(),
-        ));
+        dep_signature_to_fact_signature_for_tests(
+            &verter_type_engine::semantic_query::DepSignature::default(),
+        );
     assert!(
         bridged_empty.is_empty(),
         "matrix slice: empty `DepSignature` must bridge to \

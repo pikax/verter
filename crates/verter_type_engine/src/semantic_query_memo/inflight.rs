@@ -82,7 +82,7 @@ pub(super) struct InflightState {
     /// preserved across cooperative-admission joins. Empty for non-
     /// walker queries.
     pub(super) walker_diagnostics:
-        Option<std::sync::Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>>,
+        Option<crate::project_semantic_dispatch::walk::WalkerDiagnostics>,
     /// The receipt of the winner's build, when it sealed one: a
     /// subscriber's demand replays it, exactly as a warm read does, so
     /// waiting on another task's computation costs what computing it would.

@@ -2920,8 +2920,11 @@ fn semantic_publication_pages_a_post_finalise_wide_carrier() {
         .expect("semantic root is indexed")
         .whole_hash;
     let traced = crate::semantic_graph_self_root_tests::page_width_terminal_witness_facts();
-    let mut output: verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput =
-        (QueryResult::Error(QueryError::Miss), Arc::from([])).into();
+    let mut output: verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput = (
+        QueryResult::Error(QueryError::Miss),
+        verter_type_engine::semantic_query::DepSignature::default(),
+    )
+        .into();
     output.observed_self_roots = vec![(Arc::<str>::from(canonical), whole_hash)];
 
     let completed = finalise_traced_build_output(
@@ -2974,8 +2977,11 @@ fn a_wide_work_refusal_carries_its_whole_proving_prefix() {
             })
             .collect();
     let refused = || {
-        let mut output: verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput =
-            (QueryResult::Error(QueryError::Miss), Arc::from([])).into();
+        let mut output: verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput = (
+            QueryResult::Error(QueryError::Miss),
+            verter_type_engine::semantic_query::DepSignature::default(),
+        )
+            .into();
         output.mark_partial_with(
             verter_type_engine::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT,
         );
@@ -3031,8 +3037,11 @@ fn a_torn_self_root_never_certifies_a_refusal() {
         .whole_hash;
     assert_ne!(before, after);
     let refused = |roots: Vec<(Arc<str>, _)>| {
-        let mut output: verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput =
-            (QueryResult::Error(QueryError::Miss), Arc::from([])).into();
+        let mut output: verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput = (
+            QueryResult::Error(QueryError::Miss),
+            verter_type_engine::semantic_query::DepSignature::default(),
+        )
+            .into();
         output.mark_partial_with(
             verter_type_engine::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT,
         );
@@ -3327,7 +3336,7 @@ fn resolve_decl_dep_signature_captures_file_hash_and_project_gen() {
         .expect("warm entry must exist");
     let mut has_whole_hash = false;
     let mut has_project_gen = false;
-    for (_, dv) in warm.dep_signature().iter() {
+    for verter_type_engine::semantic_query::DepEntry(_, dv) in warm.dep_signature().iter() {
         match dv {
             DepVersion::WholeHash(_) => has_whole_hash = true,
             DepVersion::ProjectGeneration(_) => has_project_gen = true,
@@ -23698,7 +23707,7 @@ fn execute_read_preserves_dep_signature_on_success() {
     let names: Vec<String> = read
         .dep_signature()
         .iter()
-        .map(|(c, _)| c.to_string())
+        .map(|verter_type_engine::semantic_query::DepEntry(c, _)| c.to_string())
         .collect();
     assert!(
         names.iter().any(|n| n == "/w/types.ts"),
@@ -24737,7 +24746,7 @@ fn cacheread_warm_replays_walker_diagnostics_after_memo_hit() {
 
     // Second dispatch — warm replay must produce equal diagnostics
     // (read from the memo entry; not re-running the walker). The
-    // `Arc<[ShallowDiagnostic]>` clone preserves identity-style
+    // `WalkerDiagnostics` clone preserves identity-style
     // equality without re-allocating.
     let second = read_shallow_metadata(&host, cond_id);
     assert_eq!(
@@ -27409,7 +27418,12 @@ fn overload_set_key_of_kind(
 fn execute_overload_set(
     dispatch: &ProjectSemanticDispatch<crate::resolver_core::HostCapabilities>,
     key: SemanticQueryKey,
-) -> Result<Arc<[verter_type_engine::semantic_query::SignatureRef]>, QueryResult<SemanticNodeId>> {
+) -> Result<
+    verter_session_query::retention::owned::OwnedSlice<
+        verter_type_engine::semantic_query::SignatureRef,
+    >,
+    QueryResult<SemanticNodeId>,
+> {
     match verter_type_engine::semantic_query::SemanticQueryApi::execute(dispatch, key) {
         QueryResult::Value(SemanticQueryOutput { value, .. }) => match value {
             verter_type_engine::semantic_query::SemanticQueryValue::OverloadSet(refs) => Ok(refs),

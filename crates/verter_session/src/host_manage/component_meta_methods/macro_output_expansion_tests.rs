@@ -86,8 +86,11 @@ fn sink_preserves_fallback_source_for_non_leaf_carrier_node() {
     );
 
     let fallback = distinct_fallback_source();
-    let artifact =
-        AdmittedExpansionNode::new(node, Arc::from(Vec::new().into_boxed_slice()), false);
+    let artifact = AdmittedExpansionNode::new(
+        node,
+        verter_type_engine::semantic_query::DepSignature::new(Vec::new().into_boxed_slice()),
+        false,
+    );
     let via_sink = materialize_admitted_expansion_node(&dispatch, &artifact, &fallback)
         .expect("sink must publish a source for a raisable node-bearing artifact");
 
@@ -139,8 +142,11 @@ fn sink_projects_leaf_fact_or_preserves_fallback_across_carrier_shapes() {
     let fallback = distinct_fallback_source();
 
     // The LEAF node projects its complete closed leaf fact.
-    let leaf_artifact =
-        AdmittedExpansionNode::new(string_id, Arc::from(Vec::new().into_boxed_slice()), false);
+    let leaf_artifact = AdmittedExpansionNode::new(
+        string_id,
+        verter_type_engine::semantic_query::DepSignature::new(Vec::new().into_boxed_slice()),
+        false,
+    );
     let leaf_out = materialize_admitted_expansion_node(&dispatch, &leaf_artifact, &fallback)
         .expect("a leaf node publishes a source");
     assert_eq!(
@@ -154,8 +160,11 @@ fn sink_projects_leaf_fact_or_preserves_fallback_across_carrier_shapes() {
     // A UNION whose every member is a complete leaf projects to the closed
     // ORDERED leaf-union fact — never the fallback (the union is a decided
     // closed result, e.g. an instantiated `string | number` payload param).
-    let union_artifact =
-        AdmittedExpansionNode::new(union, Arc::from(Vec::new().into_boxed_slice()), false);
+    let union_artifact = AdmittedExpansionNode::new(
+        union,
+        verter_type_engine::semantic_query::DepSignature::new(Vec::new().into_boxed_slice()),
+        false,
+    );
     let union_out = materialize_admitted_expansion_node(&dispatch, &union_artifact, &fallback)
         .expect("a leaf-union node publishes a source");
     assert_eq!(
@@ -178,8 +187,11 @@ fn sink_projects_leaf_fact_or_preserves_fallback_across_carrier_shapes() {
         ("array", array),
         ("raw-fallback", raw),
     ] {
-        let artifact =
-            AdmittedExpansionNode::new(node, Arc::from(Vec::new().into_boxed_slice()), false);
+        let artifact = AdmittedExpansionNode::new(
+            node,
+            verter_type_engine::semantic_query::DepSignature::new(Vec::new().into_boxed_slice()),
+            false,
+        );
         let out = materialize_admitted_expansion_node(&dispatch, &artifact, &fallback)
             .expect("a non-closed resolved node publishes a source");
         assert_eq!(
@@ -203,8 +215,11 @@ fn sink_none_miss_matches_oracle_none() {
         shell_raise_oracle(&dispatch, absent).is_none(),
         "the oracle raises an absent node to None"
     );
-    let artifact =
-        AdmittedExpansionNode::new(absent, Arc::from(Vec::new().into_boxed_slice()), false);
+    let artifact = AdmittedExpansionNode::new(
+        absent,
+        verter_type_engine::semantic_query::DepSignature::new(Vec::new().into_boxed_slice()),
+        false,
+    );
     assert!(
         materialize_admitted_expansion_node(&dispatch, &artifact, &distinct_fallback_source())
             .is_none(),
@@ -221,11 +236,14 @@ fn node_bearing_artifact_preserves_node_and_metadata() {
     // constructor that DROPS / zeroes `dep_signature` (rather than storing the
     // arg verbatim) FAILS — an empty-signature round-trip would not discriminate
     // a field-dropping ctor.
-    let dep: verter_type_engine::semantic_query::DepSignature = Arc::from(vec![(
-        Arc::<str>::from("dep-a"),
-        DepVersion::WholeHash([7u8; 16]),
-    )]);
-    let artifact = AdmittedExpansionNode::new(SemanticNodeId(7), Arc::clone(&dep), true);
+    let dep: verter_type_engine::semantic_query::DepSignature =
+        verter_type_engine::semantic_query::DepSignature::new(vec![
+            verter_type_engine::semantic_query::DepEntry::new(
+                "dep-a",
+                DepVersion::WholeHash([7u8; 16]),
+            ),
+        ]);
+    let artifact = AdmittedExpansionNode::new(SemanticNodeId(7), dep.clone(), true);
     assert_eq!(artifact.node, SemanticNodeId(7), "node round-trips");
     assert!(artifact.result_is_partial, "partial flag round-trips");
     assert_eq!(
@@ -251,7 +269,11 @@ fn node_bearing_artifact_preserves_node_and_metadata() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let dispatch = ProjectSemanticDispatch::new(&host);
     let s = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
-    let s_artifact = AdmittedExpansionNode::new(s, Arc::from(Vec::new().into_boxed_slice()), false);
+    let s_artifact = AdmittedExpansionNode::new(
+        s,
+        verter_type_engine::semantic_query::DepSignature::new(Vec::new().into_boxed_slice()),
+        false,
+    );
     let expr =
         materialize_admitted_expansion_node(&dispatch, &s_artifact, &distinct_fallback_source())
             .expect("primitive materialises")

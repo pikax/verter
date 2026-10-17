@@ -875,7 +875,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         (
             payload.outcome,
-            Arc::clone(&payload.bindings),
+            Arc::from(&payload.bindings[..]),
             redischarge_execute_visits_for_tests() - before,
         )
     }
@@ -926,7 +926,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let result = (
             payload.outcome,
-            Arc::clone(&payload.bindings),
+            Arc::from(&payload.bindings[..]),
             redischarge_execute_visits_for_tests() - before,
         );
         self.relation_abort_completed_members();
@@ -3762,7 +3762,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 ..
             }) => match payload.outcome {
                 RelationOutcome::Assignable => PendingVerdict::Assignable {
-                    bindings: Arc::clone(&payload.bindings),
+                    bindings: Arc::from(&payload.bindings[..]),
                 },
                 RelationOutcome::NotAssignable => PendingVerdict::NotAssignable,
                 RelationOutcome::BudgetExceeded(_) => PendingVerdict::Unknown,
@@ -8286,7 +8286,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> RelationPayload {
         RelationPayload {
             outcome,
-            bindings,
+            bindings: bindings.to_vec().into(),
             recursion: crate::semantic_query::RelationRecursionFootprint::default(),
         }
     }
@@ -12200,7 +12200,7 @@ pub(super) fn relation_step_from_pending(pending: &PendingVerdict) -> RelationSt
 fn relation_step_from_payload(payload: &RelationPayload) -> RelationStep {
     match &payload.outcome {
         RelationOutcome::Assignable => RelationStep::Assignable {
-            bindings: Arc::clone(&payload.bindings),
+            bindings: Arc::from(&payload.bindings[..]),
         },
         RelationOutcome::NotAssignable => RelationStep::NotAssignable,
         RelationOutcome::BudgetExceeded(kind) => {

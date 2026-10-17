@@ -235,9 +235,9 @@ pub(crate) enum VueMacroDependencyFailure {
         /// Exact top-level lexical owner of the consuming macro.
         macro_owner: verter_type_expr::TopLevelOwnerId,
         /// Unresolved arm head.
-        name: Arc<str>,
+        name: verter_session_query::retention::owned::OwnedStr,
         /// Canonical file that authored the arm.
-        owner_canonical: Arc<str>,
+        owner_canonical: verter_session_query::retention::owned::OwnedStr,
         /// Exact top-level lexical owner that authored the arm/import.
         owner: verter_type_expr::TopLevelOwnerId,
     },
@@ -543,8 +543,8 @@ fn record_unresolved_surface_arms(
         Some(VueMacroDependencyFailure::UnresolvedSurfaceArm {
             macro_index,
             macro_owner,
-            name: Arc::clone(name),
-            owner_canonical: Arc::clone(owner_canonical),
+            name: name.clone(),
+            owner_canonical: owner_canonical.clone(),
             owner: *owner,
         })
     }));

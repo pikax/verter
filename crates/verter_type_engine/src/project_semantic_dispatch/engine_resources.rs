@@ -301,7 +301,7 @@ mod tests {
                     &authority,
                     verter_type_expr::TypeExpr::string_literal("retained member"),
                 ),
-                Arc::from([]),
+                crate::semantic_query::DepSignature::default(),
                 false,
             );
             let member = SurfaceMember {

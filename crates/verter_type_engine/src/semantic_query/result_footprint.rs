@@ -9,14 +9,9 @@
 //! compile until its heap is accounted for. A field asserted with
 //! [`copy_inline`] owns no heap: a `Copy` type cannot own an allocation.
 
-#[cfg(test)]
-use std::sync::Arc;
+use verter_session_query::retention::allocation::AliasSet;
 
-use verter_session_query::retention::allocation::{arc_slice_block_bytes, AliasSet};
-
-use super::super::allocation_footprint::{
-    arc_value_bytes, copy_inline, copy_slice_inline, OwnedHeap,
-};
+use super::super::allocation_footprint::{arc_value_bytes, copy_inline, OwnedHeap};
 use super::super::{
     BroadRuntimeClassification, CanonicalTypeSubstitution, FlowFunctionSlotIdentity,
     FlowInputContext, FlowReturnContext, FlowReturnKey, MaterializationCycleGateFallbackReasons,
@@ -44,19 +39,14 @@ impl OwnedHeap for FlowReturnResult {
             facet,
             checker_diagnostics,
         } = self;
-        independent_member
-            .as_ref()
-            .map_or(0, |proof| arc_value_bytes(proof, aliases))
+        independent_member.owned_heap_bytes(aliases)
             + copy_inline(observed_completeness)
-            + exact_return_keys
-                .as_ref()
-                .map_or(0, |proof| arc_value_bytes(proof, aliases))
+            + exact_return_keys.owned_heap_bytes(aliases)
             + copy_inline(can_fall_through)
             + copy_inline(degradation)
             + fresh_literal_arms.owned_heap_bytes(aliases)
             + function_kind_facet_bytes(facet)
-            + arc_slice_block_bytes(checker_diagnostics, aliases).unwrap_or(0)
-            + copy_slice_inline(checker_diagnostics)
+            + checker_diagnostics.owned_heap_bytes(aliases)
     }
 }
 
@@ -308,9 +298,7 @@ impl OwnedHeap for MaterializationCycleGateOutcome {
             MaterializationCycleGateOutcome::Decided(verdict) => copy_inline(verdict),
             MaterializationCycleGateOutcome::LegacyFallback { verdict, reasons } => {
                 let MaterializationCycleGateFallbackReasons(reasons) = reasons;
-                copy_inline(verdict)
-                    + arc_slice_block_bytes(reasons, aliases).unwrap_or(0)
-                    + copy_slice_inline(reasons)
+                copy_inline(verdict) + reasons.offer(aliases)
             }
         }
     }
@@ -329,7 +317,7 @@ impl FlowReturnResult {
     /// filters them, so a footprint test controls the backing it measures.
     pub(crate) fn for_footprint_tests(
         return_type: SemanticNodeId,
-        fresh_literal_arms: Arc<[SemanticNodeId]>,
+        fresh_literal_arms: verter_session_query::retention::owned::OwnedSlice<SemanticNodeId>,
     ) -> Self {
         Self {
             independent_member: None,
@@ -341,7 +329,7 @@ impl FlowReturnResult {
             degradation: None,
             fresh_literal_arms,
             facet: FunctionKindFacet::None,
-            checker_diagnostics: Arc::from([]),
+            checker_diagnostics: Vec::new().into(),
         }
     }
 }

@@ -818,9 +818,9 @@ pub fn read_positive_surface_members<C: crate::resolver_core::ResolverCapabiliti
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnresolvedSurfaceArm {
     /// The reference's head name as written (`NotFound` in `extends NotFound`).
-    pub(crate) name: Arc<str>,
+    pub(crate) name: verter_session_query::retention::owned::OwnedStr,
     /// Canonical id of the file whose declaration authored the arm.
-    pub(crate) owner_canonical: Arc<str>,
+    pub(crate) owner_canonical: verter_session_query::retention::owned::OwnedStr,
     /// Exact top-level lexical owner that authored the arm.
     pub(crate) owner: verter_type_expr::TopLevelOwnerId,
 }
@@ -887,8 +887,8 @@ fn unresolved_surface_arms_from_diags(
                 owner_canonical,
                 owner,
             } => Some(UnresolvedSurfaceArm {
-                name: Arc::clone(name),
-                owner_canonical: Arc::clone(owner_canonical),
+                name: name.clone(),
+                owner_canonical: owner_canonical.clone(),
                 owner: *owner,
             }),
             _ => None,

@@ -318,7 +318,7 @@ impl SemanticGraphStore {
     ) -> crate::semantic_query::RelationPayload {
         crate::semantic_query::RelationPayload {
             outcome,
-            bindings: Arc::from(Vec::new().into_boxed_slice()),
+            bindings: Vec::new().into(),
             recursion: crate::semantic_query::RelationRecursionFootprint::default(),
         }
     }

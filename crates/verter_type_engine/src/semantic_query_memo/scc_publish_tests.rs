@@ -5,9 +5,7 @@
 use super::*;
 use crate::semantic_query::RelationOutcome;
 use verter_session_query::facts::fact_cache::{FactVersionRef, ReadSetSignature};
-use verter_session_query::retention::allocation::{
-    arc_block_bytes, arc_str_list_bytes, fact_slice_bytes, AliasSet,
-};
+use verter_session_query::retention::allocation::{arc_str_list_bytes, fact_slice_bytes, AliasSet};
 use verter_session_query::retention::shared::registration_bytes;
 use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount, StoreAccount};
 
@@ -104,9 +102,12 @@ fn an_scc_member_shares_the_carrier_charge_and_keeps_it_after_the_root_drains() 
         .expect("the member's incremental footprint is admitted");
     let member_own = super::retention::own_reservation_bytes(&member, &member_family, 1, 1);
     // What the member newly retains, from its allocations alone: its own
-    // bookkeeping and its own (empty) relation-binding value under one
-    // registration. The carrier and self-root list are the root's already.
-    let member_value = arc_block_bytes(0) + registration_bytes();
+    // bookkeeping and its own (empty) relation-binding value, an owned cell
+    // charged by itself. The carrier and self-root list are the root's
+    // already.
+    let member_value = verter_session_query::retention::owned::Owned::<
+        Box<[crate::semantic_query::InferBinding]>,
+    >::cell_block_bytes();
     // Its delivery's metadata, pinned to the delivery until now, is adopted
     // into retention with it.
     let member_metadata = member.lease.own_charge_bytes_for_tests();
@@ -186,25 +187,29 @@ fn a_refused_candidate_keeps_no_charge_and_no_registration() {
 }
 
 /// One oversized name shared by a diagnostic and a dependency rail — two
-/// different carriers — is charged once, and stays charged, once, while
-/// either carrier survives the other.
+/// different carriers — is charged once, by its own cell, and stays
+/// charged, once, while either carrier survives the other.
 #[test]
 fn a_name_a_diagnostic_and_a_dependency_rail_share_is_charged_once() {
-    use crate::project_semantic_dispatch::walk::ShallowDiagnostic;
+    use crate::project_semantic_dispatch::walk::{ShallowDiagnostic, WalkerDiagnostics};
     use crate::semantic_query::DepVersion;
+    use verter_session_query::retention::owned::OwnedStr;
     const NAME: usize = 30_000;
     for diagnostics_first in [true, false] {
         let account = unbounded_account();
         let store = SemanticGraphStore::with_account(StoreAccount::new(Arc::clone(&account)));
-        let name: Arc<str> = Arc::from("n".repeat(NAME));
-        let diagnostics: Arc<[ShallowDiagnostic]> =
-            Arc::from(vec![ShallowDiagnostic::UnresolvedSurfaceArm {
-                name: Arc::clone(&name),
-                owner_canonical: Arc::from("/o.ts"),
-                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            }]);
-        let dep_signature: crate::semantic_query::DepSignature =
-            Arc::from(vec![(Arc::clone(&name), DepVersion::ProjectGeneration(1))]);
+        let name = OwnedStr::from("n".repeat(NAME));
+        let diagnostics = WalkerDiagnostics::new(vec![ShallowDiagnostic::UnresolvedSurfaceArm {
+            name: name.clone(),
+            owner_canonical: "/o.ts".into(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        }]);
+        let dep_signature =
+            crate::semantic_query::DepSignature::new(vec![crate::semantic_query::DepEntry(
+                name.clone(),
+                DepVersion::ProjectGeneration(1),
+            )]);
+        drop(name);
         let facts = crate::fact_signature_helpers::empty_fact_signature();
         let roots: Arc<[Arc<str>]> = Arc::from(Vec::new());
         let result = QueryResult::Value(SemanticQueryValue::TypeNode(
@@ -221,7 +226,7 @@ fn a_name_a_diagnostic_and_a_dependency_rail_share_is_charged_once() {
             })
             .expect("admitted");
         let charged = account.snapshot().retained_bytes;
-        let name_charge = arc_block_bytes(NAME) + registration_bytes();
+        let name_charge = OwnedStr::charge_for_len(NAME);
         let without_name = charged - name_charge;
         assert!(
             without_name < NAME,

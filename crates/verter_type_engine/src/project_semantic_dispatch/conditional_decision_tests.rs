@@ -8,12 +8,11 @@ use crate::semantic_query::{
     QueryResult, SemanticNodeData,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
-use std::sync::Arc;
 
 fn read(
     value: QueryResult<crate::semantic_query::SemanticNodeId>,
 ) -> CacheRead<QueryResult<crate::semantic_query::SemanticNodeId>> {
-    CacheRead::from_value_and_signature(value, Arc::from([]))
+    CacheRead::from_value_and_signature(value, crate::semantic_query::DepSignature::default())
 }
 
 fn partial(

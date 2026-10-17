@@ -1,21 +1,22 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::project_semantic_dispatch::walk::DiagnosticError;
+use crate::project_semantic_dispatch::walk::{DiagnosticError, WalkerDiagnostics};
 use crate::semantic_query::demand::{Demand, MaterializedPoint};
+use verter_session_query::retention::owned::{OwnedSlice, OwnedStr};
 
 fn arm(name: &str, owner: &str) -> ShallowDiagnostic {
     ShallowDiagnostic::UnresolvedSurfaceArm {
-        name: Arc::from(name),
-        owner_canonical: Arc::from(owner),
+        name: name.into(),
+        owner_canonical: owner.into(),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
     }
 }
 
 #[test]
 fn a_diagnostic_rail_is_charged_for_the_text_its_diagnostics_name() {
-    let short: Arc<[ShallowDiagnostic]> = Arc::from(vec![arm("A", "/a.ts")]);
-    let long: Arc<[ShallowDiagnostic]> = Arc::from(vec![arm(&"n".repeat(9_000), "/a.ts")]);
+    let short = WalkerDiagnostics::new(vec![arm("A", "/a.ts")]);
+    let long = WalkerDiagnostics::new(vec![arm(&"n".repeat(9_000), "/a.ts")]);
     let short_bytes = short.owned_heap_bytes(&mut AliasSet::new());
     let long_bytes = long.owned_heap_bytes(&mut AliasSet::new());
     // The former per-diagnostic proxy charged both 256 bytes.
@@ -56,10 +57,10 @@ fn a_materialised_point_is_charged_for_its_path_text() {
 
 #[test]
 fn one_charge_counts_a_shared_allocation_once() {
-    let name: Arc<str> = Arc::from("s".repeat(3_000));
-    let rail: Arc<[ShallowDiagnostic]> = Arc::from(vec![ShallowDiagnostic::UnresolvedSurfaceArm {
-        name: Arc::clone(&name),
-        owner_canonical: Arc::clone(&name),
+    let name = OwnedStr::from("s".repeat(3_000));
+    let rail = WalkerDiagnostics::new(vec![ShallowDiagnostic::UnresolvedSurfaceArm {
+        name: name.clone(),
+        owner_canonical: name.clone(),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
     }]);
     let bytes = rail.owned_heap_bytes(&mut AliasSet::new());
@@ -110,7 +111,7 @@ fn flow_slot(canonical: Arc<str>) -> crate::semantic_query::FlowFunctionSlotIden
     }
 }
 
-fn nodes(count: u64) -> Arc<[SemanticNodeId]> {
+fn nodes(count: u64) -> OwnedSlice<SemanticNodeId> {
     (0..count).map(SemanticNodeId).collect()
 }
 
@@ -118,9 +119,9 @@ fn value_bytes(value: SemanticQueryValue) -> usize {
     value.owned_heap_bytes(&mut AliasSet::new())
 }
 
-/// The backing an `Arc<[T]>` of `count` elements adds over an empty one.
+/// The backing an owned slice of `count` elements adds over an empty one.
 fn slice_growth<T>(count: usize) -> usize {
-    arc_block_bytes(count * std::mem::size_of::<T>()) - arc_block_bytes(0)
+    heap_block_bytes(count * std::mem::size_of::<T>())
 }
 
 #[test]
@@ -132,7 +133,7 @@ fn a_flow_return_is_charged_for_its_nested_backing() {
     const TEXT: usize = 9_000;
     let canonical: Arc<str> = Arc::from("/a.ts");
     let small = FlowReturnResult::for_footprint_tests(SemanticNodeId(1), nodes(0));
-    let diagnostics: Arc<[CheckerDiagnostic]> = (0..ARMS)
+    let diagnostics: OwnedSlice<CheckerDiagnostic> = (0..ARMS)
         .map(|_| CheckerDiagnostic {
             code: crate::semantic_query::CheckerDiagnosticCode::NoMatchingOverload,
             operation: crate::semantic_query::CheckerDiagnosticOperation::CallResolution,
@@ -153,8 +154,12 @@ fn a_flow_return_is_charged_for_its_nested_backing() {
             Arc::from(vec![(long_root, [0; 16])]),
         ));
 
-    let small_bytes = value_bytes(SemanticQueryValue::FlowReturn(Arc::new(small)));
-    let large_bytes = value_bytes(SemanticQueryValue::FlowReturn(Arc::new(large)));
+    let small_bytes = value_bytes(SemanticQueryValue::FlowReturn(
+        verter_session_query::retention::owned::Owned::new(small),
+    ));
+    let large_bytes = value_bytes(SemanticQueryValue::FlowReturn(
+        verter_session_query::retention::owned::Owned::new(large),
+    ));
     let nested = slice_growth::<SemanticNodeId>(ARMS)
         + slice_growth::<CheckerDiagnostic>(ARMS)
         + 2 * arc_block_bytes(TEXT);
@@ -174,14 +179,16 @@ fn a_selected_call_is_charged_for_its_substitution_and_fresh_returns() {
     const PAIRS: usize = 5_000;
     const TEXT: usize = 9_000;
     let selected = |origin, substitution, fresh| {
-        SemanticQueryValue::ResolveCall(Arc::new(ResolvedCallResult::Selected {
-            selected: origin,
-            selected_signature: SemanticNodeId(1),
-            substitution,
-            return_type: SemanticNodeId(2),
-            fresh_literal_returns: fresh,
-            recovery_diagnostic: None,
-        }))
+        SemanticQueryValue::ResolveCall(verter_session_query::retention::owned::Owned::new(
+            ResolvedCallResult::Selected {
+                selected: origin,
+                selected_signature: SemanticNodeId(1),
+                substitution,
+                return_type: SemanticNodeId(2),
+                fresh_literal_returns: fresh,
+                recovery_diagnostic: None,
+            },
+        ))
     };
     let small = selected(
         SignatureCandidateOrigin::Rootless,
@@ -232,7 +239,9 @@ fn a_flow_return_counts_an_allocation_it_reaches_twice_once() {
             SemanticNodeId(1),
             Arc::from(vec![(Arc::clone(&shared), [0; 16])]),
         ));
-    let bytes = value_bytes(SemanticQueryValue::FlowReturn(Arc::new(result)));
+    let bytes = value_bytes(SemanticQueryValue::FlowReturn(
+        verter_session_query::retention::owned::Owned::new(result),
+    ));
     assert!(bytes >= arc_block_bytes(TEXT));
     assert!(
         bytes < 2 * arc_block_bytes(TEXT),
@@ -262,7 +271,7 @@ fn a_fallback_cycle_gate_is_charged_for_its_reason_list() {
     assert!(
         fallback
             >= decided
-                + arc_block_bytes(std::mem::size_of::<MaterializationCycleGateFallbackReason>())
+                + heap_block_bytes(std::mem::size_of::<MaterializationCycleGateFallbackReason>())
     );
 }
 
@@ -303,7 +312,7 @@ fn a_relation_is_charged_for_its_recursion_identities() {
     let relation = |identities| {
         SemanticQueryValue::Relation(RelationPayload {
             outcome: RelationOutcome::Assignable,
-            bindings: Arc::from([]),
+            bindings: Vec::new().into(),
             recursion: RelationRecursionFootprint {
                 identities,
                 ..Default::default()

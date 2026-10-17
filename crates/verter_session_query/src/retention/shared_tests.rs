@@ -112,6 +112,22 @@ fn pressure_never_revokes_a_held_charge_and_refuses_only_its_readoption() {
     assert_eq!(occupancy(&account), (0, 0));
 }
 
+/// A caller-first charge minted without a registry is adopted into
+/// retention by a cache, and handed back to its caller when the cache
+/// drains.
+#[test]
+fn an_unregistered_caller_pin_is_adopted_into_retention_and_handed_back() {
+    let account = account(1 << 20);
+    let caller = CallerHold::pin(&account, 400);
+    assert_eq!(occupancy(&account), (0, 400));
+    let cache = caller.adopt().expect("headroom");
+    assert_eq!(occupancy(&account), (400, 0), "adoption moves the bytes");
+    drop(cache);
+    assert_eq!(occupancy(&account), (0, 400));
+    drop(caller);
+    assert_eq!(occupancy(&account), (0, 0));
+}
+
 #[test]
 fn independent_owners_of_one_allocation_share_one_registered_charge() {
     let account = account(1 << 20);

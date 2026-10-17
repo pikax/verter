@@ -340,7 +340,9 @@ impl SemanticGraphStore {
             // The published payload is extracted from the proof token —
             // the member's value is admissible only as the proven one.
             let entry = self.stage_entry(
-                SemanticQueryValue::FlowReturn(Arc::new(member.result.value().clone())),
+                SemanticQueryValue::FlowReturn(verter_session_query::retention::owned::Owned::new(
+                    member.result.value().clone(),
+                )),
                 member.materialized,
                 carrier,
                 self_root_canonicals,
@@ -367,7 +369,9 @@ impl SemanticGraphStore {
                 ),
             };
             let entry = self.stage_entry(
-                SemanticQueryValue::ResolveCall(Arc::new(member.result.into_inner())),
+                SemanticQueryValue::ResolveCall(
+                    verter_session_query::retention::owned::Owned::new(member.result.into_inner()),
+                ),
                 resolve_call_satisfied_projection(),
                 carrier,
                 self_root_canonicals,
@@ -548,7 +552,7 @@ impl SemanticGraphStore {
                 .expect("staged component operands are live"),
             result,
             read_set_signature: carrier.clone(),
-            dispatch_dep_signature: Arc::clone(dispatch_dep_signature),
+            dispatch_dep_signature: dispatch_dep_signature.clone(),
             self_root_canonicals: Arc::clone(self_root_canonicals),
             walker_diagnostics,
             satisfied_projection,

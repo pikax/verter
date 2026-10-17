@@ -405,6 +405,18 @@ impl<T: Measured> std::ops::Deref for Owned<T> {
     }
 }
 
+impl<T: Measured> From<T> for Owned<T> {
+    fn from(value: T) -> Self {
+        Self::new(value)
+    }
+}
+
+impl<T: Measured> AsRef<T> for Owned<T> {
+    fn as_ref(&self) -> &T {
+        &self.0.value
+    }
+}
+
 impl<T: Measured + PartialEq> PartialEq for Owned<T> {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0) || self.0.value == other.0.value
@@ -440,6 +452,21 @@ impl<T: Measured + std::fmt::Debug> std::fmt::Debug for Owned<T> {
 impl<T: Measured + Default> Default for Owned<T> {
     fn default() -> Self {
         Self::new(T::default())
+    }
+}
+
+/// An owned slice: a sealed, self-charged list allocation.
+pub type OwnedSlice<T> = Owned<Box<[T]>>;
+
+impl<T: Measured> From<Vec<T>> for Owned<Box<[T]>> {
+    fn from(items: Vec<T>) -> Self {
+        Self::new(items.into_boxed_slice())
+    }
+}
+
+impl<T: Measured> FromIterator<T> for Owned<Box<[T]>> {
+    fn from_iter<I: IntoIterator<Item = T>>(items: I) -> Self {
+        Self::new(items.into_iter().collect())
     }
 }
 
@@ -643,6 +670,20 @@ impl From<&str> for OwnedStr {
 impl From<String> for OwnedStr {
     fn from(text: String) -> Self {
         Self(Owned::new(text.into_boxed_str()))
+    }
+}
+
+impl From<Arc<str>> for OwnedStr {
+    /// An owned copy of a raw shared string: a new allocation, charged by
+    /// its own cell.
+    fn from(text: Arc<str>) -> Self {
+        Self::new(&text)
+    }
+}
+
+impl From<&Arc<str>> for OwnedStr {
+    fn from(text: &Arc<str>) -> Self {
+        Self::new(text)
     }
 }
 

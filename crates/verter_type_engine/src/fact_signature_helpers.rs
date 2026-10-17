@@ -861,7 +861,7 @@ pub fn observe_file_source_env_from_artifact_key<C: crate::resolver_core::Resolv
 ///   this arm is the defensive floor.
 pub fn dep_signature_to_fact_signature(sig: &DepSignature) -> Vec<FactVersionRef> {
     sig.iter()
-        .filter_map(|(canon, ver)| match ver {
+        .filter_map(|crate::semantic_query::DepEntry(canon, ver)| match ver {
             DepVersion::WholeHash(h) => Some(FactVersionRef::FileWholeHash {
                 canonical_id: canon.as_ref().to_string(),
                 hash: *h,
@@ -1318,11 +1318,11 @@ pub fn empty_fact_signature() -> Arc<[FactVersionRef]> {
 ///   the value is not safely cacheable; the caller must not admit it.
 #[must_use]
 pub fn fact_signature_from_fence(
-    fence: &[(Arc<str>, crate::semantic_query::DepVersion)],
+    fence: &[crate::semantic_query::DepEntry],
 ) -> Option<Arc<[FactVersionRef]>> {
     use crate::semantic_query::DepVersion;
     let mut out: Vec<FactVersionRef> = Vec::with_capacity(fence.len());
-    for (canonical, version) in fence.iter() {
+    for crate::semantic_query::DepEntry(canonical, version) in fence.iter() {
         match version {
             DepVersion::WholeHash(hash) => {
                 out.push(FactVersionRef::FileWholeHash {
@@ -1790,7 +1790,9 @@ pub fn engine_fact_signature_for_materialize_memo(
     });
     entries.push(FactVersionRef::Parse(observed_scope_syntactic_export_set));
 
-    for (observed_canonical, dep_version) in materialized_dep_signature.iter() {
+    for crate::semantic_query::DepEntry(observed_canonical, dep_version) in
+        materialized_dep_signature.iter()
+    {
         match dep_version {
             DepVersion::WholeHash(observed_hash) => {
                 if observed_canonical.as_ref() == scope_canonical_id {
@@ -1835,7 +1837,7 @@ pub fn engine_fact_signature_for_materialize_memo(
 }
 
 /// Merge the `dep_signature` entries from a `CacheRead` (or any
-/// `&[(Arc<str>, DepVersion)]` slice) into a per-frame `local_fence`.
+/// `&[crate::semantic_query::DepEntry]` slice) into a per-frame `local_fence`.
 ///
 /// The `dep_signature_merges` / `dep_signature_intern_hits` audit
 /// counters are NOT bumped here — they are owned by the shared dispatch
@@ -1843,8 +1845,8 @@ pub fn engine_fact_signature_for_materialize_memo(
 /// This helper is now a pure fence merge for its remaining
 /// non-dispatch-fan-in callers.
 pub fn merge_dep_signature_into_local_fence(
-    local_fence: &mut Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
-    incoming: &[(Arc<str>, crate::semantic_query::DepVersion)],
+    local_fence: &mut Vec<crate::semantic_query::DepEntry>,
+    incoming: &[crate::semantic_query::DepEntry],
 ) {
     for entry in incoming {
         local_fence.push(entry.clone());

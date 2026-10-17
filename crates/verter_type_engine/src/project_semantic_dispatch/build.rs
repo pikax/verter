@@ -2910,7 +2910,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             OriginEdgeKind::Instantiate,
             Arc::from(vec![base].into_boxed_slice()),
             OriginMeta::None,
-            Arc::clone(&fence),
+            fence.clone(),
         );
 
         // `decl_whole_hash` (re-sourced live at value-compute from
@@ -5028,7 +5028,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 OriginEdgeKind::Instantiate,
                 Arc::from(inst_sources.into_boxed_slice()),
                 OriginMeta::None,
-                Arc::clone(&fence),
+                fence.clone(),
             );
             // Root the carrier value on the same file-derived arg set the
             // materialised builtin would (an edit to a file-derived arg
@@ -5760,7 +5760,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             OriginEdgeKind::Instantiate,
             Arc::from(inst_sources.into_boxed_slice()),
             OriginMeta::None,
-            Arc::clone(&fence),
+            fence.clone(),
         );
 
         // SubstituteTypeParam edges on the shell result: one per visited
@@ -5773,7 +5773,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 OriginEdgeKind::SubstituteTypeParam,
                 Arc::from(vec![arg_id].into_boxed_slice()),
                 OriginMeta::SubstitutedParam(param_name),
-                Arc::clone(&fence),
+                fence.clone(),
             );
         }
 
@@ -9930,7 +9930,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 OriginEdgeKind::Instantiate,
                 Arc::from(inst_sources.into_boxed_slice()),
                 OriginMeta::None,
-                Arc::clone(&fence),
+                fence.clone(),
             );
             for (idx, arg_id) in args.iter().enumerate() {
                 // Use the utility's declared type-parameter name when
@@ -9945,7 +9945,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     OriginEdgeKind::SubstituteTypeParam,
                     Arc::from(vec![*arg_id].into_boxed_slice()),
                     OriginMeta::SubstitutedParam(param_name),
-                    Arc::clone(&fence),
+                    fence.clone(),
                 );
             }
         };
@@ -10260,7 +10260,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     OriginEdgeKind::AliasResolve,
                     Arc::from(vec![source].into_boxed_slice()),
                     OriginMeta::None,
-                    Arc::clone(&fence),
+                    fence.clone(),
                 );
                 record_utility_edges(result);
                 (QueryResult::Value(result), fence, false, None)
@@ -12384,7 +12384,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 );
                 let mut out = super::walk::QueryBuildOutput::from((
                     QueryResult::Value(carrier),
-                    Arc::clone(&fence),
+                    fence.clone(),
                 ))
                 .with_observed_self_roots(self.observed_self_roots_from_nodes([base, object]));
                 out.merge_completeness(walker.completeness);
@@ -12400,7 +12400,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if let QueryResult::Value(id) = norm.value {
                     let mut out = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
                         QueryResult::Value(id),
-                        Arc::clone(&fence),
+                        fence.clone(),
                     ))
                     .with_observed_self_roots(self.observed_self_roots_from_nodes([base, object]));
                     out.fold_partial(norm.result_is_partial());
@@ -12867,7 +12867,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 OriginEdgeKind::ProjectPath,
                 Arc::from(vec![base].into_boxed_slice()),
                 OriginMeta::Path(Arc::clone(path)),
-                Arc::clone(&fence),
+                fence.clone(),
             );
         }
         // Collect intermediate path-prefix backfill records so a
@@ -13558,7 +13558,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     key: key.clone(),
                     provenance: verter_audit::MemberEdgeProvenance::KeyOfEnumerated,
                 },
-                Arc::clone(fence),
+                fence.clone(),
             );
         }
         let ids: Vec<SemanticNodeId> = member_literals.into_iter().map(|(id, _)| id).collect();
@@ -14462,7 +14462,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 OriginEdgeKind::Normalize,
                 Arc::from(contribution_nodes.clone().into_boxed_slice()),
                 OriginMeta::None,
-                Arc::clone(&fence),
+                fence.clone(),
             );
             return crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
                 QueryResult::Value(node),
@@ -14498,7 +14498,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 OriginEdgeKind::Normalize,
                 Arc::from(contribution_nodes.clone().into_boxed_slice()),
                 OriginMeta::None,
-                Arc::clone(&fence),
+                fence.clone(),
             );
             return crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
                 QueryResult::Value(node),
@@ -14717,7 +14717,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 OriginEdgeKind::Normalize,
                 Arc::from(contribution_nodes.clone().into_boxed_slice()),
                 OriginMeta::None,
-                Arc::clone(&fence),
+                fence.clone(),
             );
             let mut deferred_output =
                 crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
@@ -15185,7 +15185,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 OriginEdgeKind::Normalize,
                 Arc::from(contribution_nodes.clone().into_boxed_slice()),
                 OriginMeta::None,
-                Arc::clone(&fence),
+                fence.clone(),
             );
             let mut deferred_output =
                 crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
@@ -15222,7 +15222,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             OriginEdgeKind::Normalize,
             Arc::from(contribution_nodes.clone().into_boxed_slice()),
             OriginMeta::None,
-            Arc::clone(&fence),
+            fence.clone(),
         );
         for (value_id, key) in project_member_edges {
             graph.record_origin_edge(
@@ -15233,7 +15233,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     key,
                     provenance: verter_audit::MemberEdgeProvenance::MappedKeyEnumerated,
                 },
-                Arc::clone(&fence),
+                fence.clone(),
             );
         }
 
@@ -16242,7 +16242,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 OriginEdgeKind::Normalize,
                 Arc::clone(members),
                 OriginMeta::None,
-                Arc::clone(&fence),
+                fence.clone(),
             );
         }
         // Self-version rooting: the normalised composite depends on every
@@ -18598,10 +18598,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // version for a builtin/structural carrier. The non-file owner
         // roots entirely through its `type_args` (the same rule
         // `build_instantiate` applies to a non-file base).
-        let mut local_fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
+        let mut local_fence: Vec<crate::semantic_query::DepEntry> = Vec::new();
+        let owner_canonical =
+            verter_session_query::retention::owned::OwnedStr::new(&owner.defining_canonical);
         if !is_non_file_owner {
-            local_fence.push((
-                Arc::clone(&owner.defining_canonical),
+            local_fence.push(crate::semantic_query::DepEntry(
+                owner_canonical.clone(),
                 crate::semantic_query::DepVersion::WholeHash(owner_whole_hash),
             ));
         }
@@ -18609,8 +18611,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // workspace-wide changes that could invalidate the lowering
         // basis (mirrors `dep_signature_for` semantics).
         let project_gen = self.snapshot.current_project_generation();
-        local_fence.push((
-            Arc::clone(&owner.defining_canonical),
+        local_fence.push(crate::semantic_query::DepEntry(
+            owner_canonical,
             crate::semantic_query::DepVersion::ProjectGeneration(project_gen),
         ));
 
@@ -19096,12 +19098,10 @@ fn collect_prefix_backfills(
 
 /// Helper — convert a per-call local fence (one
 /// `(canonical, version)` entry per dep fact accumulated during the
-/// build path) into the canonical `Arc<[(Arc<str>, DepVersion)]>`
+/// build path) into the canonical `Arc<[crate::semantic_query::DepEntry]>`
 /// shape returned alongside `QueryResult`.
-fn fence_to_dep_signature(
-    fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
-) -> DepSignature {
-    Arc::from(fence.into_boxed_slice())
+fn fence_to_dep_signature(fence: Vec<crate::semantic_query::DepEntry>) -> DepSignature {
+    crate::semantic_query::DepSignature::new(fence)
 }
 
 /// Apply a TS string-intrinsic case transform to a single string literal value.

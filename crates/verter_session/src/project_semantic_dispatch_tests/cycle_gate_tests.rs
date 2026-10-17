@@ -609,13 +609,15 @@ fn signature_covers(
     signature: &verter_type_engine::semantic_query::DepSignature,
     canonical: &str,
 ) -> bool {
-    signature.iter().any(|(c, version)| {
-        c.as_ref() == canonical
-            && matches!(
-                version,
-                verter_type_engine::semantic_query::DepVersion::WholeHash(_)
-            )
-    })
+    signature
+        .iter()
+        .any(|verter_type_engine::semantic_query::DepEntry(c, version)| {
+            c.as_ref() == canonical
+                && matches!(
+                    version,
+                    verter_type_engine::semantic_query::DepVersion::WholeHash(_)
+                )
+        })
 }
 
 /// Cold AND warm reads return the family dep signature — the consumer

@@ -150,7 +150,7 @@ fn union_operand_evidence(
         }
         for dep in input.dep_signatures().iter() {
             if !deps.contains(dep) {
-                deps.push(Arc::clone(dep));
+                deps.push(dep.clone());
             }
         }
     }
@@ -466,7 +466,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             for dep in evidence.dep_signatures().iter() {
                 if !deps.contains(dep) {
-                    deps.push(Arc::clone(dep));
+                    deps.push(dep.clone());
                 }
             }
         }

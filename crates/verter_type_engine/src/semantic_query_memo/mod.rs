@@ -958,7 +958,7 @@ pub fn semantic_operand_evidence(
     Some(crate::semantic_query::operand::SemanticOperandEvidence {
         read_set: read_set.clone(),
         self_roots: Arc::from(self_roots.into_boxed_slice()),
-        dep_signatures: Arc::from([Arc::clone(dep_signature)]),
+        dep_signatures: Arc::from([dep_signature.clone()]),
     })
 }
 
@@ -1391,10 +1391,9 @@ impl SemanticGraphStore {
                     let entry_facts = &entry.read_set_signature.facts;
                     let drop = Arc::ptr_eq(entry_facts, registered_facts)
                         || carrier_facts_reference_canonical(entry_facts, canonical_id)
-                        || entry
-                            .dispatch_dep_signature
-                            .iter()
-                            .any(|(c, _)| c.as_ref() == canonical_id);
+                        || entry.dispatch_dep_signature.iter().any(
+                            |crate::semantic_query::DepEntry(c, _)| c.as_ref() == canonical_id,
+                        );
                     if drop {
                         victims.push(entry.clone());
                         false
@@ -1407,7 +1406,7 @@ impl SemanticGraphStore {
                     evicted_entries.push((
                         (family.clone(), *slot, victim.admission_seq),
                         victim.read_set_signature.clone(),
-                        Arc::clone(&victim.dispatch_dep_signature),
+                        victim.dispatch_dep_signature.clone(),
                     ));
                 }
             }
@@ -1947,7 +1946,7 @@ impl SemanticGraphStore {
                 // fact identities. AND-gate validation happens at
                 // the outer fence revalidation point.
                 entry.read_set_signature.bubble_via_tls();
-                let dep_signature = Arc::clone(&entry.dispatch_dep_signature);
+                let dep_signature = entry.dispatch_dep_signature.clone();
                 CacheRead {
                     lease: entry.lease,
                     value: entry.result,
@@ -2107,7 +2106,7 @@ impl SemanticGraphStore {
                 Some(slot) => *slot = Some(entry.read_set_signature.clone()),
                 None => entry.read_set_signature.bubble(ctx),
             }
-            let dep_signature = Arc::clone(&entry.dispatch_dep_signature);
+            let dep_signature = entry.dispatch_dep_signature.clone();
             CacheRead {
                 lease: entry.lease,
                 value: entry.result,
@@ -2260,7 +2259,7 @@ impl SemanticGraphStore {
         let hit = CacheRead {
             lease: entry.lease,
             value: entry.result,
-            dep_signature: Arc::clone(&entry.dispatch_dep_signature),
+            dep_signature: entry.dispatch_dep_signature.clone(),
             walker_diagnostics: entry.walker_diagnostics,
             cache_suppress: false,
             fact_status: crate::semantic_query::FactStatus::Complete,
@@ -2410,7 +2409,7 @@ impl SemanticGraphStore {
         flags: &crate::resolver_core::resolver_context::RequestFlags,
         prepared: &PreparedKeyHandle,
         result: &QueryResult<SemanticQueryValue>,
-        walker_diagnostics: &Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
+        walker_diagnostics: &crate::project_semantic_dispatch::walk::WalkerDiagnostics,
         read_set_signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
         dispatch_dep_signature: &DepSignature,
         self_root_canonicals: &Arc<[Arc<str>]>,
@@ -2469,9 +2468,9 @@ impl SemanticGraphStore {
             },
             result: result.clone(),
             read_set_signature: read_set_signature.clone(),
-            dispatch_dep_signature: Arc::clone(&dispatch_dep_signature),
+            dispatch_dep_signature: dispatch_dep_signature.clone(),
             self_root_canonicals: Arc::clone(self_root_canonicals),
-            walker_diagnostics: Arc::clone(walker_diagnostics),
+            walker_diagnostics: walker_diagnostics.clone(),
             satisfied_projection: satisfied_projection.clone(),
             retention: None,
             validated_at_generation,
@@ -2711,7 +2710,7 @@ impl SemanticGraphStore {
         // result into an empty narrower sibling slot.
         verter_audit::attribute!(CacheCandidateCopy);
         let dispatch_dep_signature = self.dep_signature_interner.intern(&dispatch_dep_signature);
-        let dispatch_dep_signature_clone = Arc::clone(&dispatch_dep_signature);
+        let dispatch_dep_signature_clone = dispatch_dep_signature.clone();
         let reverse_index_inputs = reverse_index::ReverseIndexInputs::new(
             &read_set_signature,
             &dispatch_dep_signature_clone,
@@ -3031,25 +3030,18 @@ pub fn semantic_graph_carrier(
 /// result that depends on no dispatch fence costs no allocation.
 pub fn empty_signature() -> DepSignature {
     static EMPTY: std::sync::OnceLock<DepSignature> = std::sync::OnceLock::new();
-    Arc::clone(EMPTY.get_or_init(|| Arc::from(Vec::new().into_boxed_slice())))
+    EMPTY.get_or_init(DepSignature::static_empty).clone()
 }
 
 /// The one process-wide empty walker-diagnostic list. Like
 /// [`empty_signature`], it is process-static storage, never charged: a read
 /// with no diagnostics shares it instead of allocating its own.
-pub fn empty_diagnostics() -> Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]> {
-    static EMPTY: std::sync::OnceLock<
-        Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
-    > = std::sync::OnceLock::new();
-    Arc::clone(EMPTY.get_or_init(|| Arc::from(Vec::new().into_boxed_slice())))
-}
-
-/// Whether `allocation` is one of the process-static empty lists, which no
-/// owner charges.
-pub(crate) fn is_static_empty<T: ?Sized>(allocation: &Arc<T>) -> bool {
-    let address = Arc::as_ptr(allocation).cast::<()>();
-    std::ptr::eq(address, Arc::as_ptr(&empty_signature()).cast::<()>())
-        || std::ptr::eq(address, Arc::as_ptr(&empty_diagnostics()).cast::<()>())
+pub fn empty_diagnostics() -> crate::project_semantic_dispatch::walk::WalkerDiagnostics {
+    static EMPTY: std::sync::OnceLock<crate::project_semantic_dispatch::walk::WalkerDiagnostics> =
+        std::sync::OnceLock::new();
+    EMPTY
+        .get_or_init(crate::project_semantic_dispatch::walk::WalkerDiagnostics::static_empty)
+        .clone()
 }
 
 // ──────────────────────────────────────────────────────────────────────────

@@ -994,7 +994,9 @@ fn shape_value_and_fact_sig_for_scope(
     let value = MaterializedOutputTypeExpr::from_type_expr_for_test(
         None,
         verter_type_expr::TypeExpr::string_literal("ok".to_string()),
-        Arc::from([] as [(Arc<str>, verter_type_engine::semantic_query::DepVersion); 0]),
+        verter_type_engine::semantic_query::DepSignature::new(
+            [] as [verter_type_engine::semantic_query::DepEntry; 0]
+        ),
         result_is_partial,
     );
     let fact_sig =

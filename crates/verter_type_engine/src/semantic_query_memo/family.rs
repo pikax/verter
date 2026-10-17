@@ -67,7 +67,7 @@ pub(super) struct MemoEntry {
     /// Walker diagnostics observed during the cold build that produced
     /// this entry. Replayed on warm hits via `CacheRead.walker_diagnostics`.
     /// Empty for non-walker queries.
-    pub(super) walker_diagnostics: Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
+    pub(super) walker_diagnostics: crate::project_semantic_dispatch::walk::WalkerDiagnostics,
     /// The §3.4 **materialised-record set** — the concrete `(path, point)`
     /// records this candidate's compute ACTUALLY produced (the terminal
     /// point plus one `Navigate` hop per walked intermediate for a path

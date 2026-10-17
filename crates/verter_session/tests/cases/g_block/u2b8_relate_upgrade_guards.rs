@@ -699,7 +699,9 @@ pub(crate) fn relate_query_value_carries_relation_proof_and_budget_state() {
         // Budget state is FOLDED into the outcome — there is no separate
         // `budget_state` field (the old field would fail to compile here).
         outcome: RelationOutcome::BudgetExceeded(BudgetExceededKind::RelationBudget),
-        bindings: Arc::from(vec![binding].into_boxed_slice()),
+        bindings: verter_session_query::retention::owned::Owned::from(
+            vec![binding].into_boxed_slice(),
+        ),
         recursion: Default::default(),
     };
 

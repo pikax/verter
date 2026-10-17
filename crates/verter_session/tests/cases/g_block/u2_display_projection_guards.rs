@@ -914,7 +914,7 @@ fn declaration_analysis_contributors_apply_intersection_precedence() {
         verter_session::for_tests::composite_fixture_for_tests(Arc::from([a, b])),
     ));
     let value = SemanticQueryValue::DeclarationAnalysis(DeclarationAnalysisValue {
-        contributors: Arc::from([union_ab, c]),
+        contributors: vec![union_ab, c].into(),
     });
 
     // DISCRIMINATING: the looser Union contributor must parenthesise under the

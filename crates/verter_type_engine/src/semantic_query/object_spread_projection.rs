@@ -567,14 +567,16 @@ pub enum OpenSafeKeyEvidence<'a> {
 /// Opaque correlated finite-union formula.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectProjectionFormula {
-    alternatives: Arc<[ObjectProjectionAlternative]>,
+    alternatives: verter_session_query::retention::owned::OwnedSlice<ObjectProjectionAlternative>,
     closed_keyof: Option<Arc<[PropertyKey]>>,
 }
 
 impl ObjectProjectionFormula {
-    /// The alternatives' allocation: the key of the formula's retained
+    /// The alternatives' owned allocation, which carries the formula's
     /// charge.
-    pub(crate) fn alternatives_arc(&self) -> &Arc<[ObjectProjectionAlternative]> {
+    pub(crate) fn alternatives_owned(
+        &self,
+    ) -> &verter_session_query::retention::owned::OwnedSlice<ObjectProjectionAlternative> {
         &self.alternatives
     }
 
@@ -618,7 +620,7 @@ impl ObjectProjectionFormula {
     }
 
     #[allow(dead_code)] // Evaluator-owned constructor; unit builders reuse it.
-    fn new(alternatives: Arc<[ObjectProjectionAlternative]>) -> Self {
+    fn new(alternatives: Vec<ObjectProjectionAlternative>) -> Self {
         verter_debug_assert!(
             alternatives.first().is_none_or(|first| alternatives
                 .iter()
@@ -655,7 +657,7 @@ impl ObjectProjectionFormula {
             None
         };
         Self {
-            alternatives,
+            alternatives: alternatives.into(),
             closed_keyof,
         }
     }
@@ -987,10 +989,25 @@ impl<'a> ClosedObjectProjectionFormula<'a> {
 }
 
 impl super::allocation_footprint::OwnedHeap for ObjectProjectionFormula {
-    /// Every alternative's fact, key, witness, index, signature and excess
-    /// arrays with their key text and declaration origins. Proven values
-    /// are graph ordinals. Destructured exhaustively: a new field fails to
-    /// compile until its heap is counted.
+    /// The alternative list — an owned allocation charged by its own cell —
+    /// and the closed key list.
+    fn owned_heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        let Self {
+            alternatives,
+            closed_keyof,
+        } = self;
+        alternatives.offer(aliases) + closed_keyof.owned_heap_bytes(aliases)
+    }
+}
+
+impl super::allocation_footprint::OwnedHeap for ObjectProjectionAlternative {
+    /// Every fact, key, witness, index, signature and excess array with
+    /// their key text and declaration origins. Proven values are graph
+    /// ordinals. Destructured exhaustively: a new field fails to compile
+    /// until its heap is counted.
     fn owned_heap_bytes(
         &self,
         aliases: &mut verter_session_query::retention::allocation::AliasSet,
@@ -1052,7 +1069,10 @@ impl super::allocation_footprint::OwnedHeap for ObjectProjectionFormula {
                 + copy_inline(spans)
                 + declaration_origin.owned_heap_bytes(aliases)
         }
-        fn alternative(alternative: &ObjectProjectionAlternative, aliases: &mut AliasSet) -> usize {
+        fn alternative_bytes(
+            alternative: &ObjectProjectionAlternative,
+            aliases: &mut AliasSet,
+        ) -> usize {
             let ObjectProjectionAlternative {
                 positive,
                 selected,
@@ -1107,17 +1127,7 @@ impl super::allocation_footprint::OwnedHeap for ObjectProjectionFormula {
             };
             bytes
         }
-        let Self {
-            alternatives,
-            closed_keyof,
-        } = self;
-        let Some(mut bytes) = arc_slice_block_bytes(alternatives, aliases) else {
-            return 0;
-        };
-        for item in alternatives.iter() {
-            bytes += alternative(item, aliases);
-        }
-        bytes + closed_keyof.owned_heap_bytes(aliases)
+        alternative_bytes(self, aliases)
     }
 }
 
@@ -1183,7 +1193,7 @@ pub(crate) mod evaluator_support {
     pub(crate) fn formula(
         alternatives: impl IntoIterator<Item = ObjectProjectionAlternative>,
     ) -> ObjectProjectionFormula {
-        ObjectProjectionFormula::new(Arc::from(alternatives.into_iter().collect::<Vec<_>>()))
+        ObjectProjectionFormula::new(alternatives.into_iter().collect())
     }
 
     #[must_use]

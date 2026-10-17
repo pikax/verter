@@ -2375,7 +2375,7 @@ pub enum ResolvedCallResult {
         /// to its base primitive, an object-member position widens every
         /// listed constituent, and a `const` initializer records them as
         /// the binding's widening membership.
-        fresh_literal_returns: std::sync::Arc<[SemanticNodeId]>,
+        fresh_literal_returns: verter_session_query::retention::owned::OwnedSlice<SemanticNodeId>,
         /// The diagnostic the checker reports when NO candidate applies
         /// and this is its error-recovery candidate
         /// (`getCandidateForOverloadFailure`): the call's value is then
@@ -5084,8 +5084,153 @@ pub enum DepVersion {
     ProjectGeneration(u64),
 }
 
+/// One dependency a cached value was computed from: a file (or the
+/// project) at a version. The canonical is an owned string, so a clone of
+/// the entry shares its one charge.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct DepEntry(
+    pub verter_session_query::retention::owned::OwnedStr,
+    pub DepVersion,
+);
+
+impl DepEntry {
+    /// An entry naming `canonical` at `version`, owning a copy of the text.
+    #[must_use]
+    pub fn new(canonical: &str, version: DepVersion) -> Self {
+        Self(canonical.into(), version)
+    }
+
+    /// The dependency's canonical id.
+    #[must_use]
+    pub fn canonical(&self) -> &str {
+        &self.0
+    }
+
+    /// The version the value observed.
+    #[must_use]
+    pub fn version(&self) -> &DepVersion {
+        &self.1
+    }
+}
+
+/// A dependency signature's entries: the owned allocation a
+/// [`DepSignature`] seals.
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct DepRail(Box<[DepEntry]>);
+
+impl verter_session_query::retention::owned::Measured for DepRail {
+    /// The entry slice and every entry's canonical, each charged by its own
+    /// cell.
+    fn heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        verter_session_query::retention::allocation::heap_block_bytes(std::mem::size_of_val::<
+            [DepEntry],
+        >(&self.0))
+            + self
+                .0
+                .iter()
+                .map(|entry| entry.0.offer(aliases))
+                .sum::<usize>()
+    }
+}
+
 /// Dependency signature returned alongside every reusable cache read.
-pub type DepSignature = Arc<[(Arc<str>, DepVersion)]>;
+///
+/// A sealed, self-charged rail: clones share one allocation and its one
+/// charge, released with the last handle, and the entries are reachable
+/// only by borrow. Every empty signature is the one process-static empty
+/// rail, which no owner charges.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct DepSignature(verter_session_query::retention::owned::Owned<DepRail>);
+
+impl DepSignature {
+    /// A signature of `entries`, in order.
+    #[must_use]
+    pub fn new(entries: impl Into<Vec<DepEntry>>) -> Self {
+        let entries: Vec<DepEntry> = entries.into();
+        if entries.is_empty() {
+            return crate::semantic_query_memo::empty_signature();
+        }
+        Self(verter_session_query::retention::owned::Owned::new(DepRail(
+            entries.into_boxed_slice(),
+        )))
+    }
+
+    /// The process-static empty rail. Only its static initialiser calls
+    /// this.
+    pub(crate) fn static_empty() -> Self {
+        Self(verter_session_query::retention::owned::Owned::new(DepRail(
+            Box::new([]),
+        )))
+    }
+
+    /// The owned allocation behind a nonempty signature; `None` for the
+    /// static empty rail.
+    pub(crate) fn owned(&self) -> Option<&verter_session_query::retention::owned::Owned<DepRail>> {
+        (!self.is_empty()).then_some(&self.0)
+    }
+
+    /// Wrap an interned rail allocation.
+    pub(crate) fn from_owned(rail: verter_session_query::retention::owned::Owned<DepRail>) -> Self {
+        Self(rail)
+    }
+
+    /// An interned rail of `entries`, whose cell block its interner keeps
+    /// allocated and charges.
+    pub(crate) fn interned_rail(
+        entries: Vec<DepEntry>,
+    ) -> verter_session_query::retention::owned::Owned<DepRail> {
+        verter_session_query::retention::owned::Owned::new_with_block_charged_elsewhere(DepRail(
+            entries.into_boxed_slice(),
+        ))
+    }
+
+    /// Whether two signatures share one allocation.
+    #[must_use]
+    pub fn ptr_eq(this: &Self, other: &Self) -> bool {
+        verter_session_query::retention::owned::Owned::ptr_eq(&this.0, &other.0)
+    }
+
+    /// Bytes this signature's charge holds; `None` while no owner charged
+    /// it (and always for the static empty rail).
+    #[must_use]
+    pub fn charge_bytes(&self) -> Option<usize> {
+        self.0.charge_bytes()
+    }
+}
+
+impl std::ops::Deref for DepSignature {
+    type Target = [DepEntry];
+    fn deref(&self) -> &[DepEntry] {
+        &self.0 .0
+    }
+}
+
+impl std::fmt::Debug for DepSignature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+impl From<Vec<DepEntry>> for DepSignature {
+    fn from(entries: Vec<DepEntry>) -> Self {
+        Self::new(entries)
+    }
+}
+
+impl FromIterator<DepEntry> for DepSignature {
+    fn from_iter<I: IntoIterator<Item = DepEntry>>(entries: I) -> Self {
+        Self::new(entries.into_iter().collect::<Vec<_>>())
+    }
+}
+
+impl Default for DepSignature {
+    fn default() -> Self {
+        crate::semantic_query_memo::empty_signature()
+    }
+}
 
 /// The set of reasons a result is PARTIAL (structurally incomplete).
 ///
@@ -5535,7 +5680,7 @@ pub struct CacheRead<T> {
     /// Walker diagnostics produced during this query's computation.
     /// Stored on the memo entry; warm reads replay transparently. Empty
     /// for queries that don't run the walker.
-    pub(crate) walker_diagnostics: Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
+    pub(crate) walker_diagnostics: crate::project_semantic_dispatch::walk::WalkerDiagnostics,
     /// **Inner-memo non-cacheability.** `true` when THIS query's memo
     /// entry must not be admitted/shared — either because the build hit a
     /// fatal `QueryError` / pathological-input cap, OR because a perfectly
@@ -5620,7 +5765,7 @@ impl<T> CacheRead<T> {
     pub fn unleased_for_tests(
         value: T,
         dep_signature: DepSignature,
-        walker_diagnostics: Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
+        walker_diagnostics: crate::project_semantic_dispatch::walk::WalkerDiagnostics,
         cache_suppress: bool,
         fact_status: FactStatus,
         receipt: ReadReceipt,
@@ -6495,7 +6640,7 @@ pub enum SemanticQueryValue {
     /// construct bucket (the `typeof` projection's visibility rule already
     /// hid trailing implementation signatures). The last element is the
     /// last visible overload.
-    OverloadSet(Arc<[SignatureRef]>),
+    OverloadSet(verter_session_query::retention::owned::OwnedSlice<SignatureRef>),
     /// The public outcome of a relation query — the LIVE value domain of
     /// [`SemanticQueryKey::Relate`]. `execute(Relate)` produces and admits
     /// decided binary judgements (`Assignable` / `NotAssignable`); a
@@ -6514,13 +6659,13 @@ pub enum SemanticQueryValue {
     /// defaults to `ReturnOnly` (only a non-degraded COMPLETE evaluation
     /// admits warm); every NO-VALUE outcome is a typed
     /// `FlowReturnFailure` through `ReturnOnly` and never admits.
-    FlowReturn(Arc<FlowReturnResult>),
+    FlowReturn(verter_session_query::retention::owned::Owned<FlowReturnResult>),
     /// The call / construct resolution produced by a `ResolveCall` query —
     /// only a COMPLETE evaluation reaches this domain (one fully-decided
     /// first-applicable candidate, or a genuine dynamic `any`); every
     /// uncertainty, failure, or budget trip is a typed failure through
     /// `ReturnOnly` and never admits.
-    ResolveCall(Arc<ResolvedCallResult>),
+    ResolveCall(verter_session_query::retention::owned::Owned<ResolvedCallResult>),
     /// The sealed materialization cycle-gate outcome — the LIVE value domain
     /// of [`SemanticQueryKey::ClassifyMaterializationCycleGate`], the sole
     /// authority for "does this declaration transitively reach a cycle
@@ -6623,13 +6768,15 @@ impl BroadRuntimeKind {
 /// Stable first-occurrence-deduplicated broad runtime facts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BroadRuntimeClassification {
-    kinds: Arc<[BroadRuntimeKind]>,
+    kinds: verter_session_query::retention::owned::OwnedSlice<BroadRuntimeKind>,
     status: FactStatus,
 }
 
 impl BroadRuntimeClassification {
-    /// The kind allocation, for its retained footprint.
-    pub(crate) fn kinds_arc(&self) -> &Arc<[BroadRuntimeKind]> {
+    /// The kind allocation, which carries the value's charge.
+    pub(crate) fn kinds_owned(
+        &self,
+    ) -> &verter_session_query::retention::owned::OwnedSlice<BroadRuntimeKind> {
         &self.kinds
     }
 
@@ -6645,7 +6792,7 @@ impl BroadRuntimeClassification {
             }
         }
         Self {
-            kinds: Arc::from(ordered.into_boxed_slice()),
+            kinds: ordered.into(),
             status: FactStatus::Complete,
         }
     }
@@ -6653,7 +6800,7 @@ impl BroadRuntimeClassification {
     /// A classifier that could not determine its demanded member's kinds.
     pub(crate) fn unavailable(causes: surface_resolution::NonEmptyReasons) -> Self {
         Self {
-            kinds: Arc::from([BroadRuntimeKind::Unknown]),
+            kinds: vec![BroadRuntimeKind::Unknown].into(),
             status: FactStatus::Unavailable(causes),
         }
     }
@@ -6748,7 +6895,11 @@ impl MaterializationCycleGateFallbackReason {
 /// the only constructor collects into `Some` first element or returns
 /// `None`, so an empty `LegacyFallback` reason set is unrepresentable.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MaterializationCycleGateFallbackReasons(Arc<[MaterializationCycleGateFallbackReason]>);
+pub struct MaterializationCycleGateFallbackReasons(pub(crate) OwnedFallbackReasons);
+
+/// The owned reason list a fallback carries.
+type OwnedFallbackReasons =
+    verter_session_query::retention::owned::OwnedSlice<MaterializationCycleGateFallbackReason>;
 
 impl MaterializationCycleGateFallbackReasons {
     /// Collect `reasons` into a deduplicated set, or `None` when empty.
@@ -6765,7 +6916,7 @@ impl MaterializationCycleGateFallbackReasons {
         if ordered.is_empty() {
             return None;
         }
-        Some(Self(Arc::from(ordered.into_boxed_slice())))
+        Some(Self(ordered.into()))
     }
 
     #[must_use]
@@ -7031,7 +7182,7 @@ pub struct ProgramAnalysisValue {
 /// (`GraphMergedDeclaration`). This shell has no live producer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeclarationAnalysisValue {
-    pub contributors: Arc<[SemanticNodeId]>,
+    pub contributors: verter_session_query::retention::owned::OwnedSlice<SemanticNodeId>,
 }
 
 /// The value-domain payload of a [`SemanticQueryKey::Relate`] judgement — the
@@ -7067,7 +7218,7 @@ pub struct RelationPayload {
     /// `infer T` captures a successful assignability judgement surfaces). Empty
     /// for a pure non-binding assignability check and for a `BudgetExceeded`
     /// outcome.
-    pub bindings: Arc<[InferBinding]>,
+    pub bindings: verter_session_query::retention::owned::OwnedSlice<InferBinding>,
     /// What the relation's computation used of the checker's recursion
     /// bounds. A warm read replays the outcome only where the cold
     /// computation takes the same course.
@@ -12191,7 +12342,7 @@ mod tests {
 
         // A non-TypeNode domain (an overload set) must NOT narrow to a node.
         let overloads = QueryResult::Value(SemanticQueryOutput {
-            value: SemanticQueryValue::OverloadSet(Arc::from(Vec::<SignatureRef>::new())),
+            value: SemanticQueryValue::OverloadSet(Vec::<SignatureRef>::new().into()),
             provenance: ResultProvenance::clean(),
         });
         match narrow_output_to_type_node(overloads) {
@@ -12242,12 +12393,12 @@ mod tests {
             ),
             (
                 SemanticQueryValue::DeclarationAnalysis(DeclarationAnalysisValue {
-                    contributors: Arc::from(vec![node].into_boxed_slice()),
+                    contributors: vec![node].into(),
                 }),
                 SemanticQueryValueTag::DeclarationAnalysis,
             ),
             (
-                SemanticQueryValue::OverloadSet(Arc::from(
+                SemanticQueryValue::OverloadSet(verter_session_query::retention::owned::Owned::new(
                     vec![SignatureRef {
                         node,
                         occurrence: SignatureCandidateOrigin::Authored(
@@ -12276,7 +12427,7 @@ mod tests {
             (
                 SemanticQueryValue::Relation(RelationPayload {
                     outcome: RelationOutcome::Assignable,
-                    bindings: Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
+                    bindings: Vec::<InferBinding>::new().into(),
                     recursion: RelationRecursionFootprint::default(),
                 }),
                 SemanticQueryValueTag::Relation,
@@ -12296,7 +12447,7 @@ mod tests {
                 SemanticQueryValueTag::MaterializationCycleGate,
             ),
             (
-                SemanticQueryValue::FlowReturn(Arc::new(FlowReturnResult::new(
+                SemanticQueryValue::FlowReturn(verter_session_query::retention::owned::Owned::new(FlowReturnResult::new(
                     &crate::semantic_query_memo::SemanticGraphStore::new(),
                     node,
                     verter_session_query::flow::completion::NormalCompletion::minted_for_fixture(
@@ -12307,7 +12458,7 @@ mod tests {
                 SemanticQueryValueTag::FlowReturn,
             ),
             (
-                SemanticQueryValue::ResolveCall(Arc::new(ResolvedCallResult::DynamicAny {
+                SemanticQueryValue::ResolveCall(verter_session_query::retention::owned::Owned::new(ResolvedCallResult::DynamicAny {
                     return_type: node,
                 })),
                 SemanticQueryValueTag::ResolveCall,

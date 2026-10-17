@@ -190,7 +190,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         key: &MaterializationCycleGateKey,
     ) -> QueryBuildOutput<SemanticQueryValue> {
         use crate::semantic_query::{
-            DeclIdentity, DepVersion, ProjectionMode, ProjectionReductionContext, SemanticNodeId,
+            DeclIdentity, ProjectionMode, ProjectionReductionContext, SemanticNodeId,
         };
         use rustc_hash::FxHashSet;
         use std::collections::VecDeque;
@@ -229,7 +229,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             decl_name: Arc::clone(&root.merged_symbol_name),
         };
 
-        let mut dep_facts: Vec<(Arc<str>, DepVersion)> = self
+        let mut dep_facts: Vec<crate::semantic_query::DepEntry> = self
             .project_generation_signature()
             .iter()
             .cloned()
@@ -399,7 +399,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             QueryResult::Value(SemanticQueryValue::MaterializationCycleGate(
                 outcome.clone(),
             )),
-            Arc::from(dep_facts.into_boxed_slice()),
+            crate::semantic_query::DepSignature::new(dep_facts),
         )
             .into();
         output.observed_self_roots = observed_self_roots;

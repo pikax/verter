@@ -744,7 +744,7 @@ fn run_exact_fit_pressure_batch(
                 FamilyKey::FlowReturn {
                     key: Box::new(flow_keys[0].clone()),
                 },
-                SemanticQueryValue::FlowReturn(Arc::new(FlowReturnResult::new(
+                SemanticQueryValue::FlowReturn(verter_session_query::retention::owned::Owned::new(FlowReturnResult::new(
                     &store,
                     return_type,
                     verter_session_query::flow::completion::NormalCompletion::minted_for_fixture(

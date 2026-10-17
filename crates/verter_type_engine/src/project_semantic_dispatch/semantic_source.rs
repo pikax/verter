@@ -1536,7 +1536,7 @@ fn shallow_semantic_source_carrier<C: crate::resolver_core::ResolverCapabilities
         super::output_materialization::MaterializedOutputTypeExpr::from_parts(
             Some(hot.node()),
             sealed,
-            Arc::from(Vec::new().into_boxed_slice()),
+            crate::semantic_query::DepSignature::default(),
             false,
         ),
     )

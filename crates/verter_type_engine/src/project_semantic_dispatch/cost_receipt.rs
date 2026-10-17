@@ -636,12 +636,12 @@ impl BudgetProfileSpec {
 pub struct BudgetProfile(Arc<InternedProfile>);
 
 /// The interned allowances, removed from the interner when the last
-/// profile naming them drops.
+/// profile naming them drops, and the charge of their own block.
 #[derive(Debug)]
-pub struct InternedProfile(
-    BudgetProfileSpec,
-    verter_session_query::retention::RetentionCharge,
-);
+pub struct InternedProfile {
+    spec: BudgetProfileSpec,
+    _charge: verter_session_query::retention::RetentionCharge,
+}
 
 /// The live profiles and the pinned charge of the table holding them.
 #[derive(Default)]
@@ -684,14 +684,15 @@ impl BudgetProfile {
         if let Some(live) = interner.profiles.get(&spec).and_then(Weak::upgrade) {
             return Self(live);
         }
-        let profile = Arc::new(InternedProfile(
+        let profile = Arc::new(InternedProfile {
             spec,
-            verter_session_query::retention::SemanticRetentionAccount::process_local().pin(
-                verter_session_query::retention::allocation::arc_block_bytes(std::mem::size_of::<
-                    InternedProfile,
-                >()),
-            ),
-        ));
+            _charge: verter_session_query::retention::SemanticRetentionAccount::process_local()
+                .pin(
+                    verter_session_query::retention::allocation::arc_block_bytes(
+                        std::mem::size_of::<InternedProfile>(),
+                    ),
+                ),
+        });
         interner.profiles.insert(spec, Arc::downgrade(&profile));
         interner.settle();
         Self(profile)
@@ -699,7 +700,7 @@ impl BudgetProfile {
 
     /// The allowances.
     pub fn spec(&self) -> &BudgetProfileSpec {
-        &self.0 .0
+        &self.0.spec
     }
 
     /// Whether a live profile for `spec` is interned now.
@@ -711,7 +712,7 @@ impl BudgetProfile {
     /// Bytes this profile is charged.
     #[cfg(any(test, feature = "test-support"))]
     pub fn charge_bytes_for_tests(&self) -> usize {
-        self.0 .1.bytes()
+        self.0._charge.bytes()
     }
 
     /// The profile table's bucket capacity and the bytes its backing is
@@ -737,10 +738,10 @@ impl Drop for InternedProfile {
         let mut interner = profile_interner().lock();
         if interner
             .profiles
-            .get(&self.0)
+            .get(&self.spec)
             .is_some_and(|entry| entry.strong_count() == 0)
         {
-            interner.profiles.remove(&self.0);
+            interner.profiles.remove(&self.spec);
             let len = interner.profiles.len();
             if len == 0 {
                 interner.profiles = FxHashMap::default();

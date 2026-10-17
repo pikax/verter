@@ -253,17 +253,14 @@ pub(crate) fn engine_dep_signature_for_two_canonicals(
     canonical_a: &str,
     canonical_b: &str,
 ) -> verter_type_engine::semantic_query::DepSignature {
-    let mut entries: Vec<(
-        std::sync::Arc<str>,
-        verter_type_engine::semantic_query::DepVersion,
-    )> = Vec::new();
+    let mut entries: Vec<verter_type_engine::semantic_query::DepEntry> = Vec::new();
     let push = |entries: &mut Vec<_>, c: &str| {
         let whole_hash = ctx
             .shallow_file_state(c)
             .map(|state| state.whole_hash)
             .unwrap_or_default();
-        entries.push((
-            std::sync::Arc::<str>::from(c),
+        entries.push(verter_type_engine::semantic_query::DepEntry::new(
+            &*c,
             verter_type_engine::semantic_query::DepVersion::WholeHash(whole_hash),
         ));
     };
@@ -273,7 +270,7 @@ pub(crate) fn engine_dep_signature_for_two_canonicals(
     }
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     entries.dedup_by(|a, b| a.0 == b.0);
-    std::sync::Arc::from(entries.into_boxed_slice())
+    verter_type_engine::semantic_query::DepSignature::new(entries.into_boxed_slice())
 }
 
 #[cfg(test)]
