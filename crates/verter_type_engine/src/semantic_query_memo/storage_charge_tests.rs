@@ -244,8 +244,9 @@ fn a_released_payload_a_reader_still_holds_stays_charged_until_the_reader_lets_g
 }
 
 /// A payload a reader holds past the store's teardown stays charged — and
-/// only it: the rest of the graph's storage goes with the store, and the
-/// reader's drop restores the baseline, in either release order.
+/// only it: the rest of the graph's storage goes with the store and the
+/// last owner of its nodes, and the reader's drop restores the baseline, in
+/// either release order.
 #[test]
 fn a_payload_a_reader_holds_past_the_store_stays_charged_until_its_own_drop() {
     const TEXT: usize = 1 << 20;
@@ -253,6 +254,7 @@ fn a_payload_a_reader_holds_past_the_store_stays_charged_until_its_own_drop() {
     for reader_first in [false, true] {
         let account = account();
         let store = SemanticGraphStore::with_account(StoreAccount::new(Arc::clone(&account)));
+        let owner = store.enter_node_root_scope();
         let node = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(
             "h".repeat(TEXT),
         )));
@@ -268,10 +270,12 @@ fn a_payload_a_reader_holds_past_the_store_stays_charged_until_its_own_drop() {
             drop(held);
             assert!(store.graph_storage_charge_for_tests() >= TEXT + OTHER);
             drop(store);
+            drop(owner);
             assert_eq!(account.snapshot().total_bytes(), 0);
             continue;
         }
         drop(store);
+        drop(owner);
         let charged = account.snapshot().total_bytes();
         assert!(
             (TEXT..OTHER).contains(&charged),

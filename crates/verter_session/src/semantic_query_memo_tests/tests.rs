@@ -10323,7 +10323,10 @@ fn a_close_keeps_the_token_nodes_a_leased_epoch_reads_until_the_lease_drops() {
         store.node_is_live(read),
         "a leased epoch still owns the node its token names"
     );
-    assert!(Arc::ptr_eq(&store.node_data(read).unwrap(), &payload));
+    assert!(verter_type_engine::semantic_query_memo::NodeData::ptr_eq(
+        &store.node_data(read).unwrap(),
+        &payload
+    ));
 
     drop(view);
     assert!(store.node_is_live(b_param), "the lease still holds it");

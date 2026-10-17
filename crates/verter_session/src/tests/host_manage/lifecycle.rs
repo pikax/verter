@@ -954,7 +954,7 @@ fn a_concurrent_close_never_revokes_an_in_flight_requests_nodes() {
             let finished = closer.is_finished();
             let now = graph.node_data(node).expect("still readable");
             assert!(
-                Arc::ptr_eq(&now, &payload),
+                verter_type_engine::semantic_query_memo::NodeData::ptr_eq(&now, &payload),
                 "read {reads} during the close switched payloads"
             );
             reads += 1;
@@ -974,7 +974,7 @@ fn a_concurrent_close_never_revokes_an_in_flight_requests_nodes() {
 
     // The request keeps executing against the closed document.
     let _ = request.execute_type_node(key);
-    assert!(Arc::ptr_eq(
+    assert!(verter_type_engine::semantic_query_memo::NodeData::ptr_eq(
         &graph.node_data(node).expect("still readable"),
         &payload
     ));

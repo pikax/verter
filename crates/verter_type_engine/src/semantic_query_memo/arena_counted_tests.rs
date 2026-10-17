@@ -306,7 +306,7 @@ fn production_constructor_destroys_a_node_on_its_last_release() {
         "the parent's destruction releases its edge"
     );
     assert_eq!(arena.live_len(), 0);
-    assert!(Arc::ptr_eq(
+    assert!(NodeData::ptr_eq(
         &arena.get(child_id).unwrap(),
         &arena.released_placeholder
     ));
