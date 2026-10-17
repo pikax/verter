@@ -2,7 +2,9 @@
 //! continues with — the payload of
 //! [`QueryError::CheckerRecovery`](super::QueryError::CheckerRecovery).
 
-use super::PrimitiveKind;
+use std::sync::Arc;
+
+use super::{PrimitiveKind, SemanticNodeId};
 
 /// A checker diagnostic: its code and the operation that raised it.
 ///
@@ -182,7 +184,7 @@ impl CheckerDiagnosticCode {
 }
 
 /// The type operation that raised a [`CheckerDiagnostic`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CheckerDiagnosticOperation {
     /// The lib `Awaited<T>` conditional over an authored `Awaited<X>`
     /// application.
@@ -229,4 +231,246 @@ pub enum RecoveryBasis {
     /// The operation exhausted Verter's own allowance for it. The recovery
     /// is usable but a resource partial: never complete, never kept.
     Budget,
+}
+
+/// The typed arguments a [`CheckerDiagnosticRecipe`] fills its code's
+/// message template with, in the template's order. Types are graph nodes,
+/// printed only when the recipe is bound to an occurrence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CheckerDiagnosticArguments {
+    /// A message with no placeholder.
+    None,
+    /// `'{0}'` is the source type and `'{1}'` the target type of the
+    /// relation that failed (TS2322, TS2345, TS2859).
+    Types {
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    },
+    /// `{0}` is the arguments the only candidate accepts — `min`, or
+    /// `min-max` when it accepts a range — and `{1}` the arguments the call
+    /// supplies (TS2554). With no `max` the candidate has a rest parameter
+    /// and `{0}` is its required count (TS2555).
+    ArgumentCount {
+        min: u32,
+        max: Option<u32>,
+        got: u32,
+    },
+}
+
+impl CheckerDiagnosticArguments {
+    /// Every node the arguments name.
+    pub(crate) fn for_each_node(self, mut visit: impl FnMut(SemanticNodeId)) {
+        match self {
+            Self::None | Self::ArgumentCount { .. } => {}
+            Self::Types { source, target } => {
+                visit(source);
+                visit(target);
+            }
+        }
+    }
+}
+
+/// Where, relative to the operation that raised it, the checker reports a
+/// diagnostic. A recipe names a position of its operation, never a source
+/// offset: the same recipe, reused at another call site, is reported at that
+/// site's own position ([`CheckerDiagnosticRecipe::bind`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CheckerDiagnosticSubject {
+    /// The operation itself; for a call, its callee
+    /// (`getDiagnosticSpanForCallNode`).
+    Operation,
+    /// The call argument at this ordinal.
+    Argument(u32),
+    /// The call's arguments from this ordinal on — the ones its only
+    /// candidate does not accept (`getArgumentArityError`).
+    ExcessArguments(u32),
+    /// The returned expression of the function argument at this ordinal,
+    /// where the checker elaborates an argument failure onto the callback's
+    /// return (`elaborateArrowFunction`).
+    ArgumentReturn(u32),
+}
+
+/// A REUSABLE diagnostic: what the checker reports, with its typed
+/// arguments and the position of its operation it is reported at. A recipe
+/// carries no source location, so a cached call result's recipe is valid at
+/// every call site that reuses it; binding it to one site makes a
+/// [`CheckerDiagnosticOccurrence`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CheckerDiagnosticRecipe {
+    /// The diagnostic the checker reports.
+    pub diagnostic: CheckerDiagnostic,
+    /// The values its message template is filled with.
+    pub arguments: CheckerDiagnosticArguments,
+    /// The position of the operation it is reported at.
+    pub subject: CheckerDiagnosticSubject,
+}
+
+impl CheckerDiagnosticRecipe {
+    /// A call-resolution recipe.
+    #[must_use]
+    pub const fn call(
+        code: CheckerDiagnosticCode,
+        arguments: CheckerDiagnosticArguments,
+        subject: CheckerDiagnosticSubject,
+    ) -> Self {
+        Self {
+            diagnostic: CheckerDiagnostic {
+                code,
+                operation: CheckerDiagnosticOperation::CallResolution,
+            },
+            arguments,
+            subject,
+        }
+    }
+
+    /// The recipe's code.
+    #[must_use]
+    pub const fn code(&self) -> CheckerDiagnosticCode {
+        self.diagnostic.code
+    }
+
+    /// Bind the recipe to one authored occurrence: its subject read off
+    /// `site` and its type arguments printed by `print` — the occurrence's
+    /// location and message, fixed for good. `None` when the site does not
+    /// know the subject's position.
+    pub(crate) fn bind(
+        &self,
+        site: &CheckerDiagnosticSite,
+        print: impl Fn(SemanticNodeId, SemanticNodeId) -> (String, String),
+    ) -> Option<CheckerDiagnosticOccurrence> {
+        let start = match self.subject {
+            CheckerDiagnosticSubject::Operation => site.operation_start?,
+            CheckerDiagnosticSubject::Argument(ordinal)
+            | CheckerDiagnosticSubject::ExcessArguments(ordinal) => {
+                *site.argument_starts.get(ordinal as usize)?
+            }
+            CheckerDiagnosticSubject::ArgumentReturn(ordinal) => {
+                (*site.argument_return_starts.get(ordinal as usize)?)?
+            }
+        };
+        let arguments: Box<[Box<str>]> = match self.arguments {
+            CheckerDiagnosticArguments::None => Box::new([]),
+            CheckerDiagnosticArguments::Types { source, target } => {
+                let (source, target) = print(source, target);
+                Box::new([source.into_boxed_str(), target.into_boxed_str()])
+            }
+            CheckerDiagnosticArguments::ArgumentCount { min, max, got } => {
+                let expected = match max {
+                    Some(max) if max != min => format!("{min}-{max}"),
+                    _ => min.to_string(),
+                };
+                Box::new([expected.into_boxed_str(), got.to_string().into_boxed_str()])
+            }
+        };
+        Some(CheckerDiagnosticOccurrence {
+            start,
+            diagnostic: self.diagnostic,
+            arguments,
+        })
+    }
+}
+
+/// The authored positions of one operation's occurrence that a recipe's
+/// [`CheckerDiagnosticSubject`] reads: byte offsets into the occurrence's
+/// file, each the start of the node the checker reports at.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct CheckerDiagnosticSite {
+    /// The operation's own report position (a call's callee), when known.
+    pub(crate) operation_start: Option<u32>,
+    /// Each call argument's start, in argument order.
+    pub(crate) argument_starts: Arc<[u32]>,
+    /// Each function argument's returned expression's start, where the
+    /// argument is a function returning one expression.
+    pub(crate) argument_return_starts: Arc<[Option<u32>]>,
+}
+
+/// One diagnostic as the checker reports it at one authored position: the
+/// byte offset into its file it starts at, its code, and its message
+/// arguments as printed. It names no graph node, so it outlives every store.
+/// Occurrences order as the checker sorts its diagnostics
+/// (`compareDiagnostics`): by position, then by code, then by message.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CheckerDiagnosticOccurrence {
+    start: u32,
+    diagnostic: CheckerDiagnostic,
+    arguments: Box<[Box<str>]>,
+}
+
+impl Ord for CheckerDiagnosticOccurrence {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.start
+            .cmp(&other.start)
+            .then_with(|| self.code().code().cmp(&other.code().code()))
+            .then_with(|| self.arguments.cmp(&other.arguments))
+            .then_with(|| self.diagnostic.operation.cmp(&other.diagnostic.operation))
+    }
+}
+
+impl PartialOrd for CheckerDiagnosticOccurrence {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl CheckerDiagnosticOccurrence {
+    /// The diagnostic reported.
+    #[must_use]
+    pub const fn diagnostic(&self) -> CheckerDiagnostic {
+        self.diagnostic
+    }
+
+    /// The diagnostic's code.
+    #[must_use]
+    pub const fn code(&self) -> CheckerDiagnosticCode {
+        self.diagnostic.code
+    }
+
+    /// The byte offset into the occurrence's file the diagnostic starts at.
+    #[must_use]
+    pub const fn start(&self) -> u32 {
+        self.start
+    }
+
+    /// The printed values of the message's placeholders, in order.
+    #[must_use]
+    pub fn arguments(&self) -> &[Box<str>] {
+        &self.arguments
+    }
+
+    /// The full message: the code's template with each `{n}` replaced by
+    /// its argument.
+    #[must_use]
+    pub fn message(&self) -> String {
+        let template = self.diagnostic.code.message();
+        let mut message = String::with_capacity(template.len());
+        let mut rest = template;
+        while let Some(open) = rest.find('{') {
+            message.push_str(&rest[..open]);
+            let after = &rest[open + 1..];
+            let filled = after.find('}').and_then(|close| {
+                let index: usize = after[..close].parse().ok()?;
+                Some((self.arguments.get(index)?, close))
+            });
+            match filled {
+                Some((argument, close)) => {
+                    message.push_str(argument);
+                    rest = &after[close + 1..];
+                }
+                None => {
+                    message.push('{');
+                    rest = after;
+                }
+            }
+        }
+        message.push_str(rest);
+        message
+    }
+
+    /// The heap bytes this occurrence keeps reachable beyond its inline size.
+    pub(crate) fn heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        verter_session_query::retention::owned::Measured::heap_bytes(&self.arguments, aliases)
+    }
 }

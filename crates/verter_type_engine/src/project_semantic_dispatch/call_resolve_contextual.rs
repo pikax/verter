@@ -37,8 +37,12 @@ pub(in crate::project_semantic_dispatch) struct ContextualCallState {
     /// sole candidate's error recovery, even after its collector is abandoned.
     pub(super) completed: Option<ContextualCandidateBindings>,
     arity_fit: bool,
+    /// The widest argument range the candidates the call does not fit
+    /// accept: the fewest any requires and the most any accepts (`None`
+    /// once one has an unbounded rest).
+    arity_range: Option<(usize, Option<usize>)>,
     diagnostics_enabled: bool,
-    pub(super) diagnostic: Option<crate::semantic_query::CheckerDiagnosticCode>,
+    pub(super) diagnostic: Option<crate::semantic_query::CheckerDiagnosticRecipe>,
     pub(in crate::project_semantic_dispatch) resume_at: Option<(RelationKind, SemanticNodeId)>,
 }
 
@@ -59,7 +63,7 @@ impl Drop for ContextualCallIsolation<'_> {
 pub(super) struct ContextualCandidateBindings {
     pub(super) signature: SemanticNodeId,
     pub(super) fixed: FxHashMap<SemanticNodeId, SemanticNodeId>,
-    pub(super) diagnostic: Option<crate::semantic_query::CheckerDiagnosticCode>,
+    pub(super) diagnostic: Option<crate::semantic_query::CheckerDiagnosticRecipe>,
 }
 
 impl ContextualCallState {
@@ -82,20 +86,24 @@ impl ContextualCallState {
         {
             return None;
         }
-        Some(ResolveCallFailure::Diagnosed(
-            crate::semantic_query::CheckerDiagnostic {
-                code: if self.arity_candidates.len() > 1 {
-                    crate::semantic_query::CheckerDiagnosticCode::NoMatchingOverload
-                } else if self.arity_fit {
-                    self.diagnostic.unwrap_or(
-                        crate::semantic_query::CheckerDiagnosticCode::ArgumentNotAssignable,
-                    )
-                } else {
-                    crate::semantic_query::CheckerDiagnosticCode::ArgumentCount
-                },
-                operation: crate::semantic_query::CheckerDiagnosticOperation::CallResolution,
-            },
-        ))
+        use crate::semantic_query::{
+            CheckerDiagnosticArguments, CheckerDiagnosticCode, CheckerDiagnosticRecipe,
+            CheckerDiagnosticSubject,
+        };
+        let original = self.original.as_ref()?;
+        let recipe = if self.arity_candidates.len() > 1 {
+            CheckerDiagnosticRecipe::call(
+                CheckerDiagnosticCode::NoMatchingOverload,
+                CheckerDiagnosticArguments::None,
+                CheckerDiagnosticSubject::Operation,
+            )
+        } else if self.arity_fit {
+            self.diagnostic?
+        } else {
+            let (required, maximum) = self.arity_range?;
+            super::argument_count_recipe(required, maximum, original.len())
+        };
+        Some(ResolveCallFailure::Diagnosed(recipe))
     }
 }
 
@@ -350,13 +358,22 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .0
     }
 
+    /// The diagnostic the checker reports for the function argument at
+    /// `position`, typed as `source`, that its parameter's `target` does
+    /// not accept: its return's TS2322 elaborated onto the returned
+    /// expression where the two returns are what fails
+    /// (`elaborateArrowFunction`), the argument's TS2345 otherwise.
     pub(super) fn contextual_argument_failure(
         &self,
+        position: usize,
         source: SemanticNodeId,
         target: SemanticNodeId,
         budget: &mut CallResolutionBudget<'_>,
-    ) -> crate::semantic_query::CheckerDiagnosticCode {
-        use crate::semantic_query::CheckerDiagnosticCode;
+    ) -> crate::semantic_query::CheckerDiagnosticRecipe {
+        use crate::semantic_query::{
+            CheckerDiagnosticArguments, CheckerDiagnosticCode, CheckerDiagnosticRecipe,
+            CheckerDiagnosticSubject,
+        };
         let single_return = |node| {
             let super::super::signature_discovery::SharedSignatureNodes::Nodes(nodes) =
                 self.shared_signature_nodes(node, SignatureKind::Call)
@@ -376,10 +393,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 self.call_relation(from, into, from, budget, false, false),
                 RelationStep::NotAssignable
             ) {
-                return CheckerDiagnosticCode::TypeNotAssignable;
+                return CheckerDiagnosticRecipe::call(
+                    CheckerDiagnosticCode::TypeNotAssignable,
+                    CheckerDiagnosticArguments::Types {
+                        source: from,
+                        target: into,
+                    },
+                    CheckerDiagnosticSubject::ArgumentReturn(
+                        u32::try_from(position).unwrap_or(u32::MAX),
+                    ),
+                );
             }
         }
-        CheckerDiagnosticCode::ArgumentNotAssignable
+        super::argument_not_assignable(position, source, target)
     }
     /// The same call authority, with a route-owned contextual continuation.
     /// Nesting restores the enclosing route's state after the inner call.
@@ -587,6 +613,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         if resumed.is_none() {
             let (required, maximum, _) = call_candidate_arity(ordinary, rest.as_ref());
             if original.len() < required || maximum.is_some_and(|max| original.len() > max) {
+                state.arity_range = Some(match state.arity_range {
+                    None => (required, maximum),
+                    Some((fewest, most)) => (
+                        fewest.min(required),
+                        most.zip(maximum).map(|(most, maximum)| most.max(maximum)),
+                    ),
+                });
                 return Err(ContextualCandidateFailure::Mismatch);
             }
             state.arity_fit = true;
@@ -674,8 +707,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 let target = progress.pending_target.take().expect("pending callback");
                 state.typed_arguments.insert(position, typed);
                 if !self.collect_contextual_argument(&typed, target, budget, &declared)? {
-                    state.diagnostic =
-                        Some(self.contextual_argument_failure(typed.node, target, budget));
+                    state.diagnostic = Some(
+                        self.contextual_argument_failure(position, typed.node, target, budget),
+                    );
                     state.resume_at = None;
                     return Err(ContextualCandidateFailure::Mismatch);
                 }
@@ -797,14 +831,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         };
                     }
                     if let Some(signature) = self.generic_function_against(argument.node, target) {
-                        generic_arguments.push((argument, signature, target));
+                        generic_arguments.push((position, argument, signature, target));
                         continue;
                     }
                     if !self.collect_contextual_argument(&argument, target, budget, &declared)? {
+                        state.diagnostic = Some(super::argument_not_assignable(
+                            position,
+                            argument.node,
+                            target,
+                        ));
                         return Err(ContextualCandidateFailure::Mismatch);
                     }
                 }
-                for (mut argument, signature, target) in generic_arguments {
+                for (position, mut argument, signature, target) in generic_arguments {
                     argument.node = self
                         .generic_function_in_context(
                             session_id,
@@ -817,6 +856,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         .map_err(ContextualCandidateFailure::Degraded)?
                         .unwrap_or(argument.node);
                     if !self.collect_contextual_argument(&argument, target, budget, &declared)? {
+                        state.diagnostic = Some(super::argument_not_assignable(
+                            position,
+                            argument.node,
+                            target,
+                        ));
                         return Err(ContextualCandidateFailure::Mismatch);
                     }
                 }
@@ -833,6 +877,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         &declared,
                     )? {
                         state.diagnostic = Some(self.contextual_argument_failure(
+                            position,
                             typed.node,
                             inference_target,
                             budget,

@@ -648,3 +648,108 @@ fn literal_members(
         _ => Vec::new(),
     }
 }
+
+/// How many levels of unions, intersections and constraints a relation's
+/// target is read through to decide whether it could hold a literal.
+const SINGLETON_SCAN_DEPTH: u32 = 16;
+
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    /// The two types of a failed relation as the checker prints them in its
+    /// message (`reportRelationError`): a literal source is printed as its
+    /// base primitive unless the target could itself hold a literal at its
+    /// top level, where the literal is what tells the two apart.
+    pub(in crate::project_semantic_dispatch) fn print_relation_operands(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> (String, String) {
+        let generalized = if self.could_hold_top_level_singleton(target, SINGLETON_SCAN_DEPTH) {
+            None
+        } else {
+            self.literal_base_spelling(source)
+        };
+        (
+            generalized.unwrap_or_else(|| self.print_diagnostic_type(source)),
+            self.print_diagnostic_type(target),
+        )
+    }
+
+    /// One type as a diagnostic message prints it.
+    pub(in crate::project_semantic_dispatch) fn print_diagnostic_type(
+        &self,
+        node: SemanticNodeId,
+    ) -> String {
+        crate::semantic_query::display::display_type_node(
+            self.graph(),
+            node,
+            crate::semantic_query::DisplayNeeds::single(
+                crate::semantic_query::DisplayFacet::CheckerSpelling,
+            )
+            .union(crate::semantic_query::DisplayNeeds::single(
+                crate::semantic_query::DisplayFacet::IncludeReadonlyModifier,
+            )),
+            crate::semantic_query::display::MAX_DISPLAY_DEPTH,
+            &mut crate::semantic_query::display::DisplayContext::default(),
+        )
+        .0
+    }
+
+    /// Whether `target` could hold a literal or other unit type at its top
+    /// level (`typeCouldHaveTopLevelSingletonTypes`), read `depth` levels
+    /// of unions, intersections and constraints deep; past that (a
+    /// constraint chain that comes round again) the literal is kept.
+    fn could_hold_top_level_singleton(&self, target: SemanticNodeId, depth: u32) -> bool {
+        let Some(data) = self.graph().node_data(target) else {
+            return true;
+        };
+        let Some(depth) = depth.checked_sub(1) else {
+            return true;
+        };
+        match data.as_ref() {
+            SemanticNodeData::Primitive(PrimitiveKind::Boolean) => false,
+            SemanticNodeData::Union(members) => members
+                .iter()
+                .any(|&member| self.could_hold_top_level_singleton(member, depth)),
+            SemanticNodeData::Intersection(members) => members
+                .iter()
+                .any(|&member| self.could_hold_top_level_singleton(member, depth)),
+            SemanticNodeData::TypeParam { constraint, .. } => constraint
+                .is_some_and(|constraint| self.could_hold_top_level_singleton(constraint, depth)),
+            SemanticNodeData::Literal(_)
+            | SemanticNodeData::Primitive(PrimitiveKind::Null | PrimitiveKind::Undefined)
+            | SemanticNodeData::TemplateLiteral { .. } => true,
+            _ => false,
+        }
+    }
+
+    /// The base primitive a literal source prints as
+    /// (`getBaseTypeOfLiteralType`): each literal of a union of literals
+    /// mapped to its primitive, in order and once. `None` for any type that
+    /// is not a literal or a union of them.
+    fn literal_base_spelling(&self, source: SemanticNodeId) -> Option<String> {
+        let base = |node: SemanticNodeId| match self.graph().node_data(node)?.as_ref() {
+            SemanticNodeData::Literal(value) => Some(match LiteralKind::of(value) {
+                LiteralKind::String => "string",
+                LiteralKind::Number => "number",
+                LiteralKind::BigInt => "bigint",
+                LiteralKind::Boolean => "boolean",
+            }),
+            _ => None,
+        };
+        if let Some(single) = base(source) {
+            return Some(single.to_owned());
+        }
+        let data = self.graph().node_data(source)?;
+        let SemanticNodeData::Union(members) = data.as_ref() else {
+            return None;
+        };
+        let mut bases: Vec<&str> = Vec::new();
+        for &member in members.iter() {
+            let spelled = base(member)?;
+            if !bases.contains(&spelled) {
+                bases.push(spelled);
+            }
+        }
+        Some(bases.join(" | "))
+    }
+}

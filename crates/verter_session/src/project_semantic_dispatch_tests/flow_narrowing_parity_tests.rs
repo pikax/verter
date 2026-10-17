@@ -1060,6 +1060,10 @@ declare function ctx<T>(x: T, f: (v: T) => void): T;
 declare function box<T>(x: T[]): T;
 declare function ov(x: string): string;
 declare function ov(x: number): number;
+declare function cb(f: () => number): void;
+declare function g2<T>(x: T): T;
+declare function g2<T>(x: T, y: T): T;
+declare const o: { m(x: string): number };
 export function tu() { return takes(u); }
 export function tab(x: { a: 1 }, y: { b: 1 }) { return two(x, y); }
 export function o1(x: number) { return one(x); }
@@ -1071,64 +1075,44 @@ export function c1() { return con(1); }
 export function x1() { return ctx(1, (v: string) => {}); }
 export function bx(x: number) { return box(x); }
 export function v1(x: boolean) { return ov(x); }
+export function e1() { return cb(() => "s"); }
+export function eg() { return g2<string>(1); }
+export function eg1() { return con<"a">("b"); }
+export function cc() { return [con(1), con(true)]; }
+export function c3() { return con(1); }
+export function om() { return o.m(); }
 "#;
 
 /// A call its only candidate does not accept continues with that
 /// candidate as the checker's error-recovery candidate
-/// (`getCandidateForOverloadFailure`), re-inferred from the arguments, and
-/// the diagnostic the checker reports rides with the answer. Measured on
-/// 7.0.2, identically without `strictNullChecks`: `takes(u)` is `A`
-/// (TS2345: the inferred `x is A` does not accept `B`'s predicate);
-/// `two(x, y)` over `{ a: 1 }` and `{ b: 1 }` is `{ a: 1 }` — the
-/// candidates' common supertype, which `y` then fails — where the checker
-/// prints the argument failure's elaboration, TS2741 ("Property 'a' is
-/// missing");
-/// `con(1)` is `string` — the inference violating `T extends string`
-/// takes the constraint (TS2345); `ctx(1, (v: string) => {})` is `string`
-/// (TS2345).
+/// (`getCandidateForOverloadFailure`), re-inferred from the arguments.
+/// Measured on 7.0.2, identically without `strictNullChecks`: `takes(u)`
+/// is `A`; `two(x, y)` over `{ a: 1 }` and `{ b: 1 }` is `{ a: 1 }` — the
+/// candidates' common supertype, which `y` then fails; `con(1)` is
+/// `string` — the inference violating `T extends string` takes the
+/// constraint; `ctx(1, (v: string) => {})` is `string`.
 ///
 /// A call to a lone NON-generic signature is answered from its declared
-/// return without resolving the call — the checker's answer whatever the
-/// arguments: `one(x)` is `number` (TS2345), `one()` and `one("a", "b")`
-/// are `number` (TS2554), `rest()` is `number` (TS2555), `opt()` is
-/// `number` (TS2554). No applicability check runs there, so no diagnostic
-/// rides those answers.
+/// return whatever the arguments: `one(x)`, `one()`, `one("a", "b")`,
+/// `rest()` and `opt()` are `number`.
 ///
 /// A generic candidate whose inference relation fails (`box(x)`, the
 /// checker's `unknown`) and a call over several overloads (`ov(x)`, the
-/// checker's `never` with TS2769) keep the typed call gap: the first
-/// re-infers from a relation this executor abandoned, the second answers
-/// from a signature combining every overload.
+/// checker's `never`) keep the typed call gap: the first re-infers from a
+/// relation this executor abandoned, the second answers from a signature
+/// combining every overload.
 #[test]
 fn a_call_its_only_candidate_rejects_answers_the_checkers_recovery() {
-    use verter_type_engine::semantic_query::{
-        CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation,
-    };
     let rows = [
-        ("tu", "A", CheckerDiagnosticCode::ArgumentNotAssignable),
-        (
-            "tab",
-            "{ a: 1; }",
-            CheckerDiagnosticCode::ArgumentNotAssignable,
-        ),
-        ("c1", "string", CheckerDiagnosticCode::ArgumentNotAssignable),
-        ("x1", "string", CheckerDiagnosticCode::ArgumentNotAssignable),
+        ("tu", "A"),
+        ("tab", "{ a: 1; }"),
+        ("c1", "string"),
+        ("x1", "string"),
     ];
     let host = host_with(CALL_RECOVERY);
     for root in [STRICT_ROOT, LOOSE_ROOT] {
-        for (function, printed, code) in rows {
+        for (function, printed) in rows {
             assert_prints(&host, root, function, printed);
-            assert_eq!(
-                super::signature_predicate_inference_tests::checker_diagnostics(
-                    &host, root, function
-                ),
-                vec![CheckerDiagnostic {
-                    code,
-                    operation: CheckerDiagnosticOperation::CallResolution,
-                }],
-                "`{function}` in {root} carries the checker's TS{}",
-                code.code()
-            );
         }
         for function in ["o1", "o2", "o3", "r0", "op0"] {
             assert_prints(&host, root, function, "number");
@@ -1137,6 +1121,76 @@ fn a_call_its_only_candidate_rejects_answers_the_checkers_recovery() {
             super::signature_predicate_inference_tests::assert_degrades(&host, root, function);
         }
     }
+}
+
+/// The diagnostics riding each function's answer, through the public
+/// audited flow-return boundary, printed as `tsc --pretty false` prints
+/// the first line of each — `(line,col): error TS<code>: <message>` — in
+/// its order. Every expected line is TypeScript 7.0.2's on this fixture,
+/// identical with `strictNullChecks` off.
+///
+/// The positions are the checker's: an argument's start for TS2345, the
+/// first argument past the candidate's arity for too many arguments, the
+/// callee — a property access's NAME — for too few, and the returned
+/// expression of an arrow callback whose return is what fails (TS2322,
+/// `elaborateArrowFunction`). A literal argument prints as its base
+/// primitive unless the parameter could hold a literal (`"b"` against
+/// `"a"`).
+///
+/// One cached call result serves two call sites (`con(1)` in `c1` and
+/// `c3`): each reports at its own call, and two failing calls of one body
+/// (`cc`) report in source order.
+#[test]
+fn call_diagnostics_carry_the_checkers_code_message_position_and_order() {
+    let rows: &[(&str, &[&str])] = &[
+        ("o1", &["(21,44): error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'."]),
+        ("o2", &["(22,31): error TS2554: Expected 1 arguments, but got 0."]),
+        ("o3", &["(23,40): error TS2554: Expected 1 arguments, but got 2."]),
+        ("r0", &["(24,31): error TS2555: Expected at least 1 arguments, but got 0."]),
+        ("op0", &["(25,32): error TS2554: Expected 1-2 arguments, but got 0."]),
+        ("c1", &["(26,35): error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'."]),
+        ("x1", &["(27,35): error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'."]),
+        ("e1", &["(30,40): error TS2322: Type 'string' is not assignable to type 'number'."]),
+        ("eg", &["(31,42): error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'."]),
+        ("eg1", &["(32,41): error TS2345: Argument of type '\"b\"' is not assignable to parameter of type '\"a\"'."]),
+        (
+            "cc",
+            &[
+                "(33,36): error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'.",
+                "(33,44): error TS2345: Argument of type 'boolean' is not assignable to parameter of type 'string'.",
+            ],
+        ),
+        ("c3", &["(34,35): error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'."]),
+        ("om", &["(35,33): error TS2554: Expected 1 arguments, but got 0."]),
+    ];
+    let host = host_with(CALL_RECOVERY);
+    let mut mismatches = Vec::new();
+    // Cold, then warm: a warm read serves the same occurrences.
+    for pass in ["cold", "warm"] {
+        for root in [STRICT_ROOT, LOOSE_ROOT] {
+            for (function, expected) in rows {
+                let reported = super::signature_predicate_inference_tests::checker_report(
+                    &host,
+                    root,
+                    function,
+                    CALL_RECOVERY,
+                );
+                if reported != *expected {
+                    mismatches.push(format!(
+                        "{pass} `{function}` in {root}: {reported:#?}, expected {expected:#?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "{}",
+        mismatches.join(
+            "
+"
+        )
+    );
 }
 
 const LIB_VALUE_READS: &str = r#"

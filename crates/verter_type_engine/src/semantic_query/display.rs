@@ -514,6 +514,8 @@ fn display_resolved_type_node(
             }
             if parts.is_empty() {
                 "{}".to_string()
+            } else if needs.contains(DisplayFacet::CheckerSpelling) {
+                format!("{{ {}; }}", parts.join("; "))
             } else {
                 format!("{{ {} }}", parts.join("; "))
             }
@@ -620,6 +622,11 @@ fn display_resolved_type_node(
             render_merged_decl_surface(store, &surface, needs, child_depth, visited)
         }
         SemanticNodeData::Primitive(kind) => primitive_keyword(*kind).to_string(),
+        SemanticNodeData::Literal(LiteralValue::String(s))
+            if needs.contains(DisplayFacet::CheckerSpelling) =>
+        {
+            double_quoted(s)
+        }
         SemanticNodeData::Literal(value) => literal_token(value),
         SemanticNodeData::EnumLiteral(literal) => literal.printed_name(),
         // Error carrier riding through display — a concise token, NOT a panic.
@@ -1254,6 +1261,27 @@ fn is_bare_member_name(name: &str) -> bool {
         return false;
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+}
+
+/// Render `s` as a double-quoted string literal, as the checker spells a
+/// string literal type in a message (`"a"`), escaping `\`, `"` and control
+/// characters.
+fn double_quoted(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Render `s` as a single-quoted TS string literal, escaping `\`, `'`, and

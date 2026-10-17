@@ -2066,11 +2066,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     return CandidateVerdict::Mismatch;
                 }
             };
-            failure = Some(if too_few && effective_rest {
-                crate::semantic_query::CheckerDiagnosticCode::ArgumentCountAtLeast
-            } else {
-                crate::semantic_query::CheckerDiagnosticCode::ArgumentCount
-            });
+            failure = Some(argument_count_recipe(
+                required,
+                (!effective_rest).then_some(maximum).flatten(),
+                arguments.len(),
+            ));
         }
         let arguments = if too_few || too_many {
             &arguments[..0]
@@ -2319,9 +2319,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     if recovery
                         && (visible_type_params.is_empty() || contextual_diagnostic.is_some()) =>
                 {
-                    failure.get_or_insert(
-                        crate::semantic_query::CheckerDiagnosticCode::ArgumentNotAssignable,
-                    );
+                    failure.get_or_insert(argument_not_assignable(index, source, target));
                 }
                 RelationStep::NotAssignable => {
                     return self.reject_call_candidate(session_id, &checkpoint)
@@ -2724,9 +2722,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ) {
                 Ok(Some(true)) => {}
                 Ok(Some(false)) if recovery => {
-                    failure.get_or_insert(
-                        crate::semantic_query::CheckerDiagnosticCode::ArgumentNotAssignable,
-                    );
+                    failure.get_or_insert(argument_not_assignable(index, source, target));
                 }
                 Ok(Some(false)) => {
                     if self
@@ -2737,10 +2733,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .as_ref()
                         .is_some_and(|state| state.was_context_sensitive(index))
                     {
-                        let code = self.contextual_argument_failure(source, target, budget);
+                        let recipe =
+                            self.contextual_argument_failure(index, source, target, budget);
                         if let Some(state) = self.dispatch_txn.borrow_mut().call.contextual.as_mut()
                         {
-                            state.diagnostic = Some(code);
+                            state.diagnostic = Some(recipe);
                         }
                     }
                     return self.reject_call_candidate(session_id, &checkpoint);
@@ -3243,10 +3240,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 selected_signature,
                 substitution,
                 fresh_literal_returns,
-                recovery_diagnostic: failure.map(|code| crate::semantic_query::CheckerDiagnostic {
-                    code,
-                    operation: crate::semantic_query::CheckerDiagnosticOperation::CallResolution,
-                }),
+                recovery_diagnostic: failure,
             },
             concrete_seeds,
             holds,
@@ -4342,6 +4336,59 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 struct RestParam<'p> {
     param: &'p FunctionParam,
     shape: RestShape,
+}
+
+/// The checker's TS2345 for the argument at `index`: `source` is not
+/// assignable to its parameter's `target`.
+pub(super) fn argument_not_assignable(
+    index: usize,
+    source: SemanticNodeId,
+    target: SemanticNodeId,
+) -> crate::semantic_query::CheckerDiagnosticRecipe {
+    use crate::semantic_query::{
+        CheckerDiagnosticArguments, CheckerDiagnosticCode, CheckerDiagnosticRecipe,
+        CheckerDiagnosticSubject,
+    };
+    CheckerDiagnosticRecipe::call(
+        CheckerDiagnosticCode::ArgumentNotAssignable,
+        CheckerDiagnosticArguments::Types { source, target },
+        CheckerDiagnosticSubject::Argument(u32::try_from(index).unwrap_or(u32::MAX)),
+    )
+}
+
+/// The checker's arity error for a call supplying `got` arguments to a
+/// candidate accepting `required..=maximum` (`getArgumentArityError`):
+/// TS2555 where a rest parameter leaves the count unbounded and the call
+/// supplies too few, TS2554 otherwise. Too many arguments are reported from
+/// the first one the candidate does not accept; too few at the callee.
+pub(super) fn argument_count_recipe(
+    required: usize,
+    maximum: Option<usize>,
+    got: usize,
+) -> crate::semantic_query::CheckerDiagnosticRecipe {
+    use crate::semantic_query::{
+        CheckerDiagnosticArguments, CheckerDiagnosticCode, CheckerDiagnosticRecipe,
+        CheckerDiagnosticSubject,
+    };
+    let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+    CheckerDiagnosticRecipe::call(
+        if maximum.is_none() && got < required {
+            CheckerDiagnosticCode::ArgumentCountAtLeast
+        } else {
+            CheckerDiagnosticCode::ArgumentCount
+        },
+        CheckerDiagnosticArguments::ArgumentCount {
+            min: count(required),
+            max: maximum.map(count),
+            got: count(got),
+        },
+        match maximum {
+            Some(maximum) if got > maximum => {
+                CheckerDiagnosticSubject::ExcessArguments(count(maximum))
+            }
+            _ => CheckerDiagnosticSubject::Operation,
+        },
+    )
 }
 
 fn call_candidate_arity(

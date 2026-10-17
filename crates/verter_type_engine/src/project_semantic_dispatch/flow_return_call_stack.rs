@@ -797,6 +797,18 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             ..
         } = route;
         let call = &indexed.call;
+        self.call_diagnostic_sites.insert(
+            span,
+            crate::semantic_query::CheckerDiagnosticSite {
+                operation_start: Some(call.report_point),
+                argument_starts: call.args.iter().map(|argument| argument.point).collect(),
+                argument_return_starts: call
+                    .args
+                    .iter()
+                    .map(|argument| argument.return_point)
+                    .collect(),
+            },
+        );
         let mut explicit_type_args = Vec::with_capacity(call.explicit_type_args.len());
         for argument in call.explicit_type_args.iter() {
             // Explicit arguments belong to the calling body's lexical clause,

@@ -412,7 +412,7 @@ fn recovery_code(
         super::call_resolve::ResolveCallStep::Complete(ResolvedCallResult::Selected {
             recovery_diagnostic: Some(diagnostic),
             ..
-        }) => Some(diagnostic.code),
+        }) => Some(diagnostic.code()),
         _ => None,
     }
 }
@@ -3908,8 +3908,11 @@ fn union_partial_applicability_answers_the_synthesized_signatures_recovery() {
             &step,
             super::call_resolve::ResolveCallStep::Complete(ResolvedCallResult::Selected {
                 return_type,
-                recovery_diagnostic: Some(verter_type_engine::semantic_query::CheckerDiagnostic {
-                    code: verter_type_engine::semantic_query::CheckerDiagnosticCode::ArgumentNotAssignable,
+                recovery_diagnostic: Some(verter_type_engine::semantic_query::CheckerDiagnosticRecipe {
+                    diagnostic: verter_type_engine::semantic_query::CheckerDiagnostic {
+                        code: verter_type_engine::semantic_query::CheckerDiagnosticCode::ArgumentNotAssignable,
+                        ..
+                    },
                     ..
                 }),
                 ..

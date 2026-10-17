@@ -870,7 +870,7 @@ pub enum ResolveCallSelection {
         fresh_literal_returns: Vec<SemanticNodeId>,
         /// The diagnostic of an error-recovery winner (see
         /// [`ResolvedCallResult::Selected`]).
-        recovery_diagnostic: Option<crate::semantic_query::CheckerDiagnostic>,
+        recovery_diagnostic: Option<crate::semantic_query::CheckerDiagnosticRecipe>,
     },
     DynamicAny,
 }

@@ -6862,6 +6862,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             heritage_self_roots: Vec::new(),
             inferred_predicate: None,
             checker_diagnostics: Vec::new(),
+            call_diagnostic_sites: rustc_hash::FxHashMap::default(),
             declared_reads: false,
             dead_writes: false,
             dead_written: rustc_hash::FxHashSet::default(),
@@ -6895,7 +6896,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let (outcome, body_falls_through) = evaluator.eval_region(&ir.body);
             evaluator.promote_pending_statement_gap();
             inferred_predicate = evaluator.inferred_predicate;
-            checker_diagnostics = std::mem::take(&mut evaluator.checker_diagnostics);
+            checker_diagnostics = {
+                let mut occurrences = std::mem::take(&mut evaluator.checker_diagnostics);
+                occurrences.sort();
+                occurrences
+            };
             holds = std::mem::take(&mut evaluator.holds);
             yield_contributions = std::mem::take(&mut evaluator.yield_contributions);
             observations = evaluator.observations;
@@ -10374,6 +10379,12 @@ pub(super) trait FlowDemandDriver {
         &self,
         canonical: &str,
     ) -> crate::semantic_query::ResolveCallContext;
+    /// A failed relation's two types as a diagnostic message prints them.
+    fn print_relation_operands(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> (String, String);
     fn resolve_closed_signature_utility(
         &self,
         node: SemanticNodeId,
@@ -10960,6 +10971,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         canonical: &str,
     ) -> crate::semantic_query::ResolveCallContext {
         ProjectSemanticDispatch::resolve_call_context_for(self, canonical)
+    }
+    fn print_relation_operands(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> (String, String) {
+        ProjectSemanticDispatch::print_relation_operands(self, source, target)
     }
     fn resolve_closed_signature_utility(
         &self,
@@ -11635,6 +11653,13 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     ) -> crate::semantic_query::ResolveCallContext {
         self.driver.resolve_call_context_for(canonical)
     }
+    fn print_relation_operands(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> (String, String) {
+        self.driver.print_relation_operands(source, target)
+    }
     fn resolve_closed_signature_utility(
         &self,
         node: SemanticNodeId,
@@ -12093,9 +12118,15 @@ struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
     /// result carries it only when the whole return joins to `boolean`.
     inferred_predicate: Option<crate::semantic_query::SignaturePredicate>,
     /// The diagnostics of the calls this body resolved to the checker's
-    /// error-recovery candidate, deduplicated in first-seen order: the
-    /// frame's result carries them with its value.
-    checker_diagnostics: Vec<crate::semantic_query::CheckerDiagnostic>,
+    /// error-recovery candidate, each bound to the call it was reported at
+    /// and recorded once: the frame's result carries them with its value,
+    /// in the checker's order.
+    checker_diagnostics: Vec<crate::semantic_query::CheckerDiagnosticOccurrence>,
+    /// The authored report positions of each call this frame asked the
+    /// executor about, by the call's span: where a diagnostic recipe the
+    /// call's result carries is reported at THIS call site.
+    call_diagnostic_sites:
+        rustc_hash::FxHashMap<verter_span::Span, crate::semantic_query::CheckerDiagnosticSite>,
     /// Whether a read of a parameter or local answers its DECLARED type
     /// rather than its narrowed reaching value — on while a class
     /// expression's property initializer evaluates: a property
@@ -23611,8 +23642,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             // The checker's effects signature of a call no
                             // candidate applies to is its error-recovery
                             // candidate; the diagnostic rides the narrow.
-                            if let Some(diagnostic) = recovery_diagnostic {
-                                self.record_checker_diagnostic(diagnostic);
+                            if let Some(recipe) = recovery_diagnostic {
+                                self.record_call_diagnostic(&recipe, site);
                             }
                             selected_signature
                         }
@@ -23701,9 +23732,42 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     }
 
     /// Record a diagnostic the checker reports for one of this body's calls.
-    fn record_checker_diagnostic(&mut self, diagnostic: crate::semantic_query::CheckerDiagnostic) {
-        if !self.checker_diagnostics.contains(&diagnostic) {
-            self.checker_diagnostics.push(diagnostic);
+    fn record_checker_diagnostic(
+        &mut self,
+        occurrence: crate::semantic_query::CheckerDiagnosticOccurrence,
+    ) {
+        if !self.checker_diagnostics.contains(&occurrence) {
+            self.checker_diagnostics.push(occurrence);
+        }
+    }
+
+    /// Record the diagnostic `recipe` a call's result carries, bound to the
+    /// call at `site`: its subject read off the report positions the
+    /// call's executor route recorded for it, its types printed now. A
+    /// call whose route recorded no positions reports at the call itself.
+    fn record_call_diagnostic(
+        &mut self,
+        recipe: &crate::semantic_query::CheckerDiagnosticRecipe,
+        site: verter_session_query::flow::slice::SliceCallSite,
+    ) {
+        let fallback = crate::semantic_query::CheckerDiagnosticSite {
+            operation_start: Some(site.span().start),
+            ..Default::default()
+        };
+        let positions = self
+            .call_diagnostic_sites
+            .get(&site.span())
+            .unwrap_or(&fallback);
+        let print = |source, target| self.dispatch.print_relation_operands(source, target);
+        let occurrence = recipe.bind(positions, print).or_else(|| {
+            crate::semantic_query::CheckerDiagnosticRecipe {
+                subject: crate::semantic_query::CheckerDiagnosticSubject::Operation,
+                ..*recipe
+            }
+            .bind(&fallback, print)
+        });
+        if let Some(occurrence) = occurrence {
+            self.record_checker_diagnostic(occurrence);
         }
     }
 
@@ -28070,6 +28134,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         {
             return true;
         }
+        // A lone non-generic signature with a DECLARED return answers that
+        // return whether or not the call applies, but the checker still
+        // checks the call against it: the executor decides applicability,
+        // so the diagnostic of a call it does not accept rides the answer.
+        if self.lone_declared_signature(&call_sigs, &construct_sigs) {
+            return true;
+        }
         let supplies_evidence =
             site.supplies_parameter_ordinal(0) || site.has_explicit_type_arguments();
         if !supplies_evidence {
@@ -28087,6 +28158,34 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     }) if !type_parameters.is_empty()
                 )
             })
+    }
+
+    /// Whether one bucket holds exactly one signature, non-generic, whose
+    /// return is DECLARED: its answer does not depend on the arguments, so
+    /// resolving the call through the executor changes no value and only
+    /// adds the applicability check the checker runs.
+    fn lone_declared_signature(
+        &self,
+        call_sigs: &[SemanticNodeId],
+        construct_sigs: &[SemanticNodeId],
+    ) -> bool {
+        let [only] = (if call_sigs.is_empty() {
+            construct_sigs
+        } else if construct_sigs.is_empty() {
+            call_sigs
+        } else {
+            return false;
+        }) else {
+            return false;
+        };
+        matches!(
+            self.dispatch.arena().node_data(*only).as_deref(),
+            Some(SemanticNodeData::Signature {
+                type_parameters,
+                return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(_),
+                ..
+            }) if type_parameters.is_empty()
+        )
     }
 
     /// Whether a signature of `callee` reads its own type parameters in
@@ -28255,11 +28354,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // frame's freshness widening — the return join widens it,
                 // a value position keeps it.
                 if let crate::semantic_query::ResolvedCallResult::Selected {
-                    recovery_diagnostic: Some(diagnostic),
+                    recovery_diagnostic: Some(recipe),
                     ..
                 } = &result
                 {
-                    self.record_checker_diagnostic(*diagnostic);
+                    self.record_call_diagnostic(recipe, site);
                 }
                 if let crate::semantic_query::ResolvedCallResult::Selected {
                     selected_signature,
@@ -28291,9 +28390,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             // it on the component's admitted results.
             super::call_resolve::ResolveCallStep::Hold(_) => Some(Positional::Hold),
             super::call_resolve::ResolveCallStep::Degraded(
-                crate::semantic_query::ResolveCallFailure::Diagnosed(diagnostic),
+                crate::semantic_query::ResolveCallFailure::Diagnosed(recipe),
             ) => {
-                self.record_checker_diagnostic(diagnostic);
+                self.record_call_diagnostic(&recipe, site);
                 Some(self.degraded_unrepresentable_callee())
             }
             // A PROVEN refusal — the callee is not callable, or no
@@ -28563,6 +28662,29 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     return self
                         .eval_call_via_resolve_call(callee, site, arguments)
                         .unwrap_or_else(|| self.degraded_unrepresentable_callee());
+                }
+                // A lone non-generic callee with a DECLARED return answers
+                // that return whatever the arguments, and the checker still
+                // checks the call: the executor decides applicability so a
+                // call it does not accept carries the checker's diagnostic.
+                // An undecided executor leaves the declared read below.
+                if prepared.as_ref().is_some_and(|prepared| {
+                    matches!(
+                        prepared.signatures.as_slice(),
+                        [signature] if signature.type_parameters.is_empty()
+                            && matches!(
+                                signature.return_source,
+                                verter_type_expr::facts::FunctionReturnSource::Declared(_)
+                            )
+                    )
+                }) {
+                    if let Some(callee) = self.direct_callee_value_node(target) {
+                        if let Some(value) =
+                            self.eval_call_via_resolve_call(callee, site, arguments)
+                        {
+                            return value;
+                        }
+                    }
                 }
                 let source = prepared.as_ref().and_then(|prepared| {
                     prepared

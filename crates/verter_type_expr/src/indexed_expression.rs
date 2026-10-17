@@ -60,6 +60,11 @@ pub struct IndexedValueCallArg {
     pub context_sensitive: bool,
     /// Exact return carrier for an inline callback argument.
     pub function_return_source: Option<FunctionReturnSource>,
+    /// Where the checker reports a failure of this argument's returned
+    /// value (`elaborateArrowFunction`): the start of the returned
+    /// expression of an arrow function whose body is that expression and
+    /// none of whose parameters is annotated. `None` for any other argument.
+    pub return_point: Option<u32>,
 }
 
 /// One direct call/construct record. Children are parsed typed IR; no raw
@@ -67,6 +72,11 @@ pub struct IndexedValueCallArg {
 #[derive(Debug, Clone, PartialEq)]
 pub struct IndexedValueCall {
     pub point: u32,
+    /// The start of the node the checker reports a diagnostic about the
+    /// whole call at (`getDiagnosticSpanForCallNode`): a property-access
+    /// callee's name, any other callee of a call, and the expression itself
+    /// for `new` and a tagged template.
+    pub report_point: u32,
     pub kind: IndexedValueCallKind,
     pub callee: Box<IndexedValueExpression>,
     pub receiver: Option<Box<IndexedValueExpression>>,

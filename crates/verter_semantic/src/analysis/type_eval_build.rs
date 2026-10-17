@@ -96,6 +96,7 @@ pub fn offset_indexed_value_expression(expression: &mut IndexedValueExpression, 
             IndexedValueExpression::Member { object, .. } => pending.push(object),
             IndexedValueExpression::Call(call) => {
                 call.point = call.point.saturating_add(base);
+                call.report_point = call.report_point.saturating_add(base);
                 let IndexedValueCall {
                     callee,
                     receiver,
@@ -108,6 +109,9 @@ pub fn offset_indexed_value_expression(expression: &mut IndexedValueExpression, 
                 }
                 for argument in Arc::make_mut(args) {
                     argument.point = argument.point.saturating_add(base);
+                    argument.return_point = argument
+                        .return_point
+                        .map(|point| point.saturating_add(base));
                     pending.push(&mut argument.expression);
                 }
             }
@@ -6856,6 +6860,7 @@ fn build_indexed_call(
         literal_mode: indexed_literal_mode(Some(expression)),
         context_sensitive: indexed_context_sensitive(Some(expression)),
         function_return_source: None,
+        return_point: indexed_argument_return_point(expression),
     };
     let call_arguments = |arguments: &[oxc_ast::ast::Argument<'_>], lowered: Vec<_>| {
         let args: Vec<IndexedValueCallArg> = arguments
@@ -6874,6 +6879,7 @@ fn build_indexed_call(
     match node {
         IndexedCallNode::Call(call) => IndexedValueCall {
             point: call.span.start,
+            report_point: indexed_call_report_point(&call.callee),
             kind: IndexedValueCallKind::Call,
             callee: Box::new(callee),
             receiver,
@@ -6885,6 +6891,7 @@ fn build_indexed_call(
         },
         IndexedCallNode::New(call) => IndexedValueCall {
             point: call.span.start,
+            report_point: call.span.start,
             kind: IndexedValueCallKind::Construct,
             callee: Box::new(callee),
             receiver: None,
@@ -6905,6 +6912,7 @@ fn build_indexed_call(
                 literal_mode: IndexedValueLiteralMode::Literal,
                 context_sensitive: false,
                 function_return_source: None,
+                return_point: None,
             });
             args.extend(
                 tagged
@@ -6916,6 +6924,7 @@ fn build_indexed_call(
             );
             IndexedValueCall {
                 point: tagged.span.start,
+                report_point: tagged.span.start,
                 kind: IndexedValueCallKind::Call,
                 callee: Box::new(callee),
                 receiver,
@@ -7249,6 +7258,7 @@ fn lower_indexed_call_expression_observed(
     let (callee, receiver) = indexed_callee_and_receiver(&call.callee, source, &mut observe);
     IndexedValueCall {
         point: call.span.start,
+        report_point: indexed_call_report_point(&call.callee),
         kind: IndexedValueCallKind::Call,
         callee: Box::new(callee),
         receiver,
@@ -7280,6 +7290,7 @@ fn lower_indexed_new_expression_observed(
 ) -> IndexedValueCall {
     IndexedValueCall {
         point: call.span.start,
+        report_point: call.span.start,
         kind: IndexedValueCallKind::Construct,
         callee: Box::new(lower_indexed_value_expression(&call.callee, source)),
         receiver: None,
@@ -7327,6 +7338,7 @@ fn lower_indexed_tagged_template_expression_observed(
         literal_mode: IndexedValueLiteralMode::Literal,
         context_sensitive: false,
         function_return_source: None,
+        return_point: None,
     });
     for (index, expression) in tagged.quasi.expressions.iter().enumerate() {
         args.push(lower_indexed_call_argument(
@@ -7340,6 +7352,7 @@ fn lower_indexed_tagged_template_expression_observed(
     }
     IndexedValueCall {
         point: tagged.span.start,
+        report_point: tagged.span.start,
         kind: IndexedValueCallKind::Call,
         callee: Box::new(callee),
         receiver,
@@ -7425,7 +7438,46 @@ fn lower_indexed_call_argument(
         literal_mode: indexed_literal_mode(Some(expression)),
         context_sensitive: indexed_context_sensitive(Some(expression)),
         function_return_source: None,
+        return_point: indexed_argument_return_point(expression),
     }
+}
+
+/// Where the checker reports a diagnostic about a whole call whose callee
+/// is `callee` (`getDiagnosticSpanForCallNode`): a property access's name,
+/// otherwise the callee expression.
+fn indexed_call_report_point(callee: &Expression<'_>) -> u32 {
+    match callee {
+        Expression::StaticMemberExpression(member) => member.property.span.start,
+        Expression::PrivateFieldExpression(member) => member.field.span.start,
+        callee => callee.span().start,
+    }
+}
+
+/// Where the checker reports a failure of an argument's returned value
+/// (`elaborateArrowFunction`): the returned expression of an arrow function
+/// whose body is an expression and none of whose parameters is annotated,
+/// through parentheses around the argument.
+fn indexed_argument_return_point(mut expression: &Expression<'_>) -> Option<u32> {
+    while let Expression::ParenthesizedExpression(parenthesized) = expression {
+        expression = &parenthesized.expression;
+    }
+    let Expression::ArrowFunctionExpression(arrow) = expression else {
+        return None;
+    };
+    if arrow
+        .params
+        .items
+        .iter()
+        .any(|param| param.type_annotation.is_some())
+        || arrow
+            .params
+            .rest
+            .as_ref()
+            .is_some_and(|rest| rest.type_annotation.is_some())
+    {
+        return None;
+    }
+    arrow.get_expression().map(|body| body.span().start)
 }
 
 fn lower_indexed_explicit_type_arguments(

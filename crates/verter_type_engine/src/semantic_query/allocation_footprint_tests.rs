@@ -130,16 +130,31 @@ fn slice_growth<T>(count: usize) -> usize {
 #[test]
 fn a_flow_return_is_charged_for_its_nested_backing() {
     use crate::project_semantic_dispatch::flow_return::{ExactMemberValue, ExactReturnKeyDomain};
-    use crate::semantic_query::{CheckerDiagnostic, FlowReturnResult};
+    use crate::semantic_query::{
+        CheckerDiagnosticArguments, CheckerDiagnosticCode, CheckerDiagnosticOccurrence,
+        CheckerDiagnosticRecipe, CheckerDiagnosticSite, CheckerDiagnosticSubject, FlowReturnResult,
+    };
 
     const ARMS: usize = 5_000;
     const TEXT: usize = 9_000;
     let canonical: Arc<str> = Arc::from("/a.ts");
     let small = FlowReturnResult::for_footprint_tests(SemanticNodeId(1), nodes(0));
-    let diagnostics: OwnedSlice<CheckerDiagnostic> = (0..ARMS)
-        .map(|_| CheckerDiagnostic {
-            code: crate::semantic_query::CheckerDiagnosticCode::NoMatchingOverload,
-            operation: crate::semantic_query::CheckerDiagnosticOperation::CallResolution,
+    let recipe = CheckerDiagnosticRecipe::call(
+        CheckerDiagnosticCode::NoMatchingOverload,
+        CheckerDiagnosticArguments::None,
+        CheckerDiagnosticSubject::Operation,
+    );
+    let diagnostics: OwnedSlice<CheckerDiagnosticOccurrence> = (0..ARMS)
+        .map(|ordinal| {
+            let site = CheckerDiagnosticSite {
+                operation_start: Some(ordinal as u32),
+                ..Default::default()
+            };
+            recipe
+                .bind(&site, |_, _| {
+                    unreachable!("the message has no type argument")
+                })
+                .expect("the site names the call")
         })
         .collect();
     let long_key: Arc<str> = Arc::from("k".repeat(TEXT));
@@ -164,7 +179,7 @@ fn a_flow_return_is_charged_for_its_nested_backing() {
         verter_session_query::retention::owned::Owned::new(large),
     ));
     let nested = slice_growth::<SemanticNodeId>(ARMS)
-        + slice_growth::<CheckerDiagnostic>(ARMS)
+        + slice_growth::<CheckerDiagnosticOccurrence>(ARMS)
         + 2 * arc_block_bytes(TEXT);
     assert!(
         large_bytes >= small_bytes + nested,

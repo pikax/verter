@@ -44,6 +44,7 @@ fn indexed_call(point: u32) -> verter_type_expr::IndexedValueExpression {
     use verter_type_expr::{IndexedValueCall, IndexedValueCallKind, IndexedValueExpression};
     IndexedValueExpression::Call(IndexedValueCall {
         point,
+        report_point: point,
         kind: IndexedValueCallKind::Call,
         callee: Box::new(IndexedValueExpression::Value(
             verter_type_expr::TypeExpr::TypeOf(verter_type_expr::ValueRef {
