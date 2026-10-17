@@ -880,7 +880,8 @@ impl RootChain {
         self.iter().last()
     }
 
-    /// Each link's shared allocation address with its step, outermost first, so a footprint measurement can count a link shared by several
+    /// Each link's shared allocation address with its step, outermost
+    /// first, so a footprint measurement can count a link shared by several
     /// chains once.
     pub fn links(&self) -> impl Iterator<Item = (*const (), &ResolvedRootStep)> + '_ {
         std::iter::successors(self.head.as_ref(), |link| link.rest.head.as_ref())
@@ -993,4 +994,57 @@ pub struct FallthroughBranch {
     pub root_chain: RootChain,
     /// Resolution status of this branch.
     pub status: BranchStatus,
+}
+
+#[cfg(test)]
+mod root_chain_tests {
+    use super::{ResolvedRootStep, RootChain};
+
+    fn tag(name: &str) -> ResolvedRootStep {
+        ResolvedRootStep::NativeTag {
+            tag: name.to_string(),
+        }
+    }
+
+    /// A prepended hop shares its child's chain: the parent writes one link,
+    /// keeps the child's steps in order after it, and a chain held by the
+    /// child alone survives the parent being dropped.
+    #[test]
+    fn prepend_shares_the_child_chain_in_order() {
+        let child = RootChain::from(vec![tag("b"), tag("c")]);
+        let parent = RootChain::prepend(tag("a"), &child);
+
+        assert_eq!(parent.len(), 3);
+        assert_eq!(
+            parent.iter().cloned().collect::<Vec<_>>(),
+            vec![tag("a"), tag("b"), tag("c")]
+        );
+        assert_eq!(parent.first(), Some(&tag("a")));
+        assert_eq!(parent.last(), Some(&tag("c")));
+        let parent_links: Vec<_> = parent.links().map(|(link, _)| link).collect();
+        let child_links: Vec<_> = child.links().map(|(link, _)| link).collect();
+        assert_eq!(&parent_links[1..], &child_links[..], "the tail is shared");
+
+        assert_eq!(parent, RootChain::from(vec![tag("a"), tag("b"), tag("c")]));
+        assert_ne!(parent, RootChain::from(vec![tag("a"), tag("c"), tag("b")]));
+        assert_ne!(parent, child);
+
+        drop(parent);
+        assert_eq!(
+            child.iter().cloned().collect::<Vec<_>>(),
+            vec![tag("b"), tag("c")]
+        );
+    }
+
+    /// Dropping a very long chain runs in a loop: a recursive drop of one
+    /// native frame per link overflows the test thread's stack here.
+    #[test]
+    fn a_long_chain_drops_without_native_recursion() {
+        let mut chain = RootChain::default();
+        for _ in 0..300_000 {
+            chain = RootChain::prepend(tag(""), &chain);
+        }
+        assert_eq!(chain.len(), 300_000);
+        drop(chain);
+    }
 }

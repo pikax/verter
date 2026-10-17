@@ -114,6 +114,10 @@ pub use fallthrough::{
     FallthroughResolutionView, FallthroughResolverHost, IntrinsicMemberTypeSource,
     IntrinsicSurfaceMember, KnownSpreadKeys, ResolvedConsumedBindings, ResolvedFallthroughSurface,
 };
+#[cfg(any(test, feature = "semantic-observe"))]
+pub use fallthrough::{
+    fallthrough_composition_work, reset_fallthrough_composition_work, FallthroughCompositionWork,
+};
 pub use fallthrough_override_key::FallthroughOverrideIdentity;
 pub(crate) use fallthrough_request::FallthroughRequestHost;
 pub(crate) use fallthrough_request::{run_fallthrough_request, FallthroughStableAdmission};

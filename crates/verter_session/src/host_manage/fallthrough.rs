@@ -337,13 +337,12 @@ impl VerterHost {
                         condition_text: None,
                         props: Vec::new(),
                         events: Vec::new(),
-                        root_chain: vec![ResolvedRootStep::Unresolved {
+                        root_chain: RootChain::single(ResolvedRootStep::Unresolved {
                             tag: "component".to_string(),
                             reason: UnresolvedBranchReason::Cycle {
                                 canonical_id: canonical_id.to_string(),
                             },
-                        }]
-                        .into(),
+                        }),
                         status: BranchStatus::Unresolved {
                             reason: UnresolvedBranchReason::Cycle {
                                 canonical_id: canonical_id.to_string(),

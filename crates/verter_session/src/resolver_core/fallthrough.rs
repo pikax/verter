@@ -459,10 +459,9 @@ pub fn append_native_candidate_branch<H: FallthroughResolverHost>(
         condition_text,
         props: inherited_props,
         events: inherited_events,
-        root_chain: vec![ResolvedRootStep::NativeTag {
+        root_chain: RootChain::single(ResolvedRootStep::NativeTag {
             tag: tag.to_string(),
-        }]
-        .into(),
+        }),
         status,
     });
 }
@@ -586,11 +585,10 @@ pub fn append_component_candidate_branches<H: FallthroughResolverHost>(
                 condition_text,
                 props: inherited_props,
                 events: inherited_events,
-                root_chain: vec![ResolvedRootStep::Component {
+                root_chain: RootChain::single(ResolvedRootStep::Component {
                     canonical_id: child_id,
                     component_name: component_name.to_string(),
-                }]
-                .into(),
+                }),
                 status,
             });
         }
@@ -991,11 +989,10 @@ pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
                                 condition_text: branch.condition_text.clone(),
                                 props: Vec::new(),
                                 events: Vec::new(),
-                                root_chain: vec![ResolvedRootStep::Unresolved {
+                                root_chain: RootChain::single(ResolvedRootStep::Unresolved {
                                     tag: "component".to_string(),
                                     reason: UnresolvedBranchReason::DynamicComponentIs,
-                                }]
-                                .into(),
+                                }),
                                 status: BranchStatus::Unresolved {
                                     reason: UnresolvedBranchReason::DynamicComponentIs,
                                 },
@@ -1106,13 +1103,12 @@ pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
                                     condition_text: branch.condition_text.clone(),
                                     props: Vec::new(),
                                     events: Vec::new(),
-                                    root_chain: vec![ResolvedRootStep::Unresolved {
+                                    root_chain: RootChain::single(ResolvedRootStep::Unresolved {
                                         tag: name.clone(),
                                         reason: UnresolvedBranchReason::UnresolvedChildImport {
                                             import_source: None,
                                         },
-                                    }]
-                                    .into(),
+                                    }),
                                     status: BranchStatus::Unresolved {
                                         reason: UnresolvedBranchReason::UnresolvedChildImport {
                                             import_source: None,
@@ -1129,13 +1125,12 @@ pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
                             condition_text: branch.condition_text.clone(),
                             props: Vec::new(),
                             events: Vec::new(),
-                            root_chain: vec![ResolvedRootStep::Unresolved {
+                            root_chain: RootChain::single(ResolvedRootStep::Unresolved {
                                 tag: tag.clone(),
                                 reason: UnresolvedBranchReason::RootTarget {
                                     reason: reason.clone(),
                                 },
-                            }]
-                            .into(),
+                            }),
                             status: BranchStatus::Unresolved {
                                 reason: UnresolvedBranchReason::RootTarget {
                                     reason: reason.clone(),
@@ -1367,13 +1362,12 @@ fn unresolved_child_import_branch(
         condition_text,
         props: Vec::new(),
         events: Vec::new(),
-        root_chain: vec![ResolvedRootStep::Unresolved {
+        root_chain: RootChain::single(ResolvedRootStep::Unresolved {
             tag: component_name.to_string(),
             reason: UnresolvedBranchReason::UnresolvedChildImport {
                 import_source: import_source.clone(),
             },
-        }]
-        .into(),
+        }),
         status: BranchStatus::Unresolved {
             reason: UnresolvedBranchReason::UnresolvedChildImport { import_source },
         },
@@ -1391,11 +1385,10 @@ fn unresolved_child_resolution_branch(
         condition_text,
         props: Vec::new(),
         events: Vec::new(),
-        root_chain: vec![ResolvedRootStep::Component {
+        root_chain: RootChain::single(ResolvedRootStep::Component {
             canonical_id: child_id,
             component_name: component_name.to_string(),
-        }]
-        .into(),
+        }),
         status: BranchStatus::Unresolved {
             reason: UnresolvedBranchReason::ChildResolutionFailed,
         },
