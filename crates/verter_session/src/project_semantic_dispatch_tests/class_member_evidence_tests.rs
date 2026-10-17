@@ -86,6 +86,7 @@ fn flow_return_key(
 /// self-roots and every leaf fact its memo entry holds.
 struct FlowReturnRead {
     ty: Option<TypeExpr>,
+    diagnostics: Vec<u32>,
     self_roots: Vec<Arc<str>>,
     facts: Vec<FactVersionRef>,
 }
@@ -113,11 +114,18 @@ fn read_flow_return(host: &Arc<VerterHost>, function: &str) -> FlowReturnRead {
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let key = SemanticQueryKey::FlowReturn(Box::new(flow_return_key(&dispatch, function)));
-    let ty = match dispatch.execute(key.clone()) {
+    let (ty, diagnostics) = match dispatch.execute(key.clone()) {
         QueryResult::Value(SemanticQueryOutput {
             value: SemanticQueryValue::FlowReturn(result),
             ..
-        }) => host.project_node_to_type_expr_for_test(result.return_type()),
+        }) => (
+            host.project_node_to_type_expr_for_test(result.return_type()),
+            result
+                .checker_diagnostics()
+                .iter()
+                .map(|diagnostic| diagnostic.code.code())
+                .collect(),
+        ),
         other => panic!("`{function}` produced no flow return: {other:?}"),
     };
     let self_roots = dispatch
@@ -132,6 +140,7 @@ fn read_flow_return(host: &Arc<VerterHost>, function: &str) -> FlowReturnRead {
         .unwrap_or_default();
     FlowReturnRead {
         ty,
+        diagnostics,
         self_roots,
         facts,
     }
@@ -287,6 +296,139 @@ fn a_reference_free_member_read_roots_on_the_member_fact_not_the_class_file() {
         strict_roots_on_class_file(&whole),
         "a member whose type names a declaration keeps the class file as a strict root: {:?}",
         whole.self_roots
+    );
+
+    // Validate the observation actually adopted by the read, rather than a
+    // separately recomputed hash. Indexing is explicit here: this checks the
+    // member fact, not the enclosing query's cross-file warm reuse.
+    use verter_session_query::facts::store_view::StoreView;
+    let adopted = precise
+        .facts
+        .iter()
+        .find(|fact| is_member_fact(fact, "B", "a"))
+        .unwrap();
+    for (source, valid) in [
+        ("export class B { u = 22; a: string = 's'; }", true),
+        ("export class B { a: number = 1; }", false),
+        ("export class B { }", false),
+        (
+            "export class A {} export class B extends A { a: string = 's'; }",
+            false,
+        ),
+        (
+            "export class B { a: string = 's'; } interface B { z: 1 }",
+            false,
+        ),
+    ] {
+        upsert(&host, CLASS, source);
+        let _ = host.ensure_indexed_ready_serve(CLASS);
+        assert_eq!(
+            host.resolver_store_view_read()
+                .into_owned_view()
+                .validates(adopted),
+            valid,
+            "adopted evidence validates against the current class: {source}"
+        );
+    }
+}
+
+/// Types requiring a binding, accessors, methods and merged declarations
+/// keep their content proof. They cannot use an exact property value to
+/// certify the work their other inputs still require.
+#[test]
+fn member_reads_without_equivalent_proof_keep_content_evidence() {
+    let mut failures = Vec::new();
+    for (source, receiver) in [
+        (
+            "export interface Other { o: 1 } export class B { a!: Other; }",
+            "B",
+        ),
+        ("export class B { a(): string { return 's'; } }", "B"),
+        ("export class B { get a(): string { return 's'; } }", "B"),
+        ("export class B<T> { a!: T; }", "B<string>"),
+        ("export class B { a!: this; }", "B"),
+        (
+            "declare const value: string; export class B { a!: typeof value; }",
+            "B",
+        ),
+        (
+            "export class B { a: string = 's'; } interface B { z: 1 }",
+            "B",
+        ),
+    ] {
+        let host = host_with(
+            source,
+            &format!(
+                "import {{ B }} from './c'; export function f(b: {receiver}) {{ return b.a; }}"
+            ),
+        );
+        let read = read_flow_return(&host, "f");
+        // A substituted argument can carry the caller's node scope. The
+        // fallback must still retain the class's whole-content evidence;
+        // node provenance alone does not enumerate all dependency facts.
+        let has_content_fact = read.facts.iter().any(|fact| {
+            matches!(fact, FactVersionRef::FileWholeHash { canonical_id, .. } if canonical_id == CLASS)
+        });
+        if !has_content_fact || read.facts.iter().any(|fact| is_member_fact(fact, "B", "a")) {
+            failures.push(format!(
+                "{source}: roots {:?}, facts {:?}",
+                read.self_roots, read.facts
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The member cutoff must not cut off its caller's work: a later generic
+/// call still diagnoses a rejected argument, and writes still narrow the
+/// member read. Expected returns and TS2345 are checked with TypeScript 7.0.2.
+#[test]
+fn member_cutoff_preserves_writes_and_cold_warm_edited_diagnostics() {
+    const READER_SOURCE: &str = "import { B } from './c';\n\
+        declare function con<T extends string>(x: T): T;\n\
+        export function f(b: B) { return con(b.a); }\n\
+        export function g(b: B) { b.w = 's'; return b.w; }\n";
+    let string = Some(TypeExpr::Primitive(verter_type_expr::PrimitiveName::String));
+    let host = host_with(
+        "export class B { a: string = 's'; w!: string | number; }",
+        READER_SOURCE,
+    );
+    for (source, diagnostics) in [
+        (
+            "export class B { a: string = 's'; w!: string | number; }",
+            vec![],
+        ),
+        (
+            "export class B { a: string = 's'; w!: string | number; u = 22; }",
+            vec![],
+        ),
+        (
+            "export class B { a: number = 1; w!: string | number; u = 22; }",
+            vec![2345],
+        ),
+    ] {
+        upsert(&host, CLASS, source);
+        let fresh = host_with(source, READER_SOURCE);
+        for (function, expected) in [("f", diagnostics), ("g", vec![])] {
+            for read in [
+                read_flow_return(&host, function),
+                read_flow_return(&host, function),
+                read_flow_return(&fresh, function),
+            ] {
+                assert_eq!(read.ty, string, "{function}: {source}");
+                assert_eq!(read.diagnostics, expected, "{function}: {source}");
+            }
+        }
+    }
+    upsert(
+        &host,
+        READER,
+        &READER_SOURCE.replace("b.w = 's'", "b.w = 1"),
+    );
+    assert_eq!(
+        read_flow_return(&host, "g").ty,
+        Some(TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)),
+        "an affecting write invalidates the enclosing return"
     );
 }
 
