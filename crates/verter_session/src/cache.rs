@@ -92,14 +92,16 @@ pub(crate) fn invalidate_nodes(
     nodes: &[VirtualNodeKind],
 ) {
     for slot in slots.values_mut() {
+        let mut products = crate::types::CompileProducts::clone(&slot.products);
         for node in nodes {
-            if let Some(outputs) = slot.products.outputs_mut() {
+            if let Some(outputs) = products.outputs_mut() {
                 outputs.remove(node);
             }
-            if let Some(last_good) = slot.products.last_good_outputs_mut() {
+            if let Some(last_good) = products.last_good_outputs_mut() {
                 last_good.remove(node);
             }
         }
+        slot.products = verter_retention::heap_size::owned_tree(products);
     }
 }
 
@@ -220,7 +222,7 @@ mod tests {
     use rustc_hash::FxHashMap;
     use std::sync::Arc;
 
-    use crate::types::{CachedVirtualFile, CompileSlot, DiagnosticsSnapshot, VirtualMeta};
+    use crate::types::{CachedVirtualFile, DiagnosticsSnapshot, VirtualMeta};
 
     /// @ai-generated - Fallback: changed=true but no slice changes → all new nodes reported
     /// This covers non-SFC files where semantic_hash changes but no specific slices exist.
@@ -270,7 +272,7 @@ mod tests {
         );
         slots.insert(
             1u64,
-            CompileSlot {
+            crate::types::CompileSlotFixture {
                 semantic_hash: [0; 16],
                 content_override_hash: 0,
                 css_hash_override: None,
@@ -284,7 +286,8 @@ mod tests {
                 last_access_tick: 1,
                 fact_dep_signature:
                     verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
-            },
+            }
+            .into_slot(),
         );
 
         invalidate_nodes(&mut slots, &[VirtualNodeKind::Main]);

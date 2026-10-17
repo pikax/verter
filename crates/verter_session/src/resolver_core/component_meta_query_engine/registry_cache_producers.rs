@@ -485,7 +485,11 @@ impl ComponentMetaQueryEngine<'_> {
                 }
             });
             match host_value {
-                Some(arc_decl) => arc_decl.as_ref().clone(),
+                Some(arc_decl) => {
+                    verter_session_query::declarations::metadata::ResolvedTypeDeclaration::clone(
+                        &arc_decl,
+                    )
+                }
                 // `None` is a genuine compute failure, or a post-compute
                 // REVALIDATION reject — the store view MOVED under the compute
                 // (a file it read was edited, or the project generation was

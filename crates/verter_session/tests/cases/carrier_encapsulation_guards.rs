@@ -103,8 +103,20 @@ const CARRIER_STRUCTS: [&str; 4] = [
 /// The only derives the carrier structs may carry — the exact built-ins. A
 /// custom or qualified derive could synthesise a leaking trait impl a syn
 /// `#[derive(...)]` scan would treat as benign, so the set is CLOSED (each
-/// carrier must derive EXACTLY these five, by bare single-segment ident).
+/// carrier must derive EXACTLY its set, by bare single-segment ident). A
+/// carrier holding a raw argument list or name has no `Clone`: a public
+/// copy would carry those allocations away from the payload charging them.
 const ALLOWED_DERIVES: [&str; 5] = ["Clone", "PartialEq", "Eq", "Hash", "Debug"];
+const ALLOWED_DERIVES_NO_COPY: [&str; 4] = ["PartialEq", "Eq", "Hash", "Debug"];
+
+/// The exact derive set `owner` carries.
+fn allowed_derives(owner: &str) -> &'static [&'static str] {
+    if owner == "TypeOfNominalCarrier" {
+        &ALLOWED_DERIVES
+    } else {
+        &ALLOWED_DERIVES_NO_COPY
+    }
+}
 
 // ════════════════════════════════════════════════════════════════════
 // EXACT-SHAPE description tables. The exact-shape allowlist accepts an item
@@ -135,11 +147,11 @@ const EXPECTED_HEAD_ALIASES: [(&str, &str); 3] = [
     ),
     (
         "BareRefHead",
-        "pub(crate) type BareRefHead<'a> = (&'a Arc<str>, &'a NodeScopeId);",
+        "pub(crate) type BareRefHead<'a> = (&'a str, &'a NodeScopeId);",
     ),
     (
         "ImportTypeHead",
-        "pub(crate) type ImportTypeHead<'a> = (&'a Arc<str>, &'a OwnedSlice<OwnedStr>, bool);",
+        "pub(crate) type ImportTypeHead<'a> = (&'a str, &'a OwnedSlice<OwnedStr>, bool);",
     ),
 ];
 
@@ -204,7 +216,7 @@ const CARRIER_SPECS: [CarrierSpec; 4] = [
                 "new",
                 "fn new(name: Arc<str>, scope: NodeScopeId, type_args: Arc<[SemanticNodeId]>) -> Self",
             ),
-            ("name", "fn name(&self) -> &Arc<str>"),
+            ("name", "fn name(&self) -> &str"),
             ("scope", "fn scope(&self) -> &NodeScopeId"),
             ("arg_nodes", "fn arg_nodes(&self) -> &[SemanticNodeId]"),
             (
@@ -226,7 +238,7 @@ const CARRIER_SPECS: [CarrierSpec; 4] = [
                 "new",
                 "fn new(specifier: Arc<str>, qualifier: OwnedSlice<OwnedStr>, type_args: Arc<[SemanticNodeId]>, typeof_query: bool) -> Self",
             ),
-            ("specifier", "fn specifier(&self) -> &Arc<str>"),
+            ("specifier", "fn specifier(&self) -> &str"),
             ("qualifier", "fn qualifier(&self) -> &OwnedSlice<OwnedStr>"),
             ("typeof_query", "fn typeof_query(&self) -> bool"),
             ("arg_nodes", "fn arg_nodes(&self) -> &[SemanticNodeId]"),
@@ -1317,10 +1329,11 @@ fn check_derive_exact(attrs: &[syn::Attribute], owner: &str, v: &mut Vec<String>
         });
     }
     let actual: BTreeSet<&str> = derives.iter().map(String::as_str).collect();
-    let expected: BTreeSet<&str> = ALLOWED_DERIVES.iter().copied().collect();
+    let allowed = allowed_derives(owner);
+    let expected: BTreeSet<&str> = allowed.iter().copied().collect();
     if actual != expected {
         v.push(format!(
-            "carrier struct `{owner}` must derive EXACTLY {ALLOWED_DERIVES:?} — found {derives:?} \
+            "carrier struct `{owner}` must derive EXACTLY {allowed:?} — found {derives:?} \
              (an extra derive could attach a leaking trait surface; a missing one changes the \
              frozen shape)"
         ));

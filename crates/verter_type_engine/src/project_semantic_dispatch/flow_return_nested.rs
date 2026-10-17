@@ -510,7 +510,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             &content.bindings,
             skeleton,
             bound,
-            planned.as_deref(),
+            planned.as_deref().map(|planned| &**planned),
             anchor,
             &key,
             outer_env,

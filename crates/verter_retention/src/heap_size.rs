@@ -168,6 +168,7 @@ inline_heap_size!(
     std::num::NonZeroU32,
     std::num::NonZeroU64,
     std::num::NonZeroUsize,
+    verter_span::Span,
 );
 
 impl<T: Copy, const N: usize> HeapSize for [T; N] {
@@ -177,6 +178,13 @@ impl<T: Copy, const N: usize> HeapSize for [T; N] {
 }
 
 impl<T: ?Sized> HeapSize for std::marker::PhantomData<T> {
+    fn heap_size<'t>(&'t self, _meter: &mut HeapMeter<'_, 't>) -> usize {
+        0
+    }
+}
+
+impl HeapSize for str {
+    /// A borrowed `str` (a `&'static` label) owns nothing.
     fn heap_size<'t>(&'t self, _meter: &mut HeapMeter<'_, 't>) -> usize {
         0
     }

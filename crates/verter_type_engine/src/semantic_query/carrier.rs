@@ -89,10 +89,6 @@ pub struct TypeOfCarrier {
 }
 
 impl TypeOfCarrier {
-    pub(crate) fn clone(&self) -> Self {
-        self.with_type_args(Arc::clone(&self.type_args))
-    }
-
     fn new(
         value_root: ValueRootKey,
         path: OwnedSlice<OwnedStr>,
@@ -201,10 +197,6 @@ pub struct BareRefCarrier {
 }
 
 impl BareRefCarrier {
-    pub(crate) fn clone(&self) -> Self {
-        self.with_type_args(Arc::clone(&self.type_args))
-    }
-
     fn new(name: Arc<str>, scope: NodeScopeId, type_args: Arc<[SemanticNodeId]>) -> Self {
         Self {
             name,
@@ -255,10 +247,6 @@ pub struct ImportTypeCarrier {
 }
 
 impl ImportTypeCarrier {
-    pub(crate) fn clone(&self) -> Self {
-        self.with_type_args(Arc::clone(&self.type_args))
-    }
-
     fn new(
         specifier: Arc<str>,
         qualifier: OwnedSlice<OwnedStr>,
