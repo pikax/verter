@@ -1310,17 +1310,22 @@ pub(crate) struct NodeArenaCore {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ArenaRaceEvent {
+pub(super) enum ArenaRaceEvent {
     BeforeDedupLookup,
     BeforeInnerWrite,
     BeforeDedupRetain,
-    BeforeRootRelease { blocked: bool },
+    BeforeRootRelease {
+        blocked: bool,
+    },
     AfterRootRelease,
     BeforeShardStorageSnapshot,
+    /// A destroyed-log drain found a sidecar lock held, while it still
+    /// holds the sidecar locks it did acquire.
+    SidecarDrainBlocked,
 }
 
 #[cfg(test)]
-type ArenaRaceHook = Arc<dyn Fn(ArenaRaceEvent) + Send + Sync>;
+pub(super) type ArenaRaceHook = Arc<dyn Fn(ArenaRaceEvent) + Send + Sync>;
 
 impl Default for NodeArena {
     fn default() -> Self {
@@ -1397,7 +1402,12 @@ impl NodeArenaCore {
     }
 
     #[cfg(test)]
-    fn race_event(&self, event: ArenaRaceEvent) {
+    pub(super) fn set_race_hook(&self, hook: Option<ArenaRaceHook>) {
+        *self.race_hook.lock() = hook;
+    }
+
+    #[cfg(test)]
+    pub(super) fn race_event(&self, event: ArenaRaceEvent) {
         let hook = self.race_hook.lock().clone();
         if let Some(hook) = hook {
             hook(event);

@@ -168,6 +168,14 @@ pub(super) struct SidecarSink {
     /// Set from the release that leaves the destroyed log past its threshold
     /// until a drain empties it.
     owed: Arc<std::sync::atomic::AtomicBool>,
+    /// Held by the one drain attempt in progress. Drain attempts never
+    /// overlap, so a sidecar lock a drain finds held is held by an ordinary
+    /// guard, whose unlock settles the obligation.
+    draining: std::sync::atomic::AtomicBool,
+    /// Set by a settle that found a drain in progress: that drain may hold
+    /// the lock whose unlock asked for the settle, so it retries once it has
+    /// released its partial locks rather than leave the obligation stranded.
+    rerun: std::sync::atomic::AtomicBool,
 }
 
 impl SidecarSink {
@@ -181,13 +189,36 @@ impl SidecarSink {
     }
 
     /// Settle a recorded obligation, if any.
+    ///
+    /// One drain attempt runs at a time. A settle arriving while one is in
+    /// progress asks it to run again and returns: the attempt in progress
+    /// may hold the very lock whose unlock asked for this settle, so had it
+    /// tried itself it would have failed on that partial lock, and the
+    /// attempt in progress could then fail and return too, leaving the
+    /// obligation with no holder to settle it.
     pub(super) fn settle_owed(&self, arena: &super::arena::NodeArenaCore) {
+        use std::sync::atomic::Ordering::{Relaxed, SeqCst};
         loop {
             // Pairs with the fence in a sidecar guard's unlock: an
             // obligation recorded while this drain held the locks is seen
             // here, and one recorded before a holder unlocked is seen there.
-            std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
-            if !self.owed.load(std::sync::atomic::Ordering::Relaxed) || !self.try_drain(arena) {
+            std::sync::atomic::fence(SeqCst);
+            if !self.owed.load(Relaxed) {
+                return;
+            }
+            // Set before trying to take the drain: if the attempt in
+            // progress releases it after this settle saw it held, that
+            // attempt then reads this request.
+            self.rerun.store(true, SeqCst);
+            if self.draining.swap(true, SeqCst) {
+                return;
+            }
+            self.rerun.store(false, SeqCst);
+            let drained = self.try_drain(arena);
+            self.draining.store(false, SeqCst);
+            // A blocked attempt retries only for a settle it turned away;
+            // otherwise the guard that blocked it settles as it unlocks.
+            if !drained && !self.rerun.swap(false, SeqCst) {
                 return;
             }
         }
@@ -209,12 +240,17 @@ impl SidecarSink {
             drop(arena.drain_destroyed());
             return true;
         };
-        let (Some(mut reach), Some(mut fifo), Some(mut derivation), Some(mut classes)) = (
+        let guards = (
             reach.try_lock_raw(),
             fifo.try_lock_raw(),
             derivation.try_lock_raw(),
             classes.try_lock_raw(),
-        ) else {
+        );
+        let (Some(mut reach), Some(mut fifo), Some(mut derivation), Some(mut classes)) = guards
+        else {
+            // The partial locks are still held here.
+            #[cfg(test)]
+            arena.race_event(super::arena::ArenaRaceEvent::SidecarDrainBlocked);
             return false;
         };
         self.owed.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -401,6 +437,8 @@ impl SemanticGraphStore {
             derivation: Arc::downgrade(&self.derivation),
             key_classes: Arc::downgrade(&self.key_classes),
             owed,
+            draining: std::sync::atomic::AtomicBool::new(false),
+            rerun: std::sync::atomic::AtomicBool::new(false),
         });
     }
 
