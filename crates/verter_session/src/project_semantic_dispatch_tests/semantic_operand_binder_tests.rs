@@ -265,12 +265,12 @@ fn jsdoc_typedef_path_through_a_binder_binds_locally() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let locator = AuthoredBodyLocator::JsdocTypedefBody(JsdocTypedefBodyLocator {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(OWNER),
+            canonical_id: verter_type_expr::OwnedStr::from(OWNER),
             owner: TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("FromDoc"),
+            symbol: verter_type_expr::OwnedStr::from("FromDoc"),
             space: LocatorSymbolSpace::Type,
         },
-        path: Arc::from([TypeBodyPathStep::ConditionalTrue]),
+        path: verter_type_expr::OwnedSlice::from([TypeBodyPathStep::ConditionalTrue]),
     });
     let node = force(
         &dispatch,
@@ -284,11 +284,15 @@ fn jsdoc_typedef_path_through_a_binder_binds_locally() {
 /// Each entry is `(body, path, label)`; the body is emitted twice — once
 /// as a whole declaration body (pre-lowering navigator) and once nested
 /// under a generic callable's return position (lowered-graph navigator).
-fn navigator_parity_cases() -> Vec<(&'static str, Arc<[TypeBodyPathStep]>, &'static str)> {
+fn navigator_parity_cases() -> Vec<(
+    &'static str,
+    verter_type_expr::OwnedSlice<TypeBodyPathStep>,
+    &'static str,
+)> {
     vec![
         (
             "{ a: string }",
-            Arc::from([
+            verter_type_expr::OwnedSlice::from([
                 TypeBodyPathStep::Member { ordinal: 0 },
                 TypeBodyPathStep::MemberKey,
             ]),
@@ -296,7 +300,7 @@ fn navigator_parity_cases() -> Vec<(&'static str, Arc<[TypeBodyPathStep]>, &'sta
         ),
         (
             "{ a: string; b: number }",
-            Arc::from([
+            verter_type_expr::OwnedSlice::from([
                 TypeBodyPathStep::Member { ordinal: 1 },
                 TypeBodyPathStep::MemberValue,
             ]),
@@ -304,57 +308,57 @@ fn navigator_parity_cases() -> Vec<(&'static str, Arc<[TypeBodyPathStep]>, &'sta
         ),
         (
             "string | number | boolean",
-            Arc::from([TypeBodyPathStep::UnionArm { ordinal: 1 }]),
+            verter_type_expr::OwnedSlice::from([TypeBodyPathStep::UnionArm { ordinal: 1 }]),
             "union-arm",
         ),
         (
             "{ a: string } & { b: number }",
-            Arc::from([TypeBodyPathStep::IntersectionArm { ordinal: 1 }]),
+            verter_type_expr::OwnedSlice::from([TypeBodyPathStep::IntersectionArm { ordinal: 1 }]),
             "intersection-arm",
         ),
         (
             "Wrap<number>",
-            Arc::from([TypeBodyPathStep::TypeArgument { ordinal: 0 }]),
+            verter_type_expr::OwnedSlice::from([TypeBodyPathStep::TypeArgument { ordinal: 0 }]),
             "type-argument",
         ),
         (
             "[string, number]",
-            Arc::from([TypeBodyPathStep::TupleElement { ordinal: 1 }]),
+            verter_type_expr::OwnedSlice::from([TypeBodyPathStep::TupleElement { ordinal: 1 }]),
             "tuple-element",
         ),
         (
             "{ a: string }[\"a\"]",
-            Arc::from([TypeBodyPathStep::IndexedAccessIndex]),
+            verter_type_expr::OwnedSlice::from([TypeBodyPathStep::IndexedAccessIndex]),
             "indexed-access-index",
         ),
         (
             "{ a: string }[\"a\"]",
-            Arc::from([TypeBodyPathStep::IndexedAccessObject]),
+            verter_type_expr::OwnedSlice::from([TypeBodyPathStep::IndexedAccessObject]),
             "indexed-access-object",
         ),
         (
             "{ [Q in \"x\" | \"y\"]: string }",
-            Arc::from([TypeBodyPathStep::MappedSource]),
+            verter_type_expr::OwnedSlice::from([TypeBodyPathStep::MappedSource]),
             "mapped-source",
         ),
         (
             "string extends number ? boolean : symbol",
-            Arc::from([TypeBodyPathStep::ConditionalCheck]),
+            verter_type_expr::OwnedSlice::from([TypeBodyPathStep::ConditionalCheck]),
             "conditional-check",
         ),
         (
             "string extends number ? boolean : symbol",
-            Arc::from([TypeBodyPathStep::ConditionalExtends]),
+            verter_type_expr::OwnedSlice::from([TypeBodyPathStep::ConditionalExtends]),
             "conditional-extends",
         ),
         (
             "string extends number ? boolean : symbol",
-            Arc::from([TypeBodyPathStep::ConditionalFalse]),
+            verter_type_expr::OwnedSlice::from([TypeBodyPathStep::ConditionalFalse]),
             "conditional-false",
         ),
         (
             "{ m(a: string): number }",
-            Arc::from([
+            verter_type_expr::OwnedSlice::from([
                 TypeBodyPathStep::Member { ordinal: 0 },
                 TypeBodyPathStep::FunctionParam { ordinal: 0 },
             ]),
@@ -362,7 +366,7 @@ fn navigator_parity_cases() -> Vec<(&'static str, Arc<[TypeBodyPathStep]>, &'sta
         ),
         (
             "{ m(a: string): number }",
-            Arc::from([
+            verter_type_expr::OwnedSlice::from([
                 TypeBodyPathStep::Member { ordinal: 0 },
                 TypeBodyPathStep::FunctionReturn,
             ]),
@@ -370,7 +374,7 @@ fn navigator_parity_cases() -> Vec<(&'static str, Arc<[TypeBodyPathStep]>, &'sta
         ),
         (
             "{ [key: string]: number }",
-            Arc::from([
+            verter_type_expr::OwnedSlice::from([
                 TypeBodyPathStep::Member { ordinal: 0 },
                 TypeBodyPathStep::IndexSignatureKey,
             ]),
@@ -378,7 +382,7 @@ fn navigator_parity_cases() -> Vec<(&'static str, Arc<[TypeBodyPathStep]>, &'sta
         ),
         (
             "{ [key: string]: number }",
-            Arc::from([
+            verter_type_expr::OwnedSlice::from([
                 TypeBodyPathStep::Member { ordinal: 0 },
                 TypeBodyPathStep::IndexSignatureValue,
             ]),
@@ -426,24 +430,25 @@ fn both_locator_navigators_select_the_same_authored_position() {
             ),
         );
         let dispatch = ProjectSemanticDispatch::new(&host);
-        let crossed_path: Arc<[TypeBodyPathStep]> = {
+        let crossed_path: verter_type_expr::OwnedSlice<TypeBodyPathStep> = {
             let mut steps = vec![
                 TypeBodyPathStep::Member { ordinal: 0 },
                 TypeBodyPathStep::MemberValue,
                 TypeBodyPathStep::FunctionReturn,
             ];
             steps.extend(path.iter().cloned());
-            Arc::from(steps.into_boxed_slice())
+            verter_type_expr::OwnedSlice::from(steps.into_boxed_slice())
         };
-        let select = |symbol: &str, path: Arc<[TypeBodyPathStep]>| match dispatch
-            .force_semantic_operand_for_tests(
-                &mint(&dispatch, locator(symbol, path)),
-                request(ProjectionMode::Identity),
-            ) {
-            QueryResult::Value(forced) => Ok(forced.node()),
-            QueryResult::Error(error) => Err(error),
-            other => panic!("{label}/{symbol}: unexpected outcome {other:?}"),
-        };
+        let select =
+            |symbol: &str, path: verter_type_expr::OwnedSlice<TypeBodyPathStep>| match dispatch
+                .force_semantic_operand_for_tests(
+                    &mint(&dispatch, locator(symbol, path)),
+                    request(ProjectionMode::Identity),
+                ) {
+                QueryResult::Value(forced) => Ok(forced.node()),
+                QueryResult::Error(error) => Err(error),
+                other => panic!("{label}/{symbol}: unexpected outcome {other:?}"),
+            };
         // Interning is compound over `(payload, scope)` and the two legs
         // sit under different top-level owners, so equal node IDS are not
         // available as the oracle. The two scope-independent facts that
@@ -468,7 +473,7 @@ fn both_locator_navigators_select_the_same_authored_position() {
             (std::mem::discriminant(data.as_ref()), rendered)
         };
         match (
-            select("Direct", Arc::clone(&path)),
+            select("Direct", path.clone()),
             select("Crossed", crossed_path),
         ) {
             (Ok(direct), Ok(crossed)) => assert_eq!(
@@ -511,17 +516,17 @@ fn binder_frame_visibility_separates_constraint_default_and_body_positions() {
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
     let context = ProjectionReductionContext::published(ProjectionMode::Identity);
-    let frames: [Arc<[TypeBodyPathStep]>; 4] = [
-        Arc::from([]),
-        Arc::from([TypeBodyPathStep::TypeParamBound {
+    let frames: [verter_type_expr::OwnedSlice<TypeBodyPathStep>; 4] = [
+        verter_type_expr::OwnedSlice::from([]),
+        verter_type_expr::OwnedSlice::from([TypeBodyPathStep::TypeParamBound {
             ordinal: 1,
             position: TypeParamBoundPosition::Constraint,
         }]),
-        Arc::from([TypeBodyPathStep::TypeParamBound {
+        verter_type_expr::OwnedSlice::from([TypeBodyPathStep::TypeParamBound {
             ordinal: 1,
             position: TypeParamBoundPosition::Default,
         }]),
-        Arc::from([TypeBodyPathStep::TypeParamBound {
+        verter_type_expr::OwnedSlice::from([TypeBodyPathStep::TypeParamBound {
             ordinal: 0,
             position: TypeParamBoundPosition::Constraint,
         }]),

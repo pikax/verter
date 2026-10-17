@@ -168,7 +168,7 @@ pub(crate) fn native_feasibility_receipt() -> Value {
             Arc::<str>::from(CANONICAL_TS),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
         ),
-        name: Arc::<str>::from(TYPEINFO_SYMBOL),
+        name: verter_type_expr::OwnedStr::from(TYPEINFO_SYMBOL),
     });
     let query_record = host
         .resolve_type_with_audit(key, CANONICAL_TS)

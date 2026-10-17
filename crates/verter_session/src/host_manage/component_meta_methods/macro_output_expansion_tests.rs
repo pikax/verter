@@ -398,9 +398,9 @@ const model = defineModel<ModelValue>()
         &SemanticTypeSource::Synthesized(verter_type_expr::facts::ResolvedLocalShape::Ref(
             verter_type_expr::locators::SymbolBodyLocator {
                 anchor: verter_type_expr::locators::AuthoredAnchor {
-                    canonical_id: Arc::clone(&identity.canonical_id),
+                    canonical_id: identity.canonical_id.clone(),
                     owner: identity.owner,
-                    symbol: Arc::clone(&identity.decl_name),
+                    symbol: identity.decl_name.clone(),
                     space: verter_type_expr::locators::LocatorSymbolSpace::Type,
                 },
             },

@@ -260,9 +260,9 @@ fn connected_work_of(source: &str, function: &str, checker: &str) -> usize {
     let dispatch = super::ProjectSemanticDispatch::new(&host_ctx);
     let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: Arc::from(PROBE_FILE),
+            canonical_id: verter_type_expr::OwnedStr::from(PROBE_FILE),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(function),
+            symbol: verter_type_expr::OwnedStr::from(function),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
         function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
@@ -471,9 +471,9 @@ fn an_independent_return_type_is_exact_beside_its_refused_flow_proof() {
                 Arc::from(PROBE_FILE),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
-            name: Arc::from("pf"),
+            name: verter_type_expr::OwnedStr::from("pf"),
         },
-        Arc::from([]),
+        verter_type_expr::OwnedSlice::from([]),
         Arc::from([]),
     ));
     let observations = &host.flow_fault_injection.refused_preparations;

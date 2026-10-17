@@ -22,8 +22,6 @@
 //!   could not report `ProvenClosed` there (the L1 carrier-stop's
 //!   no-member-expansion witness).
 
-use std::sync::Arc;
-
 use super::carrier_head_resolution_tests::{host, upsert_ts};
 use super::raise::{
     prepared_decl_body_is_closed, prepared_instantiation_key_domain_is_closed,
@@ -34,10 +32,10 @@ use verter_type_engine::semantic_query::{DeclIdentity, HashValue};
 
 fn decl(canonical: &str, name: &str) -> DeclIdentity {
     DeclIdentity {
-        canonical_id: Arc::from(canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
-        decl_name: Arc::from(name),
+        decl_name: verter_type_expr::OwnedStr::from(name),
     }
 }
 

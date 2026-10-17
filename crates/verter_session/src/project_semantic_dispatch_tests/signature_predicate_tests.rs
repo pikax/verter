@@ -52,9 +52,9 @@ fn with_probe<R>(
     );
     let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: Arc::from(PROBE_FILE),
+            canonical_id: verter_type_expr::OwnedStr::from(PROBE_FILE),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("__predicate_probe"),
+            symbol: verter_type_expr::OwnedStr::from("__predicate_probe"),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
         function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,

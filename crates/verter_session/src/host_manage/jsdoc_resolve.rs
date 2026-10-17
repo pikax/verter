@@ -647,9 +647,9 @@ fn absolutize_macro_payload_locator(
     }
     verter_type_expr::locators::MacroPayloadLocator {
         anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: std::sync::Arc::from(owner_canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(owner_canonical),
             owner: locator.anchor.owner,
-            symbol: std::sync::Arc::clone(&locator.anchor.symbol),
+            symbol: locator.anchor.symbol.clone(),
             space: locator.anchor.space,
         },
         macro_index: locator.macro_index,

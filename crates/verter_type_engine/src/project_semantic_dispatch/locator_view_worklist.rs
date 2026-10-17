@@ -474,7 +474,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticNodeData::TypeOf(_) => {
                 let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
                 let value_root = value_root.clone();
-                let path = Arc::clone(path);
+                let path = path.clone();
                 let type_args: Arc<[SemanticNodeId]> =
                     Arc::from(data.carrier_type_args().to_vec().into_boxed_slice());
                 // A value's own type named inside its declared body — a
@@ -504,7 +504,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
                 let result = match self.execute_type_node(self.typeof_key_with_path(
                     value_root.clone(),
-                    Arc::clone(&path),
+                    path.clone(),
                     context,
                 )) {
                     QueryResult::Value(SemanticQueryOutput { value, provenance }) => {
@@ -513,12 +513,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     _ if !path.is_empty() => {
                         let joined: Arc<str> =
                             Arc::from(format!("{}.{}", value_root.name, path[0]));
-                        let rest: Arc<[Arc<str>]> =
-                            Arc::from(path[1..].to_vec().into_boxed_slice());
+                        let rest = verter_type_expr::OwnedSlice::from(&path[1..]);
                         match self.execute_type_node(self.typeof_key_with_path(
                             ValueRootKey {
                                 scope: value_root.scope.clone(),
-                                name: joined,
+                                name: verter_type_expr::OwnedStr::from(joined),
                             },
                             rest,
                             context,
@@ -569,14 +568,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let anchor =
                     match self.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                         scope: ScopeId {
-                            canonical_id: Arc::clone(&identity.canonical_id),
+                            canonical_id: identity.canonical_id.clone(),
                             owner: identity.owner,
                             local_scope: None,
                             binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
                                 identity.owner,
                             ),
                         },
-                        name: Arc::clone(&identity.decl_name),
+                        name: identity.decl_name.clone(),
                     })) {
                         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
                         _ => {
@@ -597,9 +596,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 ReferenceProjectionPlan::Query(SemanticQueryKey::Instantiate(
                     crate::semantic_query::InstantiateKey::new(
                         self.type_slot_for(
-                            Arc::clone(&identity.canonical_id),
+                            identity.canonical_id.clone(),
                             identity.owner,
-                            Arc::clone(&identity.decl_name),
+                            identity.decl_name.clone(),
                         ),
                         Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                         self.instantiate_context_for(&identity.canonical_id, context),

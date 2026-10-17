@@ -121,7 +121,7 @@ fn evaluate(
             FunctionPartIdentity::DeclarationBody,
             0,
         ),
-        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(PROBES),
         demand,
         input: verter_type_engine::semantic_query::FlowInputContext::empty(),

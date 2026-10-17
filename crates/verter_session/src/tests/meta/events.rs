@@ -1181,9 +1181,9 @@ defineEmits<{ change: [value: number]; close: [] }>()
         verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(
             verter_type_expr::locators::MacroPayloadLocator {
                 anchor: verter_type_expr::locators::AuthoredAnchor {
-                    canonical_id: Arc::from("/App.vue"),
+                    canonical_id: verter_type_expr::OwnedStr::from("/App.vue"),
                     owner: verter_type_expr::TopLevelOwnerId::instance(0),
-                    symbol: Arc::from("default"),
+                    symbol: verter_type_expr::OwnedStr::from("default"),
                     space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                 },
                 macro_index: 99,
@@ -1262,9 +1262,9 @@ defineEmits<{ (event: 'change', value: number): boolean }>()
         verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(
             verter_type_expr::locators::MacroPayloadLocator {
                 anchor: verter_type_expr::locators::AuthoredAnchor {
-                    canonical_id: Arc::from("/App.vue"),
+                    canonical_id: verter_type_expr::OwnedStr::from("/App.vue"),
                     owner: verter_type_expr::TopLevelOwnerId::instance(0),
-                    symbol: Arc::from("default"),
+                    symbol: verter_type_expr::OwnedStr::from("default"),
                     space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                 },
                 macro_index: 99,

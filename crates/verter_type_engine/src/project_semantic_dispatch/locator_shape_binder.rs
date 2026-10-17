@@ -89,7 +89,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // type's own `<T>` binders intern, so applying an argument to
             // the declaration's `T` can never rewrite a shadowing inner `T`.
             BinderIdentityMode::DeclHeader { owner_symbol } => (
-                DeclIdentity::from_scope(scope, Arc::clone(owner_symbol)),
+                DeclIdentity::from_scope(scope, verter_type_expr::OwnedStr::clone(owner_symbol)),
                 index as u16,
             ),
             BinderIdentityMode::Signature => (DeclIdentity::from_scope(scope, Arc::clone(name)), 0),
@@ -277,7 +277,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         key: &LocatorLoweringKey,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-        let canonical = Arc::clone(&key.slot().defining_canonical);
+        let canonical = key.slot().defining_canonical.clone();
         let Some(serve) = self.ctx.ensure_indexed_ready_serve(canonical.as_ref()) else {
             // The owning file is unknown to the live view — the value
             // cannot be self-rooted; refuse warm admission.
@@ -290,7 +290,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // through the graph lowering below.
         let indexed = serve.indexed;
         let observed_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> =
-            vec![(Arc::clone(&canonical), indexed.whole_hash)];
+            vec![(canonical.clone(), indexed.whole_hash)];
 
         let derefed = match self
             .ctx
@@ -347,16 +347,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             AuthoredBodyLocator::MacroPayload(payload) => &payload.anchor,
         };
         let scope = NodeScopeId::File {
-            canonical_id: Arc::clone(&canonical),
+            canonical_id: canonical.clone(),
             owner: anchor.owner,
             whole_hash: indexed.whole_hash,
             local_scope: None,
         };
         let anchor_symbol = match key.locator() {
-            AuthoredBodyLocator::DeclBody(slot) => Arc::clone(&slot.anchor.symbol),
-            AuthoredBodyLocator::AugmentationBody(aug) => Arc::clone(&aug.anchor.symbol),
-            AuthoredBodyLocator::JsdocTypedefBody(typedef) => Arc::clone(&typedef.anchor.symbol),
-            AuthoredBodyLocator::MacroPayload(payload) => Arc::clone(&payload.anchor.symbol),
+            AuthoredBodyLocator::DeclBody(slot) => slot.anchor.symbol.clone(),
+            AuthoredBodyLocator::AugmentationBody(aug) => aug.anchor.symbol.clone(),
+            AuthoredBodyLocator::JsdocTypedefBody(typedef) => typedef.anchor.symbol.clone(),
+            AuthoredBodyLocator::MacroPayload(payload) => payload.anchor.symbol.clone(),
         };
 
         // Anchor-scope IDENTITY-resolution inputs — the SAME sources the
@@ -906,7 +906,7 @@ fn signature_occurrence_for_locator(
         ),
         [verter_type_expr::locators::TypeBodyPathStep::Member { ordinal }] => (
             verter_type_expr::facts::FunctionPartIdentity::Member {
-                member_path: Arc::from([*ordinal]),
+                member_path: verter_type_expr::OwnedSlice::from([*ordinal]),
             },
             0,
             0,
@@ -943,12 +943,13 @@ fn locator_with_path_step(
     locator: &AuthoredBodyLocator,
     step: verter_type_expr::locators::TypeBodyPathStep,
 ) -> AuthoredBodyLocator {
-    let append = |path: &Arc<[verter_type_expr::locators::TypeBodyPathStep]>| {
-        let mut next = Vec::with_capacity(path.len() + 1);
-        next.extend_from_slice(path);
-        next.push(step);
-        Arc::from(next.into_boxed_slice())
-    };
+    let append =
+        |path: &verter_type_expr::OwnedSlice<verter_type_expr::locators::TypeBodyPathStep>| {
+            let mut next = Vec::with_capacity(path.len() + 1);
+            next.extend_from_slice(path);
+            next.push(step);
+            verter_type_expr::OwnedSlice::from(next)
+        };
     match locator {
         AuthoredBodyLocator::DeclBody(slot) => {
             AuthoredBodyLocator::DeclBody(verter_type_expr::locators::TypeBodySlot {

@@ -65,8 +65,11 @@ panic or a resurrected node: key preparation (`try_prepare_rooted_key` →
 reached from `VerterHost::evict`) evicts every CACHE owner bound to the closed
 content: memo candidates whose key or result reaches it or whose validity is
 bound to the canonical, union views over it, the hash-cons / substitute /
-deferred memos, the signature epoch's roots on its tokens (replacing the epoch
-once stranded tokens dominate) and, through `memo::close_canonical_with_shapes`,
+deferred memos, the signature store's roots on its current epoch's tokens
+(replacing the epoch once stranded tokens dominate; a read view or
+`SignatureEpochLease` of that epoch alive at the close keeps those roots until
+the last one drops, so a delivered signature result never reads a destroyed
+token node; re-rooting a stranded token uncounts it) and, through `memo::close_canonical_with_shapes`,
 the shape-cache entries. "Closed content" is decided per cached node by
 `NodeArenaCore::reaches_canonical_content` (file scope, a payload binding the
 content identity, or a retained child reaching such a node), memoized for one
@@ -78,10 +81,13 @@ served the same live handle.
 Per-node sidecars (structure bits, member-ordinal indexes, origin edges,
 stable-key classes) own nothing. Each marks the slot it describes
 (`track_sidecar`); destroying a marked slot appends its id to the arena's
-pending log, which a close or any sidecar write past
-`DESTROYED_DRAIN_THRESHOLD` drains (`reclaim_destroyed_sidecars`). The log
-never outgrows the stale entries it removes; `pending_destroyed_nodes` is its
-current count.
+pending log, which a close, any sidecar write past
+`DESTROYED_DRAIN_THRESHOLD`, or the release that grows the log past that
+threshold drains (`reclaim_destroyed_sidecars`; the release drains through the
+store's `SidecarSink`, weak handles bound into the arena, without blocking on a
+held sidecar lock). The log never outgrows the stale entries it removes and
+stays within the threshold at rest even when a holder's final drop follows the
+last close; `pending_destroyed_nodes` is its current count.
 
 ## Internal delivery and retained holders
 

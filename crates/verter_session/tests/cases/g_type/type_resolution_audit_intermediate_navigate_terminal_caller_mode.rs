@@ -55,14 +55,14 @@ fn type_resolution_audit_intermediate_hops_navigate_terminal_uses_caller_mode() 
     // needs a base.
     let resolve_a = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::from("/types.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/types.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
-        name: Arc::from("A"),
+        name: verter_type_expr::OwnedStr::from("A"),
     });
     let (a_node, _) = host
         .resolve_type_with_audit(resolve_a, "/types.ts")
@@ -74,7 +74,7 @@ fn type_resolution_audit_intermediate_hops_navigate_terminal_uses_caller_mode() 
     // Now drive a path projection of length 3 — `A['c']['full']['bar']`.
     let project = SemanticQueryKey::ProjectPath {
         base: a_node,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![
                 PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     Arc::from("c"),

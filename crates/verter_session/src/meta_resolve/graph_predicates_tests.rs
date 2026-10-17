@@ -228,7 +228,7 @@ mod node_root_gate_tests {
             let graph = Arc::clone(host.project_type_store().semantic_graph());
             let (canonical_id, whole_hash) = match graph.node_data(inst).as_deref() {
                 Some(SemanticNodeData::InstantiationRef { base, .. }) => {
-                    (Arc::clone(&base.canonical_id), base.whole_hash)
+                    (base.canonical_id.clone(), base.whole_hash)
                 }
                 other => {
                     panic!("expected `{name}<string>` to lower to InstantiationRef, got {other:?}")

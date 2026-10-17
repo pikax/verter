@@ -38,7 +38,7 @@ fn accumulator_installed() -> bool {
 ///
 /// COLD-PATH ONLY caller contract — the warm family hit must return
 /// before reaching this helper.
-pub fn record_flow_return_started(canonical_id: &Arc<str>, function_symbol: &Arc<str>) {
+pub fn record_flow_return_started(canonical_id: &str, function_symbol: &str) {
     if let Some(ctx) = crate::request_context::current_request_context() {
         ctx.flow_return_cold_computes
             .fetch_add(1, Ordering::Relaxed);
@@ -47,8 +47,8 @@ pub fn record_flow_return_started(canonical_id: &Arc<str>, function_symbol: &Arc
         return;
     }
     crate::request_observers::push_structured_event(StructuredAuditEvent::FlowReturnStarted {
-        canonical_id: Arc::clone(canonical_id),
-        function_symbol: Arc::clone(function_symbol),
+        canonical_id: Arc::from(canonical_id),
+        function_symbol: Arc::from(function_symbol),
     });
 }
 
@@ -87,7 +87,7 @@ pub fn record_flow_slice_budget_exceeded(exceeded: &FlowSliceBudgetExceeded) {
 ///
 /// `cycle_id` is the request-scoped in-flight obligation frame index
 /// the re-entry targeted.
-pub fn record_flow_cycle_reentry(cycle_id: u32, function_symbol: &Arc<str>) {
+pub fn record_flow_cycle_reentry(cycle_id: u32, function_symbol: &str) {
     if let Some(ctx) = crate::request_context::current_request_context() {
         ctx.flow_return_cycle_reentries
             .fetch_add(1, Ordering::Relaxed);
@@ -97,6 +97,6 @@ pub fn record_flow_cycle_reentry(cycle_id: u32, function_symbol: &Arc<str>) {
     }
     crate::request_observers::push_structured_event(StructuredAuditEvent::FlowCycleSentinelHit {
         cycle_id,
-        function_symbol: Arc::clone(function_symbol),
+        function_symbol: Arc::from(function_symbol),
     });
 }

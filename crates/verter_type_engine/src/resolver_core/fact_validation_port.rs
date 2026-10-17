@@ -36,7 +36,7 @@ pub trait FactValidation {
     fn complete_graph_signature(
         &self,
         roots: &[(
-            std::sync::Arc<str>,
+            verter_type_expr::OwnedStr,
             verter_session_query::analysis::types::Hash16,
         )],
         facts: Vec<FactVersionRef>,

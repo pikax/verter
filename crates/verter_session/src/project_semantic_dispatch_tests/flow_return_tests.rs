@@ -506,7 +506,7 @@ fn assert_exhausted_follower_abort(
             let enclosing_key =
                 SemanticQueryKey::ResolveDecl(verter_type_engine::semantic_query::ResolveDeclKey {
                     scope: verter_type_engine::semantic_query::ScopeId {
-                        canonical_id: Arc::from(CANONICAL),
+                        canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
                         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         local_scope: None,
                         binder_scope_id:
@@ -514,7 +514,7 @@ fn assert_exhausted_follower_abort(
                                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                             ),
                     },
-                    name: Arc::from("Enclosing"),
+                    name: verter_type_expr::OwnedStr::from("Enclosing"),
                 });
             let (ready_tx, ready_rx) = std::sync::mpsc::channel();
             let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -875,13 +875,13 @@ fn flow_result_for_file(
 ) -> (verter_type_expr::TypeExpr, bool) {
     let key = FlowReturnKey {
         function: dispatch.flow_function_slot_for(
-            Arc::from(canonical),
+            verter_type_expr::OwnedStr::from(canonical),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(name),
+            verter_type_expr::OwnedStr::from(name),
             FunctionPartIdentity::DeclarationBody,
             0,
         ),
-        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(canonical),
         demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
         input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -898,13 +898,13 @@ fn flow_key(
 ) -> FlowReturnKey {
     FlowReturnKey {
         function: dispatch.flow_function_slot_for(
-            Arc::from(CANONICAL),
+            verter_type_expr::OwnedStr::from(CANONICAL),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(name),
+            verter_type_expr::OwnedStr::from(name),
             part,
             overload_ordinal,
         ),
-        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(CANONICAL),
         demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
         input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -1086,7 +1086,7 @@ fn flow_return_this_call_reads_the_receiver_member() {
             dispatch,
             "SubThisCall",
             FunctionPartIdentity::Member {
-                member_path: Arc::from(vec![1u32].into_boxed_slice()),
+                member_path: verter_type_expr::OwnedSlice::from(vec![1u32].into_boxed_slice()),
             },
             0,
         );
@@ -1450,7 +1450,7 @@ pub(crate) fn flow_return_keys_do_not_warm_hit_across_env_axes() {
         );
         assert_ne!(ordinal_fork, base, "the overload ordinal is key identity");
         let mut args_fork = base.clone();
-        args_fork.normalized_type_args = Arc::from(
+        args_fork.normalized_type_args = verter_type_expr::OwnedSlice::from(
             vec![verter_type_engine::semantic_query::SemanticNodeId(9)].into_boxed_slice(),
         );
         assert_ne!(args_fork, base, "the normalized type args are key identity");
@@ -1482,9 +1482,9 @@ fn return_identity(
 ) -> verter_type_expr::facts::FlowFunctionReturnIdentity {
     verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: Arc::from(CANONICAL),
+            canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(name),
+            symbol: verter_type_expr::OwnedStr::from(name),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
         function_part: part,
@@ -1495,12 +1495,12 @@ fn return_identity(
 fn declared_return_slot(name: &str) -> verter_type_expr::locators::TypeBodySlot {
     verter_type_expr::locators::TypeBodySlot {
         anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: Arc::from(CANONICAL),
+            canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(name),
+            symbol: verter_type_expr::OwnedStr::from(name),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![
                 verter_type_expr::locators::TypeBodyPathStep::ValueSignature { ordinal: 0 },
                 verter_type_expr::locators::TypeBodyPathStep::FunctionReturn,
@@ -1641,9 +1641,9 @@ fn function_return_declared_rail_keeps_the_literal_union_member() {
             dispatch.graph().node_data(member.value)
         };
         let anchor = |symbol: &str| verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: Arc::from(UNION_CANONICAL),
+            canonical_id: verter_type_expr::OwnedStr::from(UNION_CANONICAL),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(symbol),
+            symbol: verter_type_expr::OwnedStr::from(symbol),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         };
 
@@ -1651,7 +1651,7 @@ fn function_return_declared_rail_keeps_the_literal_union_member() {
             verter_type_expr::locators::FunctionReturnLocator::Authored(
                 verter_type_expr::locators::TypeBodySlot {
                     anchor: anchor("ccAnnotated"),
-                    path: Arc::from(
+                    path: verter_type_expr::OwnedSlice::from(
                         vec![
                             verter_type_expr::locators::TypeBodyPathStep::ValueSignature {
                                 ordinal: 0,
@@ -1859,15 +1859,15 @@ fn mixed_component_member_entry_self_roots_cover_all_component_files() {
     with_dispatch(&host, |dispatch| {
         let key = FlowReturnKey {
             function: dispatch.flow_function_slot_for(
-                Arc::from("/ws/mixed_c.ts"),
+                verter_type_expr::OwnedStr::from("/ws/mixed_c.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("Worker"),
+                verter_type_expr::OwnedStr::from("Worker"),
                 FunctionPartIdentity::Member {
-                    member_path: Arc::from(vec![0u32].into_boxed_slice()),
+                    member_path: verter_type_expr::OwnedSlice::from(vec![0u32].into_boxed_slice()),
                 },
                 0,
             ),
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for("/ws/mixed_c.ts"),
             demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
             input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -1911,9 +1911,9 @@ fn flow_return_block_scoped_shadowing_does_not_escape() {
     with_dispatch(&host, |dispatch| {
         let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: Arc::from("/ws/shadow.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/ws/shadow.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from("shadow"),
+                symbol: verter_type_expr::OwnedStr::from("shadow"),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
             },
             function_part: FunctionPartIdentity::DeclarationBody,
@@ -1958,13 +1958,13 @@ fn flow_return_member_call_self_recursion_is_return_only_not_complete_miss() {
     with_dispatch(&host, |dispatch| {
         let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: Arc::from("/ws/member-recur.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/ws/member-recur.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from("obj"),
+                symbol: verter_type_expr::OwnedStr::from("obj"),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
             },
             function_part: FunctionPartIdentity::Member {
-                member_path: Arc::from(vec![0u32].into_boxed_slice()),
+                member_path: verter_type_expr::OwnedSlice::from(vec![0u32].into_boxed_slice()),
             },
             overload_ordinal: 0,
         };
@@ -2163,9 +2163,9 @@ fn flow_return_direct_call_chain_charges_connected_work() {
         dispatch.set_connected_limits_for_tests(4, u16::MAX);
         let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: Arc::from("/ws/chain.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/ws/chain.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from("chain0"),
+                symbol: verter_type_expr::OwnedStr::from("chain0"),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
             },
             function_part: FunctionPartIdentity::DeclarationBody,
@@ -2284,9 +2284,9 @@ fn a_budget_truncated_flow_return_folds_a_faulting_class_not_a_contained_one() {
         dispatch.set_connected_limits_for_tests(4, u16::MAX);
         let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: Arc::from("/ws/budget-class.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/ws/budget-class.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from("chain0"),
+                symbol: verter_type_expr::OwnedStr::from("chain0"),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
             },
             function_part: FunctionPartIdentity::DeclarationBody,
@@ -2352,9 +2352,9 @@ fn flow_return_direct_call_reads_the_shadowing_nested_function_declaration() {
     with_dispatch(&host, |dispatch| {
         let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: Arc::from("/ws/fn-shadow.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/ws/fn-shadow.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from("f"),
+                symbol: verter_type_expr::OwnedStr::from("f"),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
             },
             function_part: FunctionPartIdentity::DeclarationBody,
@@ -2393,9 +2393,9 @@ fn flow_return_self_call_shadowed_by_nested_function_declaration_reads_it() {
     with_dispatch(&host, |dispatch| {
         let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: Arc::from("/ws/self-fn-shadow.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/ws/self-fn-shadow.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from("f"),
+                symbol: verter_type_expr::OwnedStr::from("f"),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
             },
             function_part: FunctionPartIdentity::DeclarationBody,
@@ -2577,9 +2577,9 @@ fn flow_return_nested_value_hoisted_declaration_shadows_the_outer_callee() {
     with_dispatch(&host, |dispatch| {
         let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: Arc::from("/ws/nested-fn-shadow.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/ws/nested-fn-shadow.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from("outer"),
+                symbol: verter_type_expr::OwnedStr::from("outer"),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
             },
             function_part: FunctionPartIdentity::DeclarationBody,
@@ -2619,9 +2619,9 @@ fn flow_return_nested_value_self_name_shadowed_by_inner_declaration_reads_it() {
     with_dispatch(&host, |dispatch| {
         let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: Arc::from("/ws/nested-self-shadow.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/ws/nested-self-shadow.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from("outer"),
+                symbol: verter_type_expr::OwnedStr::from("outer"),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
             },
             function_part: FunctionPartIdentity::DeclarationBody,
@@ -2717,7 +2717,9 @@ pub(crate) fn flow_return_key_covers_input_context_and_projection_demand() {
         );
         let mut with_input = base.clone();
         with_input.input = verter_type_engine::semantic_query::FlowInputContext {
-            contextual_parameters: Arc::from(vec![contextual].into_boxed_slice()),
+            contextual_parameters: verter_type_expr::OwnedSlice::from(
+                vec![contextual].into_boxed_slice(),
+            ),
         };
         assert_ne!(
             base, with_input,
@@ -3497,9 +3499,9 @@ fn constructed_value_evidence_preserves_capture_refusal_and_its_roots() {
             let source = verter_type_expr::facts::FunctionReturnSource::Flow(
                 verter_type_expr::facts::FlowFunctionReturnIdentity {
                     anchor: verter_type_expr::locators::AuthoredAnchor {
-                        canonical_id: Arc::from(CANONICAL),
+                        canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
                         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                        symbol: Arc::from(name),
+                        symbol: verter_type_expr::OwnedStr::from(name),
                         space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                     },
                     function_part: FunctionPartIdentity::DeclarationBody,
@@ -3602,9 +3604,9 @@ fn constructed_value_evidence_withholds_unsupported_source_operands_and_executio
             let source = verter_type_expr::facts::FunctionReturnSource::Flow(
                 verter_type_expr::facts::FlowFunctionReturnIdentity {
                     anchor: verter_type_expr::locators::AuthoredAnchor {
-                        canonical_id: Arc::from(CANONICAL),
+                        canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
                         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                        symbol: Arc::from(name),
+                        symbol: verter_type_expr::OwnedStr::from(name),
                         space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                     },
                     function_part: FunctionPartIdentity::DeclarationBody,
@@ -3628,9 +3630,9 @@ fn constructed_value_evidence_withholds_unsupported_source_operands_and_executio
         let source = verter_type_expr::facts::FunctionReturnSource::Flow(
             verter_type_expr::facts::FlowFunctionReturnIdentity {
                 anchor: verter_type_expr::locators::AuthoredAnchor {
-                    canonical_id: Arc::from(CANONICAL),
+                    canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    symbol: Arc::from("subConstructed"),
+                    symbol: verter_type_expr::OwnedStr::from("subConstructed"),
                     space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                 },
                 function_part: FunctionPartIdentity::DeclarationBody,
@@ -3678,9 +3680,9 @@ fn an_independent_member_value_keeps_the_whole_return_refusal() {
                     Arc::from(CANONICAL),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
-                name: Arc::from("subIndependentLiteral"),
+                name: verter_type_expr::OwnedStr::from("subIndependentLiteral"),
             },
-            Arc::from([]),
+            verter_type_expr::OwnedSlice::from([]),
             Arc::from([]),
         ));
         let quality = ColdComputeCompletenessScope::enter();
@@ -3720,9 +3722,9 @@ fn static_return_keys_are_exact_beside_an_unfinished_member_value() {
                     Arc::from(CANONICAL),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
-                name: Arc::from("subIndependentLiteral"),
+                name: verter_type_expr::OwnedStr::from("subIndependentLiteral"),
             },
-            Arc::from([]),
+            verter_type_expr::OwnedSlice::from([]),
             Arc::from([]),
         ));
         let key =
@@ -3797,9 +3799,9 @@ fn independent_member_evidence_consumes_parameter_and_control_but_withholds_call
                         Arc::from(CANONICAL),
                         verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     ),
-                    name: Arc::from(name),
+                    name: verter_type_expr::OwnedStr::from(name),
                 },
-                Arc::from([]),
+                verter_type_expr::OwnedSlice::from([]),
                 Arc::from([]),
             ));
             let quality = ColdComputeCompletenessScope::enter();
@@ -4079,13 +4081,13 @@ fn flow_return_member_demand_never_lowers_elided_sibling_content() {
     with_dispatch(&host, |dispatch| {
         let mut key = FlowReturnKey {
             function: dispatch.flow_function_slot_for(
-                Arc::from("/ws/member-sibling-content.ts"),
+                verter_type_expr::OwnedStr::from("/ws/member-sibling-content.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("memberSliced"),
+                verter_type_expr::OwnedStr::from("memberSliced"),
                 FunctionPartIdentity::DeclarationBody,
                 0,
             ),
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for("/ws/member-sibling-content.ts"),
             demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
             input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -4500,13 +4502,15 @@ fn flow_return_unanswered_type_space_owner_probe_preserves_unresolved_carrier() 
         ] {
             let key = FlowReturnKey {
                 function: dispatch.flow_function_slot_for(
-                    Arc::from(OWNER_PROBE_CANONICAL),
+                    verter_type_expr::OwnedStr::from(OWNER_PROBE_CANONICAL),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    Arc::from(name),
+                    verter_type_expr::OwnedStr::from(name),
                     FunctionPartIdentity::DeclarationBody,
                     0,
                 ),
-                normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+                normalized_type_args: verter_type_expr::OwnedSlice::from(
+                    Vec::new().into_boxed_slice(),
+                ),
                 context: dispatch.flow_return_context_for(OWNER_PROBE_CANONICAL),
                 demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
                 input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -4548,13 +4552,13 @@ fn flow_return_unanswered_type_space_owner_probe_preserves_unresolved_carrier() 
 
         let collision = FlowReturnKey {
             function: dispatch.flow_function_slot_for(
-                Arc::from(OWNER_PROBE_CANONICAL),
+                verter_type_expr::OwnedStr::from(OWNER_PROBE_CANONICAL),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("ownerCollisionClass"),
+                verter_type_expr::OwnedStr::from("ownerCollisionClass"),
                 FunctionPartIdentity::DeclarationBody,
                 0,
             ),
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(OWNER_PROBE_CANONICAL),
             demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
             input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -4804,13 +4808,13 @@ fn scc_key(
 ) -> FlowReturnKey {
     FlowReturnKey {
         function: dispatch.flow_function_slot_for(
-            Arc::from(SCC_CANONICAL),
+            verter_type_expr::OwnedStr::from(SCC_CANONICAL),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(name),
+            verter_type_expr::OwnedStr::from(name),
             FunctionPartIdentity::DeclarationBody,
             0,
         ),
-        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(SCC_CANONICAL),
         demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
         input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -4841,11 +4845,15 @@ fn staged_flow_proof(
     let basis = FlowDemandBasis {
         ancestry: Default::default(),
         graph_body: verter_session_query::flow::bundle::FlowSliceFunctionKey {
-            canonical_id: Arc::clone(&key.function.declaration_slot.defining_canonical),
+            canonical_id: std::sync::Arc::<str>::from(
+                key.function.declaration_slot.defining_canonical.as_str(),
+            ),
             function: verter_session_query::function_program::FunctionProgramKey {
                 declaration: verter_session_query::function_program::FunctionDeclarationRef {
                     owner: key.function.declaration_slot.owner,
-                    name: Arc::clone(&key.function.declaration_slot.merged_symbol_name),
+                    name: std::sync::Arc::<str>::from(
+                        key.function.declaration_slot.merged_symbol_name.as_str(),
+                    ),
                     space: verter_session_query::facts::SymbolSpace::Value,
                 },
                 part: key.function.function_part.clone(),
@@ -4955,7 +4963,7 @@ fn reused_flow_result_replays(reuse: verter_session_query::facts::reuse::ReuseCl
             hash: [5; 16],
         };
         let root: verter_type_engine::semantic_query_memo::ObservedGraphSelfRoot =
-            (Arc::from("/ws/replayed.ts"), [6; 16]);
+            (verter_type_expr::OwnedStr::from("/ws/replayed.ts"), [6; 16]);
         dispatch.dispatch_txn.borrow_mut().flow.results.complete(
             key.clone(),
             super::dispatch_txn::TransactionFlowResult {
@@ -5481,13 +5489,13 @@ fn flow_expr_for_script(
     with_dispatch(&host, |dispatch| {
         let key = FlowReturnKey {
             function: dispatch.flow_function_slot_for(
-                Arc::from(canonical),
+                verter_type_expr::OwnedStr::from(canonical),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("makeProps"),
+                verter_type_expr::OwnedStr::from("makeProps"),
                 FunctionPartIdentity::DeclarationBody,
                 0,
             ),
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(canonical),
             demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
             input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -5859,7 +5867,7 @@ fn flow_source_probe_configured(
         let verter_type_expr::facts::FunctionReturnSource::Flow(identity) = &mut source else {
             panic!("makeProps serves a flow return source")
         };
-        identity.anchor.canonical_id = Arc::from(canonical);
+        identity.anchor.canonical_id = verter_type_expr::OwnedStr::from(canonical);
         identity.anchor.owner = owner;
         let identity = identity.clone();
         let candidate_key =
@@ -6696,15 +6704,15 @@ fn declined_member_projection_probe_leaks_no_partial_into_the_enclosing_build() 
             verter_type_engine::semantic_query::SemanticNodeData::new_typeof(
                 verter_type_engine::semantic_query::ValueRootKey {
                     scope: verter_type_engine::semantic_query::ScopeId {
-                        canonical_id: Arc::from(canonical),
+                        canonical_id: verter_type_expr::OwnedStr::from(canonical),
                         owner,
                         local_scope: None,
                         binder_scope_id:
                             verter_type_engine::semantic_query::BinderScopeId::file_scope(owner),
                     },
-                    name: Arc::from("makeProps"),
+                    name: verter_type_expr::OwnedStr::from("makeProps"),
                 },
-                Arc::from([]),
+                verter_type_expr::OwnedSlice::from([]),
                 Arc::from([]),
             ),
         );
@@ -6750,9 +6758,9 @@ fn declined_member_projection_probe_leaks_no_partial_into_the_enclosing_build() 
             0,
         );
         key.function = dispatch.flow_function_slot_for(
-            Arc::from(canonical),
+            verter_type_expr::OwnedStr::from(canonical),
             owner,
-            Arc::from("makeProps"),
+            verter_type_expr::OwnedStr::from("makeProps"),
             FunctionPartIdentity::DeclarationBody,
             0,
         );
@@ -6974,9 +6982,9 @@ fn degraded_flow_finalizer_never_warms_root_or_scc() {
             &verter_type_expr::facts::FunctionReturnSource::Flow(
                 verter_type_expr::facts::FlowFunctionReturnIdentity {
                     anchor: verter_type_expr::locators::AuthoredAnchor {
-                        canonical_id: Arc::from(CANONICAL),
+                        canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
                         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                        symbol: Arc::from("subNonCallableCall"),
+                        symbol: verter_type_expr::OwnedStr::from("subNonCallableCall"),
                         space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                     },
                     function_part: FunctionPartIdentity::DeclarationBody,
@@ -7097,7 +7105,7 @@ fn flow_plan_runs_once_per_cold_demand_and_never_for_nonflow() {
         let pending_roots = [
             SemanticQueryKey::FlowNarrowingAt {
                 point: verter_type_engine::semantic_query::ProgramPointId {
-                    canonical_id: Arc::from(CANONICAL),
+                    canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
                     offset: 0,
                 },
                 flow: verter_type_engine::semantic_query::FlowNarrowingKey::empty(),
@@ -7105,7 +7113,7 @@ fn flow_plan_runs_once_per_cold_demand_and_never_for_nonflow() {
             },
             SemanticQueryKey::ContextualTypeAt {
                 point: verter_type_engine::semantic_query::ProgramPointId {
-                    canonical_id: Arc::from(CANONICAL),
+                    canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
                     offset: 0,
                 },
                 contextual: verter_type_engine::semantic_query::ContextualTypingKey::empty(),
@@ -7161,7 +7169,7 @@ fn pending_flow_roots_surface_their_operation_specific_gap() {
             (
                 SemanticQueryKey::FlowNarrowingAt {
                     point: verter_type_engine::semantic_query::ProgramPointId {
-                        canonical_id: Arc::from(CANONICAL),
+                        canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
                         offset: 0,
                     },
                     flow: verter_type_engine::semantic_query::FlowNarrowingKey::empty(),
@@ -7172,7 +7180,7 @@ fn pending_flow_roots_surface_their_operation_specific_gap() {
             (
                 SemanticQueryKey::ContextualTypeAt {
                     point: verter_type_engine::semantic_query::ProgramPointId {
-                        canonical_id: Arc::from(CANONICAL),
+                        canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
                         offset: 0,
                     },
                     contextual: verter_type_engine::semantic_query::ContextualTypingKey::empty(),
@@ -7478,7 +7486,7 @@ fn deferred_scc_member_finalizes_after_per_key_substitution() {
             .map(|state| state.whole_hash)
             .unwrap_or_default();
         let scope = verter_type_engine::semantic_query::NodeScopeId::File {
-            canonical_id: Arc::from(SUB_CANONICAL),
+            canonical_id: verter_type_expr::OwnedStr::from(SUB_CANONICAL),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash,
             local_scope: None,
@@ -7495,13 +7503,13 @@ fn deferred_scc_member_finalizes_after_per_key_substitution() {
         });
         let key_of = |name: &str| FlowReturnKey {
             function: dispatch.flow_function_slot_for(
-                Arc::from(SUB_CANONICAL),
+                verter_type_expr::OwnedStr::from(SUB_CANONICAL),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from(name),
+                verter_type_expr::OwnedStr::from(name),
                 FunctionPartIdentity::DeclarationBody,
                 0,
             ),
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(SUB_CANONICAL),
             demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
             input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -7801,13 +7809,13 @@ export function makeProps(x: string | number) {
         );
         let key = FlowReturnKey {
             function: dispatch.flow_function_slot_for(
-                Arc::from(PRED_CANONICAL),
+                verter_type_expr::OwnedStr::from(PRED_CANONICAL),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("makeProps"),
+                verter_type_expr::OwnedStr::from("makeProps"),
                 FunctionPartIdentity::DeclarationBody,
                 0,
             ),
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(PRED_CANONICAL),
             demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
             input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -7868,13 +7876,13 @@ export function makeChecked(x: string | number) {
         );
         let key = FlowReturnKey {
             function: dispatch.flow_function_slot_for(
-                Arc::from(CHECK_CANONICAL),
+                verter_type_expr::OwnedStr::from(CHECK_CANONICAL),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("makeChecked"),
+                verter_type_expr::OwnedStr::from("makeChecked"),
                 FunctionPartIdentity::DeclarationBody,
                 0,
             ),
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(CHECK_CANONICAL),
             demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
             input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -7911,13 +7919,13 @@ fn whole_return_key(
 ) -> FlowReturnKey {
     FlowReturnKey {
         function: dispatch.flow_function_slot_for(
-            Arc::from(canonical),
+            verter_type_expr::OwnedStr::from(canonical),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(name),
+            verter_type_expr::OwnedStr::from(name),
             FunctionPartIdentity::DeclarationBody,
             0,
         ),
-        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(canonical),
         demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
         input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -11704,13 +11712,13 @@ fn flow_expr_cold_warm(
     let key = |dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>| {
         FlowReturnKey {
             function: dispatch.flow_function_slot_for(
-                Arc::from(canonical),
+                verter_type_expr::OwnedStr::from(canonical),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("makeProps"),
+                verter_type_expr::OwnedStr::from("makeProps"),
                 FunctionPartIdentity::DeclarationBody,
                 0,
             ),
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(canonical),
             demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
             input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -12003,13 +12011,13 @@ fn conv_flow_key(
 ) -> FlowReturnKey {
     FlowReturnKey {
         function: dispatch.flow_function_slot_for(
-            Arc::from(CONV_OWNER),
+            verter_type_expr::OwnedStr::from(CONV_OWNER),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(name),
+            verter_type_expr::OwnedStr::from(name),
             FunctionPartIdentity::DeclarationBody,
             0,
         ),
-        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(CONV_OWNER),
         demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
         input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -12026,7 +12034,7 @@ fn conv_member_demand(base: SemanticNodeId) -> SemanticQueryKey {
     };
     SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![PathSegment::Member(PropertyKey::identifier(Arc::from("v")))].into_boxed_slice(),
         ),
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
@@ -12641,13 +12649,13 @@ fn flow_return_reunion_asks_each_arm_pair_once_and_a_warm_replay_asks_nothing() 
     let key = |dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>| {
         FlowReturnKey {
             function: dispatch.flow_function_slot_for(
-                Arc::from(canonical),
+                verter_type_expr::OwnedStr::from(canonical),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("makeProps"),
+                verter_type_expr::OwnedStr::from("makeProps"),
                 FunctionPartIdentity::DeclarationBody,
                 0,
             ),
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(canonical),
             demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
             input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -12710,13 +12718,13 @@ fn flow_return_slot_candidates(script: &str, function: &str) -> usize {
     with_dispatch(&host, |dispatch| {
         let key = FlowReturnKey {
             function: dispatch.flow_function_slot_for(
-                Arc::from(canonical),
+                verter_type_expr::OwnedStr::from(canonical),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from(function),
+                verter_type_expr::OwnedStr::from(function),
                 FunctionPartIdentity::DeclarationBody,
                 0,
             ),
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(canonical),
             demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
             input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -12837,9 +12845,9 @@ fn a_warm_flow_return_query_takes_the_memo_lock_once_at_any_caller_count() {
     let host = make_host();
     let identity = |name: &str| verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: Arc::from(CANONICAL),
+            canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(name),
+            symbol: verter_type_expr::OwnedStr::from(name),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
         function_part: FunctionPartIdentity::DeclarationBody,
@@ -12911,13 +12919,15 @@ pub(super) fn flow_reads_without_proof(source: &str, names: &[&str]) -> Vec<Stri
         with_dispatch(&host, |dispatch| {
             let key = FlowReturnKey {
                 function: dispatch.flow_function_slot_for(
-                    Arc::from(FILE),
+                    verter_type_expr::OwnedStr::from(FILE),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    Arc::from(*name),
+                    verter_type_expr::OwnedStr::from(*name),
                     FunctionPartIdentity::DeclarationBody,
                     0,
                 ),
-                normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+                normalized_type_args: verter_type_expr::OwnedSlice::from(
+                    Vec::new().into_boxed_slice(),
+                ),
                 context: dispatch.flow_return_context_for(FILE),
                 demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
                 input: verter_type_engine::semantic_query::FlowInputContext::empty(),

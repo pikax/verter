@@ -135,7 +135,7 @@ const INDEX_STORAGE_GRANULE: usize = 4 * 1024;
 /// beside its records.
 ///
 /// Every registration record is charged by the candidate that registered it
-/// ([`registration_bytes`]). Everything else the index holds is charged
+/// ([`registration_footprint`]). Everything else the index holds is charged
 /// here, pinned while it is held: each shard's copy of its canonical's
 /// text, every shard table's unused buckets (capacity beyond its live
 /// records), and the outer table's buckets. A shard table gives its backing
@@ -270,18 +270,25 @@ impl CanonicalToEntries {
 /// `Arc`s it shares with `family`). A shard's own storage — its canonical's
 /// text, its unused buckets — is charged by the index
 /// ([`CanonicalToEntries`]).
-pub(super) fn registration_bytes(
+pub(super) fn registration_footprint(
     family: &FamilyKey,
     registered_canonicals: usize,
     populated_slots: usize,
-) -> usize {
+) -> verter_session_query::retention::Footprint {
     use verter_session_query::retention::allocation::arc_block_bytes;
     if registered_canonicals == 0 || populated_slots == 0 {
-        return 0;
+        return verter_session_query::retention::Footprint {
+            bytes: 0,
+            handles: Default::default(),
+        };
     }
-    registered_canonicals * populated_slots * RECORD_BUCKET_BYTES
-        + arc_block_bytes(std::mem::size_of::<FamilyKey>())
-        + super::family_footprint::family_key_clone_heap_bytes(family)
+    let clone = super::family_footprint::family_key_clone_heap_bytes(family);
+    verter_session_query::retention::Footprint {
+        bytes: registered_canonicals * populated_slots * RECORD_BUCKET_BYTES
+            + arc_block_bytes(std::mem::size_of::<FamilyKey>())
+            + clone.bytes,
+        handles: clone.handles,
+    }
 }
 
 /// Register the just-published candidate's reverse-index entries.

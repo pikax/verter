@@ -249,10 +249,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     ..
                 }) => {
                     let identity = crate::semantic_query::DeclIdentity {
-                        canonical_id: Arc::clone(canonical_id),
+                        canonical_id: canonical_id.clone(),
                         owner: *owner,
                         whole_hash: Default::default(),
-                        decl_name: Arc::clone(name),
+                        decl_name: name.clone(),
                     };
                     undecidable = !self.push_instantiated_runtime_subject(
                         &identity,
@@ -407,11 +407,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             };
         };
         let indexed = serve.indexed;
-        let owner_root = (Arc::clone(&owner.defining_canonical), indexed.whole_hash);
+        let owner_root = (owner.defining_canonical.clone(), indexed.whole_hash);
         let Some(macro_index) = usize::try_from(locator.macro_index()).ok() else {
             self.fold_local_partial_completeness(PartialReasonSet::SEMANTIC_QUERY_FAULT);
             return RehydratedRuntimeSubject {
-                node: self.opaque(QueryError::Other(Arc::from(
+                node: self.opaque(QueryError::Other(verter_type_expr::OwnedStr::from(
                     "broad-runtime macro index exceeds host index width",
                 ))),
                 dep_signature: crate::semantic_query::DepSignature::new(dep_facts),
@@ -498,7 +498,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 let probe = self.observe_read(|| {
                     self.execute_read(SemanticQueryKey::ProjectPath {
                         base: node,
-                        path: Arc::from([]),
+                        path: verter_type_expr::OwnedSlice::from([]),
                         context: ProjectionReductionContext::vue_runtime_object_surface(
                             ProjectionMode::Shallow,
                             provenance,
@@ -542,9 +542,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     let _ = probe.discard();
                     let member_read = self.execute_read(SemanticQueryKey::ProjectPath {
                         base: product.hot.node(),
-                        path: Arc::from([crate::semantic_query::PathSegment::Member(
-                            crate::semantic_query::PropertyKey::identifier(name.as_ref()),
-                        )]),
+                        path: verter_type_expr::OwnedSlice::from([
+                            crate::semantic_query::PathSegment::Member(
+                                crate::semantic_query::PropertyKey::identifier(name.as_ref()),
+                            ),
+                        ]),
                         context: ProjectionReductionContext::vue_runtime_object_surface(
                             ProjectionMode::Navigate,
                             provenance,
@@ -628,9 +630,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         kinds: &mut Vec<BroadRuntimeKind>,
     ) -> bool {
         let slot = self.type_slot_for(
-            Arc::clone(&identity.canonical_id),
+            identity.canonical_id.clone(),
             identity.owner,
-            Arc::clone(&identity.decl_name),
+            identity.decl_name.clone(),
         );
         let read = self.execute_read(SemanticQueryKey::Instantiate(
             crate::semantic_query::InstantiateKey::new(

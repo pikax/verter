@@ -1,8 +1,5 @@
 //! Allocation footprints of the independent flow-return proofs.
 
-#[cfg(test)]
-use std::sync::Arc;
-
 use verter_session_query::retention::allocation::AliasSet;
 
 use super::{ExactMemberValue, ExactReturnKeyDomain};
@@ -38,7 +35,7 @@ impl ExactMemberValue {
     pub(crate) fn for_footprint_tests(
         key: FlowReturnKey,
         node: SemanticNodeId,
-        roots: Arc<[ObservedGraphSelfRoot]>,
+        roots: Box<[ObservedGraphSelfRoot]>,
     ) -> Self {
         Self { key, node, roots }
     }
@@ -49,8 +46,8 @@ impl ExactReturnKeyDomain {
     /// A key domain with the given keys and self-roots, for footprint tests.
     pub(crate) fn for_footprint_tests(
         key: FlowReturnKey,
-        keys: Arc<[Arc<str>]>,
-        roots: Arc<[ObservedGraphSelfRoot]>,
+        keys: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
+        roots: Box<[ObservedGraphSelfRoot]>,
     ) -> Self {
         Self { key, keys, roots }
     }

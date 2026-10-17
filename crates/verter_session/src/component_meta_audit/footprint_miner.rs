@@ -608,7 +608,7 @@ fn named_identity_of(data: &SemanticNodeData) -> Option<NamedIdentity> {
         SemanticNodeData::TypeParam {
             decl, display_name, ..
         } => Some(NamedIdentity {
-            canonical_id: Arc::clone(&decl.canonical_id),
+            canonical_id: std::sync::Arc::<str>::from(decl.canonical_id.as_str()),
             symbol_name: Arc::clone(display_name),
             args_fingerprint: decl.whole_hash,
         }),
@@ -750,14 +750,14 @@ fn translate_meta(kind: CoreOriginEdgeKind, meta: &OriginMeta) -> OriginEdgeMeta
     match kind {
         CoreOriginEdgeKind::Instantiate => {
             let type_params = match meta {
-                OriginMeta::SubstitutedParam(name) => vec![Arc::clone(name)],
+                OriginMeta::SubstitutedParam(name) => vec![std::sync::Arc::<str>::from(name)],
                 _ => Vec::new(),
             };
             OriginEdgeMetaDto::Instantiate { type_params }
         }
         CoreOriginEdgeKind::SubstituteTypeParam => OriginEdgeMetaDto::SubstituteTypeParam {
             param_name: match meta {
-                OriginMeta::SubstitutedParam(name) => Arc::clone(name),
+                OriginMeta::SubstitutedParam(name) => std::sync::Arc::<str>::from(name.as_str()),
                 _ => Arc::from(""),
             },
             // `substituted_with` is not carried on `OriginMeta` — the
@@ -776,7 +776,7 @@ fn translate_meta(kind: CoreOriginEdgeKind, meta: &OriginMeta) -> OriginEdgeMeta
         }
         CoreOriginEdgeKind::InferBind => OriginEdgeMetaDto::InferBind {
             param_name: match meta {
-                OriginMeta::SubstitutedParam(name) => Arc::clone(name),
+                OriginMeta::SubstitutedParam(name) => std::sync::Arc::<str>::from(name.as_str()),
                 _ => Arc::from(""),
             },
             bound_to: NodeId(u32::MAX),
@@ -824,7 +824,7 @@ fn translate_meta(kind: CoreOriginEdgeKind, meta: &OriginMeta) -> OriginEdgeMeta
         // here for legacy test-scaffold emissions that pass no payload.
         CoreOriginEdgeKind::AliasResolve => OriginEdgeMetaDto::AliasResolve {
             alias_name: match meta {
-                OriginMeta::AliasName(n) => Arc::clone(n),
+                OriginMeta::AliasName(n) => std::sync::Arc::<str>::from(n.as_str()),
                 OriginMeta::None => Arc::from(""),
                 other => panic!(
                     "AliasResolve edge emitted with non-AliasName OriginMeta variant: {other:?}. \
@@ -841,7 +841,9 @@ fn translate_path_segment(seg: &PathSegment) -> ProjectPathSegment {
             key: translate_property_key(key),
         },
         PathSegment::Index(idx) => match idx {
-            IndexKey::String(s) => ProjectPathSegment::Index { key: Arc::clone(s) },
+            IndexKey::String(s) => ProjectPathSegment::Index {
+                key: std::sync::Arc::<str>::from(s.as_str()),
+            },
             IndexKey::Number(n) => ProjectPathSegment::Index {
                 key: Arc::from(n.to_string()),
             },
@@ -861,7 +863,7 @@ fn translate_path_segment(seg: &PathSegment) -> ProjectPathSegment {
 fn translate_property_key(key: &PropertyKey) -> verter_audit::AuditPropertyKey {
     match key {
         PropertyKey::String(value) => verter_audit::AuditPropertyKey::String {
-            value: Arc::clone(value),
+            value: std::sync::Arc::<str>::from(value.as_str()),
         },
         PropertyKey::Number(value) => verter_audit::AuditPropertyKey::Number { value: value.get() },
         PropertyKey::UniqueSymbol(identity) => {
@@ -878,10 +880,10 @@ fn translate_property_key(key: &PropertyKey) -> verter_audit::AuditPropertyKey {
             };
             verter_audit::AuditPropertyKey::UniqueSymbol {
                 identity: verter_audit::AuditUniqueSymbolIdentity {
-                    canonical_id: Arc::clone(&identity.canonical_id),
+                    canonical_id: std::sync::Arc::<str>::from(identity.canonical_id.as_str()),
                     owner_kind,
                     owner_ordinal: identity.owner.ordinal(),
-                    symbol: Arc::clone(&identity.symbol),
+                    symbol: std::sync::Arc::<str>::from(identity.symbol.as_str()),
                     member_path: identity
                         .member_path
                         .iter()

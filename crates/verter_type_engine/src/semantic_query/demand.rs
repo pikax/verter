@@ -33,6 +33,7 @@
 //! typed-value cache key.
 
 use std::sync::Arc;
+use verter_type_expr::OwnedSlice;
 
 // NON-`pub`: these pre-existing types are owned by `semantic_query` and stay on
 // that owner path. The demand module does NOT re-export them (§3.6): the demand
@@ -46,10 +47,10 @@ use crate::semantic_query::{PathSegment, ProjectionMode};
 
 /// A projection path built on the existing [`PathSegment`] vocabulary.
 ///
-/// **`ProjectionPath` IS the `Arc<[PathSegment]>` representation** (§3.1) — a
+/// **`ProjectionPath` IS the `verter_type_expr::OwnedSlice<PathSegment>` representation** (§3.1) — a
 /// thin, zero-cost newtype with the prefix-order methods attached, NOT a
 /// parallel/dual path representation. `SemanticQueryKey::ProjectPath.path` is
-/// itself an `Arc<[PathSegment]>`; the [`From`] conversions below are O(1)
+/// itself an `verter_type_expr::OwnedSlice<PathSegment>`; the [`From`] conversions below are O(1)
 /// `Arc` clones/moves, so the semantic-query key shares this exact
 /// representation with zero conversion tax. There is no second path datum to
 /// keep in sync.
@@ -60,19 +61,18 @@ use crate::semantic_query::{PathSegment, ProjectionMode};
 /// the normal form), so structural equality is the sound pure semantics and
 /// is what this module implements.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ProjectionPath(Arc<[PathSegment]>);
+pub struct ProjectionPath(OwnedSlice<PathSegment>);
 
-impl From<Arc<[PathSegment]>> for ProjectionPath {
-    /// O(1): adopts the existing `Arc` allocation verbatim (no copy, no
-    /// re-interning). `ProjectionPath` carries no datum beyond this `Arc`.
-    fn from(segments: Arc<[PathSegment]>) -> Self {
+impl From<OwnedSlice<PathSegment>> for ProjectionPath {
+    /// O(1): adopts the existing owned allocation verbatim (no copy, no
+    /// re-interning). `ProjectionPath` carries no datum beyond it.
+    fn from(segments: OwnedSlice<PathSegment>) -> Self {
         ProjectionPath(segments)
     }
 }
 
-impl From<ProjectionPath> for Arc<[PathSegment]> {
-    /// O(1): hands back the wrapped `Arc` by move — the round-trip
-    /// `Arc<[PathSegment]> → ProjectionPath → Arc<[PathSegment]>` is identity.
+impl From<ProjectionPath> for OwnedSlice<PathSegment> {
+    /// O(1): hands back the wrapped allocation by move.
     fn from(path: ProjectionPath) -> Self {
         path.0
     }
@@ -81,18 +81,17 @@ impl From<ProjectionPath> for Arc<[PathSegment]> {
 impl ProjectionPath {
     /// The empty path `[]` — the `⊥` of the prefix order.
     pub fn empty() -> Self {
-        ProjectionPath(Arc::from([]))
+        ProjectionPath(OwnedSlice::default())
     }
 
-    /// Borrow the underlying `Arc<[PathSegment]>` — proves there is no second
+    /// Borrow the underlying owned allocation — proves there is no second
     /// representation: this IS the stored datum (O(1), no allocation).
-    pub fn as_arc(&self) -> &Arc<[PathSegment]> {
+    pub fn as_owned(&self) -> &OwnedSlice<PathSegment> {
         &self.0
     }
 
-    /// Move out the underlying `Arc<[PathSegment]>` (O(1), no copy). Pairs with
-    /// [`From<Arc<[PathSegment]>>`] for an identity round-trip.
-    pub fn into_arc(self) -> Arc<[PathSegment]> {
+    /// Move out the underlying owned allocation (O(1), no copy).
+    pub fn into_owned(self) -> OwnedSlice<PathSegment> {
         self.0
     }
 

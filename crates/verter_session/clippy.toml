@@ -43,4 +43,8 @@ ignore-interior-mutability = [
   "verter_session_query::retention::RetentionCharge",
   "verter_type_engine::semantic_query_memo::node_roots::NodeRootSet",
   "verter_type_engine::signature_kernel::lifetime::SignatureEpochLease",
+  "verter_retention::RetentionCharge",
+  "verter_retention::owned::Owned",
+  "verter_retention::owned::OwnedStr",
+  "verter_retention::owned::OwnedSlice",
 ]

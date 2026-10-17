@@ -26,7 +26,7 @@ fn marker_kinds() -> Vec<QueryError> {
         QueryError::UnrepresentableSurface,
         QueryError::UnrepresentableSurfaceMember,
         QueryError::AliasCycle {
-            chain: Arc::from(Vec::<Arc<str>>::new()),
+            chain: verter_type_expr::OwnedSlice::from(Vec::<Arc<str>>::new()),
         },
         QueryError::RaiseAliasCycle,
         QueryError::TypeParamCycle,

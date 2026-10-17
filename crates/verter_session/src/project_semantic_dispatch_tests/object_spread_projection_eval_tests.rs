@@ -259,7 +259,11 @@ fn finite_union_spread_keeps_correlated_alternatives_through_final_overwrite() {
     let formula = project(
         &dispatch,
         program,
-        ObjectProjectionSelector::RelationShape(Arc::from([key("a"), key("b"), key("x")])),
+        ObjectProjectionSelector::RelationShape(verter_type_expr::OwnedSlice::from([
+            key("a"),
+            key("b"),
+            key("x"),
+        ])),
         ExactOptionalPropertyPolicy::Disabled,
     );
     assert_eq!(formula.alternatives().len(), 2);
@@ -396,7 +400,7 @@ fn selector_liveness_prunes_only_shadowed_recursive_key_effects() {
 
     let recursive = graph.intern_node(SemanticNodeData::Opaque(
         verter_type_engine::semantic_query::QueryError::RecursiveRef {
-            name: Arc::from("Self"),
+            name: verter_type_expr::OwnedStr::from("Self"),
             args: Default::default(),
         },
     ));
@@ -695,9 +699,9 @@ fn lowering_and_navigation_use_the_program_without_eager_surface_collapse() {
 
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: lowered,
-        path: Arc::from([verter_type_engine::semantic_query::PathSegment::Member(
-            key("x"),
-        )]),
+        path: verter_type_expr::OwnedSlice::from([
+            verter_type_engine::semantic_query::PathSegment::Member(key("x")),
+        ]),
         context: ProjectionReductionContext::published(ProjectionMode::Navigate),
     });
     assert!(matches!(
@@ -1024,7 +1028,7 @@ fn unclassifiable_spread_residual_yields_indeterminate_excess_not_generic_suppre
     assert_eq!(
         excess_of(closed),
         ExcessEligibility::Eligible {
-            direct_candidates: Arc::from([key("extra")]),
+            direct_candidates: verter_type_expr::OwnedSlice::from([key("extra")]),
         }
     );
 }
@@ -1400,10 +1404,10 @@ fn unique_symbol_keys_survive_spreads_without_aliasing_same_spelling() {
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let identity = |canonical: &str| verter_type_expr::facts::ValueDeclIdentityPart {
-        canonical_id: Arc::from(canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        symbol: Arc::from("k"),
-        member_path: Arc::from([]),
+        symbol: verter_type_expr::OwnedStr::from("k"),
+        member_path: verter_type_expr::OwnedSlice::from([]),
     };
     let first = PropertyKey::UniqueSymbol(identity("/w/first.ts"));
     let twin = PropertyKey::UniqueSymbol(identity("/w/twin.ts"));
@@ -1853,7 +1857,7 @@ fn cap_and_cycle_partials_are_never_admitted_and_later_queries_heal() {
     // A live recursive operand is likewise ReturnOnly.
     let recursive = graph.intern_node(SemanticNodeData::Opaque(
         verter_type_engine::semantic_query::QueryError::RecursiveRef {
-            name: Arc::from("Self"),
+            name: verter_type_expr::OwnedStr::from("Self"),
             args: Default::default(),
         },
     ));
@@ -2037,7 +2041,7 @@ fn joined_shallow_surface_reports_incomplete_unless_single_closed_witness() {
             &host,
             &dispatch,
             node,
-            Arc::from([]),
+            verter_type_expr::OwnedSlice::from([]),
             ProjectionReductionContext::published(ProjectionMode::Shallow),
             None,
         )
@@ -2432,9 +2436,9 @@ fn path_projection_joins_closed_absent_alternatives_as_optional() {
 
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: correlated,
-        path: Arc::from([verter_type_engine::semantic_query::PathSegment::Member(
-            key("a"),
-        )]),
+        path: verter_type_expr::OwnedSlice::from([
+            verter_type_engine::semantic_query::PathSegment::Member(key("a")),
+        ]),
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     });
     let QueryResult::Value(SemanticQueryOutput { value, .. }) = projected else {
@@ -2946,7 +2950,7 @@ fn empty_path_shallow_surface(
 ) -> verter_type_engine::semantic_query::SurfaceView {
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice(),
         ),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
@@ -3033,7 +3037,7 @@ fn empty_path_shallow_over_open_program_root_returns_open_typed_evidence() {
 
     let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base: root,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice(),
         ),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
@@ -3097,7 +3101,7 @@ fn empty_path_shallow_over_correlated_program_merges_closed_alternatives() {
 
     let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base: root,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice(),
         ),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
@@ -3190,7 +3194,7 @@ fn empty_path_shallow_over_union_with_program_arm_projects_the_arm() {
     ));
     let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base: open_union_root,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice(),
         ),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
@@ -3249,7 +3253,7 @@ fn empty_path_shallow_over_intersection_with_open_program_arm_keeps_the_carrier(
     ));
     let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base: intersection_root,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice(),
         ),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
@@ -3359,7 +3363,7 @@ fn empty_path_shallow_over_program_root_failure_is_typed_partial() {
 
     let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base: node,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice(),
         ),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
@@ -3868,7 +3872,7 @@ fn macro_member_reader_recurses_union_carriers_for_positive_members() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base: union_root,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice(),
         ),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
@@ -3903,7 +3907,7 @@ fn macro_member_reader_recurses_union_carriers_for_positive_members() {
         &host,
         &dispatch,
         union_root,
-        Arc::from([]),
+        verter_type_expr::OwnedSlice::from([]),
         ProjectionReductionContext::published(ProjectionMode::Shallow),
         None,
     );
@@ -4459,7 +4463,7 @@ fn typeinfo_join_collapses_dual_spelling_members() {
         &host,
         &dispatch,
         root,
-        Arc::from([]),
+        verter_type_expr::OwnedSlice::from([]),
         ProjectionReductionContext::published(ProjectionMode::Shallow),
         None,
     );
@@ -4696,7 +4700,7 @@ fn typeinfo_join_publishes_indeterminate_value_members_as_open_rows() {
         &host,
         &dispatch,
         root,
-        Arc::from([]),
+        verter_type_expr::OwnedSlice::from([]),
         ProjectionReductionContext::published(ProjectionMode::Shallow),
         None,
     );

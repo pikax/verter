@@ -128,7 +128,7 @@ fn selected_key_mapped_materialization_closes_conditional_to_function() {
     // branch closes to a Function.
     let project_query = SemanticQueryKey::ProjectPath {
         base: carrier,
-        path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
     };
     let surface_node = match for_tests::dispatch_execute_type_node_for_tests(&host, project_query) {

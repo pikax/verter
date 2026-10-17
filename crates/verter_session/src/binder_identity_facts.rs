@@ -185,7 +185,8 @@ impl BinderIdentityFacts {
         owner: verter_type_expr::TopLevelOwnerId,
         qualified_name: &str,
     ) -> Option<BinderScopeId> {
-        let want = BinderScopeId::namespace_scope(owner, Arc::from(qualified_name));
+        let want =
+            BinderScopeId::namespace_scope(owner, verter_type_expr::OwnedStr::from(qualified_name));
         self.scopes
             .iter()
             .find(|record| record.id == want)
@@ -494,15 +495,20 @@ pub(crate) fn project_binder_identity_facts_inputs(
         // with ONLY `namespace Empty {}` otherwise dangles — empty
         // blocks produce no type/value headers).
         note_owner(*owner, &mut file_scope_owners);
-        let id = BinderScopeId::namespace_scope(*owner, Arc::clone(qualified_name));
+        let id = BinderScopeId::namespace_scope(
+            *owner,
+            verter_type_expr::OwnedStr::from(qualified_name),
+        );
         let parent = match qualified_name.rsplit_once('.') {
-            Some((head, _)) => BinderScopeId::namespace_scope(*owner, Arc::from(head)),
+            Some((head, _)) => {
+                BinderScopeId::namespace_scope(*owner, verter_type_expr::OwnedStr::from(head))
+            }
             None => BinderScopeId::file_scope(*owner),
         };
         scopes.push(BinderScopeRecord {
             id,
             kind: verter_type_engine::semantic_query::BinderScopeKind::Namespace {
-                qualified_name: Arc::clone(qualified_name),
+                qualified_name: verter_type_expr::OwnedStr::from(qualified_name),
             },
             parent: Some(parent),
         });
@@ -532,9 +538,12 @@ pub(crate) fn project_binder_identity_facts_inputs(
                     verter_type_engine::semantic_query::BinderScopeKind::AugmentationGlobal,
                 ),
                 AugmentationScopeKind::Module(specifier) => (
-                    BinderScopeId::augmentation_module_scope(owner, Arc::from(specifier.as_str())),
+                    BinderScopeId::augmentation_module_scope(
+                        owner,
+                        verter_type_expr::OwnedStr::from(specifier.as_str()),
+                    ),
                     verter_type_engine::semantic_query::BinderScopeKind::AugmentationModule {
-                        specifier: Arc::from(specifier.as_str()),
+                        specifier: verter_type_expr::OwnedStr::from(specifier.as_str()),
                     },
                 ),
             };
@@ -1006,16 +1015,16 @@ pub(crate) mod tests {
         );
 
         let seed = DeclarationSlotSeed::new(
-            Arc::from("/w/a.ts"),
+            verter_type_expr::OwnedStr::from("/w/a.ts"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from("Foo"),
+            verter_type_expr::OwnedStr::from("Foo"),
             SemanticSymbolSpace::Type,
         );
         let via_seed = dispatch.finalize_slot_seed(seed.clone());
         let via_type_slot_for = dispatch.type_slot_for(
-            Arc::from("/w/a.ts"),
+            verter_type_expr::OwnedStr::from("/w/a.ts"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from("Foo"),
+            verter_type_expr::OwnedStr::from("Foo"),
         );
         assert_eq!(
             via_seed, via_type_slot_for,
@@ -1028,9 +1037,9 @@ pub(crate) mod tests {
         let env = host.host_view_env_hashes_for("/w/a.ts");
         let project_identity = host.host_view_project_identity_for("/w/a.ts").fold_u32();
         let expected = ResolvedDeclSlotIdentity::type_slot(
-            Arc::from("/w/a.ts"),
+            verter_type_expr::OwnedStr::from("/w/a.ts"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from("Foo"),
+            verter_type_expr::OwnedStr::from("Foo"),
             project_identity,
             env.type_env_hash,
             env.lib_env_hash,

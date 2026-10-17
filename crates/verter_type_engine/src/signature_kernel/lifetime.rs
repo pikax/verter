@@ -101,6 +101,16 @@ pub(super) struct EpochInner {
     /// ([`SignatureStore::note_released_nodes`]): every record reached
     /// through one of them is garbage no live request can name again.
     pub stranded_tokens: AtomicUsize,
+    /// Read views and leases of this epoch alive now. Each one may read any
+    /// of the epoch's tokens back to its node, so while one is alive a
+    /// close moves the store's root on a closed token into
+    /// [`Self::released_roots`] instead of dropping it.
+    holders: AtomicU64,
+    /// Roots a close took from the store while a holder of this epoch was
+    /// alive. They are dropped when the last holder drops, or by the next
+    /// close that finds none; the epoch's storage stays charged for them
+    /// until then.
+    released_roots: Mutex<Vec<crate::semantic_query_memo::node_roots::NodeRootSet>>,
 }
 
 impl EpochInner {
@@ -137,7 +147,62 @@ impl EpochInner {
             descriptor_chain_walks: AtomicU64::new(0),
             apply_count: AtomicU64::new(0),
             stranded_tokens: AtomicUsize::new(0),
+            holders: AtomicU64::new(0),
+            released_roots: Mutex::new(Vec::new()),
         }
+    }
+
+    /// A read view or lease of this epoch now exists.
+    pub(super) fn hold(&self) {
+        self.holders.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// A read view or lease of this epoch dropped; the last one releases
+    /// the roots a close deferred for it.
+    pub(super) fn release_hold(&self) {
+        if self.holders.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.drain_released_roots();
+        }
+    }
+
+    /// Keep `roots`, taken from the store by a close, until no holder of
+    /// this epoch can read their tokens back.
+    fn defer_released_roots(
+        &self,
+        roots: Vec<crate::semantic_query_memo::node_roots::NodeRootSet>,
+    ) {
+        if roots.is_empty() {
+            return;
+        }
+        {
+            let mut released = self.released_roots.lock();
+            let before = released.capacity();
+            released.extend(roots);
+            self.storage.add(
+                (released.capacity() - before)
+                    * std::mem::size_of::<crate::semantic_query_memo::node_roots::NodeRootSet>(),
+            );
+        }
+        self.drain_released_roots();
+    }
+
+    /// Drop the deferred roots once no holder of this epoch is alive. The
+    /// holder count is read under the lock a close defers under, so a close
+    /// and a final release racing each other leave nothing behind.
+    fn drain_released_roots(&self) {
+        let drained = {
+            let mut released = self.released_roots.lock();
+            if self.holders.load(Ordering::SeqCst) != 0 || released.capacity() == 0 {
+                return;
+            }
+            std::mem::take(&mut *released)
+        };
+        let block = drained.capacity()
+            * std::mem::size_of::<crate::semantic_query_memo::node_roots::NodeRootSet>();
+        let heap: usize = drained.iter().map(|roots| roots.heap_bytes()).sum();
+        // The roots drop here, outside the lock.
+        drop(drained);
+        self.storage.sub(heap + block);
     }
 
     pub(super) fn shard_lock_acquires(&self) -> u64 {
@@ -205,9 +270,9 @@ impl EpochInner {
 /// while a long-lived editor's kernel tables stop growing at a fixed size.
 pub const EPOCH_RECORD_CAP: usize = 1 << 18;
 
-/// Intentionally retained result: owns the epoch tables it was published in.
+/// Intentionally retained result: holds the epoch it was published in.
 struct RetainedRoot {
-    epoch: Arc<EpochInner>,
+    epoch: SignatureEpochLease,
     result: AppliedResult,
 }
 
@@ -323,11 +388,13 @@ impl SignatureStore {
 
     construction_ordinal_seam! {
         /// Release the current epoch's roots on the type tokens naming
-        /// `released` — closed content no request reaches again — so the
-        /// epoch no longer keeps those nodes alive; every record reached
-        /// through such a token is stranded. A token is counted once, when
-        /// its root is released. Returns how many of `released` the current
-        /// epoch held a root for.
+        /// `released` — closed content no new request reaches again — so the
+        /// store no longer keeps those nodes alive; every record reached
+        /// through such a token is stranded. A read view or lease of the
+        /// epoch alive now may still read those tokens back, so the roots
+        /// are dropped only once the last one drops. A token is counted
+        /// once per release of its root; re-rooting it uncounts it. Returns
+        /// how many of `released` the current epoch held a root for.
         fn note_released_nodes(&self, released: impl IntoIterator<Item = SemanticNodeId>) -> usize {
             let inner = self.current.load();
             let freed: Vec<_> = released
@@ -341,12 +408,8 @@ impl SignatureStore {
                 })
                 .collect();
             let stranded = freed.len();
-            for roots in &freed {
-                inner.storage.sub(roots.heap_bytes());
-            }
-            // The roots drop here, outside the table's lock.
-            drop(freed);
             inner.stranded_tokens.fetch_add(stranded, Ordering::Relaxed);
+            inner.defer_released_roots(freed);
             stranded
         }
     }
@@ -441,7 +504,7 @@ impl SignatureStore {
         let inner = self.current.load_full();
         self.check_applied(&inner, &result)?;
         self.retained_results.lock().push(RetainedRoot {
-            epoch: inner,
+            epoch: SignatureEpochLease::from_epoch(inner),
             result,
         });
         Ok(())
@@ -460,9 +523,10 @@ impl SignatureStore {
     pub fn retained_descriptor(&self, index: usize) -> Result<SignatureDescriptor, StoreError> {
         let guard = self.retained_results.lock();
         let entry = guard.get(index).ok_or(StoreError::Missing)?;
-        check_epoch(entry.epoch.epoch, entry.result.descriptor.epoch())?;
+        check_epoch(entry.epoch.inner.epoch, entry.result.descriptor.epoch())?;
         entry
             .epoch
+            .inner
             .descriptors
             .get(entry.result.descriptor.index())
             .copied()
@@ -703,6 +767,7 @@ impl SignatureStore {
                         .map_err(|_| StoreError::Missing)
                 })
                 .transpose()?;
+            let interned_before = inner.type_tokens.lookup(&node).is_some();
             let raw = inner.type_tokens.intern(node, cancelled)?;
             if let Some(root) = root {
                 let mut roots = inner.graph_roots.lock();
@@ -712,6 +777,15 @@ impl SignatureStore {
                 {
                     inner.storage.add(root.heap_bytes());
                     slot.insert(root);
+                    if interned_before {
+                        // An interned token without a root is one a close
+                        // stranded; rooting it again makes it live.
+                        let _ = inner.stranded_tokens.fetch_update(
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                            |count| count.checked_sub(1),
+                        );
+                    }
                 }
                 inner.storage.map_growth(
                     before,
@@ -1335,10 +1409,22 @@ impl SignatureStore {
 }
 
 /// Owns the tables used by one published result without adding it to a
-/// store-global retained-results list. Replacement never changes this lease.
-#[derive(Clone)]
+/// store-global retained-results list. Replacement never changes this lease,
+/// and a close never drops the graph roots of the tokens it can read.
 pub struct SignatureEpochLease {
     inner: Arc<EpochInner>,
+}
+
+impl Clone for SignatureEpochLease {
+    fn clone(&self) -> Self {
+        Self::from_epoch(Arc::clone(&self.inner))
+    }
+}
+
+impl Drop for SignatureEpochLease {
+    fn drop(&mut self) {
+        self.inner.release_hold();
+    }
 }
 
 impl std::fmt::Debug for SignatureEpochLease {
@@ -1351,6 +1437,7 @@ impl std::fmt::Debug for SignatureEpochLease {
 
 impl SignatureEpochLease {
     pub(super) fn from_epoch(inner: Arc<EpochInner>) -> Self {
+        inner.hold();
         Self { inner }
     }
     pub fn epoch(&self) -> GraphEpoch {
@@ -1391,7 +1478,7 @@ impl SignatureStore {
     pub fn lease_epoch(&self, epoch: GraphEpoch) -> Result<SignatureEpochLease, StoreError> {
         let inner = self.current.load_full();
         check_epoch(inner.epoch, epoch)?;
-        Ok(SignatureEpochLease { inner })
+        Ok(SignatureEpochLease::from_epoch(inner))
     }
 }
 
