@@ -83,8 +83,10 @@ pub(super) struct EpochInner {
     pub environments: AppendInterner<CanonicalTypeSubstitution>,
     pub locators: AppendInterner<u64>,
     pub type_tokens: AppendInterner<SemanticNodeId>,
-    graph_roots:
-        Mutex<rustc_hash::FxHashMap<u32, crate::semantic_query_memo::node_roots::NodeRootSet>>,
+    /// Each type token's graph root, or the mark a close left on a token
+    /// whose root it released. The stranded count changes only under this
+    /// lock, with the entry it describes.
+    graph_roots: Mutex<rustc_hash::FxHashMap<u32, TokenRoot>>,
     /// Authored source node of a descriptor (graph `Signature` node token).
     /// Epoch-local, like every handle it is keyed by.
     /// Logical identity that owns each binder-space key, so a truncated key
@@ -98,8 +100,10 @@ pub(super) struct EpochInner {
     pub descriptor_chain_walks: AtomicU64,
     pub apply_count: AtomicU64,
     /// Type tokens of this epoch whose graph root a close released
-    /// ([`SignatureStore::note_released_nodes`]): every record reached
-    /// through one of them is garbage no live request can name again.
+    /// ([`SignatureStore::note_released_nodes`]) and no intern has rooted
+    /// again: every record reached through one of them is garbage no live
+    /// request can name again. Exactly the [`TokenRoot::Stranded`] entries
+    /// of [`Self::graph_roots`], updated under that lock.
     pub stranded_tokens: AtomicUsize,
     /// Read views and leases of this epoch alive now. Each one may read any
     /// of the epoch's tokens back to its node, so while one is alive a
@@ -111,6 +115,15 @@ pub(super) struct EpochInner {
     /// close that finds none; the epoch's storage stays charged for them
     /// until then.
     released_roots: Mutex<Vec<crate::semantic_query_memo::node_roots::NodeRootSet>>,
+}
+
+/// A type token's entry in its epoch's root table.
+enum TokenRoot {
+    /// The root the store holds on the token's node.
+    Rooted(crate::semantic_query_memo::node_roots::NodeRootSet),
+    /// A close released the root; an intern of the same node roots it
+    /// again.
+    Stranded,
 }
 
 impl EpochInner {
@@ -397,18 +410,29 @@ impl SignatureStore {
         /// how many of `released` the current epoch held a root for.
         fn note_released_nodes(&self, released: impl IntoIterator<Item = SemanticNodeId>) -> usize {
             let inner = self.current.load();
-            let freed: Vec<_> = released
+            let indexes: Vec<u32> = released
                 .into_iter()
-                .filter_map(|node| {
-                    let index = inner.type_tokens.lookup(&node)?;
-                    inner
-                        .graph_roots
-                        .lock()
-                        .remove(&super::records::handle_index(index))
-                })
+                .filter_map(|node| inner.type_tokens.lookup(&node))
+                .map(super::records::handle_index)
                 .collect();
+            let mut freed = Vec::new();
+            {
+                let mut roots = inner.graph_roots.lock();
+                for index in indexes {
+                    let Some(entry) = roots.get_mut(&index) else {
+                        continue;
+                    };
+                    if let TokenRoot::Rooted(root) =
+                        std::mem::replace(entry, TokenRoot::Stranded)
+                    {
+                        freed.push(root);
+                    }
+                }
+                // Counted with the marks, under the lock an intern re-roots
+                // under, so a concurrent re-root never misses its uncount.
+                inner.stranded_tokens.fetch_add(freed.len(), Ordering::Relaxed);
+            }
             let stranded = freed.len();
-            inner.stranded_tokens.fetch_add(stranded, Ordering::Relaxed);
             inner.defer_released_roots(freed);
             stranded
         }
@@ -422,7 +446,10 @@ impl SignatureStore {
             .graph_roots
             .lock()
             .values()
-            .filter_map(|roots| roots.operands().first().copied())
+            .filter_map(|entry| match entry {
+                TokenRoot::Rooted(roots) => roots.operands().first().copied(),
+                TokenRoot::Stranded => None,
+            })
             .collect()
     }
 
@@ -541,6 +568,17 @@ impl SignatureStore {
 
     fn inner(&self) -> arc_swap::Guard<Arc<EpochInner>> {
         self.current.load()
+    }
+
+    /// Intern `node`'s token record without its root: the state a
+    /// concurrent [`Self::intern_type_token`] leaves between interning the
+    /// record and rooting it.
+    #[cfg(test)]
+    pub(crate) fn intern_unrooted_type_token_for_tests(&self, node: SemanticNodeId) {
+        self.inner()
+            .type_tokens
+            .intern(node, None)
+            .expect("a test token interns");
     }
 
     fn require_id<T>(
@@ -767,30 +805,30 @@ impl SignatureStore {
                         .map_err(|_| StoreError::Missing)
                 })
                 .transpose()?;
-            let interned_before = inner.type_tokens.lookup(&node).is_some();
             let raw = inner.type_tokens.intern(node, cancelled)?;
             if let Some(root) = root {
                 let mut roots = inner.graph_roots.lock();
                 let before = roots.capacity();
-                if let std::collections::hash_map::Entry::Vacant(slot) =
-                    roots.entry(super::records::handle_index(raw))
-                {
-                    inner.storage.add(root.heap_bytes());
-                    slot.insert(root);
-                    if interned_before {
-                        // An interned token without a root is one a close
-                        // stranded; rooting it again makes it live.
-                        let _ = inner.stranded_tokens.fetch_update(
-                            Ordering::Relaxed,
-                            Ordering::Relaxed,
-                            |count| count.checked_sub(1),
-                        );
+                match roots.entry(super::records::handle_index(raw)) {
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        inner.storage.add(root.heap_bytes());
+                        slot.insert(TokenRoot::Rooted(root));
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut slot) => {
+                        if matches!(slot.get(), TokenRoot::Stranded) {
+                            // A close stranded this token; rooting it again
+                            // makes it live, decided under the lock the
+                            // close marked it under.
+                            inner.storage.add(root.heap_bytes());
+                            slot.insert(TokenRoot::Rooted(root));
+                            inner.stranded_tokens.fetch_sub(1, Ordering::Relaxed);
+                        }
                     }
                 }
                 inner.storage.map_growth(
                     before,
                     roots.capacity(),
-                    std::mem::size_of::<(u32, crate::semantic_query_memo::node_roots::NodeRootSet)>(),
+                    std::mem::size_of::<(u32, TokenRoot)>(),
                 );
             }
             Ok(super::records::TypeToken::from_raw(raw))

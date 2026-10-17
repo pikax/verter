@@ -1409,9 +1409,12 @@ impl NodeArenaCore {
         self.destroyed.lock().drain()
     }
 
-    /// Log `ids` again: a drain that could not clean them yet.
-    pub(super) fn relog_destroyed(&self, ids: &[SemanticNodeId]) {
-        self.destroyed.lock().extend(self.retention_account(), ids);
+    /// Settle the destroyed-log drain a release left to the holder of a
+    /// sidecar lock (see [`super::release::SidecarMutex`]).
+    pub(super) fn settle_destroyed_log(&self) {
+        if let Some(sink) = self.destroyed_sink.get() {
+            sink.settle_owed(self);
+        }
     }
 
     /// Bind the owning store's sidecars; the first store bound keeps them.
@@ -1514,7 +1517,7 @@ impl NodeArenaCore {
             };
             if over_threshold {
                 if let Some(sink) = self.destroyed_sink.get() {
-                    sink.try_drain(self);
+                    sink.settle(self);
                 }
             }
         }

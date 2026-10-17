@@ -159,45 +159,87 @@ fn release_decl_key(canonical: &str, name: &str) -> SemanticQueryKey {
 /// content then, with no close or sidecar write left to drain the log: the
 /// release that grows the destroyed log past its threshold drains it into
 /// the sidecars itself, so neither the log nor the stale sidecar entries
-/// outlive the drop by more than the threshold.
+/// outlive the drop by more than the threshold. When a sidecar lock is held
+/// across that final release the drain cannot run then; the lock's holder
+/// runs it as it unlocks, with no fresh entry of its own and no later work.
 ///
 /// Discriminating against a log drained only by a later close or sidecar
-/// write: every destroyed id and its structure bits would stay retained.
+/// write, and against a release that gives up on a held sidecar lock: every
+/// destroyed id and its structure bits would stay retained.
 #[test]
 fn a_final_drop_after_close_keeps_the_destroyed_log_bounded() {
-    let store = SemanticGraphStore::new();
-    let count = super::super::release::DESTROYED_DRAIN_THRESHOLD * 4;
-    let scope = store.enter_node_root_scope();
-    let scoped = release_file_scope("/w/a.ts", 1);
-    for index in 0..count {
-        let node = store.intern_node_with_scope(
-            release_type_param("/w/a.ts", 1, &format!("T{index}")),
-            scoped.clone(),
+    /// A lock guard held across the final release, dropped by type erasure.
+    trait Held {}
+    impl<T> Held for T {}
+    type Hold = for<'a> fn(&'a SemanticGraphStore) -> Box<dyn Held + 'a>;
+    let cases: [(&str, Option<Hold>); 5] = [
+        ("uncontended", None),
+        (
+            "key classes held",
+            Some(|store| Box::new(store.key_classes.lock())),
+        ),
+        (
+            "structure bits held",
+            Some(|store| Box::new(store.unresolved_reach.lock())),
+        ),
+        (
+            "origin edges held",
+            Some(|store| Box::new(store.derivation.lock())),
+        ),
+        (
+            "member-index order held",
+            Some(|store| Box::new(store.member_ordinal_index_fifo.lock())),
+        ),
+    ];
+    let threshold = super::super::release::DESTROYED_DRAIN_THRESHOLD;
+    for (label, hold) in cases {
+        let store = SemanticGraphStore::new();
+        let count = threshold * 4;
+        let scope = store.enter_node_root_scope();
+        let scoped = release_file_scope("/w/a.ts", 1);
+        for index in 0..count {
+            let node = store.intern_node_with_scope(
+                release_type_param("/w/a.ts", 1, &format!("T{index}")),
+                scoped.clone(),
+            );
+            // Classifying writes the node's structure-bit sidecar entry.
+            store.node_is_inert_structure(node);
+        }
+        assert_eq!(store.unresolved_reach_count(), count, "{label}");
+
+        store.close_canonical("/w/a.ts");
+        assert_eq!(
+            store.unresolved_reach_count(),
+            count,
+            "{label}: premise: the scope still holds every node"
         );
-        // Classifying writes the node's structure-bit sidecar entry.
-        store.node_is_inert_structure(node);
+        let held = hold.map(|hold| hold(&store));
+        drop(scope);
+        assert_eq!(
+            store.node_count(),
+            0,
+            "{label}: the final drop destroys them all"
+        );
+        if held.is_some() {
+            assert_eq!(
+                store.pending_destroyed_nodes(),
+                count,
+                "{label}: premise: the held lock blocks the release's drain"
+            );
+        }
+        drop(held);
+
+        assert!(
+            store.pending_destroyed_nodes() <= threshold,
+            "{label}: pending {} of {count}",
+            store.pending_destroyed_nodes()
+        );
+        assert!(
+            store.unresolved_reach_count() <= threshold,
+            "{label}: stale structure bits {} of {count}",
+            store.unresolved_reach_count()
+        );
     }
-    assert_eq!(store.unresolved_reach_count(), count);
-
-    store.close_canonical("/w/a.ts");
-    assert_eq!(
-        store.unresolved_reach_count(),
-        count,
-        "premise: the scope still holds every node"
-    );
-    drop(scope);
-
-    assert_eq!(store.node_count(), 0, "the final drop destroys them all");
-    assert!(
-        store.pending_destroyed_nodes() <= super::super::release::DESTROYED_DRAIN_THRESHOLD,
-        "pending {} of {count}",
-        store.pending_destroyed_nodes()
-    );
-    assert!(
-        store.unresolved_reach_count() <= super::super::release::DESTROYED_DRAIN_THRESHOLD,
-        "stale structure bits {} of {count}",
-        store.unresolved_reach_count()
-    );
 }
 
 /// The inert-structure bit and the unresolved-reach bit of a node live in
@@ -2121,6 +2163,8 @@ fn the_origin_edge_store_charges_its_own_storage_until_it_drops_it() {
     const SOURCES: usize = 32;
     let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
     let store = SemanticGraphStore::with_account(StoreAccount::new(Arc::clone(&account)));
+    // An edge describes a live node: the scope owns every endpoint.
+    let scope = store.enter_node_root_scope();
     let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let before = store.bookkeeping_storage_charge_bytes();
     for index in 0..EDGES {
@@ -2147,6 +2191,7 @@ fn the_origin_edge_store_charges_its_own_storage_until_it_drops_it() {
         cleared + source_lists <= before + grown,
         "cleared edges give their lists back; only retained table capacity stays: {cleared}"
     );
+    drop(scope);
     drop(store);
     assert_eq!(account.snapshot().total_bytes(), 0);
 }
