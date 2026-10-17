@@ -34,6 +34,7 @@ mod carrier_type_param_descent_tests;
 mod checker_probe_lane_tests;
 mod class_evaluation_flow_tests;
 mod class_inherited_member_tests;
+mod class_member_evidence_tests;
 mod class_member_return_tests;
 mod class_owner_tests;
 mod class_prototype_property_tests;
