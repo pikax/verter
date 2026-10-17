@@ -540,6 +540,11 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// (a content, source-environment or project-shape clock moved) is
     /// never served: the claim computes.
     published_results: std::cell::RefCell<rustc_hash::FxHashMap<SemanticQueryKey, PublishedResult>>,
+    /// The request-local completions this dispatcher has open
+    /// ([`completes_request_locally`]): a key read again while its own
+    /// completion runs is the same-path recursion a family-memo claim would
+    /// answer with its recursion carrier.
+    request_local_open: std::cell::RefCell<rustc_hash::FxHashSet<SemanticQueryKey>>,
     /// The receipt of each root evaluation this dispatcher admitted as
     /// finishing as itself ([`Self::admit_self_evaluation`]): one step under
     /// the evaluation's own identity, a pure function of that identity, so
@@ -903,6 +908,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 connected_demand::DemandCancellation::from_flags(snapshot.flags()),
             ),
             published_results: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
+            request_local_open: std::cell::RefCell::new(rustc_hash::FxHashSet::default()),
             self_evaluation_receipts: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             driven_root_traced: std::cell::RefCell::new(None),
             _construction: binding_graph_scope,
@@ -1366,6 +1372,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let read = self.served_read(key, read, nesting).ok()?;
         Some((read, carrier))
+    }
+
+    /// Whether `key` has a request-local completion open on this dispatcher
+    /// ([`completes_request_locally`]).
+    fn request_local_is_open(&self, key: &SemanticQueryKey) -> bool {
+        let open = self.request_local_open.borrow();
+        !open.is_empty() && completes_request_locally(key) && open.contains(key)
     }
 
     /// Keep a result this dispatcher's build just published, under the
@@ -3626,7 +3639,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Option<connected_demand::ConnectedDemandGuard<'_>>,
         CacheRead<QueryResult<SemanticQueryValue>>,
     > {
-        let exact_same_path = self.graph().is_same_path_claim(key);
+        let exact_same_path =
+            self.graph().is_same_path_claim(key) || self.request_local_is_open(key);
         let mut query_depth_guard = None;
         if preexisting_trip.is_some_and(|reasons| {
             reasons.contains(crate::semantic_query::PartialReasonSet::CANCELLED)
@@ -4377,89 +4391,160 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // instead, once; a recomputation answered by another unpayable
         // result is the demand's trip.
         let mut refused = None;
-        let cache_read = loop {
-            let recompute = refused.is_some();
-            // A memo miss this dispatcher's own build already published
-            // answers before any claim: a claim installs a flight other
-            // tasks may join, so it is taken only to produce.
-            let mut own_published = || {
-                plain_read
-                    .then(|| self.own_published_read(&key, cost_receipt::Nesting::Entered))
-                    .flatten()
-                    .map(|(read, carrier)| {
-                        crate::fact_signature_helpers::ReadSetSignatureExt::bubble_via_tls(
-                            &carrier,
-                        );
-                        read
-                    })
-            };
-            break match graph.acquire_query(
-                self.ctx,
-                flags,
-                key.clone(),
-                &mut execution,
-                &mut capture,
-                recompute,
-                &mut own_published,
-            ) {
-                Acquired::Served(read) => read,
-                Acquired::Read(read) => {
-                    match self.served_read(&key, read, cost_receipt::Nesting::Entered) {
-                        Ok(read) => read,
-                        Err(refusal) if !recompute => {
-                            refused = Some(refusal);
-                            continue;
+        // A cheap intermediate nested in another computation, outside every
+        // checker obligation, completes for this request alone
+        // ([`completes_request_locally`]). A key whose family-memo producer
+        // is open on this task re-enters through the memo, which answers it
+        // as every same-path re-entry.
+        let request_local = plain_read
+            && isolated_root.is_none()
+            && !connected_guard.is_root()
+            && completes_request_locally(&key)
+            && self.active_operand_evidence.borrow().is_empty()
+            && self.dispatch_txn.borrow().obligations.decides_root()
+            && !graph.is_same_path_claim(&key);
+        let cache_read = if self.request_local_is_open(&key) {
+            // The key's own request-local completion is open: the same-path
+            // re-entry a family-memo claim answers with its recursion carrier.
+            self.connected_demand.note_divergence_certificate();
+            graph.recursion_read(
+                crate::semantic_query_memo::Recursion::SamePath,
+                (sentinel.take().expect("the completion runs once"))(),
+            )
+        } else if request_local {
+            // The family memo's lookup, exactly as a claim makes it: a
+            // validated stored result answers, a result this demand cannot
+            // pay for is computed instead, and a result this dispatcher kept
+            // answers a miss. Only the claim, its flight and the admission
+            // are left out.
+            let attempt = match graph.begin_query_claim(self.ctx, flags, key.clone(), &mut capture)
+            {
+                Err(read) => match self.served_read(&key, read, cost_receipt::Nesting::Entered) {
+                    Ok(read) => Err(read),
+                    Err(_) => graph.begin_query_recompute(flags, key.clone()),
+                },
+                Ok(attempt) => {
+                    match self.own_published_read(&key, cost_receipt::Nesting::Entered) {
+                        Some((read, carrier)) => {
+                            crate::fact_signature_helpers::ReadSetSignatureExt::bubble_via_tls(
+                                &carrier,
+                            );
+                            Err(read)
                         }
-                        Err(refusal) => self.refused_replay_read(&key, refusal),
+                        None => Ok(attempt),
                     }
                 }
-                Acquired::Recursive(recursion) => {
-                    if recursion == crate::semantic_query_memo::Recursion::WaitCycle {
-                        self.connected_demand.note_schedule_cut();
-                    } else {
-                        self.connected_demand.note_divergence_certificate();
-                    }
-                    self.graph().recursion_read(
-                        recursion,
-                        (sentinel.take().expect("the claim ends once"))(),
-                    )
-                }
-                Acquired::Produce(lease) => {
-                    let traced_build = traced_build.take().expect("the claim ends once");
-                    // The clocks the build computes under: an edit landing
-                    // while it runs moves them, so its result is never
-                    // served as current past that edit.
+            };
+            match attempt {
+                Err(read) => read,
+                Ok(attempt) => {
+                    let _open = RequestLocalOpen::enter(&self.request_local_open, &key);
+                    let traced_build = traced_build.take().expect("the completion runs once");
                     let computed_at = self.workspace_edit();
-                    // The build's charges are its own exclusive cost; its
-                    // receipt is what every later read of the result pays.
                     let request = crate::request_context::current_request_budget();
-                    let recording = self.connected_demand.record_cost(lease.cost_identity());
+                    // The identity the family memo's producer records under,
+                    // so a receipt paid either way is paid once.
+                    let recording = self.connected_demand.record_cost(attempt.cost_identity());
                     let output = traced_build();
-                    if isolated_root.is_some() {
-                        refusal_carrier = TracedFacts::of_output(&output, rooting.take());
-                    }
                     let receipt =
                         recording.finish(!output.completeness.is_partial(), request.as_deref());
                     if let Some(receipt) = &receipt {
                         self.connected_demand
                             .record_prerequisite(receipt, cost_receipt::Nesting::Entered);
                     }
-                    match lease.settle(self.ctx, flags, output, receipt.clone()) {
-                        Err(read) => read,
-                        Ok(mut settled) => match settled.admit(self.ctx, flags, &mut capture) {
-                            Err(read) => read,
-                            Ok(()) => {
-                                let published = settled.published_carrier();
-                                let read = settled.complete(self.ctx, &mut capture);
-                                if let Some(carrier) = published {
-                                    self.keep_published(&key, &read, carrier, computed_at);
-                                }
-                                read
-                            }
-                        },
+                    let (read, kept) =
+                        graph.complete_request_local(attempt, flags, output, receipt);
+                    if let Some(carrier) = kept {
+                        self.keep_published(&key, &read, carrier, computed_at);
                     }
+                    read
                 }
-            };
+            }
+        } else {
+            loop {
+                let recompute = refused.is_some();
+                // A memo miss this dispatcher's own build already published
+                // answers before any claim: a claim installs a flight other
+                // tasks may join, so it is taken only to produce.
+                let mut own_published = || {
+                    plain_read
+                        .then(|| self.own_published_read(&key, cost_receipt::Nesting::Entered))
+                        .flatten()
+                        .map(|(read, carrier)| {
+                            crate::fact_signature_helpers::ReadSetSignatureExt::bubble_via_tls(
+                                &carrier,
+                            );
+                            read
+                        })
+                };
+                break match graph.acquire_query(
+                    self.ctx,
+                    flags,
+                    key.clone(),
+                    &mut execution,
+                    &mut capture,
+                    recompute,
+                    &mut own_published,
+                ) {
+                    Acquired::Served(read) => read,
+                    Acquired::Read(read) => {
+                        match self.served_read(&key, read, cost_receipt::Nesting::Entered) {
+                            Ok(read) => read,
+                            Err(refusal) if !recompute => {
+                                refused = Some(refusal);
+                                continue;
+                            }
+                            Err(refusal) => self.refused_replay_read(&key, refusal),
+                        }
+                    }
+                    Acquired::Recursive(recursion) => {
+                        if recursion == crate::semantic_query_memo::Recursion::WaitCycle {
+                            self.connected_demand.note_schedule_cut();
+                        } else {
+                            self.connected_demand.note_divergence_certificate();
+                        }
+                        self.graph().recursion_read(
+                            recursion,
+                            (sentinel.take().expect("the claim ends once"))(),
+                        )
+                    }
+                    Acquired::Produce(lease) => {
+                        let traced_build = traced_build.take().expect("the claim ends once");
+                        // The clocks the build computes under: an edit landing
+                        // while it runs moves them, so its result is never
+                        // served as current past that edit.
+                        let computed_at = self.workspace_edit();
+                        // The build's charges are its own exclusive cost; its
+                        // receipt is what every later read of the result pays.
+                        let request = crate::request_context::current_request_budget();
+                        let recording = self.connected_demand.record_cost(lease.cost_identity());
+                        let output = traced_build();
+                        if isolated_root.is_some() {
+                            refusal_carrier = TracedFacts::of_output(&output, rooting.take());
+                        }
+                        let receipt =
+                            recording.finish(!output.completeness.is_partial(), request.as_deref());
+                        if let Some(receipt) = &receipt {
+                            self.connected_demand
+                                .record_prerequisite(receipt, cost_receipt::Nesting::Entered);
+                        }
+                        match lease.settle(self.ctx, flags, output, receipt.clone()) {
+                            Err(read) => read,
+                            Ok(mut settled) => match settled.admit(self.ctx, flags, &mut capture) {
+                                Err(read) => read,
+                                Ok(()) => {
+                                    let published = settled.published_carrier();
+                                    let read = settled.complete(self.ctx, &mut capture);
+                                    if let Some(carrier) = published {
+                                        self.keep_published(&key, &read, carrier, computed_at);
+                                    }
+                                    read
+                                }
+                            },
+                        }
+                    }
+                };
+            }
         };
         drop(execution);
         let is_cold = cold_build_ran.load(std::sync::atomic::Ordering::Relaxed);
@@ -4482,6 +4567,61 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         );
         drop(query_depth_guard);
         cache_read
+    }
+}
+
+/// Whether a read of `key` nested in another computation completes for the
+/// requesting dispatcher alone, outside the family memo's claim and
+/// admission. These families are cheap intermediates of the computation
+/// that reads them: a conditional's decision, a template literal's
+/// reduction and an index projection are read by the evaluation or build
+/// that reaches them, which is itself retained (the evaluated value in the
+/// deferred-evaluation memo, the enclosing instantiation or root query in
+/// the family memo), so a family-memo entry of their own would be claimed,
+/// admitted, indexed and evicted without a later request reaching it.
+///
+/// The completion keeps everything a read of the result observes: the
+/// family memo's validated lookup (a stored result still answers, and one
+/// the demand cannot pay for is computed), the query entry's charges, the
+/// build's receipt (recorded under the producer's identity and replayed by
+/// a repeated read through the dispatcher's kept results), its carrier and
+/// rails, and the same-path recursion carrier. A root read, a read inside a
+/// checker obligation (a relation, flow or call frame, whose decisions are
+/// shared through the memo), a captured read and a key whose family-memo
+/// producer is open keep the family memo.
+fn completes_request_locally(key: &SemanticQueryKey) -> bool {
+    matches!(
+        key,
+        SemanticQueryKey::Conditional { .. }
+            | SemanticQueryKey::TemplateLiteralReduce { .. }
+            | SemanticQueryKey::ProjectPath { .. }
+    )
+}
+
+/// An open request-local completion of one key, closed when dropped
+/// (including on unwind) so a later read of the key is never mistaken for
+/// a same-path re-entry.
+struct RequestLocalOpen<'d> {
+    open: &'d std::cell::RefCell<rustc_hash::FxHashSet<SemanticQueryKey>>,
+    key: SemanticQueryKey,
+}
+
+impl<'d> RequestLocalOpen<'d> {
+    fn enter(
+        open: &'d std::cell::RefCell<rustc_hash::FxHashSet<SemanticQueryKey>>,
+        key: &SemanticQueryKey,
+    ) -> Self {
+        open.borrow_mut().insert(key.clone());
+        Self {
+            open,
+            key: key.clone(),
+        }
+    }
+}
+
+impl Drop for RequestLocalOpen<'_> {
+    fn drop(&mut self) {
+        self.open.borrow_mut().remove(&self.key);
     }
 }
 

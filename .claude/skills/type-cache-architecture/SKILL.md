@@ -1054,6 +1054,38 @@ innermost construction owner of its arena as a bare ordinal, released in one
 batch when that owner closes; a closing owner hands its delivery leases to its
 heir by merging the smaller holding into the larger.
 
+Request-local completion: a NESTED read of a cheap intermediate family —
+`Conditional`, `TemplateLiteralReduce`, `ProjectPath` (`completes_request_locally`
+in `project_semantic_dispatch/mod.rs`) — outside every checker obligation
+(`ObligationRuntime::decides_root`), uncaptured, with no operand force active
+and no family-memo producer of the key open on this task, completes for the
+requesting dispatcher alone. It makes the family memo's validated lookup
+exactly as a claim does (`begin_query_claim`: a stored result answers, one the
+demand cannot pay for is recomputed, a result the dispatcher kept answers a
+miss), then runs the same traced build under the producer's cost identity
+(`ClaimAttempt::cost_identity`) and settles its output through the SAME
+`settle_output` the memo's `ProducerLease::settle` uses
+(`SemanticGraphStore::complete_request_local`): the carrier is bubbled, the
+read carries its receipt, and a complete priced result is kept on the
+dispatcher (`keep_published`) for repeated reads. It registers no flight and is
+never admitted: the evaluation or build that reads it is itself retained (the
+deferred-evaluation memo, the enclosing instantiation or root query), so an
+entry of its own would be claimed, admitted, reverse-indexed and FIFO-evicted
+without a later request reaching it. A re-entry of a key whose local
+completion is open answers the same-path recursion carrier on either path.
+Root reads, obligation-frame reads (relation, flow, call — whose decisions are
+shared through the memo) and captured reads keep the family memo. Guarded by
+`recursive_paths_admit_their_instantiations_not_their_nested_steps`.
+
+Instantiation serves: every instantiation reads its declaration file's
+`IndexedReady` record (`ProjectSemanticDispatch::transaction_indexed_record`), as do its global-interface, member-index and augmentation-candidate reads.
+The first serve of a canonical on a transaction is recorded with
+`record_transaction_read` and kept in `CheckerDispatchTransaction::indexed_serves`
+under the workspace edit clocks it was served at; a later instantiation under
+the same clocks replays that read (`replay_transaction_read`: its facts,
+refusal and self-roots) instead of re-serving. An edit moves the clocks and the
+file is served afresh; a refused or non-reusable serve is never kept.
+
 Paged signature evidence: a `fact_dep_signature` is never refused for its
 width. `FactReadSet::finalise` (and `seal_canonical_signature` for a signature
 a producer assembles by hand) cuts a canonical set wider than

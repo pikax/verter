@@ -495,6 +495,108 @@ fn recursive_mapped_index_budget_refusal_does_not_warm() {
     assert!(graph.contains_key(&memo_key));
 }
 
+/// What one cold evaluation of the mapped index `Paths<Api>` selects over
+/// `count` entities admits into the family memo, with the paths it publishes.
+fn recursive_paths_admissions(count: usize, groups: usize) -> (u64, usize) {
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+    use verter_type_engine::semantic_query::{
+        InstantiateKey, ProjectionReductionContext, QueryResult, SemanticNodeData, SemanticQueryKey,
+    };
+
+    let host = recursive_paths_host(count, groups, 50_000);
+    let view = crate::typeinfo::current_store_view_for_query(&host).unwrap();
+    let host_context = crate::resolver_core::HostResolverContext::from_current(
+        &host,
+        &view,
+        Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+    );
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host_context);
+    let graph = host.project_type_store().semantic_graph();
+    let shell = dispatch.execute_read(SemanticQueryKey::Instantiate(InstantiateKey::new(
+        dispatch.type_slot_for(
+            Arc::from("/paths/scenario.ts"),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from("Probe"),
+        ),
+        Arc::from([]),
+        dispatch.instantiate_context_for(
+            "/paths/scenario.ts",
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+        ),
+    )));
+    let QueryResult::Value(node) = shell.value().clone() else {
+        panic!(
+            "the authored access must resolve: {:?}",
+            shell.value().clone()
+        );
+    };
+    let data = graph.node_data(node).unwrap();
+    let SemanticNodeData::IndexedAccess { object, index } = data.as_ref() else {
+        panic!("the mapped index must remain: {data:?}");
+    };
+    let context = RequestContext::with_kind_timing_and_projection_budget(
+        1,
+        Arc::from("/paths/scenario.ts"),
+        verter_audit::RequestKind::TypeResolution,
+        false,
+        false,
+        None,
+        50_000,
+    );
+    let _guard = RequestContextGuard::install(Arc::clone(&context));
+    let read = dispatch.execute_read(SemanticQueryKey::IndexedAccess {
+        base: *object,
+        index: index.clone(),
+        mode: ProjectionMode::Expanded,
+    });
+    assert!(!read.result_is_partial() && !read.cache_suppress());
+    let QueryResult::Value(value) = read.value().clone() else {
+        panic!("the evaluation must complete: {:?}", read.value().clone());
+    };
+    let answer = host.project_node_to_type_expr_for_test(value).unwrap();
+    let TypeExpr::Union(paths) = &answer else {
+        panic!("{count} entities must publish a path union, got {answer:?}");
+    };
+    (
+        context
+            .memo_insertions
+            .load(std::sync::atomic::Ordering::Relaxed),
+        paths.len(),
+    )
+}
+
+/// A recursive evaluation admits what a later demand can reach — each
+/// instantiation and the projections that answer it — while the conditional
+/// decisions, template-literal reductions and index projections nested in
+/// its evaluation complete for the request alone, so its family-memo
+/// admissions stay a small, flat multiple of its entities.
+#[test]
+fn recursive_paths_admit_their_instantiations_not_their_nested_steps() {
+    let sizes = [(20, 3), (40, 5)];
+    let measured = sizes.map(|(count, groups)| {
+        let (admissions, paths) = recursive_paths_admissions(count, groups);
+        assert_eq!(
+            paths,
+            count * 18,
+            "{count} entities publish every dotted path"
+        );
+        eprintln!("RECURSIVE_PATHS entities={count} admissions={admissions}");
+        admissions / count as u64
+    });
+    // Admitted memo slots: an instantiation fills up to four mode slots. A
+    // slot per nested conditional decision, template-literal reduction and
+    // index projection as well — about sixty more per entity — lifts every
+    // layout far above this line.
+    const PER_ENTITY_CEILING: u64 = 100;
+    for (per_entity, (count, _)) in measured.iter().zip(sizes) {
+        assert!(
+            *per_entity <= PER_ENTITY_CEILING,
+            "{count} entities admitted {per_entity} entries per entity (ceiling {PER_ENTITY_CEILING}): {measured:?}"
+        );
+    }
+}
+
 /// A host holding `Paths<Api>` over `count` entities spread across `groups`
 /// mutually importing modules, under the request allowance `budget`
 /// (`0` keeps the shipped default fuse).
