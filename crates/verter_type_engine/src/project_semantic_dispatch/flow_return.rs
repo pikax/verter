@@ -6237,7 +6237,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     hash_key: slice_key,
                     slice_hash: planned.hash(),
                 };
-                match self.flow_slice_driver().lookup_lowered(lowered_key) {
+                match self
+                    .flow_slice_driver()
+                    .lookup_lowered(lowered_key, &planned)
+                {
                     None => {
                         return degraded(FlowReturnFailure::Unresolved, self_roots);
                     }
@@ -9727,6 +9730,9 @@ pub(super) trait FlowDemandDriver {
     fn flow_slice_lowered(
         &self,
         key: crate::cache_runtime::flow_slice_node::FlowSliceLoweredKey,
+        planned: &verter_session_query::retention::heap_size::OwnedTree<
+            crate::cache_runtime::flow_slice_node::PlannedFlowSlice,
+        >,
     ) -> Option<
         verter_session_query::retention::heap_size::OwnedTree<
             verter_session_query::flow::flow_ir::FlowSliceIR,
@@ -10123,12 +10129,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     fn flow_slice_lowered(
         &self,
         key: crate::cache_runtime::flow_slice_node::FlowSliceLoweredKey,
+        planned: &verter_session_query::retention::heap_size::OwnedTree<
+            crate::cache_runtime::flow_slice_node::PlannedFlowSlice,
+        >,
     ) -> Option<
         verter_session_query::retention::heap_size::OwnedTree<
             verter_session_query::flow::flow_ir::FlowSliceIR,
         >,
     > {
-        self.flow_slice_driver().lookup_lowered(key)
+        self.flow_slice_driver().lookup_lowered(key, planned)
     }
     fn flow_slice_hash(
         &self,
@@ -10816,12 +10825,15 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     fn flow_slice_lowered(
         &self,
         key: crate::cache_runtime::flow_slice_node::FlowSliceLoweredKey,
+        planned: &verter_session_query::retention::heap_size::OwnedTree<
+            crate::cache_runtime::flow_slice_node::PlannedFlowSlice,
+        >,
     ) -> Option<
         verter_session_query::retention::heap_size::OwnedTree<
             verter_session_query::flow::flow_ir::FlowSliceIR,
         >,
     > {
-        self.driver.flow_slice_lowered(key)
+        self.driver.flow_slice_lowered(key, planned)
     }
     fn flow_slice_hash(
         &self,

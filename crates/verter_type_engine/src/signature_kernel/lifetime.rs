@@ -111,10 +111,15 @@ pub(super) struct EpochInner {
     /// [`Self::released_roots`] instead of dropping it.
     holders: AtomicU64,
     /// Roots a close took from the store while a holder of this epoch was
-    /// alive. They are dropped when the last holder drops, or by the next
-    /// close that finds none; the epoch's storage stays charged for them
-    /// until then.
-    released_roots: Mutex<Vec<crate::semantic_query_memo::node_roots::NodeRootSet>>,
+    /// alive, keyed by the token they rooted, so a token holds at most one
+    /// root whatever its close/re-intern history: an intern of a stranded
+    /// token takes its deferred root back instead of acquiring another.
+    /// They are dropped when the last holder drops, or by the next close
+    /// that finds none; the epoch's storage stays charged for them until
+    /// then. Inserted and reclaimed only under [`Self::graph_roots`], so a
+    /// [`TokenRoot::Rooted`] token never also has a deferred root.
+    released_roots:
+        Mutex<rustc_hash::FxHashMap<u32, crate::semantic_query_memo::node_roots::NodeRootSet>>,
 }
 
 /// A type token's entry in its epoch's root table.
@@ -161,7 +166,7 @@ impl EpochInner {
             apply_count: AtomicU64::new(0),
             stranded_tokens: AtomicUsize::new(0),
             holders: AtomicU64::new(0),
-            released_roots: Mutex::new(Vec::new()),
+            released_roots: Mutex::new(rustc_hash::FxHashMap::default()),
         }
     }
 
@@ -179,24 +184,47 @@ impl EpochInner {
     }
 
     /// Keep `roots`, taken from the store by a close, until no holder of
-    /// this epoch can read their tokens back.
+    /// this epoch can read their tokens back. The caller holds
+    /// [`Self::graph_roots`] and has just marked each token stranded, so no
+    /// token already has a deferred root; should one, the duplicate is
+    /// returned for the caller to drop outside its locks, never kept.
     fn defer_released_roots(
         &self,
-        roots: Vec<crate::semantic_query_memo::node_roots::NodeRootSet>,
-    ) {
+        roots: Vec<(u32, crate::semantic_query_memo::node_roots::NodeRootSet)>,
+    ) -> Vec<crate::semantic_query_memo::node_roots::NodeRootSet> {
+        let mut duplicates = Vec::new();
         if roots.is_empty() {
-            return;
+            return duplicates;
         }
-        {
-            let mut released = self.released_roots.lock();
-            let before = released.capacity();
-            released.extend(roots);
-            self.storage.add(
-                (released.capacity() - before)
-                    * std::mem::size_of::<crate::semantic_query_memo::node_roots::NodeRootSet>(),
-            );
+        let mut released = self.released_roots.lock();
+        let before = released.capacity();
+        for (index, root) in roots {
+            match released.entry(index) {
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(root);
+                }
+                std::collections::hash_map::Entry::Occupied(_) => {
+                    self.storage.sub(root.heap_bytes());
+                    duplicates.push(root);
+                }
+            }
         }
-        self.drain_released_roots();
+        self.storage.map_growth(
+            before,
+            released.capacity(),
+            std::mem::size_of::<(u32, crate::semantic_query_memo::node_roots::NodeRootSet)>(),
+        );
+        duplicates
+    }
+
+    /// Take back the root a close deferred on token `index`, if no final
+    /// holder drop has dropped it yet. The caller holds
+    /// [`Self::graph_roots`] and re-roots the token with it.
+    fn reclaim_released_root(
+        &self,
+        index: u32,
+    ) -> Option<crate::semantic_query_memo::node_roots::NodeRootSet> {
+        self.released_roots.lock().remove(&index)
     }
 
     /// Drop the deferred roots once no holder of this epoch is alive. The
@@ -211,8 +239,9 @@ impl EpochInner {
             std::mem::take(&mut *released)
         };
         let block = drained.capacity()
-            * std::mem::size_of::<crate::semantic_query_memo::node_roots::NodeRootSet>();
-        let heap: usize = drained.iter().map(|roots| roots.heap_bytes()).sum();
+            * (std::mem::size_of::<(u32, crate::semantic_query_memo::node_roots::NodeRootSet)>()
+                + 1);
+        let heap: usize = drained.values().map(|roots| roots.heap_bytes()).sum();
         // The roots drop here, outside the lock.
         drop(drained);
         self.storage.sub(heap + block);
@@ -416,7 +445,7 @@ impl SignatureStore {
                 .map(super::records::handle_index)
                 .collect();
             let mut freed = Vec::new();
-            {
+            let (stranded, duplicates) = {
                 let mut roots = inner.graph_roots.lock();
                 for index in indexes {
                     let Some(entry) = roots.get_mut(&index) else {
@@ -425,15 +454,19 @@ impl SignatureStore {
                     if let TokenRoot::Rooted(root) =
                         std::mem::replace(entry, TokenRoot::Stranded)
                     {
-                        freed.push(root);
+                        freed.push((index, root));
                     }
                 }
                 // Counted with the marks, under the lock an intern re-roots
-                // under, so a concurrent re-root never misses its uncount.
+                // under, so a concurrent re-root never misses its uncount;
+                // deferred under it too, so that re-root finds the root to
+                // take back.
                 inner.stranded_tokens.fetch_add(freed.len(), Ordering::Relaxed);
-            }
-            let stranded = freed.len();
-            inner.defer_released_roots(freed);
+                (freed.len(), inner.defer_released_roots(freed))
+            };
+            // Any duplicate drops here, outside the locks.
+            drop(duplicates);
+            inner.drain_released_roots();
             stranded
         }
     }
@@ -807,6 +840,8 @@ impl SignatureStore {
                 .transpose()?;
             let raw = inner.type_tokens.intern(node, cancelled)?;
             if let Some(root) = root {
+                // The root this intern does not keep drops after the lock.
+                let mut spare = None;
                 let mut roots = inner.graph_roots.lock();
                 let before = roots.capacity();
                 match roots.entry(super::records::handle_index(raw)) {
@@ -818,9 +853,20 @@ impl SignatureStore {
                         if matches!(slot.get(), TokenRoot::Stranded) {
                             // A close stranded this token; rooting it again
                             // makes it live, decided under the lock the
-                            // close marked it under.
-                            inner.storage.add(root.heap_bytes());
-                            slot.insert(TokenRoot::Rooted(root));
+                            // close marked it under. A root the close
+                            // deferred for a holder is taken back, so
+                            // repeated close/re-intern never stacks roots.
+                            let kept = match inner.reclaim_released_root(*slot.key()) {
+                                Some(deferred) => {
+                                    spare = Some(root);
+                                    deferred
+                                }
+                                None => {
+                                    inner.storage.add(root.heap_bytes());
+                                    root
+                                }
+                            };
+                            slot.insert(TokenRoot::Rooted(kept));
                             inner.stranded_tokens.fetch_sub(1, Ordering::Relaxed);
                         }
                     }
@@ -830,6 +876,8 @@ impl SignatureStore {
                     roots.capacity(),
                     std::mem::size_of::<(u32, TokenRoot)>(),
                 );
+                drop(roots);
+                drop(spare);
             }
             Ok(super::records::TypeToken::from_raw(raw))
         }

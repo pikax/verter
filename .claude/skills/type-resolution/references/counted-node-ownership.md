@@ -71,7 +71,11 @@ deferred memos, the signature store's roots on its current epoch's tokens
 the last one drops, so a delivered signature result never reads a destroyed
 token node; a closed token's root-table entry becomes a `Stranded` mark under
 the table lock, and only an intern that finds that mark re-roots and uncounts
-it, so the stranded count is exact under concurrent close and intern) and, through `memo::close_canonical_with_shapes`,
+it, so the stranded count is exact under concurrent close and intern; the
+deferred roots are keyed by token and deferred under that same lock, and an
+intern of a stranded token takes its deferred root back instead of acquiring
+another, so a token holds at most one root whatever its close/re-intern
+history) and, through `memo::close_canonical_with_shapes`,
 the shape-cache entries. "Closed content" is decided per cached node by
 `NodeArenaCore::reaches_canonical_content` (file scope, a payload binding the
 content identity, or a retained child reaching such a node), memoized for one
@@ -104,7 +108,9 @@ cached signature result of some still-open file — a close's released token
 roots wait in `released_roots`, so the closed file's token nodes (and the
 DAGs they retain) outlive its own cache and caller owners. The bound is the
 stranded-majority epoch replacement (`replace_epoch_if_mostly_stranded`) or
-the eviction of the last holder; `SemanticCloseReport::signature_tokens_released`
+the eviction of the last holder, and never exceeds one deferred root per
+stranded token, since a re-interned token reclaims its deferred root
+(`repeated_close_and_re_intern_under_a_held_epoch_keeps_one_root_per_token`); `SemanticCloseReport::signature_tokens_released`
 counts roots taken from the store, not nodes freed. The exact fix roots, per
 delivered value or prepared key, the token nodes its records can read back, so
 only real readers keep them.

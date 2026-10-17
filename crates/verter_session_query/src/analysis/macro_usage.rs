@@ -3,7 +3,7 @@
 use verter_span::Span;
 
 /// A literal emit call site: `emit("save", …)`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, verter_retention::heap_size::HeapSize)]
 #[serde(rename_all = "camelCase")]
 pub struct MacroUsageCall {
     /// The literal event name.
@@ -13,7 +13,7 @@ pub struct MacroUsageCall {
 }
 
 /// Script-side usage facts for macro-declared members (see module docs).
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, verter_retention::heap_size::HeapSize)]
 #[serde(rename_all = "camelCase")]
 pub struct MacroUsageFacts {
     /// Literal event names called on the `defineEmits` binding, with spans.

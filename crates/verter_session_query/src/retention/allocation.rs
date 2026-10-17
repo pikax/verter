@@ -193,6 +193,26 @@ fn resolution_key_heap_bytes(key: &ResolutionFactKey) -> usize {
     key.owned_heap_bytes()
 }
 
+impl verter_retention::heap_size::HeapSize for FactVersionRef {
+    /// A fact's own heap; a receipt carries its own charge.
+    fn heap_size<'t>(
+        &'t self,
+        meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+    ) -> usize {
+        fact_heap_bytes(self, meter.handles())
+    }
+}
+
+impl verter_retention::heap_size::HeapSize for crate::facts::fact_cache::ReadSetSignature {
+    /// The fact slice and every fact's own heap.
+    fn heap_size<'t>(
+        &'t self,
+        meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+    ) -> usize {
+        fact_slice_bytes(&self.facts, meter.handles())
+    }
+}
+
 #[cfg(test)]
 #[path = "allocation_tests.rs"]
 mod tests;

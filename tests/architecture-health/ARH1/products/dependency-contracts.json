@@ -133,6 +133,7 @@
         "verter_parser",
         "verter_protocol",
         "verter_resolution",
+        "verter_retention",
         "verter_scheduler",
         "verter_semantic",
         "verter_semantic_source",
@@ -225,6 +226,7 @@
         "verter_identity",
         "verter_language",
         "verter_no_typeexpr",
+        "verter_retention",
         "verter_session_query",
         "verter_span",
         "verter_type_expr"
@@ -1140,6 +1142,7 @@
           "verter_audit",
           "verter_identity",
           "verter_no_typeexpr",
+          "verter_retention",
           "verter_session_query",
           "verter_span",
           "verter_type_expr"
@@ -1188,6 +1191,7 @@
           "crates/verter_session/src/component_meta_canonical_reuse_tests.rs",
           "crates/verter_session/src/component_meta_delivery.rs",
           "crates/verter_session/src/component_meta_flow_return_admission_tests.rs",
+          "crates/verter_session/src/component_meta_footprint.rs",
           "crates/verter_session/src/component_meta_host.rs",
           "crates/verter_session/src/component_meta_host_tests.rs",
           "crates/verter_session/src/component_meta_indexed_access_early_out_tests.rs",
@@ -1391,6 +1395,7 @@
           "crates/verter_session/src/resolver_core_tests/bare_name_resolve_namespace_tests.rs",
           "crates/verter_session/src/semantic_graph_self_root_tests.rs",
           "crates/verter_session/src/semantic_query_memo_tests.rs",
+          "crates/verter_session/src/semantic_query_memo_tests/allocation_ownership_tests.rs",
           "crates/verter_session/src/semantic_query_memo_tests/cancellation_tests.rs",
           "crates/verter_session/src/semantic_query_memo_tests/object_spread_projection_tests.rs",
           "crates/verter_session/src/semantic_query_memo_tests/producer_tests.rs",
@@ -1468,6 +1473,7 @@
           "crates/verter_session/src/u6_flow_expect_tests.rs",
           "crates/verter_session/src/u6_flow_shape_corpus_tests.rs",
           "crates/verter_session/tests/allocation_cases/flow_products.rs",
+          "crates/verter_session/tests/allocation_cases/recursive_paths.rs",
           "crates/verter_session/tests/allocator_canaries.rs",
           "crates/verter_session/tests/cases/compile-fail/composite_mint_unforgeable.rs",
           "crates/verter_session/tests/cases/compile-fail/composite_replay_cross_kind.rs",
@@ -1487,6 +1493,7 @@
           "crates/verter_session/tests/cases/compile-fail/public_node_capability_cannot_be_forged.rs",
           "crates/verter_session/tests/cases/compile-fail/public_owned_carriers_borrow_and_own.rs",
           "crates/verter_session/tests/cases/compile-fail/public_payload_arrays_and_members_cannot_detach.rs",
+          "crates/verter_session/tests/cases/compile-fail/public_payload_has_no_construction_copy.rs",
           "crates/verter_session/tests/cases/compile-fail/public_result_and_payload_cannot_be_extracted.rs",
           "crates/verter_session/tests/cases/compile-fail/public_signature_children_cannot_detach.rs",
           "crates/verter_session/tests/cases/compile-fail/public_surface_nested_carriers_cannot_detach.rs",
@@ -1556,6 +1563,7 @@
           "crates/verter_session/tests/cases/typeinfo_ignored_test_manifest.rs",
           "crates/verter_source_policy_gate/tests/cases/semantic_capability_witnesses.rs",
           "crates/verter_type_engine/tests/allocation_cases/flow_literal_provenance.rs",
+          "crates/verter_type_engine/tests/allocator_canaries.rs",
           "crates/verter_wasm/src/feasibility_probe_tests.rs",
           "crates/verter_wasm/src/lib.rs",
           "crates/verter_wasm/src/typeinfo.rs"
@@ -1811,6 +1819,7 @@
               "crates/verter_session/src/resolver_core_tests/bare_name_resolve_namespace_tests.rs",
               "crates/verter_session/src/semantic_graph_self_root_tests.rs",
               "crates/verter_session/src/semantic_query_memo_tests.rs",
+              "crates/verter_session/src/semantic_query_memo_tests/allocation_ownership_tests.rs",
               "crates/verter_session/src/semantic_query_memo_tests/cancellation_tests.rs",
               "crates/verter_session/src/semantic_query_memo_tests/object_spread_projection_tests.rs",
               "crates/verter_session/src/semantic_query_memo_tests/producer_tests.rs",
@@ -1886,6 +1895,7 @@
               "crates/verter_session/tests/cases/compile-fail/public_diagnostic_error_cannot_detach.rs",
               "crates/verter_session/tests/cases/compile-fail/public_owned_carriers_borrow_and_own.rs",
               "crates/verter_session/tests/cases/compile-fail/public_payload_arrays_and_members_cannot_detach.rs",
+              "crates/verter_session/tests/cases/compile-fail/public_payload_has_no_construction_copy.rs",
               "crates/verter_session/tests/cases/compile-fail/public_result_and_payload_cannot_be_extracted.rs",
               "crates/verter_session/tests/cases/compile-fail/public_surface_nested_carriers_cannot_detach.rs",
               "crates/verter_session/tests/cases/compile-fail/semantic_operand_carriers_are_sealed.rs",
@@ -1945,7 +1955,8 @@
               "crates/verter_session/tests/cases/g_type/type_resolution_audit_tls_propagation.rs",
               "crates/verter_session/tests/cases/relation_nominal_authority.rs",
               "crates/verter_session/tests/cases/typeinfo_ignored_test_manifest.rs",
-              "crates/verter_type_engine/tests/allocation_cases/flow_literal_provenance.rs"
+              "crates/verter_type_engine/tests/allocation_cases/flow_literal_provenance.rs",
+              "crates/verter_type_engine/tests/allocator_canaries.rs"
             ],
             "note": "the cross-crate population outside verter_session imports only the retained ten types; retaining a type alone does not retain its methods, so PartialReasonSet::{empty,is_empty,iter,PROPAGATED,SEMANTIC_QUERY_FAULT}, ResultCompleteness::partial and ScopeId::file stay pub for the ffi/napi/wasm production consumers, and PartialReasonSet::{contains,CONNECTED_MEMORY_LIMIT,UNDECIDED_CONDITIONAL} and ResultCompleteness::is_partial stay pub for the verter_session files that import only retained types; the recorded consumer files each import at least one narrowed name (the verter_session sources reach the engine across the crate boundary, and its integration tests, benches and examples compile as separate crates); the test files migrate to the existing for_tests test-support surface pattern in the same change as the narrowing, and the verter_session production sources need a retained session-facing surface rather than pub(crate)"
           }

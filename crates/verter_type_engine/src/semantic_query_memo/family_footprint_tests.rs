@@ -92,10 +92,15 @@ fn a_family_holds_the_member_name_its_key_retains_by_the_names_own_cell() {
     );
     let ctx = verter_session_query::retention::owned::ChargeCtx::new(&account);
     let holds = large.handles.hold(ctx).expect("admitted");
+    assert_eq!(holds.len(), 1);
     assert_eq!(
         account.snapshot().retained_bytes,
-        OwnedStr::charge_for_len(NAME),
-        "holding the key retains its name once, however many key copies share it"
+        OwnedStr::charge_for_len(NAME)
+            + verter_session_query::retention::allocation::heap_block_bytes(
+                2 * std::mem::size_of::<usize>()
+            ),
+        "holding the key retains its name once, however many key copies share it, beside \
+         the one-hold slice keeping it"
     );
     drop(holds);
     drop(small);

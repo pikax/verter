@@ -158,6 +158,7 @@ fn node_payload_footprint_repeated_quasi_counts_once_per_measurement() {
         Some(
             OwnedSlice::<OwnedStr>::cell_block_bytes()
                 + heap_block_bytes(3 * std::mem::size_of::<OwnedStr>())
+                + verter_session_query::retention::owned::child_registration_bytes(2)
         )
     );
     assert_eq!(long.charge_bytes(), Some(OwnedStr::charge_for_len(10_000)));
