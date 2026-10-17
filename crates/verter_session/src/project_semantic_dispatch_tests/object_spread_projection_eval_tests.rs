@@ -4870,3 +4870,178 @@ fn a_spread_union_keyof_intersects_keys_nominally() {
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// The literal a [`keyed_union`] arm writes, or panic.
+fn literal_value(
+    graph: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
+    fact: &verter_type_engine::semantic_query::PositiveKeyFact,
+) -> f64 {
+    let ProjectionEvidence::Proven(node) = fact.value() else {
+        panic!("a closed arm's value is proven: {fact:?}");
+    };
+    match graph.node_data(*node).as_deref() {
+        Some(SemanticNodeData::Literal(
+            verter_type_engine::semantic_query::LiteralValue::Number(value),
+        )) => *value,
+        other => panic!("a keyed arm writes its literal, got {other:?}"),
+    }
+}
+
+/// The stress-size products — 369 × 271 and 50 × 50 × 39 constituents —
+/// build factored and complete. Any alternative read by index pairs exactly
+/// its own arms (correlation) and carries the later direct write over the
+/// arm that wrote the same key (overwrite); a selected-key read multiplies
+/// by no unrelated arm.
+#[test]
+fn stress_products_keep_each_alternative_correlated_and_overwritten() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    for widths in [vec![369usize, 271], vec![50, 50, 39]] {
+        let prefixes = ["a", "b", "c"];
+        let mut effects = widths
+            .iter()
+            .zip(prefixes)
+            .map(|(width, prefix)| {
+                ObjectConstructionEffect::Spread(keyed_union(graph, prefix, *width))
+            })
+            .collect::<Vec<_>>();
+        effects.push(property("a0", string, false));
+        let root = program(graph, effects);
+        let formula = match dispatch.execute(SemanticQueryKey::ProjectObjectSpread {
+            program: root,
+            selector: ObjectProjectionSelector::Surface,
+            context: context(ExactOptionalPropertyPolicy::Disabled),
+        }) {
+            QueryResult::Value(SemanticQueryOutput {
+                value: SemanticQueryValue::ObjectProjection(formula),
+                ..
+            }) => formula,
+            other => panic!("{widths:?}: the product builds, got {other:?}"),
+        };
+        let width = widths.iter().product::<usize>();
+        assert_eq!(formula.width(), width as u64, "{widths:?}");
+        assert!(formula.all_alternatives_closed());
+
+        let samples = [
+            vec![0, 0, 0],
+            vec![5, 7, 3],
+            widths.iter().map(|width| width - 1).collect::<Vec<_>>(),
+        ];
+        for sample in samples {
+            let digits = &sample[..widths.len()];
+            let index = digits
+                .iter()
+                .zip(&widths)
+                .fold(0usize, |index, (digit, width)| index * width + digit);
+            let alternative = dispatch
+                .object_spread_cursor(&formula)
+                .nth(index)
+                .expect("the index is inside the product")
+                .expect("a read outside a demand is never refused");
+            let closed = alternative.closed().expect("closed alternative");
+            let mut expected = digits
+                .iter()
+                .zip(prefixes)
+                .map(|(digit, prefix)| format!("{prefix}{digit}"))
+                .collect::<Vec<_>>();
+            if !expected.contains(&"a0".to_owned()) {
+                expected.push("a0".to_owned());
+            }
+            expected.sort();
+            let mut keys = closed
+                .keyof()
+                .expect("a Surface alternative is whole-domain")
+                .iter()
+                .map(|key| key.as_string().expect("an authored name").to_owned())
+                .collect::<Vec<_>>();
+            keys.sort();
+            assert_eq!(keys, expected, "{widths:?} alternative {sample:?}");
+            for (digit, prefix) in digits.iter().zip(prefixes) {
+                let name = format!("{prefix}{digit}");
+                let Some(verter_type_engine::semantic_query::ClosedKeyLookup::Present(fact)) =
+                    closed.lookup(&key(&name))
+                else {
+                    panic!("{name} is present");
+                };
+                if name == "a0" {
+                    assert_eq!(
+                        fact.value(),
+                        &ProjectionEvidence::Proven(string),
+                        "the later direct write overwrites the arm's a0"
+                    );
+                } else {
+                    assert_eq!(literal_value(graph, fact), *digit as f64, "{name}");
+                }
+            }
+        }
+
+        let selected = project(
+            &dispatch,
+            root,
+            ObjectProjectionSelector::Key(key("b7")),
+            ExactOptionalPropertyPolicy::Disabled,
+        );
+        assert_eq!(
+            selected.formula.width(),
+            2,
+            "a selected-key read sees only whether its arm was chosen"
+        );
+        let present = selected
+            .alternatives()
+            .iter()
+            .filter(|alternative| {
+                matches!(
+                    alternative.closed().and_then(|closed| closed.lookup(&key("b7"))),
+                    Some(verter_type_engine::semantic_query::ClosedKeyLookup::Present(fact))
+                        if literal_value(graph, fact) == 7.0
+                )
+            })
+            .count();
+        assert_eq!(present, 1, "exactly one alternative reads the b7 arm");
+    }
+}
+
+/// A selected-key read of an `n × n` spread costs work linear in `n`:
+/// doubling both unions at most about doubles it, where building the
+/// Cartesian product would quadruple it.
+#[test]
+fn a_selected_key_read_grows_with_the_arms_not_their_product() {
+    let work = |arms: usize| {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = host.project_type_store().semantic_graph();
+        let root = program(
+            graph,
+            [
+                ObjectConstructionEffect::Spread(keyed_union(graph, "a", arms)),
+                ObjectConstructionEffect::Spread(keyed_union(graph, "b", arms)),
+            ],
+        );
+        let (result, usage) =
+            verter_type_engine::project_semantic_dispatch::connected_demand::with_connected_work_capture_for_tests(
+                || {
+                    dispatch.execute(SemanticQueryKey::ProjectObjectSpread {
+                        program: root,
+                        selector: ObjectProjectionSelector::Key(key("a1")),
+                        context: context(ExactOptionalPropertyPolicy::Disabled),
+                    })
+                },
+            );
+        match result {
+            QueryResult::Value(SemanticQueryOutput {
+                value: SemanticQueryValue::ObjectProjection(formula),
+                ..
+            }) => assert_eq!(formula.width(), 2),
+            other => panic!("the selected read builds, got {other:?}"),
+        }
+        assert!(usage.work > 0, "the read is charged");
+        usage.work
+    };
+    let (small, large) = (work(60), work(120));
+    assert!(
+        large * 10 <= small * 25,
+        "doubling the arms must keep the read linear: {small} -> {large}"
+    );
+}

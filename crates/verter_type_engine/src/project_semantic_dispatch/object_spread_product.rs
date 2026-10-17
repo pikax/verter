@@ -622,6 +622,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> Iterator for ProductCursor<'
         Some(read)
     }
 
+    /// Skip `n` alternatives without building them: an alternative is a
+    /// function of its index alone.
+    fn nth(&mut self, n: usize) -> Option<Self::Item> {
+        self.next = self
+            .next
+            .saturating_add(u64::try_from(n).unwrap_or(u64::MAX))
+            .min(self.width);
+        self.next()
+    }
+
     fn size_hint(&self) -> (usize, Option<usize>) {
         let remaining = usize::try_from(self.width - self.next).unwrap_or(usize::MAX);
         (0, Some(remaining))

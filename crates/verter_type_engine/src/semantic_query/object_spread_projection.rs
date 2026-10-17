@@ -1,10 +1,11 @@
 //! Selector-aware, correlated object-spread projection facts.
 //!
-//! The formula deliberately keeps finite-union alternatives separate. An
+//! The formula deliberately keeps finite-union alternatives separate, and
+//! keeps them factored: it owns the sum of its spread layers, and a consumer
+//! reads one correlated alternative at a time through the dispatch cursor. An
 //! ordinary alternative exposes positive evidence only; exact absence,
 //! emptiness, `keyof`, exhaustive iteration, and closed materialisation require
-//! one of the borrowed witnesses minted by [`ObjectProjectionAlternative::closed`]
-//! or [`ObjectProjectionFormula::closed`].
+//! the borrowed witness minted by [`ObjectProjectionAlternative::closed`].
 
 use std::sync::Arc;
 
@@ -565,7 +566,9 @@ impl ObjectProjectionAlternative {
     }
 
     /// Whole-program excess eligibility. A semantic generic spread suppresses
-    /// freshness even when the named-key domain remains open.
+    /// freshness even when the named-key domain remains open. A selector that
+    /// reads only some facts (`Key`, `RelationShape`, index and signature
+    /// selectors) reports `Indeterminate`: excess is a whole-construction fact.
     #[must_use]
     pub const fn excess(&self) -> &ExcessEligibility {
         &self.excess
