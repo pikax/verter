@@ -1114,7 +1114,52 @@ impl ConnectedDemandLedger<'_> {
                 .effective_projection_op_budget()
                 .saturating_sub(request.projection_ops_executed_count()) as u64
         });
-        let (unpaid, unpaid_operations, total) = {
+        let (unpaid, unpaid_operations, total) = if receipt.prerequisites().is_empty() {
+            // A leaf's closure is itself: what it owes is its own usage,
+            // with no traversal to deduplicate.
+            let identity = receipt.identity();
+            let demand_paid = self.paid.borrow().contains(identity);
+            let request_paid = operations_paid
+                .as_ref()
+                .is_none_or(|operations| operations.contains(identity));
+            let exclusive = receipt.exclusive();
+            let total = LogicalUsage {
+                work: if demand_paid { 0 } else { exclusive.work },
+                bytes: if demand_paid { 0 } else { exclusive.bytes },
+                operations: if request_paid {
+                    0
+                } else {
+                    exclusive.operations
+                },
+                comparisons: if demand_paid {
+                    0
+                } else {
+                    exclusive.comparisons
+                },
+            };
+            if total.work > work_room {
+                return Err(ReplayRefusal::Work);
+            }
+            if total.operations > operation_room {
+                return Err(ReplayRefusal::Operations);
+            }
+            if total.comparisons > u64::from(comparison_room) {
+                return Err(ReplayRefusal::RelationComparisons);
+            }
+            (
+                if demand_paid {
+                    Vec::new()
+                } else {
+                    vec![identity.clone()]
+                },
+                if request_paid {
+                    Vec::new()
+                } else {
+                    vec![identity.clone()]
+                },
+                total,
+            )
+        } else {
             let paid = self.paid.borrow();
             let mut unpaid: Vec<&CostIdentity> = Vec::new();
             let mut unpaid_operations: Vec<&CostIdentity> = Vec::new();

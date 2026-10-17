@@ -144,14 +144,37 @@ fn assert_retained_multiset(data: &SemanticNodeData, mut retained: SmallVec<[u64
         }
     }
     retained.retain(|held| *held < UNALLOCATABLE_ID_FLOOR);
-    retained.sort_unstable();
-    expected.sort_unstable();
+    sort_small(&mut retained);
+    sort_small(&mut expected);
     assert_eq!(
         retained,
         expected,
         "retained operand multiset for {:?}",
         data.node_tag()
     );
+}
+
+/// Sort a node-id multiset in place. Payloads name a handful of children,
+/// which a plain insertion sort orders without the slice sort's machinery;
+/// a wide one (a union of hundreds of members) takes the slice sort.
+#[cfg(any(test, feature = "test-support"))]
+fn sort_small(ids: &mut SmallVec<[u64; 16]>) {
+    if ids.len() > 16 {
+        ids.sort_unstable();
+        return;
+    }
+    let ids = ids.as_mut_slice();
+    let mut next = 1;
+    while next < ids.len() {
+        let held = ids[next];
+        let mut at = next;
+        while at > 0 && ids[at - 1] > held {
+            ids[at] = ids[at - 1];
+            at -= 1;
+        }
+        ids[at] = held;
+        next += 1;
+    }
 }
 
 /// The allocatable node ids a `Debug` rendering prints, read as it is
@@ -177,9 +200,12 @@ enum PrintedNodeIdStage {
 #[cfg(any(test, feature = "test-support"))]
 impl std::fmt::Write for PrintedNodeIds {
     fn write_str(&mut self, written: &str) -> std::fmt::Result {
-        let stage = std::mem::take(&mut self.stage);
+        const NAME: &[u8] = b"SemanticNodeId";
+        let bytes = written.as_bytes();
+        let stage = self.stage;
+        self.stage = PrintedNodeIdStage::Text;
         match stage {
-            PrintedNodeIdStage::Name if written == "(" => self.stage = PrintedNodeIdStage::Open,
+            PrintedNodeIdStage::Name if bytes == b"(" => self.stage = PrintedNodeIdStage::Open,
             PrintedNodeIdStage::Open => {
                 if let Ok(held) = written.parse::<u64>() {
                     if held < UNALLOCATABLE_ID_FLOOR {
@@ -187,7 +213,9 @@ impl std::fmt::Write for PrintedNodeIds {
                     }
                 }
             }
-            _ if written == "SemanticNodeId" => self.stage = PrintedNodeIdStage::Name,
+            _ if bytes.len() == NAME.len() && bytes == NAME => {
+                self.stage = PrintedNodeIdStage::Name;
+            }
             _ => {}
         }
         Ok(())
