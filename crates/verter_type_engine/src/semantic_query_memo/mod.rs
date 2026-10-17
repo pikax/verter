@@ -609,6 +609,10 @@ pub struct SemanticGraphStore {
     /// takes only shard mutexes and never re-enters `entries`, so the
     /// order holds.
     canonical_to_entries: CanonicalToEntries,
+    /// Whether a candidate was published since the reverse index last
+    /// registered every resident candidate. Written and read only under
+    /// the `entries` lock.
+    reverse_index_pending: std::sync::atomic::AtomicBool,
     /// Store-owned hash-cons pool for dispatch dependency signatures.
     /// Every warm candidate passes through this pool before admission, so
     /// equivalent signatures share one allocation while live candidates keep
@@ -817,6 +821,7 @@ impl SemanticGraphStore {
             #[cfg(any(test, feature = "test-support"))]
             joiner_on_condvar_count: Default::default(),
             canonical_to_entries: Default::default(),
+            reverse_index_pending: Default::default(),
             dep_signature_interner: Default::default(),
             memo_budget: Default::default(),
             candidate_admission_seq: Default::default(),
@@ -1068,6 +1073,8 @@ impl SemanticGraphStore {
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn canonical_to_entries_shard_count_for_test(&self) -> usize {
+        let mut entries = self.entries_lock_diagnosed();
+        self.index_unregistered_candidates_locked(&mut entries);
         self.canonical_to_entries.len()
     }
 
@@ -1229,10 +1236,52 @@ impl SemanticGraphStore {
     /// canonical is not present. Test/diagnostic accessor.
     #[must_use]
     pub fn canonical_to_entries_count(&self, canonical_id: &str) -> usize {
+        let mut entries = self.entries_lock_diagnosed();
+        self.index_unregistered_candidates_locked(&mut entries);
         self.canonical_to_entries
             .get(canonical_id)
             .map(|shard| shard.value().lock().len())
             .unwrap_or(0)
+    }
+
+    /// Note that a candidate was published unindexed: the next read of the
+    /// reverse index registers it. Called under the `entries` lock.
+    fn defer_reverse_index_registration(&self) {
+        self.reverse_index_pending
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Register every resident candidate the reverse index does not hold
+    /// yet, under the caller's `entries` lock hold, so the read that
+    /// follows sees every resident candidate's registrations.
+    pub(super) fn index_unregistered_candidates_locked(
+        &self,
+        entries: &mut FxHashMap<FamilyKey, FamilySlots>,
+    ) {
+        if !self
+            .reverse_index_pending
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        let timing_on = verter_execution::request_context::current_timing_enabled();
+        for (family, slots) in entries.iter_mut() {
+            let mut shared_family: Option<Arc<FamilyKey>> = None;
+            slots.for_each_candidate_mut(|slot, entry| {
+                if entry.reverse_indexed {
+                    return;
+                }
+                let family = shared_family.get_or_insert_with(|| Arc::new(family.clone()));
+                reverse_index::register_candidate(
+                    &self.canonical_to_entries,
+                    family,
+                    slot,
+                    entry,
+                    timing_on,
+                );
+                entry.reverse_indexed = true;
+            });
+        }
     }
 
     /// Invalidate every warm memo slot whose stored `DepSignature`
@@ -1296,6 +1345,9 @@ impl SemanticGraphStore {
         {
             let timing_on = verter_execution::request_context::current_timing_enabled();
             let mut entries = self.entries_lock_diagnosed();
+            // The drain reads the reverse index: every resident candidate
+            // is registered first, under this same hold.
+            self.index_unregistered_candidates_locked(&mut entries);
 
             // Drain the per-canonical `(family, slot) → registered fact
             // rail` map for `canonical_id`, UNDER the held `entries`
@@ -2469,6 +2521,7 @@ impl SemanticGraphStore {
             retention_charge: None,
             validated_at_generation,
             admission_seq,
+            reverse_indexed: false,
             cost_receipt: Arc::clone(cost_receipt),
         };
         // Aggregate retention admission, BEFORE the per-family cap plan:
@@ -2575,13 +2628,11 @@ impl SemanticGraphStore {
         // `entries` lock, keeping the live memo slot and its
         // reverse-index registration atomic against a concurrent
         // `invalidate_all`. See `register_reverse_index`'s docstring.
-        reverse_index::register_reverse_index(
-            &self.canonical_to_entries,
-            family,
-            &populated_slots,
-            &reverse_index::ReverseIndexInputs::new(&read_set_signature, &dispatch_dep_signature),
-            admission_seq,
-        );
+        // The candidate enters the reverse index when the index is next
+        // read, under the `entries` lock as this publish holds it.
+        if !populated_slots.is_empty() {
+            self.defer_reverse_index_registration();
+        }
         let published = PublishedMemoCandidate {
             read_set_signature,
             self_root_canonicals: Arc::clone(self_root_canonicals),
@@ -2697,7 +2748,6 @@ impl SemanticGraphStore {
         // result into an empty narrower sibling slot.
         verter_audit::attribute!(CacheCandidateCopy);
         let dispatch_dep_signature = self.dep_signature_interner.intern(&dispatch_dep_signature);
-        let dispatch_dep_signature_clone = Arc::clone(&dispatch_dep_signature);
         let validated_at_generation = flags.current_project_generation();
         let admission_seq = self.alloc_candidate_admission_seq();
         let mut entry = MemoEntry {
@@ -2715,6 +2765,7 @@ impl SemanticGraphStore {
             retention_charge: None,
             validated_at_generation,
             admission_seq,
+            reverse_indexed: false,
             cost_receipt,
         };
         entry.lease = match self.lease_candidate(family, &entry.result, &entry.walker_diagnostics) {
@@ -2793,19 +2844,11 @@ impl SemanticGraphStore {
         if family_was_new && !populated_slots.is_empty() {
             self.record_family_admission_locked(&mut entries, family);
         }
-        // Carrier-aware reverse-index registration — runs UNDER the held
-        // `entries` lock; see `warm_publish_one` for the full carrier and
-        // lock-order rationale.
-        reverse_index::register_reverse_index(
-            &self.canonical_to_entries,
-            family,
-            &populated_slots,
-            &reverse_index::ReverseIndexInputs::new(
-                &read_set_signature,
-                &dispatch_dep_signature_clone,
-            ),
-            admission_seq,
-        );
+        // The candidate enters the reverse index when the index is next
+        // read; see `warm_publish_one`.
+        if !populated_slots.is_empty() {
+            self.defer_reverse_index_registration();
+        }
         let admitted = !populated_slots.is_empty();
         drop(entries);
         admitted

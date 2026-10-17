@@ -964,13 +964,22 @@ beyond the output they own. `FactReadSet::finalise` merges absorbed canonical
 runs over borrowed facts (comparison count unchanged) and clones each distinct
 fact once; fan-out to an enclosing tracer copies a fact only when its recent
 window lacks it; `semantic_graph_read_set_signature` keys self-roots in a sorted
-small list and leaves sorting to the one seal. The reverse index registers and
-drains through ONE borrowed projection (`RegisteredCanonicals` over
+small list and leaves sorting to the one seal. A sealed traced set that
+already holds the build's fence and every observed self-root at its observed
+version is shared as the completed carrier rather than copied and sealed
+again. The reverse index is registered when it is READ, not at publish: a
+publish leaves its candidate unindexed (`MemoEntry::reverse_indexed`) and every
+read of `canonical_to_entries` — `invalidate_canonical` and the diagnostic
+counts — first registers every unindexed resident candidate under the same
+`entries` hold (`index_unregistered_candidates_locked`), so a read sees every
+resident candidate and a candidate displaced or FIFO-evicted before any read
+is dropped with nothing to prune. Registration and every drain go through ONE
+borrowed projection (`RegisteredCanonicals` over
 `ReadSetSignature::for_each_canonical_id` ∪ the dispatch-fence canonicals), so
-publish, displacement, FIFO eviction and canonical invalidation stay symmetric
-without allocating a canonical per call; an existing shard is reached by a read
-guard (which excludes the outer `remove_if` like the write-locked `entry` path),
-and a prune attempts the outer drop only when it emptied the inner map. The
+they stay symmetric without allocating a canonical per call; an existing shard
+is reached by a read guard (which excludes the outer `remove_if` like the
+write-locked `entry` path), and a prune attempts the outer drop only when it
+emptied the inner map. The
 allocation canary `recursive_paths_allocations_per_entity_stay_flat` guards the
 per-entity allocation ceiling and its flat growth across layouts.
 
