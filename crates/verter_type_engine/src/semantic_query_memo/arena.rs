@@ -935,6 +935,18 @@ impl NodeArenaCore {
         Ok(())
     }
 
+    /// Keep only the live ids of `ids` and retain each of them, under one
+    /// hold of the arena: a tombstone or an unallocated ordinal owns no
+    /// storage, so it is dropped rather than refused.
+    pub(super) fn retain_live(&self, ids: &mut super::node_roots::RootIds) {
+        let mut inner = self.inner.write();
+        ids.retain(|id| matches!(inner.slot(*id), Slot::Live(..)));
+        for id in ids.iter() {
+            inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)).unwrap().owners
+                [(id.0 & CHUNK_MASK) as usize] += 1;
+        }
+    }
+
     pub(super) fn release_roots(&self, ids: &[SemanticNodeId]) {
         let mut pending = SmallVec::<[SemanticNodeId; 16]>::from_slice(ids);
         let mut retired = SmallVec::<[(SemanticNodeId, u64); 4]>::new();

@@ -143,6 +143,19 @@ impl NodeRootSet {
         Ok(Self(Some(Arc::new(RootOwner { arena, ids }))))
     }
 
+    /// Retain the live operands of `ids` from `arena`, dropping any id that
+    /// names no live node.
+    pub(crate) fn acquire_live(arena: Arc<NodeArenaCore>, mut ids: RootIds) -> Self {
+        if ids.is_empty() {
+            return Self::default();
+        }
+        arena.retain_live(&mut ids);
+        if ids.is_empty() {
+            return Self::default();
+        }
+        Self(Some(Arc::new(RootOwner { arena, ids })))
+    }
+
     pub fn operands(&self) -> &[SemanticNodeId] {
         self.0.as_ref().map_or(&[], |owner| owner.ids.as_slice())
     }
