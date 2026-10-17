@@ -1040,8 +1040,11 @@ from the canonical, each node once. Unregistering a candidate drops every
 evidence node and canonical only it reached, so the index drains to empty with
 its last candidate; edges naming a candidate are charged by that candidate's
 reservation, everything else by the index's own pin — every table and holder
-set by CAPACITY, so the spare buckets a partial drain leaves stay charged
-until the table shrinks (at a quarter live) or empties. There is no
+set by the capacity its allocation was made with, not its live `capacity()`
+(a removal's tombstone lowers `capacity()` without freeing a bucket), so the
+spare and tombstoned buckets a partial drain leaves stay charged until the
+table is rebuilt (at a quarter live) or freed, and a full drain releases
+exactly what was charged. There is no
 account-less index: `Default` charges the process-local account, and
 `ReceiptReverseIndex::charging_registrations` (the candidate store, whose
 candidates charge nothing) charges the candidates' share too. The index drives
@@ -1143,8 +1146,9 @@ immutable evidence page — a `ResultReceipt` of `EvidenceKind::Page` — and pa
 the level of pages again until the top level fits one page. Pages are
 deterministic (cut points are positions in the canonical order), lossless,
 validated leaf by leaf through the same receipt walk as a consumed result's
-receipt, projected into reverse-index registration through their canonical
-summaries, and shared by `Arc` with every candidate, refusal summary and
+receipt, registered in the reverse index as evidence nodes like any consumed
+receipt (each page once, under the canonicals its own facts read and the
+evidence that consumed it), and shared by `Arc` with every candidate, refusal summary and
 enclosing signature that absorbs them. Each page holds ONE retention charge for
 its whole life, sized by what it stores (entry array, owned fact strings, the
 canonical-set storage it does not share), however many holders share it. A page
@@ -1270,10 +1274,12 @@ proof after the export table is evicted. Canonical summaries are persistent
 hash tries; their public iteration stays lexical through a byte radix walk.
 Radix ordering consumes common prefixes once per bucket (including small
 insertion buckets) and visits only the occupied bucket range when names
-diverge. Component publication projects its shared carrier's canonical union
-once, outside the memo lock, and reuses that temporary projection for every
-member and populated slot; each candidate still registers its own admission
-identity and the complete fact carrier. Export-table scale tests inspect all
+diverge. Component publication builds one set of registration inputs — the
+shared carrier and the dispatch-fence canonicals — and reuses it for every
+member and populated slot; the reverse index walks that carrier's direct facts
+and child receipts once, registering only the evidence not indexed yet, so the
+members share one carrier node and each registers only its own admission
+identity, its carrier edge and its fence edges. Export-table scale tests inspect all
 suffixes through one request context and count proof work
 across construction and those reads; the request's receipt validation memo
 remains responsible for sharing completed validation.

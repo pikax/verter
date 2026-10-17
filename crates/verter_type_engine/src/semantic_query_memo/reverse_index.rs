@@ -40,9 +40,9 @@
 //! (charged by its owner through [`ReceiptReverseIndex::candidate_bytes`]),
 //! an edge naming an evidence node is the index's own storage. Every
 //! allocation the index holds is charged to a retention account for as long
-//! as it is held: by CAPACITY, not by live count, so a table or set that
-//! keeps spare buckets after a partial drain stays charged until it shrinks
-//! or is freed. The candidates' own share is the only part an owner may
+//! as it is held: by the capacity its allocation was made with, not by live
+//! count, so a table or set that keeps spare or tombstoned buckets after a
+//! partial drain stays charged until it is rebuilt or freed. The candidates' own share is the only part an owner may
 //! charge instead ([`ReceiptReverseIndex::charged`]); an owner that charges
 //! nothing of its candidates leaves all of it to the index
 //! ([`ReceiptReverseIndex::charging_registrations`]). There is no
@@ -107,7 +107,81 @@ struct EvidenceNode {
     owner: EvidenceOwner,
     /// The evidence nodes that consumed this one and the candidates it
     /// validates.
-    parents: FxHashSet<Holder>,
+    parents: Tracked<FxHashSet<Holder>>,
+}
+
+/// A hash table the index can resize and rebuild.
+trait Table: Default {
+    fn len(&self) -> usize;
+    fn capacity(&self) -> usize;
+    /// The same entries in a fresh allocation for at least `capacity`.
+    fn rebuilt(self, capacity: usize) -> Self;
+}
+
+impl<T: Hash + Eq, V> Table for FxHashMap<T, V> {
+    fn len(&self) -> usize {
+        self.len()
+    }
+
+    fn capacity(&self) -> usize {
+        self.capacity()
+    }
+
+    fn rebuilt(self, capacity: usize) -> Self {
+        let mut table = FxHashMap::with_capacity_and_hasher(capacity, Default::default());
+        table.extend(self);
+        table
+    }
+}
+
+impl<T: Hash + Eq> Table for FxHashSet<T> {
+    fn len(&self) -> usize {
+        self.len()
+    }
+
+    fn capacity(&self) -> usize {
+        self.capacity()
+    }
+
+    fn rebuilt(self, capacity: usize) -> Self {
+        let mut table = FxHashSet::with_capacity_and_hasher(capacity, Default::default());
+        table.extend(self);
+        table
+    }
+}
+
+/// A hash table and the buckets its allocation holds.
+///
+/// A removal may leave a tombstone that lowers the table's `capacity()`
+/// without giving its bucket back, so `capacity()` understates the
+/// allocation once anything was removed. `slots` is the capacity the
+/// current allocation was made with — the most `capacity()` has answered
+/// since: a table only reallocates when it grows past it, or when
+/// [`Tracked::release_sparse`] rebuilds or frees it.
+#[derive(Default)]
+struct Tracked<T> {
+    table: T,
+    slots: usize,
+}
+
+impl<T: Table> Tracked<T> {
+    /// Take in the table's capacity after an insertion: a reallocation
+    /// raises `slots` to it.
+    fn note_inserted(&mut self) {
+        self.slots = self.slots.max(self.table.capacity());
+    }
+
+    /// Free the table once empty, and rebuild it into an allocation twice
+    /// its live count once a quarter or less of its slots is live.
+    fn release_sparse(&mut self) {
+        let len = self.table.len();
+        if len == 0 {
+            *self = Self::default();
+        } else if len * 4 <= self.slots {
+            self.table = std::mem::take(&mut self.table).rebuilt(len * 2);
+            self.slots = self.table.capacity();
+        }
+    }
 }
 
 struct CandidateNode<K, P> {
@@ -121,7 +195,8 @@ struct CandidateNode<K, P> {
 }
 
 /// Bytes one canonical's bucket holds, besides its text.
-const CANONICAL_BUCKET_BYTES: usize = std::mem::size_of::<(Arc<str>, FxHashSet<Holder>)>() + 1;
+const CANONICAL_BUCKET_BYTES: usize =
+    std::mem::size_of::<(Arc<str>, Tracked<FxHashSet<Holder>>)>() + 1;
 
 /// Bytes one evidence node's bucket holds.
 const EVIDENCE_BUCKET_BYTES: usize = std::mem::size_of::<(EvidenceAddr, EvidenceNode)>() + 1;
@@ -180,8 +255,8 @@ struct IndexStorage {
     pin: Option<GranularPin>,
     /// Text blocks of the canonicals the index holds.
     text: usize,
-    /// Buckets of every holder set — a canonical's holders, an evidence
-    /// node's parents — live or spare.
+    /// Slots of every holder set — a canonical's holders, an evidence
+    /// node's parents — live, spare or tombstoned.
     set_slots: usize,
     /// Edges naming a candidate.
     candidate_edges: usize,
@@ -204,10 +279,10 @@ impl IndexStorage {
 }
 
 struct IndexState<K, P> {
-    canonicals: FxHashMap<Arc<str>, FxHashSet<Holder>>,
-    evidence: FxHashMap<EvidenceAddr, EvidenceNode>,
-    candidate_ids: FxHashMap<K, CandidateId>,
-    candidates: FxHashMap<CandidateId, CandidateNode<K, P>>,
+    canonicals: Tracked<FxHashMap<Arc<str>, Tracked<FxHashSet<Holder>>>>,
+    evidence: Tracked<FxHashMap<EvidenceAddr, EvidenceNode>>,
+    candidate_ids: Tracked<FxHashMap<K, CandidateId>>,
+    candidates: Tracked<FxHashMap<CandidateId, CandidateNode<K, P>>>,
     next_candidate: CandidateId,
     edges: usize,
     storage: IndexStorage,
@@ -218,10 +293,10 @@ struct IndexState<K, P> {
 impl<K, P> IndexState<K, P> {
     fn new(storage: IndexStorage) -> Self {
         Self {
-            canonicals: FxHashMap::default(),
-            evidence: FxHashMap::default(),
-            candidate_ids: FxHashMap::default(),
-            candidates: FxHashMap::default(),
+            canonicals: Tracked::default(),
+            evidence: Tracked::default(),
+            candidate_ids: Tracked::default(),
+            candidates: Tracked::default(),
             next_candidate: 0,
             edges: 0,
             storage,
@@ -230,19 +305,19 @@ impl<K, P> IndexState<K, P> {
         }
     }
 
-    /// The bytes the index's charge covers: every table's buckets and
-    /// every holder set's buckets by capacity, spare ones included, and the
+    /// The bytes the index's charge covers: every table's and every holder
+    /// set's allocated slots, spare and tombstoned ones included, and the
     /// canonicals' text — less the share each candidate's owner charges
     /// when it does.
     fn storage_bytes(&self) -> usize {
-        let held = self.canonicals.capacity() * CANONICAL_BUCKET_BYTES
-            + self.evidence.capacity() * EVIDENCE_BUCKET_BYTES
-            + self.candidate_ids.capacity() * id_bucket_bytes::<K>()
-            + self.candidates.capacity() * candidate_bucket_bytes::<K, P>()
+        let held = self.canonicals.slots * CANONICAL_BUCKET_BYTES
+            + self.evidence.slots * EVIDENCE_BUCKET_BYTES
+            + self.candidate_ids.slots * id_bucket_bytes::<K>()
+            + self.candidates.slots * candidate_bucket_bytes::<K, P>()
             + self.storage.text
             + self.storage.set_slots * EDGE_BYTES;
         if self.storage.candidates_charged_by_owner {
-            held - (self.candidates.len()
+            held - (self.candidates.table.len()
                 * (id_bucket_bytes::<K>() + candidate_bucket_bytes::<K, P>())
                 + self.storage.candidate_edges * EDGE_BYTES)
         } else {
@@ -266,24 +341,26 @@ impl<K, P> IndexState<K, P> {
     }
 }
 
-/// Shrink `table` once a quarter or less of its capacity is live, freeing
-/// it outright when empty.
-fn shrink_sparse<T: Hash + Eq, V>(table: &mut FxHashMap<T, V>) {
-    if table.is_empty() {
-        *table = FxHashMap::default();
-    } else if table.len() * 4 <= table.capacity() {
-        table.shrink_to(table.len() * 2);
-    }
+/// Release a non-empty holder set's spare slots, keeping `set_slots` in
+/// step.
+fn release_holders(set_slots: &mut usize, set: &mut Tracked<FxHashSet<Holder>>) {
+    let before = set.slots;
+    set.release_sparse();
+    *set_slots = *set_slots + set.slots - before;
 }
 
-/// Shrink a non-empty holder set once a quarter or less of its capacity is
-/// live, answering the buckets it gave back.
-fn shrink_holders(set: &mut FxHashSet<Holder>) -> usize {
-    let before = set.capacity();
-    if set.len() * 4 <= before {
-        set.shrink_to(set.len() * 2);
-    }
-    before - set.capacity()
+/// Insert `holder` into `set`, keeping `set_slots` in step. Answers
+/// whether it was new.
+fn insert_holder(
+    set_slots: &mut usize,
+    set: &mut Tracked<FxHashSet<Holder>>,
+    holder: Holder,
+) -> bool {
+    let before = set.slots;
+    let inserted = set.table.insert(holder);
+    set.note_inserted();
+    *set_slots += set.slots - before;
+    inserted
 }
 
 impl<K: Eq + Hash + Clone, P> IndexState<K, P> {
@@ -312,21 +389,24 @@ impl<K: Eq + Hash + Clone, P> IndexState<K, P> {
     /// Register `holder` under `canonical`, answering the index's copy of
     /// the canonical's text.
     fn link_canonical(&mut self, canonical: &str, holder: Holder) -> Arc<str> {
-        let key = match self.canonicals.get_key_value(canonical) {
+        let key = match self.canonicals.table.get_key_value(canonical) {
             Some((key, _)) => Arc::clone(key),
             None => {
                 let key: Arc<str> = Arc::from(canonical);
                 self.storage.text += arc_block_bytes(canonical.len());
                 self.canonicals
-                    .insert(Arc::clone(&key), FxHashSet::default());
+                    .table
+                    .insert(Arc::clone(&key), Tracked::default());
+                self.canonicals.note_inserted();
                 key
             }
         };
-        let set = self.canonicals.get_mut(canonical).expect("present above");
-        let before = set.capacity();
-        let inserted = set.insert(holder);
-        self.storage.set_slots += set.capacity() - before;
-        if inserted {
+        let set = self
+            .canonicals
+            .table
+            .get_mut(canonical)
+            .expect("present above");
+        if insert_holder(&mut self.storage.set_slots, set, holder) {
             self.note_linked(holder);
         }
         key
@@ -335,19 +415,19 @@ impl<K: Eq + Hash + Clone, P> IndexState<K, P> {
     /// Remove `holder` from `canonical`, dropping the canonical with its
     /// last holder.
     fn unlink_canonical(&mut self, canonical: &str, holder: Holder) {
-        let Some(set) = self.canonicals.get_mut(canonical) else {
+        let Some(set) = self.canonicals.table.get_mut(canonical) else {
             return;
         };
-        if !set.remove(&holder) {
+        if !set.table.remove(&holder) {
             return;
         }
-        if set.is_empty() {
-            self.storage.set_slots -= set.capacity();
-            self.canonicals.remove(canonical);
+        if set.table.is_empty() {
+            self.storage.set_slots -= set.slots;
+            self.canonicals.table.remove(canonical);
             self.storage.text -= arc_block_bytes(canonical.len());
-            shrink_sparse(&mut self.canonicals);
+            self.canonicals.release_sparse();
         } else {
-            self.storage.set_slots -= shrink_holders(set);
+            release_holders(&mut self.storage.set_slots, set);
         }
         self.note_unlinked(holder);
     }
@@ -363,11 +443,8 @@ impl<K: Eq + Hash + Clone, P> IndexState<K, P> {
         let mut pending: Vec<(EvidenceOwner, Holder)> = vec![(owner, parent)];
         while let Some((owner, parent)) = pending.pop() {
             let addr = owner.addr();
-            if let Some(node) = self.evidence.get_mut(&addr) {
-                let before = node.parents.capacity();
-                let inserted = node.parents.insert(parent);
-                self.storage.set_slots += node.parents.capacity() - before;
-                if inserted {
+            if let Some(node) = self.evidence.table.get_mut(&addr) {
+                if insert_holder(&mut self.storage.set_slots, &mut node.parents, parent) {
                     self.note_linked(parent);
                 }
                 continue;
@@ -387,11 +464,13 @@ impl<K: Eq + Hash + Clone, P> IndexState<K, P> {
                     }
                 }
             }
-            let mut parents = FxHashSet::default();
-            parents.insert(parent);
-            self.storage.set_slots += parents.capacity();
+            let mut parents = Tracked::default();
+            insert_holder(&mut self.storage.set_slots, &mut parents, parent);
             self.note_linked(parent);
-            self.evidence.insert(addr, EvidenceNode { owner, parents });
+            self.evidence
+                .table
+                .insert(addr, EvidenceNode { owner, parents });
+            self.evidence.note_inserted();
         }
         Some(root)
     }
@@ -407,20 +486,20 @@ impl<K: Eq + Hash + Clone, P> IndexState<K, P> {
     ) {
         let mut pending: Vec<(EvidenceAddr, Holder)> = vec![(addr, parent)];
         while let Some((addr, parent)) = pending.pop() {
-            let Some(node) = self.evidence.get_mut(&addr) else {
+            let Some(node) = self.evidence.table.get_mut(&addr) else {
                 continue;
             };
-            if !node.parents.remove(&parent) {
+            if !node.parents.table.remove(&parent) {
                 continue;
             }
-            if !node.parents.is_empty() {
-                self.storage.set_slots -= shrink_holders(&mut node.parents);
+            if !node.parents.table.is_empty() {
+                release_holders(&mut self.storage.set_slots, &mut node.parents);
                 self.note_unlinked(parent);
                 continue;
             }
             self.note_unlinked(parent);
-            let node = self.evidence.remove(&addr).expect("present above");
-            self.storage.set_slots -= node.parents.capacity();
+            let node = self.evidence.table.remove(&addr).expect("present above");
+            self.storage.set_slots -= node.parents.slots;
             let holder = Holder::Evidence(addr);
             for fact in node.owner.facts() {
                 match fact {
@@ -438,12 +517,16 @@ impl<K: Eq + Hash + Clone, P> IndexState<K, P> {
             }
             released.push(node.owner);
         }
-        shrink_sparse(&mut self.evidence);
+        self.evidence.release_sparse();
     }
 
     fn unregister(&mut self, key: &K, released: &mut Vec<EvidenceOwner>) -> Option<P> {
-        let id = self.candidate_ids.remove(key)?;
-        let node = self.candidates.remove(&id).expect("every id names a node");
+        let id = self.candidate_ids.table.remove(key)?;
+        let node = self
+            .candidates
+            .table
+            .remove(&id)
+            .expect("every id names a node");
         let holder = Holder::Candidate(id);
         self.storage.candidate_extras -= node.extras.len();
         for canonical in node.extras.iter() {
@@ -452,8 +535,8 @@ impl<K: Eq + Hash + Clone, P> IndexState<K, P> {
         if let Some(carrier) = node.carrier {
             self.unlink_evidence(carrier, holder, released);
         }
-        shrink_sparse(&mut self.candidates);
-        shrink_sparse(&mut self.candidate_ids);
+        self.candidates.release_sparse();
+        self.candidate_ids.release_sparse();
         Some(node.payload)
     }
 }
@@ -539,8 +622,9 @@ impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
                 .collect();
             state.storage.candidate_extras += extras.len();
             let carrier = state.link_evidence(EvidenceOwner::Carrier(Arc::clone(carrier)), holder);
-            state.candidate_ids.insert(key.clone(), id);
-            state.candidates.insert(
+            state.candidate_ids.table.insert(key.clone(), id);
+            state.candidate_ids.note_inserted();
+            state.candidates.table.insert(
                 id,
                 CandidateNode {
                     key,
@@ -549,6 +633,7 @@ impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
                     extras,
                 },
             );
+            state.candidates.note_inserted();
             state.settle();
         }
         drop(released);
@@ -574,11 +659,12 @@ impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
         let mut released = Vec::new();
         let found = {
             let mut state = self.state.lock();
-            let Some(&id) = state.candidate_ids.get(key) else {
+            let Some(&id) = state.candidate_ids.table.get(key) else {
                 return false;
             };
             let node = state
                 .candidates
+                .table
                 .get_mut(&id)
                 .expect("every id names a node");
             if !retain(&mut node.payload) {
@@ -600,11 +686,11 @@ impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
             allow(unused_mut)
         )]
         let mut state = self.state.lock();
-        let Some(holders) = state.canonicals.get(canonical) else {
+        let Some(holders) = state.canonicals.table.get(canonical) else {
             return Vec::new();
         };
         let mut visited: FxHashSet<Holder> = FxHashSet::default();
-        let mut stack: Vec<Holder> = holders.iter().copied().collect();
+        let mut stack: Vec<Holder> = holders.table.iter().copied().collect();
         let mut reached = Vec::new();
         while let Some(holder) = stack.pop() {
             if !visited.insert(holder) {
@@ -612,11 +698,11 @@ impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
             }
             match holder {
                 Holder::Candidate(id) => {
-                    let node = &state.candidates[&id];
+                    let node = &state.candidates.table[&id];
                     reached.push((node.key.clone(), node.payload.clone()));
                 }
                 Holder::Evidence(addr) => {
-                    stack.extend(state.evidence[&addr].parents.iter().copied());
+                    stack.extend(state.evidence.table[&addr].parents.table.iter().copied());
                 }
             }
         }
@@ -631,12 +717,14 @@ impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
     pub fn clear(&self) {
         let released = {
             let mut state = self.state.lock();
-            let released: Vec<EvidenceOwner> =
-                state.evidence.drain().map(|(_, node)| node.owner).collect();
-            state.canonicals = FxHashMap::default();
-            state.evidence = FxHashMap::default();
-            state.candidate_ids = FxHashMap::default();
-            state.candidates = FxHashMap::default();
+            let released: Vec<EvidenceOwner> = std::mem::take(&mut state.evidence.table)
+                .into_values()
+                .map(|node| node.owner)
+                .collect();
+            state.canonicals = Tracked::default();
+            state.evidence = Tracked::default();
+            state.candidate_ids = Tracked::default();
+            state.candidates = Tracked::default();
             state.edges = 0;
             state.storage.text = 0;
             state.storage.set_slots = 0;
@@ -652,9 +740,9 @@ impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
     pub fn occupancy(&self) -> ReverseIndexOccupancy {
         let state = self.state.lock();
         ReverseIndexOccupancy {
-            canonicals: state.canonicals.len(),
-            evidence: state.evidence.len(),
-            candidates: state.candidates.len(),
+            canonicals: state.canonicals.table.len(),
+            evidence: state.evidence.table.len(),
+            candidates: state.candidates.table.len(),
             edges: state.edges,
         }
     }
