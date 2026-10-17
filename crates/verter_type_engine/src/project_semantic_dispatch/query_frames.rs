@@ -59,6 +59,13 @@ pub(super) struct QueryDelivery {
     carrier: Option<ReadSetSignature>,
 }
 
+/// A delivery a frame's build consumes where its evaluation reads it,
+/// with how deep the needing frame nests.
+pub(super) struct FrameDelivery {
+    delivery: QueryDelivery,
+    depth: u32,
+}
+
 /// The program instantiations run on: the dispatch they evaluate through
 /// and the task that owns every producer the drive claims.
 pub(super) struct QueryProgram<'p, 'a, C: crate::resolver_core::ResolverCapabilities> {
@@ -615,6 +622,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// carrier into the frame's tracer, fold its rails into the frame's
     /// taint, and read the instantiated node as a synchronous
     /// instantiation's reader does.
+    /// [`Self::consume_delivery`] for a delivery a build consumes itself.
+    pub(super) fn consume_frame_delivery(&self, delivery: FrameDelivery) -> SemanticNodeId {
+        self.consume_delivery(delivery.delivery, delivery.depth)
+    }
+
     fn consume_delivery(&self, delivery: QueryDelivery, depth: u32) -> SemanticNodeId {
         let QueryDelivery { read, carrier } = delivery;
         if let Some(carrier) = carrier {
@@ -663,13 +675,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         });
         let taint = super::StepTaint::install(&self.build_local_taint, &mut frame.taint);
         let installed = tracer.install();
-        let delivered = delivery.map(|outcome| match outcome {
-            Ok(delivery) => self.consume_delivery(delivery, frame.depth + 1),
+        let delivery = delivery.map(|outcome| match outcome {
+            Ok(delivery) => delivery,
             Err(()) => unreachable!("a stopped drive delivers nothing"),
         });
         let poll = match frame.build.as_mut() {
-            Some(FrameBuild::Instantiate(build)) => self.drain_instantiate(build, delivered),
-            Some(FrameBuild::Typeof(build)) => self.drain_typeof(build, delivered),
+            Some(FrameBuild::Instantiate(build)) => self.drain_instantiate(
+                build,
+                delivery.map(|delivery| self.consume_delivery(delivery, frame.depth + 1)),
+            ),
+            // A typeof build consumes its delivery where its evaluation
+            // reads it.
+            Some(FrameBuild::Typeof(build)) => self.drain_typeof(
+                build,
+                delivery.map(|delivery| FrameDelivery {
+                    delivery,
+                    depth: frame.depth + 1,
+                }),
+            ),
             None => {
                 self.open_cold_build(None);
                 match &frame.key {

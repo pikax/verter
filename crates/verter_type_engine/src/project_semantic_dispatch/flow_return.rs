@@ -1772,20 +1772,33 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         owner: verter_type_expr::TopLevelOwnerId,
         expression: &verter_type_expr::IndexedValueExpression,
     ) -> Option<IndexedValue> {
-        let pending = || {
-            self.dispatch_txn
-                .borrow()
-                .obligations
-                .pending()
-                .pending_len()
-        };
-        let before = pending();
+        let before = self.pending_obligations();
         let node = self.evaluate_indexed_value(canonical, owner, expression, false);
-        if pending() != before {
+        self.settle_indexed_value_for_type(before, node)
+    }
+
+    /// How many obligations the transaction holds pending.
+    fn pending_obligations(&self) -> usize {
+        self.dispatch_txn
+            .borrow()
+            .obligations
+            .pending()
+            .pending_len()
+    }
+
+    /// A type-level read's value, given the obligations pending before it
+    /// was evaluated: a call that left one pending is provisional, a typed
+    /// miss ([`Self::evaluate_indexed_value_for_type`]).
+    fn settle_indexed_value_for_type(
+        &self,
+        pending_before: usize,
+        value: Option<IndexedValue>,
+    ) -> Option<IndexedValue> {
+        if self.pending_obligations() != pending_before {
             crate::request_context::mark_request_result_partial();
             return None;
         }
-        node
+        value
     }
 
     pub(crate) fn evaluate_indexed_value_expression_node_inner(
@@ -1812,133 +1825,247 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         expression: &verter_type_expr::IndexedValueExpression,
         hold_flow_result: bool,
     ) -> Option<IndexedValue> {
-        // A call's callee, receiver and arguments, and a member read's
-        // object, evaluate from an explicit stack of the records waiting on
-        // them, in that order, a record ending at a child with no value: a
-        // call nested in an argument or a receiver (`f(f(f(1)))`,
-        // `b.m().m()`) or a member read off a call's result (`f().a.b`)
-        // costs no native level.
-        struct Waiting<'e> {
-            call: &'e verter_type_expr::IndexedValueCall,
-            hold_flow_result: bool,
-            callee: Option<crate::semantic_query::SemanticNodeId>,
-            receiver: Option<Option<crate::semantic_query::SemanticNodeId>>,
-            /// The object of the member read the call's callee is: its
-            /// receiver.
-            member_receiver: Option<crate::semantic_query::SemanticNodeId>,
-            args: Vec<crate::semantic_query::CallArgKey>,
-        }
-        enum Pending<'e> {
-            Call(Waiting<'e>),
-            /// A member read waiting on its object; the callee of the call
-            /// below it when `callee`.
-            Member {
-                name: &'e Arc<str>,
-                callee: bool,
-            },
-        }
-        let mut waiting: Vec<Pending<'_>> = Vec::new();
-        let (mut current, mut hold, mut as_callee) = (expression, hold_flow_result, false);
-        loop {
-            let mut value = match self.indexed_value_leaf(canonical, owner, current) {
-                Ok(value) => value,
-                Err(IndexedRecord::Call(call)) => {
-                    waiting.push(Pending::Call(Waiting {
-                        call,
-                        hold_flow_result: hold,
-                        callee: None,
-                        receiver: None,
-                        member_receiver: None,
-                        args: Vec::with_capacity(call.args.len()),
-                    }));
-                    (current, hold, as_callee) = (&call.callee, false, true);
-                    continue;
-                }
-                Err(IndexedRecord::Member(object, name)) => {
-                    waiting.push(Pending::Member {
-                        name,
-                        callee: as_callee,
-                    });
-                    (current, hold, as_callee) = (object, false, false);
-                    continue;
-                }
-            };
-            loop {
-                let top = match waiting.last_mut() {
-                    None => return value,
-                    Some(Pending::Member { name, callee }) => {
-                        let (name, callee) = (*name, *callee);
-                        waiting.pop();
-                        let object = value.map(|object| object.node);
-                        value = object
-                            .and_then(|object| self.indexed_member_value(canonical, object, name))
-                            .map(|node| IndexedValue { node, fresh: false });
-                        if callee {
-                            if let (Some(object), Some(Pending::Call(call))) =
-                                (object, waiting.last_mut())
-                            {
-                                call.member_receiver = Some(object);
-                            }
-                        }
-                        continue;
-                    }
-                    Some(Pending::Call(top)) => top,
-                };
-                let call = top.call;
-                if top.callee.is_none() {
-                    let Some(callee) = value else {
-                        waiting.pop();
-                        value = None;
-                        continue;
-                    };
-                    top.callee = Some(callee.node);
-                    if let Some(receiver) = top.member_receiver.take() {
-                        top.receiver = Some(Some(receiver));
-                    } else if let Some(receiver) = call.receiver.as_deref() {
-                        (current, hold, as_callee) = (receiver, false, false);
-                        break;
-                    } else {
-                        top.receiver = Some(None);
-                    }
-                } else if top.receiver.is_none() {
-                    top.receiver = Some(value.map(|receiver| receiver.node));
-                } else {
-                    let Some(argument_value) = value else {
-                        waiting.pop();
-                        value = None;
-                        continue;
-                    };
-                    let argument = &call.args[top.args.len()];
-                    top.args.push(crate::semantic_query::CallArgKey::Eager {
-                        ty: argument_value.node,
-                        spread: argument.spread,
-                        context_sensitive: argument.context_sensitive,
-                        const_view: None,
-                        first_pass: None,
-                        literal_mode: indexed_argument_literal_mode(
-                            argument.literal_mode,
-                            argument_value.fresh,
-                        ),
-                    });
-                }
-                if let Some(argument) = call.args.get(top.args.len()) {
-                    (current, hold, as_callee) = (&argument.expression, false, false);
-                    break;
-                }
-                let Some(Pending::Call(finished)) = waiting.pop() else {
-                    unreachable!("the call on top")
-                };
-                value = self.resolve_indexed_call(
-                    canonical,
-                    owner,
-                    finished.call,
-                    finished.callee.expect("a resolved call has a callee"),
-                    finished.receiver.flatten(),
-                    finished.args,
-                    finished.hold_flow_result,
-                );
+        let mut run = IndexedValueRun::new(hold_flow_result);
+        match self.drain_indexed_value(canonical, owner, expression, &mut run, false, None) {
+            IndexedValuePoll::Done(value) => value,
+            IndexedValuePoll::Need(_) => {
+                unreachable!("an inline run evaluates the values it references in place")
             }
         }
+    }
+
+    /// Carry an indexed run over `root` on as far as it can go.
+    ///
+    /// A call's callee, receiver and arguments, and a member read's object,
+    /// evaluate from the run's explicit stack of the records waiting on
+    /// them, in that order, a record ending at a child with no value: a call
+    /// nested in an argument or a receiver (`f(f(f(1)))`, `b.m().m()`) or a
+    /// member read off a call's result (`f().a.b`) costs no native level.
+    ///
+    /// Run inline, the run evaluates every value its leaves name in place.
+    /// Run as a continuation (`suspend`), it stops at each leaf that is a
+    /// value's `typeof` (`id(y)` reads `typeof y`) with that `typeof` as its
+    /// need, and resumes with its value as `delivery`: a chain of values
+    /// each initialized from a call over the one before is then a chain of
+    /// frames.
+    pub(super) fn drain_indexed_value(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        root: &verter_type_expr::IndexedValueExpression,
+        run: &mut IndexedValueRun,
+        suspend: bool,
+        delivery: Option<crate::semantic_query::SemanticNodeId>,
+    ) -> IndexedValuePoll {
+        use verter_type_expr::IndexedValueExpression;
+        enum Phase {
+            Enter,
+            Deliver(Option<IndexedValue>),
+        }
+        let IndexedValueRun {
+            path,
+            waiting,
+            next,
+        } = run;
+        // The expressions along `path`: the last is the one evaluating.
+        let mut exprs: Vec<&IndexedValueExpression> = Vec::with_capacity(path.len() + 1);
+        exprs.push(root);
+        for child in path.iter() {
+            let parent = *exprs.last().expect("the root is on the stack");
+            exprs.push(indexed_child(parent, *child));
+        }
+        let (mut hold, mut as_callee) = (false, false);
+        let mut phase = match std::mem::replace(next, IndexedNext::Finished) {
+            IndexedNext::Enter {
+                hold: entered_hold,
+                as_callee: entered_as_callee,
+            } => {
+                (hold, as_callee) = (entered_hold, entered_as_callee);
+                Phase::Enter
+            }
+            IndexedNext::AwaitReference => Phase::Deliver(Some(IndexedValue {
+                node: delivery.expect("a run waiting on a value resumes with it"),
+                fresh: false,
+            })),
+            IndexedNext::Finished => unreachable!("a finished run is not drained again"),
+        };
+        loop {
+            let value = match phase {
+                Phase::Enter => {
+                    let current = *exprs.last().expect("the run evaluates an expression");
+                    if suspend {
+                        if let Some(key) =
+                            self.indexed_value_reference_key(canonical, owner, current)
+                        {
+                            *next = IndexedNext::AwaitReference;
+                            return IndexedValuePoll::Need(key);
+                        }
+                    }
+                    phase = match self.indexed_value_leaf(canonical, owner, current) {
+                        Ok(value) => Phase::Deliver(value),
+                        Err(IndexedRecord::Call(call)) => {
+                            waiting.push(IndexedPending::Call {
+                                hold_flow_result: hold,
+                                callee: None,
+                                receiver: None,
+                                member_receiver: None,
+                                args: Vec::with_capacity(call.args.len()),
+                            });
+                            path.push(IndexedChild::Callee);
+                            exprs.push(&call.callee);
+                            (hold, as_callee) = (false, true);
+                            Phase::Enter
+                        }
+                        Err(IndexedRecord::Member(object)) => {
+                            waiting.push(IndexedPending::Member { callee: as_callee });
+                            path.push(IndexedChild::Object);
+                            exprs.push(object);
+                            (hold, as_callee) = (false, false);
+                            Phase::Enter
+                        }
+                    };
+                    continue;
+                }
+                Phase::Deliver(value) => value,
+            };
+            // `value` is the evaluated expression's: deliver it to the
+            // record waiting on it.
+            let Some(top) = waiting.last_mut() else {
+                return IndexedValuePoll::Done(value);
+            };
+            path.pop();
+            exprs.pop();
+            let record = *exprs.last().expect("a waiting record has its expression");
+            if let IndexedPending::Member { callee } = top {
+                let callee = *callee;
+                waiting.pop();
+                let IndexedValueExpression::Member { name, .. } = record else {
+                    unreachable!("a member record waits on a member read")
+                };
+                let object = value.map(|object| object.node);
+                let value = object
+                    .and_then(|object| self.indexed_member_value(canonical, object, name))
+                    .map(|node| IndexedValue { node, fresh: false });
+                if callee {
+                    if let (
+                        Some(object),
+                        Some(IndexedPending::Call {
+                            member_receiver, ..
+                        }),
+                    ) = (object, waiting.last_mut())
+                    {
+                        *member_receiver = Some(object);
+                    }
+                }
+                phase = Phase::Deliver(value);
+                continue;
+            }
+            let IndexedValueExpression::Call(call) = record else {
+                unreachable!("a call record waits on a call")
+            };
+            let IndexedPending::Call {
+                callee,
+                receiver,
+                member_receiver,
+                args,
+                ..
+            } = top
+            else {
+                unreachable!("the record on top is a call")
+            };
+            if callee.is_none() {
+                let Some(resolved) = value else {
+                    waiting.pop();
+                    phase = Phase::Deliver(None);
+                    continue;
+                };
+                *callee = Some(resolved.node);
+                if let Some(object) = member_receiver.take() {
+                    *receiver = Some(Some(object));
+                } else if let Some(authored) = call.receiver.as_deref() {
+                    path.push(IndexedChild::Receiver);
+                    exprs.push(authored);
+                    (hold, as_callee) = (false, false);
+                    phase = Phase::Enter;
+                    continue;
+                } else {
+                    *receiver = Some(None);
+                }
+            } else if receiver.is_none() {
+                *receiver = Some(value.map(|receiver| receiver.node));
+            } else {
+                let Some(argument_value) = value else {
+                    waiting.pop();
+                    phase = Phase::Deliver(None);
+                    continue;
+                };
+                let argument = &call.args[args.len()];
+                args.push(crate::semantic_query::CallArgKey::Eager {
+                    ty: argument_value.node,
+                    spread: argument.spread,
+                    context_sensitive: argument.context_sensitive,
+                    const_view: None,
+                    first_pass: None,
+                    literal_mode: indexed_argument_literal_mode(
+                        argument.literal_mode,
+                        argument_value.fresh,
+                    ),
+                });
+            }
+            if let Some(argument) = call.args.get(args.len()) {
+                path.push(IndexedChild::Argument(args.len()));
+                exprs.push(&argument.expression);
+                (hold, as_callee) = (false, false);
+                phase = Phase::Enter;
+                continue;
+            }
+            let Some(IndexedPending::Call {
+                hold_flow_result,
+                callee,
+                receiver,
+                args,
+                ..
+            }) = waiting.pop()
+            else {
+                unreachable!("the call on top")
+            };
+            phase = Phase::Deliver(self.resolve_indexed_call(
+                canonical,
+                owner,
+                call,
+                callee.expect("a resolved call has a callee"),
+                receiver.flatten(),
+                args,
+                hold_flow_result,
+            ));
+        }
+    }
+
+    /// The `typeof` an indexed leaf that names a value reads (`y` in
+    /// `id(y)`), exactly as its lowering would query it; `None` for any
+    /// other leaf.
+    fn indexed_value_reference_key(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        expression: &verter_type_expr::IndexedValueExpression,
+    ) -> Option<crate::semantic_query::SemanticQueryKey> {
+        let verter_type_expr::IndexedValueExpression::Value(TypeExpr::TypeOf(value_ref)) =
+            expression
+        else {
+            return None;
+        };
+        if !value_ref.type_args.is_empty() {
+            return None;
+        }
+        self.typeof_reference_key(
+            &Arc::from(canonical),
+            owner,
+            value_ref,
+            crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Navigate,
+            ),
+        )
     }
 
     /// Member `name` of the value `object` an indexed expression evaluated
@@ -2006,8 +2133,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 regular(self.global_template_strings_array(canonical, owner))
             }
             IndexedValueExpression::Call(call) => return Err(IndexedRecord::Call(call)),
-            IndexedValueExpression::Member { object, name } => {
-                return Err(IndexedRecord::Member(object, name))
+            IndexedValueExpression::Member { object, .. } => {
+                return Err(IndexedRecord::Member(object))
             }
         })
     }
@@ -2080,6 +2207,76 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         })
     }
 
+    /// [`Self::execute_semantic_expression_source`] on the continuation
+    /// runtime: an indexed expression source stops at each value its leaves
+    /// name and resumes with that value's `typeof` as `delivery`, and the
+    /// observations its steps make are one optional probe's, adopted when
+    /// it yields a value and dropped when it yields none.
+    pub(super) fn drain_semantic_expression_source(
+        &self,
+        source: &verter_type_expr::facts::SemanticExpressionSource,
+        run: &mut ExpressionSourceRun,
+        delivery: Option<super::query_frames::FrameDelivery>,
+    ) -> ExpressionSourcePoll {
+        let scope = match run.observed.take() {
+            Some(observed) => observed.resume(self),
+            None => self.begin_read_observation(),
+        };
+        let mut delivered = delivery.map(|delivery| self.consume_frame_delivery(delivery));
+        let owner = run.owner;
+        let value = loop {
+            let indexed = match &mut run.state {
+                ExpressionSourceState::Unrouted => {
+                    match self.route_semantic_expression_source(source) {
+                        ExpressionSourceRoute::Evaluated(value) => break value,
+                        ExpressionSourceRoute::Indexed {
+                            serve,
+                            canonical,
+                            expression,
+                        } => ExpressionSourceState::Indexed {
+                            _serve: serve,
+                            canonical,
+                            expression,
+                            run: IndexedValueRun::new(false),
+                            pending_before: self.pending_obligations(),
+                        },
+                    }
+                }
+                ExpressionSourceState::Indexed {
+                    canonical,
+                    expression,
+                    run: indexed,
+                    pending_before,
+                    ..
+                } => {
+                    match self.drain_indexed_value(
+                        canonical,
+                        owner,
+                        expression,
+                        indexed,
+                        true,
+                        delivered.take(),
+                    ) {
+                        IndexedValuePoll::Need(key) => {
+                            run.observed = Some(scope.finish(()));
+                            return ExpressionSourcePoll::Need(key);
+                        }
+                        IndexedValuePoll::Done(value) => {
+                            break self.settle_indexed_value_for_type(*pending_before, value)
+                        }
+                    }
+                }
+            };
+            run.state = indexed;
+        };
+        let read = scope.finish(value.map(|value| value.node));
+        ExpressionSourcePoll::Done(if read.value().is_some() {
+            read.adopt(self).ok().flatten()
+        } else {
+            read.discard().ok().flatten()
+        })
+    }
+
     /// Whether an inferred declaration's expression source is a FRESH
     /// literal — a call whose result is wholly the fresh literal its
     /// inference kept ([`Self::evaluate_indexed_value`]): the declared type
@@ -2102,8 +2299,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         source: &verter_type_expr::facts::SemanticExpressionSource,
         owner: verter_type_expr::TopLevelOwnerId,
     ) -> Option<IndexedValue> {
+        match self.route_semantic_expression_source(source) {
+            ExpressionSourceRoute::Evaluated(value) => value,
+            ExpressionSourceRoute::Indexed {
+                serve: _serve,
+                canonical,
+                expression,
+            } => self.evaluate_indexed_value_for_type(&canonical, owner, &expression),
+        }
+    }
+
+    /// Where an expression source's value comes from: a value its source
+    /// evaluated, or the indexed expression record its source names, served
+    /// by `serve`, which [`Self::drain_indexed_value`] evaluates.
+    fn route_semantic_expression_source(
+        &self,
+        source: &verter_type_expr::facts::SemanticExpressionSource,
+    ) -> ExpressionSourceRoute {
         let regular = |node: Option<crate::semantic_query::SemanticNodeId>| {
-            node.map(|node| IndexedValue { node, fresh: false })
+            ExpressionSourceRoute::Evaluated(node.map(|node| IndexedValue { node, fresh: false }))
         };
         match source {
             verter_type_expr::facts::SemanticExpressionSource::FunctionReturn(source) => {
@@ -2114,7 +2328,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     verter_type_expr::facts::FunctionReturnSource::Flow(identity) => {
                         identity.anchor.canonical_id.as_ref()
                     }
-                    verter_type_expr::facts::FunctionReturnSource::Absent => return None,
+                    verter_type_expr::facts::FunctionReturnSource::Absent => {
+                        return ExpressionSourceRoute::Evaluated(None)
+                    }
                 };
                 regular(
                     match self.execute_function_return_source(source, canonical) {
@@ -2128,11 +2344,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 )
             }
             verter_type_expr::facts::SemanticExpressionSource::ProgramExpression(point) => {
-                let (_serve, source_demand) = self
+                let Some((serve, source_demand)) = self
                     .ctx
-                    .indexed_expression_source(point.canonical_id.as_ref())?;
+                    .indexed_expression_source(point.canonical_id.as_ref())
+                else {
+                    return ExpressionSourceRoute::Evaluated(None);
+                };
                 let index = source_demand.function_program_index();
-                let record = index.expression(point)?;
+                let Some(record) = index.expression(point) else {
+                    return ExpressionSourceRoute::Evaluated(None);
+                };
                 match &record.source {
                     verter_session_query::function_program::ProgramExpressionSource::FunctionReturn(source) => {
                         regular(match self.execute_function_return_source(source, point.canonical_id.as_ref()) {
@@ -2149,11 +2370,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     } => regular(self.initializer_value(identity, *readonly)),
                     verter_session_query::function_program::ProgramExpressionSource::FieldInitializer { .. } => {
                         crate::request_context::mark_request_result_partial();
-                        None
+                        ExpressionSourceRoute::Evaluated(None)
                     }
                     verter_session_query::function_program::ProgramExpressionSource::UnsupportedCall => {
                         crate::request_context::mark_request_result_partial();
-                        None
+                        ExpressionSourceRoute::Evaluated(None)
                     }
                     verter_session_query::function_program::ProgramExpressionSource::SemanticCall {
                         initializer: Some(initializer), ..
@@ -2168,19 +2389,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             Some(SemanticNodeData::Opaque(QueryError::UnmodeledPosition))
                         )) {
                             crate::request_context::mark_request_result_partial();
-                            None
+                            ExpressionSourceRoute::Evaluated(None)
                         } else {
                             regular(node)
                         }
                     },
                     verter_session_query::function_program::ProgramExpressionSource::Value
                     | verter_session_query::function_program::ProgramExpressionSource::SemanticCall { .. } => {
-                        let expression = source_demand.indexed_program_expression_ir(record)?;
-                        self.evaluate_indexed_value_for_type(
-                            point.canonical_id.as_ref(),
-                            owner,
-                            expression.as_ref(),
-                        )
+                        match source_demand.indexed_program_expression_ir(record) {
+                            Some(expression) => ExpressionSourceRoute::Indexed {
+                                serve,
+                                canonical: Arc::clone(&point.canonical_id),
+                                expression,
+                            },
+                            None => ExpressionSourceRoute::Evaluated(None),
+                        }
                     }
                 }
             }
@@ -8999,7 +9222,165 @@ pub(crate) struct IndexedValue {
 /// evaluates over its children: a call, or a member read off a value.
 enum IndexedRecord<'e> {
     Call(&'e verter_type_expr::IndexedValueCall),
-    Member(&'e verter_type_expr::IndexedValueExpression, &'e Arc<str>),
+    Member(&'e verter_type_expr::IndexedValueExpression),
+}
+
+/// Where an expression source's value comes from
+/// ([`ProjectSemanticDispatch::route_semantic_expression_source`]).
+enum ExpressionSourceRoute {
+    /// The value its source evaluated.
+    Evaluated(Option<IndexedValue>),
+    /// The indexed expression record its source names, and the serve that
+    /// holds it.
+    Indexed {
+        serve: verter_session_query::inputs::indexed::IndexedInputServe,
+        canonical: Arc<str>,
+        expression: Arc<verter_type_expr::IndexedValueExpression>,
+    },
+}
+
+/// An expression source's evaluation on the continuation runtime between
+/// the steps of its frame
+/// ([`ProjectSemanticDispatch::drain_semantic_expression_source`]).
+pub(super) struct ExpressionSourceRun {
+    owner: verter_type_expr::TopLevelOwnerId,
+    state: ExpressionSourceState,
+    /// What its earlier steps observed, until the next step resumes it.
+    observed: Option<super::flow_return_fact::ObservedRead<()>>,
+}
+
+impl ExpressionSourceRun {
+    /// The scope the source evaluates in.
+    pub(super) fn owner(&self) -> verter_type_expr::TopLevelOwnerId {
+        self.owner
+    }
+
+    /// An evaluation of a source in `owner`'s scope.
+    pub(super) fn new(owner: verter_type_expr::TopLevelOwnerId) -> Self {
+        Self {
+            owner,
+            state: ExpressionSourceState::Unrouted,
+            observed: None,
+        }
+    }
+}
+
+enum ExpressionSourceState {
+    /// The source is not routed yet.
+    Unrouted,
+    /// Its indexed expression record is evaluating.
+    Indexed {
+        _serve: verter_session_query::inputs::indexed::IndexedInputServe,
+        canonical: Arc<str>,
+        expression: Arc<verter_type_expr::IndexedValueExpression>,
+        run: IndexedValueRun,
+        /// The obligations pending before the evaluation began.
+        pending_before: usize,
+    },
+}
+
+/// Where an expression source's evaluation stands after it ran as far as
+/// it could.
+pub(super) enum ExpressionSourcePoll {
+    /// Its value.
+    Done(Option<SemanticNodeId>),
+    /// It waits on this `typeof`.
+    Need(crate::semantic_query::SemanticQueryKey),
+}
+
+/// An indexed expression's evaluation in progress
+/// ([`ProjectSemanticDispatch::drain_indexed_value`]): where it stands in
+/// the expression and the records waiting on their children. It names its
+/// position by the children it descended through, never by borrowing the
+/// expression, so it can wait across the evaluation of a value it needs.
+pub(super) struct IndexedValueRun {
+    /// The children descended through from the root to the expression
+    /// evaluating: one per waiting record.
+    path: Vec<IndexedChild>,
+    /// The records waiting on a child, outermost first.
+    waiting: Vec<IndexedPending>,
+    next: IndexedNext,
+}
+
+impl IndexedValueRun {
+    /// A run over a root expression; `hold_flow_result` when the root's own
+    /// call holds its result on the enclosing flow frame.
+    pub(super) fn new(hold_flow_result: bool) -> Self {
+        Self {
+            path: Vec::new(),
+            waiting: Vec::new(),
+            next: IndexedNext::Enter {
+                hold: hold_flow_result,
+                as_callee: false,
+            },
+        }
+    }
+}
+
+/// Where an indexed run stands after it ran as far as it could.
+pub(super) enum IndexedValuePoll {
+    /// The root's value.
+    Done(Option<IndexedValue>),
+    /// The run waits on the `typeof` of a value a leaf names.
+    Need(crate::semantic_query::SemanticQueryKey),
+}
+
+/// What an indexed run does when it is next drained.
+enum IndexedNext {
+    /// Evaluate the expression at its position: a call's result held on
+    /// the enclosing flow frame when `hold`, the callee of the call below
+    /// it when `as_callee`.
+    Enter { hold: bool, as_callee: bool },
+    /// Take the delivered value as the leaf's at its position.
+    AwaitReference,
+    /// Nothing: the run finished.
+    Finished,
+}
+
+/// The child of an indexed record a run descends into.
+#[derive(Clone, Copy)]
+enum IndexedChild {
+    Callee,
+    Receiver,
+    Argument(usize),
+    /// A member read's object.
+    Object,
+}
+
+/// The child `child` of the indexed record `parent`.
+fn indexed_child(
+    parent: &verter_type_expr::IndexedValueExpression,
+    child: IndexedChild,
+) -> &verter_type_expr::IndexedValueExpression {
+    use verter_type_expr::IndexedValueExpression;
+    match (parent, child) {
+        (IndexedValueExpression::Call(call), IndexedChild::Callee) => &call.callee,
+        (IndexedValueExpression::Call(call), IndexedChild::Receiver) => call
+            .receiver
+            .as_deref()
+            .expect("a run descends only into an authored receiver"),
+        (IndexedValueExpression::Call(call), IndexedChild::Argument(ordinal)) => {
+            &call.args[ordinal].expression
+        }
+        (IndexedValueExpression::Member { object, .. }, IndexedChild::Object) => object,
+        _ => unreachable!("a run descends only into a record's children"),
+    }
+}
+
+/// An indexed record waiting on one of its children.
+enum IndexedPending {
+    Call {
+        hold_flow_result: bool,
+        callee: Option<SemanticNodeId>,
+        receiver: Option<Option<SemanticNodeId>>,
+        /// The object of the member read the call's callee is: its
+        /// receiver.
+        member_receiver: Option<SemanticNodeId>,
+        args: Vec<crate::semantic_query::CallArgKey>,
+    },
+    /// A member read waiting on its object; the callee of the call below it
+    /// when `callee`.
+    Member { callee: bool },
 }
 
 /// The inference deposit mode of an indexed call argument: a bare literal,
