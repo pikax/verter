@@ -451,6 +451,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         hash_key: site.slice_key.clone(),
                         slice_hash: planned.hash(),
                     },
+                    &planned,
                 )?;
                 Some((
                     planned,
