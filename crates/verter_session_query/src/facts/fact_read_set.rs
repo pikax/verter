@@ -2,7 +2,7 @@
 //!
 //! ## What this module owns
 //!
-//! - [`FactReadSet`] — `!Send + !Sync` accumulator that collects
+//! - [`FactReadSet`] — `!Sync` accumulator that collects
 //!   [`FactVersionRef`] observations made during one cold compute and
 //!   produces an immutable `Arc<[FactVersionRef]>` ready to install as
 //!   a `Candidate::fact_dep_signature`.
@@ -55,13 +55,15 @@
 //! overwhelming majority of real-world cold computes (typical
 //! `fact_dep_signature` lengths land between 4 and 12).
 //!
-//! ## Single-thread, single-compute lifetime
+//! ## Single-compute lifetime
 //!
-//! A [`FactReadSetCell`] is `!Send + !Sync` by construction: it
-//! cannot leak across a task boundary even by accident. The
-//! installer lives on the calling thread for the duration of one
-//! cold compute. This makes the tracer a true per-compute substrate,
-//! not a shared accumulator that readers race on.
+//! A [`FactReadSetCell`] is `!Sync` by construction: it is never shared
+//! between threads, so readers never race on it. It is installed on the
+//! thread a compute runs on for that compute's extent — a compute that
+//! suspends owns its cell between steps and installs it only while one of
+//! its steps runs, so the cell moves with its task (it is `Send`) but is
+//! never installed on two threads at once. This makes the tracer a true
+//! per-compute substrate, not a shared accumulator.
 //!
 //! ## Nesting is supported
 //!
@@ -316,9 +318,11 @@ pub enum NonCacheablePropagation {
 /// Unbounded in width: finalisation pages a canonical set wider than
 /// [`FACT_PAGE_WIDTH`] instead of refusing it.
 ///
-/// `!Send + !Sync` by design: the tracer is per-compute, per-thread
-/// state and must never cross a task boundary. The `PhantomData<*const ()>`
-/// marker enforces this at compile time.
+/// `!Sync` by design: the tracer is one compute's state and is never shared.
+/// It is `Send` so a suspended compute that owns its tracer between steps
+/// moves with its task to whichever thread runs the next step, installed
+/// there for that step alone. The `PhantomData<Cell<()>>` marker enforces
+/// this at compile time.
 pub struct FactReadSet {
     observations: SmallVec<[FactVersionRef; INLINE_CAPACITY]>,
     /// Already-canonical signatures absorbed wholesale from a completed
@@ -359,7 +363,7 @@ pub struct FactReadSet {
     /// place. An [`ObservationMark`] taken before a rewrite no longer
     /// addresses a suffix of what was observed after it.
     rewrites: u32,
-    _not_send_sync: PhantomData<*const ()>,
+    _not_sync: PhantomData<std::cell::Cell<()>>,
 }
 
 /// Where a scope's observations stood at one instant: two marks, taken when
@@ -401,7 +405,7 @@ impl FactReadSet {
             aggregate_basis: AggregateGenerations::default(),
             mutation_unstable: false,
             rewrites: 0,
-            _not_send_sync: PhantomData,
+            _not_sync: PhantomData,
         }
     }
 

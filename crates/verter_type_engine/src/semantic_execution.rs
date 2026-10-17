@@ -64,8 +64,8 @@
 //! its state is `Send` whenever the program's frames, demands, values and
 //! subscriptions are, so a pending execution may resume on another thread.
 //! The request context bound to an execution
-//! ([`SemanticExecution::bind_request_context`]) is installed for each step
-//! and restored after it, on whichever thread the step runs.
+//! ([`SemanticExecution::bind_request_context`]) is installed for each poll
+//! and restored after it, on whichever thread the poll runs.
 //!
 //! # Nesting
 //!
@@ -214,6 +214,14 @@ pub(crate) trait Program {
     /// The failure that stops the whole drive, when it must stop
     /// (cancellation). Checked before every step.
     fn stop(&self) -> Option<Self::Failure>;
+
+    /// Release a frame the execution abandons before it completed — after a
+    /// stop, or when the execution is released while pending — together
+    /// with whatever its program holds open on its behalf. A frame that
+    /// completes released its own state in its last step.
+    fn abandon(&mut self, frame: Self::Frame) {
+        drop(frame);
+    }
 }
 
 struct DemandRecord<P: Program> {
@@ -312,6 +320,19 @@ impl Drop for DriveScope {
     }
 }
 
+/// Poll `poll` to completion on this thread, parking it whenever the poll is
+/// pending until the producer it waits on wakes it.
+pub(crate) fn block_on<T>(mut poll: impl FnMut(&Waker) -> Poll<T>) -> T {
+    PARK_WAKER.with(|waker| loop {
+        match poll(waker) {
+            Poll::Ready(outcome) => return outcome,
+            // Timed parking keeps a stop observable while the producer has
+            // not woken this thread.
+            Poll::Pending => std::thread::park_timeout(PARK_SLICE),
+        }
+    })
+}
+
 /// Whether a drive is running on this thread: a synchronous entry reached
 /// from one of its steps (or from the program it drives) must not drive
 /// another.
@@ -407,17 +428,11 @@ impl<P: Program> SemanticExecution<P> {
         self.live_frames
     }
 
-    /// Run every step under `context`: it is installed into the stepping
-    /// thread's request TLS before each step and the thread's own restored
-    /// after it, so a pending execution resumed on another thread steps
-    /// under its own request.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "bound by the poller that resumes an execution away from the thread that began it"
-        )
-    )]
+    /// Run every poll under `context`: it is installed into the polling
+    /// thread's request TLS for the poll — every step and every program
+    /// callback the poll makes — and the thread's own restored after it, so
+    /// a pending execution resumed on another thread runs under its own
+    /// request.
     pub(crate) fn bind_request_context(
         &mut self,
         context: verter_execution::request_context::OpaqueRequestContext,
@@ -437,14 +452,7 @@ impl<P: Program> SemanticExecution<P> {
     /// later drive.
     pub(crate) fn drive(&mut self, program: &mut P, root: P::Demand) -> Outcome<P> {
         let mut root = Some(root);
-        PARK_WAKER.with(|waker| loop {
-            match self.poll(program, root.take(), waker) {
-                Poll::Ready(outcome) => return outcome,
-                // Timed parking keeps a stop observable while the producer
-                // has not woken this thread.
-                Poll::Pending => std::thread::park_timeout(PARK_SLICE),
-            }
-        })
+        block_on(|waker| self.poll(program, root.take(), waker))
     }
 
     /// Advance the drive of `root` as far as it can go. The first poll of a
@@ -464,6 +472,18 @@ impl<P: Program> SemanticExecution<P> {
             "a frame step must not drive a nested execution"
         );
         let _drive = DriveScope::enter();
+        // The bound request context for this poll alone; dropping the handle
+        // restores the thread's own, unwinding included. A thread already
+        // running under that request keeps everything it installed for it.
+        let _context = self
+            .request_context
+            .as_ref()
+            .filter(|bound| {
+                !verter_execution::request_context::current_context().is_some_and(|current| {
+                    std::ptr::addr_eq(Arc::as_ptr(&current.0), Arc::as_ptr(&bound.0))
+                })
+            })
+            .map(|context| Arc::clone(&context.0).install_tls());
         let root = match (self.root, root) {
             (Some(open), None) => open,
             (None, Some(root)) => match self.open(program, root) {
@@ -479,7 +499,7 @@ impl<P: Program> SemanticExecution<P> {
                 return Poll::Ready(outcome);
             }
             if let Some(failure) = program.stop() {
-                self.abandon();
+                self.abandon(program);
                 self.root = None;
                 return Poll::Ready(Err(failure));
             }
@@ -574,12 +594,6 @@ impl<P: Program> SemanticExecution<P> {
         self.demands[produces.0 as usize].state = DemandState::Running(id);
         self.counters.steps += 1;
         let step = {
-            // The bound request context for this step alone; dropping the
-            // handle restores the thread's own, unwinding included.
-            let _context = self
-                .request_context
-                .as_ref()
-                .map(|context| Arc::clone(&context.0).install_tls());
             let record = self.frame_mut(id);
             let _scope = StepScope::enter();
             program.step(&mut record.frame, delivery)
@@ -759,11 +773,25 @@ impl<P: Program> SemanticExecution<P> {
             .expect("continuation id names a live frame")
     }
 
-    /// Drop every frame, subscription and open demand after a stop, each on
-    /// its own. Completed results stay.
-    fn abandon(&mut self) {
+    /// Release a pending drive — its request cancelled or abandoned — with
+    /// the program that holds its frames' state: every frame, subscription
+    /// and open demand goes, each on its own. Completed results stay.
+    pub(crate) fn release(&mut self, program: &mut P) {
+        self.abandon(program);
+        self.root = None;
+    }
+
+    /// Drop every frame (through the program), subscription and open
+    /// demand after a stop, each on its own. Completed results stay.
+    fn abandon(&mut self, program: &mut P) {
         self.ready.clear();
-        self.frames.clear();
+        // Innermost first: a frame is released before the frames that wait
+        // on it, as the drive would have unwound them.
+        for slot in self.frames.drain(..).rev() {
+            if let Some(record) = slot.record {
+                program.abandon(record.frame);
+            }
+        }
         self.free_frames.clear();
         self.live_frames = 0;
         self.subscription = None;

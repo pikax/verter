@@ -218,7 +218,7 @@ pub struct ProjectionBenchCase {
 /// [`ProjectSemanticDispatch::project_view_node_worklist`].
 #[cfg(any(test, feature = "test-support"))]
 pub struct ProjectionBenchHarness<'a, C: crate::resolver_core::ResolverCapabilities> {
-    dispatch: ProjectSemanticDispatch<'a, C>,
+    dispatch: super::ThreadDispatch<'a, C>,
     env: FxHashMap<String, SemanticNodeId>,
     substitutions: Vec<(Arc<str>, SemanticNodeId)>,
     memo: ViewMemo,

@@ -394,6 +394,30 @@ impl ScopeStack {
             .expect("an open construction owner is registered on its thread")
     }
 
+    /// Hand everything a closing task owner holds — its construction
+    /// counts, its roots and its deliveries — to the newest owner of its
+    /// arena open on this thread, which then holds them exactly as if they
+    /// had been constructed under it. With no such owner they are released.
+    fn absorb(&mut self, mut owners: ConstructionOwners) -> Option<ConstructionOwners> {
+        let arena = Arc::clone(&owners.arena);
+        let Some(heir) = self
+            .entries
+            .iter_mut()
+            .rev()
+            .find(|candidate| Arc::ptr_eq(&candidate.arena, &arena))
+        else {
+            return Some(owners);
+        };
+        heir.constructed.append(&mut owners.constructed);
+        heir.roots.append(&mut owners.roots);
+        for lease in owners.deliveries.drain(..) {
+            // A repeat is another handle on an owner the heir keeps.
+            let _ = heir.adopt(lease);
+        }
+        owners.delivered.clear();
+        None
+    }
+
     /// Remove a closing owner and hand its delivery attachments to the
     /// nearest remaining owner of the same arena: the one it was opened
     /// inside of first, else one opened after it that is still open. A
@@ -483,6 +507,82 @@ impl ConstructionOwners {
                 None
             }
         }
+    }
+}
+
+/// The construction owner of a task that may run on any thread. Between
+/// polls it holds what the task constructed — the counts its interns took,
+/// the roots and the deliveries its steps left — and while one poll runs it
+/// is the innermost construction owner of its arena on the polling thread
+/// ([`Self::install`]), counted as one live dispatcher of that arena there,
+/// so the task's construction ordinals stay rooted across its suspensions
+/// whichever thread resumes it. Dropping it hands what it holds to the
+/// newest owner of its arena open on the dropping thread.
+pub(crate) struct TaskConstructionOwner {
+    /// `None` only while installed on a thread.
+    owners: Option<ConstructionOwners>,
+}
+
+impl TaskConstructionOwner {
+    pub(crate) fn new(arena: &Arc<NodeArenaCore>) -> Self {
+        let mut owners = ConstructionOwners::new(0, arena);
+        owners.dispatchers = 1;
+        Self {
+            owners: Some(owners),
+        }
+    }
+
+    /// Make this the innermost construction owner of its arena on this
+    /// thread until the returned installation drops.
+    pub(crate) fn install(&mut self) -> InstalledTaskConstruction<'_> {
+        let mut owners = self
+            .owners
+            .take()
+            .expect("a task's construction owner is installed on one thread at a time");
+        let token = SCOPES.with(|scopes| {
+            let mut scopes = scopes.borrow_mut();
+            owners.token = scopes.mint();
+            let token = owners.token;
+            scopes.entries.push(owners);
+            token
+        });
+        InstalledTaskConstruction {
+            owner: self,
+            token,
+            thread_bound: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Drop for TaskConstructionOwner {
+    fn drop(&mut self) {
+        if let Some(owners) = self.owners.take() {
+            let released = SCOPES.with(|scopes| scopes.borrow_mut().absorb(owners));
+            drop(released);
+        }
+    }
+}
+
+/// One poll's installation of a [`TaskConstructionOwner`]; dropping it takes
+/// the owner back off the thread, unwinding included.
+pub(crate) struct InstalledTaskConstruction<'t> {
+    owner: &'t mut TaskConstructionOwner,
+    token: u64,
+    thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl Drop for InstalledTaskConstruction<'_> {
+    fn drop(&mut self) {
+        let owners = SCOPES.with(|scopes| {
+            let mut scopes = scopes.borrow_mut();
+            let position = scopes.position(self.token);
+            scopes.entries.remove(position)
+        });
+        verter_debug_assert!(
+            owners.dispatchers == 1,
+            "no dispatcher a poll opened outlives it"
+        );
+        self.owner.owners = Some(owners);
     }
 }
 

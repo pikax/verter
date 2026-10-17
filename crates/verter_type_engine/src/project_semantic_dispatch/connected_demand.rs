@@ -471,6 +471,65 @@ impl std::fmt::Debug for ConnectedDemandLedger<'_> {
 }
 
 impl<'a> ConnectedDemandLedger<'a> {
+    /// A ledger at this one's caps, observing its cancellation, with no
+    /// demand of its own: the ledger a task's dispatcher holds while it
+    /// carries this one's state ([`Self::exchange_state`]).
+    pub(super) fn sibling(&self) -> Self {
+        Self {
+            instantiation_depth_limit: self.instantiation_depth_limit,
+            tail_steps_limit: self.tail_steps_limit,
+            ..Self::new(self.cancellation)
+        }
+    }
+
+    /// Exchange every counter, cap, trip, cost recording and paid
+    /// identity with `other`, a ledger at the same fixed caps: the
+    /// connected demand moves between the dispatchers whole.
+    pub(super) fn exchange_state(&self, other: &Self) {
+        let Self {
+            cancellation: _,
+            active,
+            work_used,
+            work_limit,
+            bytes_used,
+            bytes_limit,
+            query_depth,
+            query_depth_limit,
+            instantiation_depth_limit,
+            tail_steps_limit,
+            tripped,
+            scopes,
+            scope_open,
+            paid,
+            request_effects,
+            schedule_cut,
+        } = self;
+        verter_debug_assert!(
+            *instantiation_depth_limit == other.instantiation_depth_limit
+                && *tail_steps_limit == other.tail_steps_limit,
+            "a ledger exchanges its state with a sibling at its own fixed caps"
+        );
+        active.swap(&other.active);
+        work_used.swap(&other.work_used);
+        work_limit.swap(&other.work_limit);
+        bytes_used.swap(&other.bytes_used);
+        bytes_limit.swap(&other.bytes_limit);
+        query_depth.swap(&other.query_depth);
+        query_depth_limit.swap(&other.query_depth_limit);
+        tripped.swap(&other.tripped);
+        scopes.swap(&other.scopes);
+        scope_open.swap(&other.scope_open);
+        paid.swap(&other.paid);
+        request_effects.swap(&other.request_effects);
+        schedule_cut.swap(&other.schedule_cut);
+    }
+
+    /// How many cost recordings are open.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_cost_scopes_for_tests(&self) -> usize {
+        self.scopes.borrow().len()
+    }
+
     /// Install a ledger at the production caps, observing `cancellation`.
     pub(super) fn new(cancellation: DemandCancellation<'a>) -> Self {
         Self {

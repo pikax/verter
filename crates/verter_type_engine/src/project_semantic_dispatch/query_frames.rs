@@ -73,10 +73,13 @@ pub(super) struct FrameDelivery {
     depth: u32,
 }
 
-/// The program instantiations run on: the dispatch they evaluate through
-/// and the task that owns every producer the drive claims.
+/// The program instantiations run on: the dispatcher they evaluate through
+/// — the semantic task's own, holding the request state the task borrowed
+/// — the graph its producers and subscriptions are claimed on, and the
+/// task that owns every producer the drive claims.
 pub(super) struct QueryProgram<'p, 'a, C: crate::resolver_core::ResolverCapabilities> {
-    dispatch: &'p ProjectSemanticDispatch<'a, C>,
+    dispatch: ProjectSemanticDispatch<'a, C>,
+    graph: &'p crate::semantic_query_memo::SemanticGraphStore,
     task: ExecutionTask,
     /// Claims that continue after an outside producer went away.
     retries: FxHashMap<SemanticQueryKey, ClaimAttempt>,
@@ -156,12 +159,15 @@ impl Drop for NestedDecisionQuery<'_> {
     }
 }
 
-/// An instantiation's — or a `typeof`'s — build between its steps.
+/// An instantiation's — or a `typeof`'s — build between its steps. It
+/// names the request state it entered (the declaration it made active, the
+/// cost recording it opened, a request-local completion it holds open) and
+/// the program releases each when the frame is abandon
+/// ([`QueryProgram::abandon`]).
 pub(super) struct InstantiateFrame<'p, 'a, C: crate::resolver_core::ResolverCapabilities> {
-    dispatch: &'p ProjectSemanticDispatch<'a, C>,
     key: SemanticQueryKey,
     producer: Option<FrameProducer<'p>>,
-    tracer: Option<crate::fact_signature_helpers::StepwiseFactTracer<'p, C::Clocks>>,
+    tracer: Option<crate::fact_signature_helpers::StepwiseFactTracer<'a, C::Clocks>>,
     taint: BuildLocalTaint,
     build: Option<FrameBuild>,
     /// The declaration and arguments the build entered as active, until it
@@ -179,30 +185,17 @@ pub(super) struct InstantiateFrame<'p, 'a, C: crate::resolver_core::ResolverCapa
     computed_at: super::WorkspaceEdit,
 }
 
-impl<C: crate::resolver_core::ResolverCapabilities> Drop for InstantiateFrame<'_, '_, C> {
-    fn drop(&mut self) {
-        // A build stopped between its steps leaves the declaration it
-        // entered; its producer lease aborts its flight on drop.
-        if let Some((identity, args)) = self.active.take() {
-            self.dispatch.leave_instantiate_active(&identity, &args);
-        }
-        // A frame stopped before it completed leaves no receipt; what it
-        // charged is its consumer's.
-        if self.recording {
-            self.dispatch.connected_demand.abandon_cost_scope();
-        }
-    }
-}
-
 /// What produces a frame's demand: the family memo's producer lease, or —
 /// for a cheap intermediate nested in another computation
 /// ([`super::completes_request_locally`]) — the request's own completion of
 /// the claim its lookup missed, open on the dispatcher until it completes.
 pub(super) enum FrameProducer<'p> {
     Lease(ProducerLease<'p>),
+    /// The request-local completion of the frame's key, which the
+    /// dispatcher's request-local open set holds open until the frame
+    /// completes or is abandoned.
     RequestLocal {
         attempt: ClaimAttempt,
-        _open: super::RequestLocalOpen<'p>,
     },
 }
 
@@ -225,6 +218,194 @@ pub(super) struct PendingClaim<'p> {
     nesting: Nesting,
 }
 
+/// One semantic query's evaluation as a task: the execution of its frames,
+/// the program they run on — with the dispatcher that holds the request
+/// state the task borrowed ([`ProjectSemanticDispatch::lend_semantic_task`])
+/// — the construction owner that roots what its polls construct, and the
+/// validity its polls observe.
+///
+/// Everything a suspended task needs is its own: its frames, their builds
+/// and leases, its outside subscription, the checker transaction with its
+/// inference sessions, its active instantiations, cost recordings and taint
+/// stack, and the counted roots of every node it constructed. It reaches the
+/// request only through immutable shared inputs. So the task is `Send` and
+/// one exclusive poller may resume it on any thread: each poll installs its
+/// construction owner, its execution task, its validity and its bound
+/// request context on the polling thread for the poll's extent and restores
+/// the thread's own after it.
+pub struct SemanticTask<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> {
+    execution: SemanticExecution<QueryProgram<'p, 'a, C>>,
+    program: QueryProgram<'p, 'a, C>,
+    construction: crate::semantic_query_memo::node_roots::TaskConstructionOwner,
+    validity: crate::request_context::TaskExecutionValidity,
+    /// The root the first poll opens.
+    root: Option<SemanticQueryKey>,
+}
+
+impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> SemanticTask<'p, 'a, C> {
+    /// Advance the task as far as it can go: `Ready` with its root's
+    /// delivery (`Err` when a stop abandoned it), or `Pending` once it
+    /// waits on a producer outside it that will wake `waker`.
+    pub(super) fn poll(
+        &mut self,
+        waker: &std::task::Waker,
+    ) -> std::task::Poll<Result<QueryDelivery, ()>> {
+        let _construction = self.construction.install();
+        let _task = self.program.graph.install_execution(&self.program.task);
+        let _validity = self.validity.install();
+        self.execution
+            .poll(&mut self.program, self.root.take(), waker)
+    }
+
+    /// Poll the task to completion on this thread.
+    pub(super) fn drive(&mut self) -> Result<QueryDelivery, ()> {
+        crate::semantic_execution::block_on(|waker| self.poll(waker))
+    }
+
+    /// [`Self::poll`], reporting what the root answered.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn poll_for_tests(
+        &mut self,
+        waker: &std::task::Waker,
+    ) -> std::task::Poll<TaskOutcomeForTests> {
+        self.poll(waker).map(|outcome| match outcome {
+            Ok(delivery) => TaskOutcomeForTests::Answered(delivery.read.value),
+            Err(()) => TaskOutcomeForTests::Stopped,
+        })
+    }
+
+    /// The frames the task holds suspended.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn live_frames_for_tests(&self) -> usize {
+        self.execution.live_frames()
+    }
+}
+
+/// What a semantic task's root answered.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug)]
+pub enum TaskOutcomeForTests {
+    Answered(QueryResult<SemanticQueryValue>),
+    /// A stop abandoned it.
+    Stopped,
+}
+
+/// The request state a dispatcher holds open on behalf of evaluations in
+/// progress.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenRequestStateForTests {
+    pub active_instantiations: usize,
+    pub open_cost_scopes: usize,
+    pub request_local_open: usize,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
+    /// [`Self::drive_query`]'s entry for `key`, handing the semantic task it
+    /// lends this dispatcher's request state to `drive` in place of the
+    /// blocking drive. `drive` may poll it, move it between threads while it
+    /// is pending, or take and drop it; a task it leaves is returned. `None`
+    /// when the entry answered without a task.
+    pub fn with_semantic_task_for_tests<'s, R>(
+        &'s self,
+        key: SemanticQueryKey,
+        drive: impl FnOnce(&mut Option<SemanticTask<'s, 'a, C>>) -> R,
+    ) -> Option<R> {
+        let (_connected_guard, _) = self.enter_connected_demand(false);
+        let (attempt, _query_depth_guard) = self.enter_query(&key, None, Nesting::Drive).ok()?;
+        let mut lent = LentTask {
+            lender: self,
+            task: Some(self.lend_semantic_task(key, attempt)),
+        };
+        Some(drive(&mut lent.task))
+    }
+
+    /// The request state this dispatcher holds open now.
+    pub fn open_request_state_for_tests(&self) -> OpenRequestStateForTests {
+        OpenRequestStateForTests {
+            active_instantiations: self.instantiate_active.borrow().len(),
+            open_cost_scopes: self.connected_demand.open_cost_scopes_for_tests(),
+            request_local_open: self.request_local_open.borrow().len(),
+        }
+    }
+}
+
+impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Drop for SemanticTask<'p, 'a, C> {
+    fn drop(&mut self) {
+        // A task released while pending releases its frames through the
+        // program, which holds the state they entered.
+        self.execution.release(&mut self.program);
+    }
+}
+
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
+    /// Begin evaluating `key` as a semantic task that borrows this
+    /// dispatcher's request state until it is returned
+    /// ([`Self::return_semantic_task`]): its claim continues `attempt`, it
+    /// runs as the execution task installed here (or a fresh one), and
+    /// every poll runs under the request context active here.
+    pub(super) fn lend_semantic_task(
+        &self,
+        key: SemanticQueryKey,
+        attempt: ClaimAttempt,
+    ) -> SemanticTask<'_, 'a, C> {
+        let dispatch = self.task_dispatcher();
+        self.exchange_request_state(&dispatch);
+        let graph = self.graph();
+        let mut execution = SemanticExecution::new();
+        if let Some(context) = verter_execution::request_context::current_context() {
+            execution.bind_request_context(context);
+        }
+        let mut program = QueryProgram {
+            dispatch,
+            graph,
+            task: graph.execution_task(),
+            retries: FxHashMap::default(),
+            child_depth: 1,
+        };
+        program.retries.insert(key.clone(), attempt);
+        SemanticTask {
+            execution,
+            program,
+            construction: crate::semantic_query_memo::node_roots::TaskConstructionOwner::new(
+                self.binding.construction.arena(),
+            ),
+            validity: crate::request_context::TaskExecutionValidity::inherit(),
+            root: Some(key),
+        }
+    }
+
+    /// Take back the request state `task` borrowed, with the abort its
+    /// polls observed, the nodes it constructed (now rooted by the
+    /// construction owner open here) and the frames it still holds, which
+    /// it releases first.
+    pub(super) fn return_semantic_task<'p>(&self, mut task: SemanticTask<'p, 'a, C>)
+    where
+        'a: 'p,
+    {
+        task.execution.release(&mut task.program);
+        self.exchange_request_state(&task.program.dispatch);
+        task.validity.bubble();
+    }
+}
+
+/// A semantic task lent the request state of the dispatcher evaluating it on
+/// this thread, which takes the state back when the task is done — or when
+/// the drive unwinds.
+struct LentTask<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> {
+    lender: &'p ProjectSemanticDispatch<'a, C>,
+    task: Option<SemanticTask<'p, 'a, C>>,
+}
+
+impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Drop for LentTask<'p, 'a, C> {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            self.lender.return_semantic_task(task);
+        }
+    }
+}
+
 impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> QueryProgram<'p, 'a, C> {
     /// The frame that produces `key` one level below the needing frame.
     fn producing_frame(
@@ -233,7 +414,6 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> QueryProgram<'p, 'a,
         producer: FrameProducer<'p>,
     ) -> QueryFrame<'p, 'a, C> {
         QueryFrame::Instantiate(Box::new(InstantiateFrame {
-            dispatch: self.dispatch,
             key: key.clone(),
             producer: Some(producer),
             tracer: None,
@@ -247,7 +427,9 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> QueryProgram<'p, 'a,
     }
 }
 
-impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryProgram<'p, 'a, C> {
+impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
+    for QueryProgram<'p, 'a, C>
+{
     type Demand = SemanticQueryKey;
     type Frame = QueryFrame<'p, 'a, C>;
     type Value = QueryDelivery;
@@ -256,7 +438,7 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
     type Subscription = PendingClaim<'p>;
 
     fn start(&mut self, key: &SemanticQueryKey) -> Start<Self> {
-        let dispatch = self.dispatch;
+        let dispatch = &self.dispatch;
         // The needed key's own frame runs one level below the needing one.
         let nesting = Nesting::Frame {
             depth: self.child_depth,
@@ -290,20 +472,16 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
             return Start::Answer(Ok(dispatch.recursion_delivery(key, Recursion::SamePath)));
         }
         if dispatch.completes_nested_request_locally(key) {
-            let open = super::RequestLocalOpen::enter(&dispatch.request_local_open, key);
-            return Start::Produce(self.producing_frame(
-                key,
-                FrameProducer::RequestLocal {
-                    attempt,
-                    _open: open,
-                },
-            ));
+            dispatch.request_local_open.borrow_mut().insert(key.clone());
+            return Start::Produce(
+                self.producing_frame(key, FrameProducer::RequestLocal { attempt }),
+            );
         }
         let (claim, carrier) = loop {
             let mut carrier = None;
             let claim = {
                 let mut capture = ReadCapture::deferring_carrier(&mut carrier);
-                dispatch.graph().claim_query(
+                self.graph.claim_query(
                     dispatch.ctx,
                     dispatch.snapshot.flags(),
                     &mut attempt,
@@ -374,13 +552,13 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
         // The open demand's producer is this task's own: the memo answers
         // the claim exactly as it answers a synchronous re-entry — a warm
         // result where one validates, else the same-path carrier.
-        let dispatch = self.dispatch;
+        let dispatch = &self.dispatch;
         let nesting = Nesting::Frame {
             depth: self.child_depth,
         };
         let mut carrier = None;
         let mut capture = ReadCapture::deferring_carrier(&mut carrier);
-        let graph = dispatch.graph();
+        let graph = self.graph;
         let claim = match graph.begin_query_claim(
             dispatch.ctx,
             dispatch.snapshot.flags(),
@@ -422,7 +600,7 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
         pending: &mut PendingClaim<'p>,
         waker: &std::task::Waker,
     ) -> std::task::Poll<External<Self>> {
-        let dispatch = self.dispatch;
+        let dispatch = &self.dispatch;
         let mut carrier = None;
         let joined = {
             let mut capture = ReadCapture::deferring_carrier(&mut carrier);
@@ -485,6 +663,28 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
     fn stop(&self) -> Option<()> {
         self.dispatch.cancellation.is_cancelled().then_some(())
     }
+
+    fn abandon(&mut self, frame: QueryFrame<'p, 'a, C>) {
+        let QueryFrame::Instantiate(mut frame) = frame;
+        // A build stopped between its steps leaves the declaration it
+        // entered; its producer lease aborts its flight as it drops.
+        if let Some((identity, args)) = frame.active.take() {
+            self.dispatch.leave_instantiate_active(&identity, &args);
+        }
+        // A frame stopped before it completed leaves no receipt; what it
+        // charged is its consumer's.
+        if std::mem::take(&mut frame.recording) {
+            self.dispatch.connected_demand.abandon_cost_scope();
+        }
+        // A request-local completion it held open closes, so a later read
+        // of the key is not taken for a same-path re-entry.
+        if let Some(FrameProducer::RequestLocal { .. }) = frame.producer.take() {
+            self.dispatch
+                .request_local_open
+                .borrow_mut()
+                .remove(&frame.key);
+        }
+    }
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
@@ -537,17 +737,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Ok(entered) => entered,
             Err(read) => return self.finish_driven_read(&key, read, None, &connected_guard, None),
         };
-        // A claim needs the entry's task; a warm read took none.
-        let execution = self.graph().enter_execution();
-        let mut program = QueryProgram {
-            dispatch: self,
-            task: execution.task().clone(),
-            retries: FxHashMap::default(),
-            child_depth: 1,
+        // The drive runs as a semantic task that borrows this dispatcher's
+        // request state and gives it back when it is done.
+        let outcome = {
+            let mut lent = LentTask {
+                lender: self,
+                task: Some(self.lend_semantic_task(key.clone(), attempt)),
+            };
+            lent.task.as_mut().expect("the task is lent").drive()
         };
-        program.retries.insert(key.clone(), attempt);
-        let outcome = SemanticExecution::new().drive(&mut program, key.clone());
-        drop(program);
         match outcome {
             Ok(QueryDelivery { read, carrier }) => {
                 if let Some(receipt) = read.receipt.priced() {
@@ -1009,7 +1207,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         let tracer = frame.tracer.get_or_insert_with(|| {
             crate::fact_signature_helpers::StepwiseFactTracer::new(
-                crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(frame.dispatch.ctx),
+                crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx),
             )
         });
         let taint = super::StepTaint::install(&self.build_local_taint, &mut frame.taint);
@@ -1193,7 +1391,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // A request-local completion settles as a producer's would and
             // enters no family memo; the dispatcher keeps what it may serve
             // again.
-            FrameProducer::RequestLocal { attempt, _open } => {
+            FrameProducer::RequestLocal { attempt } => {
                 let (read, kept) = self.graph().complete_request_local(
                     attempt,
                     self.snapshot.flags(),
@@ -1204,7 +1402,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if let Some(kept) = kept {
                     self.keep_published(&frame.key, &read, kept, frame.computed_at);
                 }
-                return QueryDelivery {
+                let delivery = QueryDelivery {
                     read: self.attribute_query_read(
                         &frame.key,
                         true,
@@ -1213,6 +1411,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     ),
                     carrier,
                 };
+                self.request_local_open.borrow_mut().remove(&frame.key);
+                return delivery;
             }
         };
         let read = {

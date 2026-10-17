@@ -304,6 +304,21 @@ impl SemanticGraphStore {
         ExecutionScope::enter(&self.task_registry)
     }
 
+    /// The task a suspendable semantic task runs as: the task installed on
+    /// this thread, which it joins exactly as a synchronous entry would, or
+    /// a fresh one.
+    pub(crate) fn execution_task(&self) -> ExecutionTask {
+        ExecutionScope::current(&self.task_registry)
+            .unwrap_or_else(|| self.task_registry.register_task())
+    }
+
+    /// Install `task` as the task this store's entries on this thread join,
+    /// for the extent of the returned scope: around each poll of the
+    /// suspendable task it runs, on whichever thread polls it.
+    pub(crate) fn install_execution(&self, task: &ExecutionTask) -> ExecutionScope {
+        ExecutionScope::install(&self.task_registry, task)
+    }
+
     construction_ordinal_seam! {
         /// Whether the task installed on this thread already has `key`'s
         /// producer open, so a claim would answer with the same-path carrier.
