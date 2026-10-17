@@ -9,9 +9,10 @@
 //! having been computed first. The hash node's compute runs the demand
 //! planner (graph reachability over the shared per-function
 //! [`FunctionFlowGraph`]) ONCE per cold demand, hashes the selected
-//! subgraph, and RETAINS the plan on the published outcome
-//! ([`PlannedFlowSlice`]); the lowered node's compute lowers exactly that
-//! retained plan — it never re-plans and never computes a slice hash.
+//! subgraph, and carries the plan on its outcome ([`PlannedFlowSlice`]),
+//! retained with the entry when the account admits it; the lowered node's
+//! compute lowers exactly the plan that outcome delivered — it never
+//! re-plans and never computes a slice hash.
 //!
 //! Both nodes are CONTENT-ADDRESSED memory-side [`crate::cache_runtime::node::ArtifactNode`]s: the
 //! key pins the canonical, the five-axis function identity, the
