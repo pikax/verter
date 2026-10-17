@@ -124,7 +124,10 @@ fn index_key_unions_enumerate_at_any_depth() {
     });
     let keys = keys.expect("a finite key set");
     assert_eq!(keys.len(), DEPTH + 1);
-    assert_eq!(keys[0], IndexKey::String(verter_type_expr::OwnedStr::from("k0")));
+    assert_eq!(
+        keys[0],
+        IndexKey::String(verter_type_expr::OwnedStr::from("k0"))
+    );
     assert_eq!(
         keys[DEPTH],
         IndexKey::String(verter_type_expr::OwnedStr::from(format!("k{DEPTH}")))
@@ -144,7 +147,12 @@ fn index_key_intersections_filter_at_any_depth() {
         }
         dispatch.finite_index_keys_for_tests(domain)
     });
-    assert_eq!(keys, Some(vec![IndexKey::String(verter_type_expr::OwnedStr::from("selected"))]));
+    assert_eq!(
+        keys,
+        Some(vec![IndexKey::String(verter_type_expr::OwnedStr::from(
+            "selected"
+        ))])
+    );
 }
 
 /// Intersections nested `depth` deep down to `object` are a valid base

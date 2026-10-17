@@ -29,11 +29,11 @@
 //! This module defines the type surface; the implementation that binds it to
 //! [`ProjectTypeStore`](crate::project_type_store::ProjectTypeStore) lives in
 //! the `project_type_store` consumers.
-use verter_type_expr::{OwnedSlice, OwnedStr};
 use verter_session_query::flow::policy::{
     ClassExpressionClause, FlowGap, FlowReturnPolicy, NullabilityPolicy,
 };
 use verter_session_query::inputs::budget::BudgetExceededFailure;
+use verter_type_expr::{OwnedSlice, OwnedStr};
 
 use std::sync::Arc;
 
@@ -764,7 +764,10 @@ pub struct ScopeId {
 
 impl ScopeId {
     /// A file top-level scope rooted in an exact authored owner.
-    pub fn file(canonical_id: impl Into<OwnedStr>, owner: verter_type_expr::TopLevelOwnerId) -> Self {
+    pub fn file(
+        canonical_id: impl Into<OwnedStr>,
+        owner: verter_type_expr::TopLevelOwnerId,
+    ) -> Self {
         Self {
             canonical_id: canonical_id.into(),
             owner,
@@ -1665,9 +1668,13 @@ impl FlowFunctionSlotIdentity {
         &self,
     ) -> verter_session_query::facts::fact_cache::ProgramAnalysisFunctionRef {
         verter_session_query::facts::fact_cache::ProgramAnalysisFunctionRef {
-            canonical_id: std::sync::Arc::<str>::from(self.declaration_slot.defining_canonical.as_str()),
+            canonical_id: std::sync::Arc::<str>::from(
+                self.declaration_slot.defining_canonical.as_str(),
+            ),
             owner: self.declaration_slot.owner,
-            merged_symbol_name: std::sync::Arc::<str>::from(self.declaration_slot.merged_symbol_name.as_str()),
+            merged_symbol_name: std::sync::Arc::<str>::from(
+                self.declaration_slot.merged_symbol_name.as_str(),
+            ),
             symbol_space: match self.declaration_slot.symbol_space {
                 SemanticSymbolSpace::Type => verter_session_query::facts::SymbolSpace::Type,
                 SemanticSymbolSpace::Value => verter_session_query::facts::SymbolSpace::Value,
@@ -1705,7 +1712,10 @@ impl CanonicalTypeSubstitution {
     /// The empty substitution.
     #[must_use]
     pub fn empty() -> Self {
-        Self(verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()), Default::default())
+        Self(
+            verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
+            Default::default(),
+        )
     }
 
     /// Canonicalize `(type_parameter, bound)` pairs of `graph`: sorted and
@@ -1761,7 +1771,10 @@ impl CanonicalTypeSubstitution {
                 .iter()
                 .flat_map(|&(parameter, value)| [parameter, value]),
         );
-        Self(verter_type_expr::OwnedSlice::from(bindings.into_boxed_slice()), roots)
+        Self(
+            verter_type_expr::OwnedSlice::from(bindings.into_boxed_slice()),
+            roots,
+        )
     }
 
     /// The canonical bindings.
@@ -11987,7 +12000,9 @@ mod tests {
                 reasons: PartialReasonSet::PROPAGATED,
             },
             QueryError::AliasCycle {
-                chain: verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from("A")].into_boxed_slice()),
+                chain: verter_type_expr::OwnedSlice::from(
+                    vec![verter_type_expr::OwnedStr::from("A")].into_boxed_slice(),
+                ),
             },
             QueryError::RecursiveRef {
                 name: OwnedStr::from("R"),
@@ -12064,7 +12079,9 @@ mod tests {
                 },
                 name: OwnedStr::from("factory"),
             },
-            verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from("make")].into_boxed_slice()),
+            verter_type_expr::OwnedSlice::from(
+                vec![verter_type_expr::OwnedStr::from("make")].into_boxed_slice(),
+            ),
             Arc::clone(&args),
         );
         assert_eq!(
@@ -12075,7 +12092,9 @@ mod tests {
 
         let import_type = SemanticNodeData::new_import_type(
             Arc::from("./m"),
-            verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from("G")].into_boxed_slice()),
+            verter_type_expr::OwnedSlice::from(
+                vec![verter_type_expr::OwnedStr::from("G")].into_boxed_slice(),
+            ),
             Arc::clone(&args),
             false,
         );
@@ -12569,5 +12588,9 @@ pub fn new_nominal_typeof_for_tests(
     path: std::sync::Arc<[std::sync::Arc<str>]>,
     nominal_identity: verter_type_expr::facts::ValueDeclIdentityPart,
 ) -> SemanticNodeData {
-    SemanticNodeData::new_nominal_typeof(value_root, verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(path), nominal_identity)
+    SemanticNodeData::new_nominal_typeof(
+        value_root,
+        verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(path),
+        nominal_identity,
+    )
 }

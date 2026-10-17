@@ -118,9 +118,9 @@ impl SemanticGraphStore {
             let mut state = inflight.state.lock();
             state.aborted = true;
             if state.completed.is_none() {
-                state.completed = Some(QueryResult::Error(QueryError::Other(verter_type_expr::OwnedStr::from(
-                    "aborted by test_trigger_inflight_abort",
-                ))));
+                state.completed = Some(QueryResult::Error(QueryError::Other(
+                    verter_type_expr::OwnedStr::from("aborted by test_trigger_inflight_abort"),
+                )));
                 state.dep_signature = Some(empty_signature());
             }
         }

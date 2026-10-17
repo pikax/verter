@@ -774,9 +774,7 @@ fn function_fact_scope_relative_sees_a_scope_relative_return_head() {
                     symbol: OwnedStr::from(std::sync::Arc::from("getRef")),
                     space: LocatorSymbolSpace::Value,
                 },
-                path: OwnedSlice::from(
-                    vec![TypeBodyPathStep::FunctionReturn].into_boxed_slice(),
-                ),
+                path: OwnedSlice::from(vec![TypeBodyPathStep::FunctionReturn].into_boxed_slice()),
                 arg_index: 0,
             })]
             .into_boxed_slice(),

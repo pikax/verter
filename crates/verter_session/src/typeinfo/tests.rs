@@ -1327,9 +1327,9 @@ fn operator_reduction_step_propagates_fault_opaque_not_masked_as_carrier() {
     }));
 
     // (a) FAULT opaque as a Value → MUST propagate as `Err`, never mask.
-    let fault_node = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(verter_type_expr::OwnedStr::from(
-        "reduction blew up",
-    ))));
+    let fault_node = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(
+        verter_type_expr::OwnedStr::from("reduction blew up"),
+    )));
     let out = classify_operator_reduction_step(graph, QueryResult::Value(fault_node), carrier);
     assert!(
         matches!(out, Err(TypeResolutionRequestError::Other(_))),

@@ -79,7 +79,9 @@ fn build_host(source: String) -> Arc<VerterHost> {
                     symbol: verter_type_expr::OwnedStr::from("Deep"),
                     space: LocatorSymbolSpace::Type,
                 },
-                path: verter_type_expr::OwnedSlice::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+                path: verter_type_expr::OwnedSlice::from(
+                    Vec::<TypeBodyPathStep>::new().into_boxed_slice(),
+                ),
             });
             assert!(
                 matches!(dispatch.lower_locator(locator), QueryResult::Value(_)),

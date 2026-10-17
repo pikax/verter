@@ -568,7 +568,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let anchor =
                     match self.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                         scope: ScopeId {
-                            canonical_id: verter_type_expr::OwnedStr::from(identity.canonical_id.clone()),
+                            canonical_id: verter_type_expr::OwnedStr::from(
+                                identity.canonical_id.clone(),
+                            ),
                             owner: identity.owner,
                             local_scope: None,
                             binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(

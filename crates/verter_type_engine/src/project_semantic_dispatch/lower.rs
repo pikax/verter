@@ -393,7 +393,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // The BFS frontier holds only the bases still to resolve; the root
         // arrives resolved. `visited` is keyed on the EFFECTIVE identity so
         // two spellings that walk to one declaration are visited once.
-        let mut worklist: Vec<(verter_type_expr::OwnedStr, verter_type_expr::TopLevelOwnerId, verter_type_expr::OwnedStr)> = Vec::new();
+        let mut worklist: Vec<(
+            verter_type_expr::OwnedStr,
+            verter_type_expr::TopLevelOwnerId,
+            verter_type_expr::OwnedStr,
+        )> = Vec::new();
         let mut resolved = Some(root.clone());
         let mut visited = rustc_hash::FxHashSet::default();
         loop {
@@ -440,7 +444,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     canonical_id: verter_type_expr::OwnedStr::from(id_canonical),
                     owner: id_owner,
                     symbol: verter_type_expr::OwnedStr::from(id_symbol),
-                    member_path: verter_type_expr::OwnedSlice::from(vec![segment.to_string()].into_boxed_slice()),
+                    member_path: verter_type_expr::OwnedSlice::from(
+                        vec![segment.to_string()].into_boxed_slice(),
+                    ),
                 };
                 return Some(match authored_scope {
                     Some(scope) => self.intern_nominal_typeof(
@@ -456,7 +462,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .graph()
                         .intern_node(SemanticNodeData::new_nominal_typeof(
                             value_root.clone(),
-                            verter_type_expr::OwnedSlice::from(segments.to_vec().into_boxed_slice()),
+                            verter_type_expr::OwnedSlice::from(
+                                segments.to_vec().into_boxed_slice(),
+                            ),
                             identity,
                         )),
                 });
@@ -474,7 +482,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             for (base_canonical, base_owner, base_name, _args) in
                 self.class_heritage_bases(eff_canonical.as_ref(), eff_owner, eff_symbol.as_ref())
             {
-                worklist.push((verter_type_expr::OwnedStr::from(base_canonical), base_owner, verter_type_expr::OwnedStr::from(base_name)));
+                worklist.push((
+                    verter_type_expr::OwnedStr::from(base_canonical),
+                    base_owner,
+                    verter_type_expr::OwnedStr::from(base_name),
+                ));
             }
         }
         None
@@ -707,7 +719,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     },
                     name: verter_type_expr::OwnedStr::from(root),
                 };
-                let path: Vec<verter_type_expr::OwnedStr> = rest.split('.').map(verter_type_expr::OwnedStr::from).collect();
+                let path: Vec<verter_type_expr::OwnedStr> = rest
+                    .split('.')
+                    .map(verter_type_expr::OwnedStr::from)
+                    .collect();
                 let (identity, remaining) = self.value_path_declaration(
                     &value_root,
                     &path,
@@ -1552,9 +1567,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // the walker's G4.5 recovery re-derives the canonical
                 // needle from the literal node.
                 let folded_key = match index {
-                    TypeExpr::Literal(verter_type_expr::LiteralValue::String(s)) => {
-                        Some(IndexKey::String(verter_type_expr::OwnedStr::from(s.as_str())))
-                    }
+                    TypeExpr::Literal(verter_type_expr::LiteralValue::String(s)) => Some(
+                        IndexKey::String(verter_type_expr::OwnedStr::from(s.as_str())),
+                    ),
                     TypeExpr::Literal(verter_type_expr::LiteralValue::Number(n)) => {
                         crate::project_semantic_dispatch::build::integer_convention_index_key(*n)
                             .map(IndexKey::Number)
@@ -2294,7 +2309,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         hb[0], hb[1], hb[2], hb[3], hb[4], hb[5], hb[6], hb[7],
                     ]);
                     let identity = crate::request_context::MapperSourceIdentity {
-                        canonical_id: std::sync::Arc::<str>::from(mapper_decl.canonical_id.as_str()),
+                        canonical_id: std::sync::Arc::<str>::from(
+                            mapper_decl.canonical_id.as_str(),
+                        ),
                         whole_hash: hash_u64,
                         display_name: Arc::clone(&mapper_display_name),
                     };
@@ -2761,7 +2778,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 };
                 let mut result = match self.execute_type_node(self.typeof_key_with_path(
                     root_key,
-                    verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(remaining.clone()),
+                    verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+                        remaining.clone(),
+                    ),
                     reduction_context,
                 )) {
                     QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -2929,7 +2948,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 owner,
                                 ..
                             } => {
-                                identity.anchor.canonical_id = verter_type_expr::OwnedStr::from(canonical_id);
+                                identity.anchor.canonical_id =
+                                    verter_type_expr::OwnedStr::from(canonical_id);
                                 identity.anchor.owner = *owner;
                                 Some(canonical_id.clone())
                             }
@@ -3166,7 +3186,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     &ctx,
                     owner_canonical.as_ref(),
                     specifier,
-                    &verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(qualifier.as_ref()),
+                    &verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+                        qualifier.as_ref(),
+                    ),
                     *typeof_query,
                     type_arguments.len(),
                     || {

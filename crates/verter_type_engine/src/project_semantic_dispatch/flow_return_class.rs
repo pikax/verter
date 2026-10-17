@@ -904,7 +904,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 };
                 let path: Arc<[Arc<str>]> = path.map(Arc::from).collect();
                 Positional::Value(self.dispatch.graph().intern_node_with_scope(
-                    SemanticNodeData::new_typeof(value_root, verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(path), Arc::from([])),
+                    SemanticNodeData::new_typeof(
+                        value_root,
+                        verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(path),
+                        Arc::from([]),
+                    ),
                     self.binder_env.scope.clone(),
                 ))
             }

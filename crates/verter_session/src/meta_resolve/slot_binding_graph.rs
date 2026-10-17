@@ -807,7 +807,8 @@ pub(crate) fn compute_bindings_via_graph(
     synthesis_steps_executed: &mut u32,
 ) -> Vec<ResolvedSlotBinding> {
     let mut out = Vec::new();
-    let empty_path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice());
+    let empty_path: verter_type_expr::OwnedSlice<PathSegment> =
+        verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice());
     let consume_step = |steps: &mut u32| -> bool {
         *steps = steps.saturating_add(1);
         match synthesis_step_budget {

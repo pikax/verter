@@ -234,9 +234,9 @@ pub(crate) fn decompose_indexed_access_chain(
             TypeExpr::IndexedAccess { object, index } => match index.as_ref() {
                 TypeExpr::Literal(LiteralValue::String(member)) => {
                     let inner_base = descend(object, path);
-                    path.push(PathSegment::Index(IndexKey::String(verter_type_expr::OwnedStr::from(
-                        member.as_str(),
-                    ))));
+                    path.push(PathSegment::Index(IndexKey::String(
+                        verter_type_expr::OwnedStr::from(member.as_str()),
+                    )));
                     inner_base
                 }
                 _ => expr,
@@ -247,7 +247,10 @@ pub(crate) fn decompose_indexed_access_chain(
 
     let mut path: Vec<PathSegment> = Vec::new();
     let base = descend(expr, &mut path);
-    (base, verter_type_expr::OwnedSlice::from(path.into_boxed_slice()))
+    (
+        base,
+        verter_type_expr::OwnedSlice::from(path.into_boxed_slice()),
+    )
 }
 
 // Class B helpers (dispatch-only surface projection) resolve a root

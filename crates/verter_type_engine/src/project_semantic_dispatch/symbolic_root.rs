@@ -124,7 +124,9 @@ fn slot_param_root_step<C: crate::resolver_core::ResolverCapabilities>(
             }
             // Concrete check → reduce the conditional and classify the result.
             let empty_path: verter_type_expr::OwnedSlice<crate::semantic_query::PathSegment> =
-                verter_type_expr::OwnedSlice::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice());
+                verter_type_expr::OwnedSlice::from(
+                    Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice(),
+                );
             let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
                 base: node,
                 path: empty_path,

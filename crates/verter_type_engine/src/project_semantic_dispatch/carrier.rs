@@ -1066,7 +1066,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .map_or(HashValue::default(), |s| s.whole_hash);
             return CarrierResolutionPlan::complete(self.recursive_ref_sentinel(
                 &DeclIdentity {
-                    canonical_id: verter_type_expr::OwnedStr::from(resolved_root.canonical_id.clone()),
+                    canonical_id: verter_type_expr::OwnedStr::from(
+                        resolved_root.canonical_id.clone(),
+                    ),
                     owner: resolved_root.owner,
                     whole_hash,
                     decl_name: verter_type_expr::OwnedStr::from(resolved_root.symbol_name.clone()),
@@ -1258,17 +1260,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let result = if qualifier.is_empty() {
                 CarrierResolution::complete(namespace)
             } else {
-                let path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(
-                    qualifier
-                        .iter()
-                        .map(|seg| {
-                            PathSegment::Member(crate::semantic_query::PropertyKey::identifier(
-                                seg.clone(),
-                            ))
-                        })
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                );
+                let path: verter_type_expr::OwnedSlice<PathSegment> =
+                    verter_type_expr::OwnedSlice::from(
+                        qualifier
+                            .iter()
+                            .map(|seg| {
+                                PathSegment::Member(crate::semantic_query::PropertyKey::identifier(
+                                    seg.clone(),
+                                ))
+                            })
+                            .collect::<Vec<_>>()
+                            .into_boxed_slice(),
+                    );
                 self.carrier_resolution_read(SemanticQueryKey::ProjectPath {
                     base: namespace,
                     path,
@@ -1329,7 +1332,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ctx.shadowing(),
             reduction_context,
         );
-        let head_plan = self.plan_bare_ref_head(&head_ctx, &Arc::<str>::from(first), head_arg_count);
+        let head_plan =
+            self.plan_bare_ref_head(&head_ctx, &Arc::<str>::from(first), head_arg_count);
         if rest.is_empty() {
             return head_plan;
         }

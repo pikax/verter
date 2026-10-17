@@ -984,7 +984,9 @@ fn class_member_clauses_print_class_then_member() {
                 dispatch,
                 "GHolder",
                 FunctionPartIdentity::Member {
-                    member_path: verter_type_expr::OwnedSlice::from(vec![ordinal].into_boxed_slice()),
+                    member_path: verter_type_expr::OwnedSlice::from(
+                        vec![ordinal].into_boxed_slice(),
+                    ),
                 },
             );
             constructor_and_instance(dispatch, result.return_type()).1
@@ -1131,11 +1133,15 @@ fn printed_name_qualifies_exactly_the_instantiated_clauses() {
         outer_clauses: verter_type_expr::OwnedSlice::from([
             verter_session_query::flow::policy::ClassExpressionClause {
                 container: verter_type_expr::OwnedStr::from("outer3"),
-                parameters: verter_type_expr::OwnedSlice::from([verter_type_expr::OwnedStr::from("U")]),
+                parameters: verter_type_expr::OwnedSlice::from([verter_type_expr::OwnedStr::from(
+                    "U",
+                )]),
             },
             verter_session_query::flow::policy::ClassExpressionClause {
                 container: verter_type_expr::OwnedStr::from("inner"),
-                parameters: verter_type_expr::OwnedSlice::from([verter_type_expr::OwnedStr::from("T")]),
+                parameters: verter_type_expr::OwnedSlice::from([verter_type_expr::OwnedStr::from(
+                    "T",
+                )]),
             },
         ]),
         own_arity: 0,

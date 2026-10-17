@@ -117,18 +117,24 @@ impl SemanticGraphStore {
                     };
                     // Charged like every retained answer; one the account
                     // refuses is computed again on demand.
+                    let mut aliases =
+                        verter_session_query::retention::allocation::AliasSet::new();
                     let bytes = hash_cons_entry_bytes::<(
                         (SemanticNodeId, SemanticNodeId, SemanticNodeId),
                         SubstituteMemoEntry,
-                    )>(
-                        &roots,
-                        &mut verter_session_query::retention::allocation::AliasSet::new(),
-                    );
+                    )>(&roots, &mut aliases);
+                    // The root owner is an owned allocation, charged by its
+                    // own cell and held by the entry.
+                    let handles = aliases.take_handles();
                     let verter_session_query::retention::RetentionAdmission::Admitted(retention) =
                         self.retention_account().reserve(
                             verter_session_query::retention::ChargeClass::Retained,
                             bytes,
                         )
+                    else {
+                        return;
+                    };
+                    let Ok(retention) = handles.retained_with(retention, self.charge_ctx())
                     else {
                         return;
                     };
@@ -249,22 +255,30 @@ impl SemanticGraphStore {
         // delivery's metadata is adopted below): the fact slice with every fact's owned text and the
         // self-root list. A page of a wide proof is claimed into the same
         // reservation and charged once wherever it is shared.
-        let own_bytes = {
+        let (own_bytes, handles) = {
             use verter_session_query::retention::allocation::{
                 arc_block_bytes, arc_str_list_bytes, fact_slice_bytes, AliasSet,
             };
             let mut aliases = AliasSet::new();
-            arc_block_bytes(std::mem::size_of::<DeferredEvaluationMemoEntry>())
+            let bytes = arc_block_bytes(std::mem::size_of::<DeferredEvaluationMemoEntry>())
                 + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
                 + fact_slice_bytes(&evidence.0, &mut aliases)
-                + arc_str_list_bytes(&evidence.1, &mut aliases)
+                + arc_str_list_bytes(&evidence.1, &mut aliases);
+            // The proof's owned names are charged by their own cells, held
+            // by the entry.
+            (bytes, aliases.take_handles())
         };
         let retention = match verter_session_query::facts::receipt::reserve_retained_with_evidence(
             self.retention_account(),
             own_bytes,
             &[&evidence.0],
         ) {
-            verter_session_query::retention::RetentionAdmission::Admitted(charge) => charge,
+            verter_session_query::retention::RetentionAdmission::Admitted(charge) => {
+                match handles.retained_with(charge, self.charge_ctx()) {
+                    Ok(charge) => charge,
+                    Err(_) => return,
+                }
+            }
             verter_session_query::retention::RetentionAdmission::Refused(_) => return,
         };
         let Ok(lease_metadata) = lease.adopt_metadata() else {

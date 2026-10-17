@@ -9,10 +9,10 @@
 //! carrier eliminates), absence reasons discriminate, serde round-trips are
 //! identity, and the accessors expose ONLY the present arm.
 
-use crate::OwnedSlice;
-use crate::OwnedStr;
 use crate::facts::*;
 use crate::locators::*;
+use crate::OwnedSlice;
+use crate::OwnedStr;
 use crate::PrimitiveName;
 
 fn anchor() -> AuthoredAnchor {

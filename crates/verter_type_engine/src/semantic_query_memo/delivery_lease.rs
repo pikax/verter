@@ -47,7 +47,9 @@ impl DeliveryOwner {
             + self.key_roots.owned_heap_bytes(&mut aliases);
         aliases
             .take_handles()
-            .pin(verter_session_query::retention::owned::ChargeCtx::new(account));
+            .pin(verter_session_query::retention::owned::ChargeCtx::new(
+                account,
+            ));
         self._own = Some(verter_session_query::retention::shared::CallerHold::pin(
             account, bytes,
         ));

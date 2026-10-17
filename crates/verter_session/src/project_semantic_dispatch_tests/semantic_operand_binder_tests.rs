@@ -284,7 +284,11 @@ fn jsdoc_typedef_path_through_a_binder_binds_locally() {
 /// Each entry is `(body, path, label)`; the body is emitted twice — once
 /// as a whole declaration body (pre-lowering navigator) and once nested
 /// under a generic callable's return position (lowered-graph navigator).
-fn navigator_parity_cases() -> Vec<(&'static str, verter_type_expr::OwnedSlice<TypeBodyPathStep>, &'static str)> {
+fn navigator_parity_cases() -> Vec<(
+    &'static str,
+    verter_type_expr::OwnedSlice<TypeBodyPathStep>,
+    &'static str,
+)> {
     vec![
         (
             "{ a: string }",
@@ -435,15 +439,16 @@ fn both_locator_navigators_select_the_same_authored_position() {
             steps.extend(path.iter().cloned());
             verter_type_expr::OwnedSlice::from(steps.into_boxed_slice())
         };
-        let select = |symbol: &str, path: verter_type_expr::OwnedSlice<TypeBodyPathStep>| match dispatch
-            .force_semantic_operand_for_tests(
-                &mint(&dispatch, locator(symbol, path)),
-                request(ProjectionMode::Identity),
-            ) {
-            QueryResult::Value(forced) => Ok(forced.node()),
-            QueryResult::Error(error) => Err(error),
-            other => panic!("{label}/{symbol}: unexpected outcome {other:?}"),
-        };
+        let select =
+            |symbol: &str, path: verter_type_expr::OwnedSlice<TypeBodyPathStep>| match dispatch
+                .force_semantic_operand_for_tests(
+                    &mint(&dispatch, locator(symbol, path)),
+                    request(ProjectionMode::Identity),
+                ) {
+                QueryResult::Value(forced) => Ok(forced.node()),
+                QueryResult::Error(error) => Err(error),
+                other => panic!("{label}/{symbol}: unexpected outcome {other:?}"),
+            };
         // Interning is compound over `(payload, scope)` and the two legs
         // sit under different top-level owners, so equal node IDS are not
         // available as the oracle. The two scope-independent facts that

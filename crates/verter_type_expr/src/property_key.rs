@@ -114,7 +114,9 @@ impl<I> PropertyKey<I> {
     pub fn from_js_number(value: f64) -> Self {
         CanonicalIndexInt::from_js_number(value)
             .map(Self::Number)
-            .unwrap_or_else(|| Self::String(OwnedStr::from(verter_ecma::js_number_to_string(value))))
+            .unwrap_or_else(|| {
+                Self::String(OwnedStr::from(verter_ecma::js_number_to_string(value)))
+            })
     }
 
     /// Borrow the ordinary string spelling when this is a string key.

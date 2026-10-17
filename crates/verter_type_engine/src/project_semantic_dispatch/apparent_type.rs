@@ -384,7 +384,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
             _ => return None,
         };
-        (!super::walk::is_canonical_index_digits(&name)).then_some(std::sync::Arc::<str>::from(name))
+        (!super::walk::is_canonical_index_digits(&name))
+            .then_some(std::sync::Arc::<str>::from(name))
     }
 
     /// Whether reading `segment` off `node` reads `node`'s apparent wrapper:
@@ -480,7 +481,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             CallableAnchor::NotCallable | CallableAnchor::Undecided => return miss(),
             CallableAnchor::Authored(canonical) => (std::sync::Arc::<str>::from(canonical), false),
             CallableAnchor::Rootless => match &context.demand_scope {
-                ApparentDemandScope::Rootless { canonical } => (std::sync::Arc::<str>::from(canonical.as_str()), true),
+                ApparentDemandScope::Rootless { canonical } => {
+                    (std::sync::Arc::<str>::from(canonical.as_str()), true)
+                }
                 // No demand-scope witness — no project to scope the ambient
                 // lookup by. Fail closed.
                 ApparentDemandScope::Anchored => return miss(),
@@ -569,7 +572,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 let canonical = self.lexical_demand_scope.borrow().last().cloned()?;
                 (
                     canonical.clone(),
-                    ApparentDemandScope::Rootless { canonical: canonical.into() },
+                    ApparentDemandScope::Rootless {
+                        canonical: canonical.into(),
+                    },
                 )
             }
         };
@@ -631,14 +636,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 SemanticNodeData::Alias(target) => node = *target,
                 SemanticNodeData::Signature { occurrence, .. } => {
                     return match occurrence {
-                        Some(occurrence) => CallableAnchor::Authored(verter_type_expr::OwnedStr::from(
-                            &occurrence.function.anchor.canonical_id,
-                        )),
+                        Some(occurrence) => {
+                            CallableAnchor::Authored(verter_type_expr::OwnedStr::from(
+                                &occurrence.function.anchor.canonical_id,
+                            ))
+                        }
                         None => CallableAnchor::Rootless,
                     };
                 }
                 SemanticNodeData::DeferredCallable(callable) => {
-                    return CallableAnchor::Authored(verter_type_expr::OwnedStr::from(callable.declaring_canonical()));
+                    return CallableAnchor::Authored(verter_type_expr::OwnedStr::from(
+                        callable.declaring_canonical(),
+                    ));
                 }
                 // A surface with call or construct signatures has the
                 // `Function` apparent type too (the checker's

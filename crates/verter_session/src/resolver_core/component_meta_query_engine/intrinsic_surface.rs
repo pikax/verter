@@ -203,7 +203,9 @@ impl ComponentMetaQueryEngine<'_> {
         Some(SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(
             TypeBodySlot {
                 anchor: AuthoredAnchor {
-                    canonical_id: verter_type_expr::OwnedStr::from(declaration.canonical_source.as_str()),
+                    canonical_id: verter_type_expr::OwnedStr::from(
+                        declaration.canonical_source.as_str(),
+                    ),
                     owner: declaration.owner,
                     symbol: verter_type_expr::OwnedStr::from(symbol),
                     space: LocatorSymbolSpace::Type,

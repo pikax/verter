@@ -49,7 +49,9 @@ fn carrier_wrapping(
         )),
         _ => graph.intern_node(SemanticNodeData::new_import_type(
             Arc::from("./m"),
-            verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from("G")].into_boxed_slice()),
+            verter_type_expr::OwnedSlice::from(
+                vec![verter_type_expr::OwnedStr::from("G")].into_boxed_slice(),
+            ),
             args,
             false,
         )),

@@ -2709,7 +2709,9 @@ pub(crate) fn flow_return_key_covers_input_context_and_projection_demand() {
         );
         let mut with_input = base.clone();
         with_input.input = verter_type_engine::semantic_query::FlowInputContext {
-            contextual_parameters: verter_type_expr::OwnedSlice::from(vec![contextual].into_boxed_slice()),
+            contextual_parameters: verter_type_expr::OwnedSlice::from(
+                vec![contextual].into_boxed_slice(),
+            ),
         };
         assert_ne!(
             base, with_input,
@@ -4498,7 +4500,9 @@ fn flow_return_unanswered_type_space_owner_probe_preserves_unresolved_carrier() 
                     FunctionPartIdentity::DeclarationBody,
                     0,
                 ),
-                normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
+                normalized_type_args: verter_type_expr::OwnedSlice::from(
+                    Vec::new().into_boxed_slice(),
+                ),
                 context: dispatch.flow_return_context_for(OWNER_PROBE_CANONICAL),
                 demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
                 input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -4833,11 +4837,15 @@ fn staged_flow_proof(
     let basis = FlowDemandBasis {
         ancestry: Default::default(),
         graph_body: verter_session_query::flow::bundle::FlowSliceFunctionKey {
-            canonical_id: std::sync::Arc::<str>::from(key.function.declaration_slot.defining_canonical.as_str()),
+            canonical_id: std::sync::Arc::<str>::from(
+                key.function.declaration_slot.defining_canonical.as_str(),
+            ),
             function: verter_session_query::function_program::FunctionProgramKey {
                 declaration: verter_session_query::function_program::FunctionDeclarationRef {
                     owner: key.function.declaration_slot.owner,
-                    name: std::sync::Arc::<str>::from(key.function.declaration_slot.merged_symbol_name.as_str()),
+                    name: std::sync::Arc::<str>::from(
+                        key.function.declaration_slot.merged_symbol_name.as_str(),
+                    ),
                     space: verter_session_query::facts::SymbolSpace::Value,
                 },
                 part: key.function.function_part.clone(),
@@ -12909,7 +12917,9 @@ pub(super) fn flow_reads_without_proof(source: &str, names: &[&str]) -> Vec<Stri
                     FunctionPartIdentity::DeclarationBody,
                     0,
                 ),
-                normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
+                normalized_type_args: verter_type_expr::OwnedSlice::from(
+                    Vec::new().into_boxed_slice(),
+                ),
                 context: dispatch.flow_return_context_for(FILE),
                 demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
                 input: verter_type_engine::semantic_query::FlowInputContext::empty(),

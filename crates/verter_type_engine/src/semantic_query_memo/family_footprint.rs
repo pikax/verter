@@ -516,9 +516,7 @@ fn authored_locator_heap_bytes(locator: &AuthoredBodyLocator, aliases: &mut Alia
         }) => {
             let scope = match scope {
                 AuthoredAugmentationScope::Global => 0,
-                AuthoredAugmentationScope::Module { specifier } => {
-                    text_bytes(specifier, aliases)
-                }
+                AuthoredAugmentationScope::Module { specifier } => text_bytes(specifier, aliases),
             };
             anchor_heap_bytes(anchor, aliases) + scope + copy_slice_bytes(path, aliases)
         }
@@ -540,10 +538,7 @@ fn anchor_heap_bytes(anchor: &AuthoredAnchor, aliases: &mut AliasSet) -> usize {
         symbol,
         space,
     } = anchor;
-    text_bytes(canonical_id, aliases)
-        + text_bytes(symbol, aliases)
-        + inline(owner)
-        + inline(space)
+    text_bytes(canonical_id, aliases) + text_bytes(symbol, aliases) + inline(owner) + inline(space)
 }
 
 /// A sealed authored operand: its locator. The operand's lexical scope is
@@ -974,9 +969,7 @@ pub(super) fn query_key_heap_bytes(key: &SemanticQueryKey, aliases: &mut AliasSe
             path,
             context,
         } => {
-            value_root_heap_bytes(value_root, aliases)
-                + text_bytes(path, aliases)
-                + inline(context)
+            value_root_heap_bytes(value_root, aliases) + text_bytes(path, aliases) + inline(context)
         }
         SemanticQueryKey::ReduceUnion {
             members,
@@ -1080,9 +1073,7 @@ pub(super) fn query_key_heap_bytes(key: &SemanticQueryKey, aliases: &mut AliasSe
             pattern,
             args,
             context,
-        } => {
-            text_bytes(pattern, aliases) + copy_slice_bytes(args, aliases) + inline(context)
-        }
+        } => text_bytes(pattern, aliases) + copy_slice_bytes(args, aliases) + inline(context),
         SemanticQueryKey::FlowNarrowingAt {
             point,
             flow,

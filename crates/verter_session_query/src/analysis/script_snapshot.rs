@@ -1,4 +1,3 @@
-use verter_type_expr::OwnedStr;
 use crate::analysis::types::deserialize_analysis_flags;
 use crate::analysis::types::is_false;
 use crate::analysis::types::serialize_analysis_flags;
@@ -9,6 +8,7 @@ use crate::analysis::types::{
     ScriptTypeEnhancements, StoreDefinition, StoreUsage, VueApiCallSite,
 };
 use verter_span::Span;
+use verter_type_expr::OwnedStr;
 
 // ---------------------------------------------------------------------------
 // Stable declaration identifiers

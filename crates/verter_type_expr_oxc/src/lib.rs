@@ -18,7 +18,6 @@
 //! - No partial parses — each node is fully consumed.
 //! - Source text is required for `Unknown` fallback and literal extraction.
 
-use verter_type_expr::OwnedStr;
 use oxc_ast::ast::{
     BindingPattern, FormalParameters, PropertyKey, TSFunctionType, TSImportType,
     TSImportTypeQualifier, TSMappedType, TSMappedTypeModifierOperator, TSQualifiedName,
@@ -27,6 +26,7 @@ use oxc_ast::ast::{
     TSTypeQueryExprName, TSTypeReference, UnaryOperator,
 };
 use oxc_span::GetSpan;
+use verter_type_expr::OwnedStr;
 
 use std::sync::Arc;
 

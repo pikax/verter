@@ -719,7 +719,12 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             crate::semantic_query::PropertyKey::UniqueSymbol(identity),
         )?;
         let iterator = self.lone_call_return(method)?;
-        let next = self.present_member(iterator, &[std::sync::Arc::<str>::from(verter_type_expr::OwnedStr::from("next"))])?;
+        let next = self.present_member(
+            iterator,
+            &[std::sync::Arc::<str>::from(
+                verter_type_expr::OwnedStr::from("next"),
+            )],
+        )?;
         let result = self.lone_call_return(next)?;
         let result = self.dispatch.resolved_reduction_view(result);
         let arms = self
@@ -733,7 +738,12 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             let arm = self.dispatch.resolved_reduction_view(arm);
             // A constituent with no `done` is a yield result (`done`
             // defaults to `false`).
-            let yields = match self.present_member(arm, &[std::sync::Arc::<str>::from(verter_type_expr::OwnedStr::from("done"))]) {
+            let yields = match self.present_member(
+                arm,
+                &[std::sync::Arc::<str>::from(
+                    verter_type_expr::OwnedStr::from("done"),
+                )],
+            ) {
                 Some(done) => match self.dispatch.execute_relate_pair(false_node, done) {
                     super::super::dispatch_txn::RelationStep::Assignable { .. } => true,
                     super::super::dispatch_txn::RelationStep::NotAssignable => false,
@@ -742,7 +752,12 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
                 None => true,
             };
             if yields {
-                values.push(self.present_member(arm, &[std::sync::Arc::<str>::from(verter_type_expr::OwnedStr::from("value"))])?);
+                values.push(self.present_member(
+                    arm,
+                    &[std::sync::Arc::<str>::from(
+                        verter_type_expr::OwnedStr::from("value"),
+                    )],
+                )?);
             }
         }
         Some(match values.as_slice() {

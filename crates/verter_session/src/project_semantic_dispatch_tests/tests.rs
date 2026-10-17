@@ -2715,7 +2715,8 @@ fn finite_mapped_index_matches_single_key_publication_context() {
             };
             value
         };
-        let singles = ["left", "right"].map(|key| project(IndexKey::String(verter_type_expr::OwnedStr::from(key))));
+        let singles = ["left", "right"]
+            .map(|key| project(IndexKey::String(verter_type_expr::OwnedStr::from(key))));
         for (key, single) in ["left", "right"].into_iter().zip(singles) {
             let data = graph.node_data(single).expect("Box result exists");
             let SemanticNodeData::Object(surface) = data.as_ref() else {
@@ -2985,7 +2986,8 @@ fn a_wide_work_refusal_carries_its_whole_proving_prefix() {
         output.mark_partial_with(
             verter_type_engine::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT,
         );
-        output.observed_self_roots = vec![(verter_type_expr::OwnedStr::from(canonical), whole_hash)];
+        output.observed_self_roots =
+            vec![(verter_type_expr::OwnedStr::from(canonical), whole_hash)];
         output
     };
     let finalise = || {
@@ -4743,9 +4745,10 @@ fn framed_incomplete_canonical_evidence_taints_frame_partial_not_only_suppressed
     );
     let mut complete =
         verter_type_engine::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
-    complete
-        .inspected_file_roots
-        .push((verter_type_expr::OwnedStr::from("/w/frame_complete.ts"), [7u8; 16]));
+    complete.inspected_file_roots.push((
+        verter_type_expr::OwnedStr::from("/w/frame_complete.ts"),
+        [7u8; 16],
+    ));
     dispatch.deposit_canonical_evidence(complete);
     let clean = complete_guard.finish();
     assert!(
@@ -5377,7 +5380,10 @@ fn indexed_access_canonicalises_to_project_path_before_admission() {
     let via_canonical = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: obj,
         path: verter_type_expr::OwnedSlice::from(
-            vec![PathSegment::Index(IndexKey::String(verter_type_expr::OwnedStr::from("k")))].into_boxed_slice(),
+            vec![PathSegment::Index(IndexKey::String(
+                verter_type_expr::OwnedStr::from("k"),
+            ))]
+            .into_boxed_slice(),
         ),
         context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Identity,
@@ -6495,7 +6501,8 @@ fn instantiate_is_mode_free_one_entry_across_depth_requests() {
     let _ = dispatch.execute_type_node(key.clone());
 
     // Follow-up path projections at two different modes.
-    let empty_path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice());
+    let empty_path: verter_type_expr::OwnedSlice<PathSegment> =
+        verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice());
     let result = match dispatch.execute_type_node(key.clone()) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -6788,7 +6795,8 @@ fn expanded_instantiate_materialises_through_dispatcher_not_private_walker() {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
     };
-    let empty_path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice());
+    let empty_path: verter_type_expr::OwnedSlice<PathSegment> =
+        verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice());
     let _ = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: result,
         path: empty_path,
@@ -7134,9 +7142,9 @@ fn decided_conditional_roots_only_on_check_extends_and_the_winner() {
     // Lattice-extreme checks decide without the relation authority. An
     // `error` check and a distributive `never` check read neither branch,
     // so neither branch file is a dependency of the answer.
-    let error_check = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(verter_type_expr::OwnedStr::from(
-        "error check",
-    ))));
+    let error_check = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(
+        verter_type_expr::OwnedStr::from("error check"),
+    )));
     let never_check = primitive(&graph, PrimitiveKind::Never);
     for (label, check, distributive) in [
         ("error", error_check, false),
@@ -8036,7 +8044,8 @@ fn distinct_projections_into_same_open_conditional_materialise_only_visited_sube
 
     // Empty-path projection into the deferred conditional returns
     // the conditional itself (empty path = identity; no distribution).
-    let empty_path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice());
+    let empty_path: verter_type_expr::OwnedSlice<PathSegment> =
+        verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice());
     let result = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: cond,
         path: empty_path,
@@ -11118,7 +11127,9 @@ fn indexed_projection_reaches_canonical_numeric_member_names() {
         ));
         match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
             base: source,
-            path: verter_type_expr::OwnedSlice::from(vec![PathSegment::Index(IndexKey::Computed(lit))].into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::from(
+                vec![PathSegment::Index(IndexKey::Computed(lit))].into_boxed_slice(),
+            ),
             context: ProjectionReductionContext::published(ProjectionMode::Expanded),
         }) {
             QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -11163,7 +11174,10 @@ fn indexed_projection_reaches_canonical_numeric_member_names() {
     let non_canonical = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: source,
         path: verter_type_expr::OwnedSlice::from(
-            vec![PathSegment::Index(IndexKey::String(verter_type_expr::OwnedStr::from("1e21")))].into_boxed_slice(),
+            vec![PathSegment::Index(IndexKey::String(
+                verter_type_expr::OwnedStr::from("1e21"),
+            ))]
+            .into_boxed_slice(),
         ),
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     }) {
@@ -11198,7 +11212,9 @@ fn pick_surface_reprojects_by_its_own_numeric_key() {
     let picked = instantiate_utility(&dispatch, &graph, "Pick", &[any, key_large]);
     let reprojected = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: picked,
-        path: verter_type_expr::OwnedSlice::from(vec![PathSegment::Index(IndexKey::Computed(key_large))].into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::from(
+            vec![PathSegment::Index(IndexKey::Computed(key_large))].into_boxed_slice(),
+        ),
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -11576,7 +11592,9 @@ fn indexed_projection_uses_canonical_js_names_beyond_2_pow_53() {
         ));
         match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
             base: source,
-            path: verter_type_expr::OwnedSlice::from(vec![PathSegment::Index(IndexKey::Computed(lit))].into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::from(
+                vec![PathSegment::Index(IndexKey::Computed(lit))].into_boxed_slice(),
+            ),
             context: ProjectionReductionContext::published(ProjectionMode::Expanded),
         }) {
             QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -11617,7 +11635,10 @@ fn indexed_projection_uses_canonical_js_names_beyond_2_pow_53() {
         match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
             base: source,
             path: verter_type_expr::OwnedSlice::from(
-                vec![PathSegment::Index(IndexKey::String(verter_type_expr::OwnedStr::from(name)))].into_boxed_slice(),
+                vec![PathSegment::Index(IndexKey::String(
+                    verter_type_expr::OwnedStr::from(name),
+                ))]
+                .into_boxed_slice(),
             ),
             context: ProjectionReductionContext::published(ProjectionMode::Expanded),
         }) {
@@ -11680,7 +11701,9 @@ fn pick_surface_reprojects_by_big_integer_key() {
     }
     let reprojected = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: picked,
-        path: verter_type_expr::OwnedSlice::from(vec![PathSegment::Index(IndexKey::Computed(key_big))].into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::from(
+            vec![PathSegment::Index(IndexKey::Computed(key_big))].into_boxed_slice(),
+        ),
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -11722,7 +11745,9 @@ fn union_index_distribution_projects_numeric_literal_arms() {
         ));
         match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
             base,
-            path: verter_type_expr::OwnedSlice::from(vec![PathSegment::Index(IndexKey::Computed(union))].into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::from(
+                vec![PathSegment::Index(IndexKey::Computed(union))].into_boxed_slice(),
+            ),
             context: ProjectionReductionContext::published(ProjectionMode::Expanded),
         }) {
             QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -11837,7 +11862,9 @@ fn union_index_distribution_preserves_carrier_valued_member_arms() {
     let project = |base: SemanticNodeId, index: SemanticNodeId| -> SemanticNodeId {
         match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
             base,
-            path: verter_type_expr::OwnedSlice::from(vec![PathSegment::Index(IndexKey::Computed(index))].into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::from(
+                vec![PathSegment::Index(IndexKey::Computed(index))].into_boxed_slice(),
+            ),
             context: ProjectionReductionContext::published(ProjectionMode::Navigate),
         }) {
             QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -12029,7 +12056,9 @@ fn project_path_tuple_numeric_index_projects_positions_and_broad_union() {
     let project = |index: IndexKey| -> SemanticNodeId {
         match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
             base: tuple,
-            path: verter_type_expr::OwnedSlice::from(vec![PathSegment::Index(index)].into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::from(
+                vec![PathSegment::Index(index)].into_boxed_slice(),
+            ),
             context: ProjectionReductionContext::published(ProjectionMode::Expanded),
         }) {
             QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -12115,7 +12144,9 @@ fn project_path_tuple_numeric_index_projects_positions_and_broad_union() {
     ));
     let negative = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: union,
-        path: verter_type_expr::OwnedSlice::from(vec![PathSegment::Index(num_key(-1))].into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::from(
+            vec![PathSegment::Index(num_key(-1))].into_boxed_slice(),
+        ),
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -12163,7 +12194,10 @@ fn project_path_tuple_string_index_requires_canonical_digits() {
         match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
             base: tuple,
             path: verter_type_expr::OwnedSlice::from(
-                vec![PathSegment::Index(IndexKey::String(verter_type_expr::OwnedStr::from(key)))].into_boxed_slice(),
+                vec![PathSegment::Index(IndexKey::String(
+                    verter_type_expr::OwnedStr::from(key),
+                ))]
+                .into_boxed_slice(),
             ),
             context: ProjectionReductionContext::published(ProjectionMode::Expanded),
         }) {
@@ -12241,7 +12275,9 @@ fn project_path_tuple_numeric_index_resolves_fixed_prefix_before_rest() {
     let project = |position: i64| -> SemanticNodeId {
         match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
             base: tuple,
-            path: verter_type_expr::OwnedSlice::from(vec![PathSegment::Index(num_key(position))].into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::from(
+                vec![PathSegment::Index(num_key(position))].into_boxed_slice(),
+            ),
             context: ProjectionReductionContext::published(ProjectionMode::Expanded),
         }) {
             QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -13613,9 +13649,9 @@ fn solver_error_publishes_as_opaque_query_error() {
     }
 
     let diagnostic: Arc<str> = Arc::from("synthetic solver error");
-    let other = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(verter_type_expr::OwnedStr::from(
-        &diagnostic,
-    ))));
+    let other = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(
+        verter_type_expr::OwnedStr::from(&diagnostic),
+    )));
     match &*graph.node_data(other).expect("other node") {
         SemanticNodeData::Opaque(QueryError::Other(text)) => {
             assert_eq!(text.as_ref(), diagnostic.as_ref(), "error text preserved");
@@ -22219,28 +22255,30 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
         )]
         .into_boxed_slice(),
     );
-    let full_path_anim: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(
-        vec![
-            PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
-                "variants",
-            )),
-            PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
-                "loadingAnimation",
-            )),
-        ]
-        .into_boxed_slice(),
-    );
-    let full_path_color: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(
-        vec![
-            PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
-                "variants",
-            )),
-            PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
-                "loadingColor",
-            )),
-        ]
-        .into_boxed_slice(),
-    );
+    let full_path_anim: verter_type_expr::OwnedSlice<PathSegment> =
+        verter_type_expr::OwnedSlice::from(
+            vec![
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "variants",
+                )),
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "loadingAnimation",
+                )),
+            ]
+            .into_boxed_slice(),
+        );
+    let full_path_color: verter_type_expr::OwnedSlice<PathSegment> =
+        verter_type_expr::OwnedSlice::from(
+            vec![
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "variants",
+                )),
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "loadingColor",
+                )),
+            ]
+            .into_boxed_slice(),
+        );
 
     // Prefix entries are cached as Navigate regardless of
     // the caller's mode (path-precise rule).
@@ -25724,7 +25762,8 @@ fn path_walk_materialized_set_records_linear_navhops_and_stops_at_arm_split() {
         MaterializedPoint::new(d)
     };
     let navhop = |k: usize| {
-        let prefix: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(path[..k].to_vec().into_boxed_slice());
+        let prefix: verter_type_expr::OwnedSlice<PathSegment> =
+            verter_type_expr::OwnedSlice::from(path[..k].to_vec().into_boxed_slice());
         MaterializedPoint::new(Demand::navigate(ProjectionPath::from(prefix)))
     };
 
@@ -25947,7 +25986,9 @@ fn identity_utility_mapped_carrier_projects_existing_members_not_miss() {
     let project = |base: SemanticNodeId, index: SemanticNodeId| -> SemanticNodeId {
         match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
             base,
-            path: verter_type_expr::OwnedSlice::from(vec![PathSegment::Index(IndexKey::Computed(index))].into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::from(
+                vec![PathSegment::Index(IndexKey::Computed(index))].into_boxed_slice(),
+            ),
             context: ProjectionReductionContext::published(ProjectionMode::Navigate),
         }) {
             QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -29044,7 +29085,9 @@ fn substitute_and_walker_descend_import_type_carrier_type_args() {
     // qualifier path and one applied type argument `T`.
     let import_type = graph.intern_node(SemanticNodeData::new_import_type(
         Arc::from("./m"),
-        verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from("Box")].into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(
+            vec![verter_type_expr::OwnedStr::from("Box")].into_boxed_slice(),
+        ),
         Arc::from(vec![t_param].into_boxed_slice()),
         false,
     ));
@@ -29200,7 +29243,9 @@ fn is_deferred_classifies_bareref_and_importtype_carriers_as_deferred_roots() {
 
     let import_type = SemanticNodeData::new_import_type(
         Arc::from("./m"),
-        verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from("Box")].into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(
+            vec![verter_type_expr::OwnedStr::from("Box")].into_boxed_slice(),
+        ),
         Arc::from(Vec::new().into_boxed_slice()),
         false,
     );
@@ -29985,11 +30030,15 @@ fn roomy_request_recomputes_correct_value_after_budget_truncation() {
     let o2 = simple_object(&graph, &[("a", inner_obj)]); // { a: { k: number } }
     let mid = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: o2,
-        index: verter_type_engine::semantic_query::IndexKey::String(verter_type_expr::OwnedStr::from("a")),
+        index: verter_type_engine::semantic_query::IndexKey::String(
+            verter_type_expr::OwnedStr::from("a"),
+        ),
     });
     let outer = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: mid,
-        index: verter_type_engine::semantic_query::IndexKey::String(verter_type_expr::OwnedStr::from("k")),
+        index: verter_type_engine::semantic_query::IndexKey::String(
+            verter_type_expr::OwnedStr::from("k"),
+        ),
     });
     let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
 
@@ -31000,7 +31049,13 @@ fn import_type_arm_threads_nested_read_cache_suppress_into_outcome() {
     let import_type = graph.intern_node_with_scope(
         SemanticNodeData::new_import_type(
             Arc::from("./dep"),
-            verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from("Ns"), verter_type_expr::OwnedStr::from("Member")].into_boxed_slice()),
+            verter_type_expr::OwnedSlice::from(
+                vec![
+                    verter_type_expr::OwnedStr::from("Ns"),
+                    verter_type_expr::OwnedStr::from("Member"),
+                ]
+                .into_boxed_slice(),
+            ),
             Arc::from(Vec::new().into_boxed_slice()),
             false,
         ),
@@ -31311,7 +31366,9 @@ fn single_segment_import_type_direct_serve_fence_refuses_evaluate_deferred_memo(
     let import_type = graph.intern_node_with_scope(
         SemanticNodeData::new_import_type(
             Arc::from("./dep"),
-            verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from("Foo")].into_boxed_slice()),
+            verter_type_expr::OwnedSlice::from(
+                vec![verter_type_expr::OwnedStr::from("Foo")].into_boxed_slice(),
+            ),
             Arc::from(Vec::new().into_boxed_slice()),
             false,
         ),
@@ -31807,7 +31864,9 @@ fn wide_surface_numeric_index_hop_resolves_member() {
 
     let hit = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base,
-        path: verter_type_expr::OwnedSlice::from(vec![PathSegment::Index(num_key(3))].into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::from(
+            vec![PathSegment::Index(num_key(3))].into_boxed_slice(),
+        ),
         context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Navigate,
         ),

@@ -169,10 +169,7 @@ pub(crate) fn project_class_a_terminal_node(
             expr,
             ProjectionMode::Expanded,
         )?;
-        (
-            base,
-            verter_type_expr::OwnedSlice::<PathSegment>::default(),
-        )
+        (base, verter_type_expr::OwnedSlice::<PathSegment>::default())
     } else {
         let base = dispatch.lower_type_expr_in_owner_scope_with_mode(
             scope_canonical_id,

@@ -103,16 +103,20 @@ impl RefusalSummary {
     /// carrier's evidence pages are claimed into this reservation, a page
     /// being charged once however many summaries and candidates share it
     /// ([`verter_session_query::facts::receipt::reserve_retained_with_evidence`]).
-    fn own_retained_bytes(&self) -> usize {
+    fn own_retained_footprint(&self) -> verter_session_query::retention::Footprint {
         use verter_session_query::retention::allocation::{arc_block_bytes, AliasSet};
         let mut aliases = AliasSet::new();
-        arc_block_bytes(std::mem::size_of::<Self>())
+        let bytes = arc_block_bytes(std::mem::size_of::<Self>())
             + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
             + self
                 .prefix
                 .request
                 .as_ref()
-                .map_or(0, |spent| spent.owned_heap_bytes(&mut aliases))
+                .map_or(0, |spent| spent.owned_heap_bytes(&mut aliases));
+        verter_session_query::retention::Footprint {
+            bytes,
+            handles: aliases.take_handles(),
+        }
     }
 
     fn shared_parts(&self) -> super::retention::SharedParts<'_> {
@@ -231,12 +235,17 @@ impl SemanticGraphStore {
             Ok(shared) => shared,
             Err(refusal) => return refuse(refusal),
         };
+        let own_footprint = summary.own_retained_footprint();
         match verter_session_query::facts::receipt::reserve_retained_with_evidence(
             self.retention_account(),
-            summary.own_retained_bytes(),
+            own_footprint.bytes,
             &[&summary.carrier.facts],
         ) {
             RetentionAdmission::Admitted(own) => {
+                let own = match own_footprint.handles.retained_with(own, self.charge_ctx()) {
+                    Ok(own) => own,
+                    Err(refusal) => return refuse(refusal),
+                };
                 let retention = shared.with_own(own);
                 summary.retention = Some(retention);
             }

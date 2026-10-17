@@ -173,9 +173,9 @@ impl NodeRootSet {
             return Ok(Self::default());
         }
         arena.retain(&ids)?;
-        Ok(Self(Some(verter_session_query::retention::owned::Owned::new(
-            RootOwner { arena, ids },
-        ))))
+        Ok(Self(Some(
+            verter_session_query::retention::owned::Owned::new(RootOwner { arena, ids }),
+        )))
     }
 
     pub fn operands(&self) -> &[SemanticNodeId] {

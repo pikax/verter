@@ -2850,7 +2850,9 @@ fn class_method_flow_identity(
             space: LocatorSymbolSpace::Value,
         },
         function_part: FunctionPartIdentity::Member {
-            member_path: verter_type_expr::OwnedSlice::from(vec![raw_member_ordinal].into_boxed_slice()),
+            member_path: verter_type_expr::OwnedSlice::from(
+                vec![raw_member_ordinal].into_boxed_slice(),
+            ),
         },
         overload_ordinal,
     })

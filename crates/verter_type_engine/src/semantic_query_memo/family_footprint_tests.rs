@@ -103,7 +103,9 @@ fn a_typeof_family_holds_its_path_by_the_paths_own_cell() {
     let large = type_of(
         "/a.ts".into(),
         "v".into(),
-        (0..SEGMENTS).map(|_| OwnedStr::from("x".repeat(SEGMENT))).collect(),
+        (0..SEGMENTS)
+            .map(|_| OwnedStr::from("x".repeat(SEGMENT)))
+            .collect(),
     );
     let small = crate::semantic_query_memo::retention::family_container_footprint(&small);
     let large = crate::semantic_query_memo::retention::family_container_footprint(&large);
@@ -136,7 +138,10 @@ fn the_ledger_clone_pays_for_its_own_box_and_shares_every_handle() {
     // The map key and the ledger's clone each pay for their boxed path
     // handle; the path, its names and the key's other names are owned
     // allocations both copies share, charged by their own cells.
-    assert_eq!(family_container_bytes(&key), inline_records() + 2 * path_box);
+    assert_eq!(
+        family_container_bytes(&key),
+        inline_records() + 2 * path_box
+    );
 }
 
 #[test]

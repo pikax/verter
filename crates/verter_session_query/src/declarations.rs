@@ -28,8 +28,8 @@ pub mod headers;
 pub mod metadata;
 pub mod module_exports;
 
-use verter_type_expr::OwnedSlice;
 use std::sync::Arc;
+use verter_type_expr::OwnedSlice;
 
 use rustc_hash::FxHashMap;
 

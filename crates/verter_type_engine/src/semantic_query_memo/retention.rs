@@ -234,9 +234,9 @@ impl SemanticGraphStore {
             own.bytes,
             &[&entry.read_set_signature.facts],
         ) {
-            RetentionAdmission::Admitted(charge) => Ok(shared.with_own(
-                own.handles.retained_with(charge, self.charge_ctx())?,
-            )),
+            RetentionAdmission::Admitted(charge) => {
+                Ok(shared.with_own(own.handles.retained_with(charge, self.charge_ctx())?))
+            }
             RetentionAdmission::Refused(refusal) => Err(refusal),
         }
     }

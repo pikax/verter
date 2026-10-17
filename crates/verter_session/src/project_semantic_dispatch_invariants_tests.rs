@@ -251,7 +251,9 @@ fn relation_guard_returns_unknown_on_cyclic_reentry() {
     let object = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![])));
     let source = graph.intern_node(SemanticNodeData::IndexedAccess {
         object,
-        index: verter_type_engine::semantic_query::IndexKey::String(verter_type_expr::OwnedStr::from("a")),
+        index: verter_type_engine::semantic_query::IndexKey::String(
+            verter_type_expr::OwnedStr::from("a"),
+        ),
     });
     // Deferred shell on source → Unknown.
     let before = graph.relation_memo_count();
@@ -1457,11 +1459,15 @@ fn relation_unknown_is_never_warm_admitted_and_decided_entries_replay() {
     ])));
     let source = graph.intern_node(SemanticNodeData::IndexedAccess {
         object,
-        index: verter_type_engine::semantic_query::IndexKey::String(verter_type_expr::OwnedStr::from("a")),
+        index: verter_type_engine::semantic_query::IndexKey::String(
+            verter_type_expr::OwnedStr::from("a"),
+        ),
     });
     let target = graph.intern_node(SemanticNodeData::IndexedAccess {
         object,
-        index: verter_type_engine::semantic_query::IndexKey::String(verter_type_expr::OwnedStr::from("b")),
+        index: verter_type_engine::semantic_query::IndexKey::String(
+            verter_type_expr::OwnedStr::from("b"),
+        ),
     });
 
     let before = graph.relation_memo_count();
@@ -1491,11 +1497,15 @@ fn relation_unknown_is_never_warm_admitted_and_decided_entries_replay() {
     // NEVER produce for this pair), then read through the warm path.
     let seed_source = graph.intern_node(SemanticNodeData::IndexedAccess {
         object,
-        index: verter_type_engine::semantic_query::IndexKey::String(verter_type_expr::OwnedStr::from("c")),
+        index: verter_type_engine::semantic_query::IndexKey::String(
+            verter_type_expr::OwnedStr::from("c"),
+        ),
     });
     let seed_target = graph.intern_node(SemanticNodeData::IndexedAccess {
         object,
-        index: verter_type_engine::semantic_query::IndexKey::String(verter_type_expr::OwnedStr::from("d")),
+        index: verter_type_engine::semantic_query::IndexKey::String(
+            verter_type_expr::OwnedStr::from("d"),
+        ),
     });
     let seed_key = dispatch.relate_key_for(seed_source, seed_target);
     // Empty carrier + empty self-roots validate trivially; stamp the live

@@ -1266,9 +1266,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ),
             LocatorFrame::IndexedObject { index, binders } => {
                 let key = match index {
-                    TypeExpr::Literal(LiteralValue::String(s)) => {
-                        Some(IndexKey::String(verter_type_expr::OwnedStr::from(s.as_str())))
-                    }
+                    TypeExpr::Literal(LiteralValue::String(s)) => Some(IndexKey::String(
+                        verter_type_expr::OwnedStr::from(s.as_str()),
+                    )),
                     TypeExpr::Literal(LiteralValue::Number(n)) => {
                         crate::semantic_query::index_key::integer_convention_index_key(*n)
                             .map(IndexKey::Number)
@@ -1950,7 +1950,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     && root.split(':').nth(1) == Some("field");
                 let canonical = value_root.scope.canonical_id.clone();
                 let carrier = graph.intern_node_with_scope(
-                    SemanticNodeData::new_typeof(value_root, verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(path), type_args),
+                    SemanticNodeData::new_typeof(
+                        value_root,
+                        verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(path),
+                        type_args,
+                    ),
                     scope.clone(),
                 );
                 if is_instance_field_value && ctx.binders.innermost_first().next().is_some() {
@@ -1970,7 +1974,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 graph.intern_node_with_scope(
                     SemanticNodeData::new_import_type(
                         Arc::clone(specifier),
-                        verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(Arc::clone(qualifier)),
+                        verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+                            Arc::clone(qualifier),
+                        ),
                         type_args,
                         *typeof_query,
                     ),

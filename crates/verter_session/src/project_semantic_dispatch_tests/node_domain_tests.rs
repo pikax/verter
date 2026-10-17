@@ -73,9 +73,9 @@ fn opaque_sentinel_summary_is_typed_only_genuine_unknown_is_always_materialized(
     // The tag discriminator, FLIPPED: `Other("semanticObjectSurface")` is
     // INERT — it must NOT tag `ObjectSurfaceSentinel` (only the typed
     // `UnrepresentableSurface` carrier does).
-    let object_surface_text = summary::opaque_sentinel(&QueryError::Other(verter_type_expr::OwnedStr::from(
-        "semanticObjectSurface",
-    )));
+    let object_surface_text = summary::opaque_sentinel(&QueryError::Other(
+        verter_type_expr::OwnedStr::from("semanticObjectSurface"),
+    ));
     assert_eq!(
         object_surface_text.tag,
         FactShapeTag::Other,

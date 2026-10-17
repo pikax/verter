@@ -646,7 +646,9 @@ fn row_unrelated_mapped_key() -> MatrixRow {
                 // The whole mapped surface nobody demanded.
                 SemanticQueryKey::ProjectPath {
                     base,
-                    path: verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                    path: verter_type_expr::OwnedSlice::from(
+                        Vec::<PathSegment>::new().into_boxed_slice(),
+                    ),
                     context,
                 },
                 // The unrelated produced members.

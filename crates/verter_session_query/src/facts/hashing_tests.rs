@@ -1,6 +1,6 @@
+use super::*;
 use verter_type_expr::OwnedSlice;
 use verter_type_expr::OwnedStr;
-use super::*;
 use verter_type_expr::{
     ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, PropertyKey, TypeExpr, UnknownValue,
 };

@@ -561,10 +561,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .iter()
                 .any(|(canonical, _)| canonical == &key.point.canonical_id)
             {
-                self_roots.push((
-                    key.point.canonical_id.clone(),
-                    serve.indexed.whole_hash,
-                ));
+                self_roots.push((key.point.canonical_id.clone(), serve.indexed.whole_hash));
             }
             true
         } else {

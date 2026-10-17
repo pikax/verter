@@ -259,7 +259,11 @@ fn finite_union_spread_keeps_correlated_alternatives_through_final_overwrite() {
     let formula = project(
         &dispatch,
         program,
-        ObjectProjectionSelector::RelationShape(verter_type_expr::OwnedSlice::from([key("a"), key("b"), key("x")])),
+        ObjectProjectionSelector::RelationShape(verter_type_expr::OwnedSlice::from([
+            key("a"),
+            key("b"),
+            key("x"),
+        ])),
         ExactOptionalPropertyPolicy::Disabled,
     );
     assert_eq!(formula.alternatives().len(), 2);
@@ -695,9 +699,9 @@ fn lowering_and_navigation_use_the_program_without_eager_surface_collapse() {
 
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: lowered,
-        path: verter_type_expr::OwnedSlice::from([verter_type_engine::semantic_query::PathSegment::Member(
-            key("x"),
-        )]),
+        path: verter_type_expr::OwnedSlice::from([
+            verter_type_engine::semantic_query::PathSegment::Member(key("x")),
+        ]),
         context: ProjectionReductionContext::published(ProjectionMode::Navigate),
     });
     assert!(matches!(
@@ -2428,9 +2432,9 @@ fn path_projection_joins_closed_absent_alternatives_as_optional() {
 
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: correlated,
-        path: verter_type_expr::OwnedSlice::from([verter_type_engine::semantic_query::PathSegment::Member(
-            key("a"),
-        )]),
+        path: verter_type_expr::OwnedSlice::from([
+            verter_type_engine::semantic_query::PathSegment::Member(key("a")),
+        ]),
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     });
     let QueryResult::Value(SemanticQueryOutput { value, .. }) = projected else {

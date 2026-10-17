@@ -1678,7 +1678,9 @@ fn assert_callback_row_param_resolves_precisely(
         ctx,
         &dispatch,
         row_param_ty,
-        verter_type_expr::OwnedSlice::from(Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(
+            Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice(),
+        ),
         verter_type_engine::semantic_query::ProjectionReductionContext::published(
             verter_type_engine::semantic_query::ProjectionMode::Shallow,
         ),

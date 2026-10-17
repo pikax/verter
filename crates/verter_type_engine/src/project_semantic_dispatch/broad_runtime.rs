@@ -542,9 +542,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     let _ = probe.discard();
                     let member_read = self.execute_read(SemanticQueryKey::ProjectPath {
                         base: product.hot.node(),
-                        path: verter_type_expr::OwnedSlice::from([crate::semantic_query::PathSegment::Member(
-                            crate::semantic_query::PropertyKey::identifier(name.as_ref()),
-                        )]),
+                        path: verter_type_expr::OwnedSlice::from([
+                            crate::semantic_query::PathSegment::Member(
+                                crate::semantic_query::PropertyKey::identifier(name.as_ref()),
+                            ),
+                        ]),
                         context: ProjectionReductionContext::vue_runtime_object_surface(
                             ProjectionMode::Navigate,
                             provenance,

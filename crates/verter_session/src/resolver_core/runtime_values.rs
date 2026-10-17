@@ -695,7 +695,9 @@ mod tests {
                     canonical_id: verter_type_expr::OwnedStr::from("/src/theme.ts"),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     symbol: verter_type_expr::OwnedStr::from("theme"),
-                    member_path: verter_type_expr::OwnedSlice::from(Vec::<String>::new().into_boxed_slice()),
+                    member_path: verter_type_expr::OwnedSlice::from(
+                        Vec::<String>::new().into_boxed_slice(),
+                    ),
                 }),
                 classification: ValueAnnotationClass::TypeOfAlias,
                 annotation: None,

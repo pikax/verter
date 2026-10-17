@@ -598,13 +598,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 let _scope = self.semantic_dispatch().enter_construction_scope();
                 let root =
                     self.dispatch_root_instantiated(scope_canonical_id, scope_owner, root_symbol)?;
-                let query_path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(
-                    path.iter()
-                        .cloned()
-                        .map(PathSegment::Member)
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                );
+                let query_path: verter_type_expr::OwnedSlice<PathSegment> =
+                    verter_type_expr::OwnedSlice::from(
+                        path.iter()
+                            .cloned()
+                            .map(PathSegment::Member)
+                            .collect::<Vec<_>>()
+                            .into_boxed_slice(),
+                    );
                 let dispatch = self.semantic_dispatch();
                 match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
                     base: root,

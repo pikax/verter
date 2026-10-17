@@ -593,7 +593,8 @@ fn resolve_macro_payload_same_canonical_edit_rejects_warm_entry() {
 /// per observed self-root, pinned to the OBSERVED hash.
 #[test]
 fn read_set_signature_prepends_observed_self_roots() {
-    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> = vec![(verter_type_expr::OwnedStr::from("/w/a.ts"), [0x11; 16])];
+    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> =
+        vec![(verter_type_expr::OwnedStr::from("/w/a.ts"), [0x11; 16])];
     let carrier =
         semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &[])
             .expect("a single observed self-root builds a carrier");
@@ -628,7 +629,8 @@ fn read_set_signature_rejects_conflicting_self_root_hashes() {
 /// rail — the producer returns `None`.
 #[test]
 fn read_set_signature_rejects_traced_self_root_hash_mismatch() {
-    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> = vec![(verter_type_expr::OwnedStr::from("/w/a.ts"), [0x11; 16])];
+    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> =
+        vec![(verter_type_expr::OwnedStr::from("/w/a.ts"), [0x11; 16])];
     let traced = vec![FactVersionRef::FileWholeHash {
         canonical_id: "/w/a.ts".to_string(),
         hash: [0x99; 16],
@@ -665,7 +667,8 @@ fn paged_traced_set(root: FactVersionRef) -> Arc<[FactVersionRef]> {
 /// self-root `FileWholeHash` held on an evidence page is still a torn read.
 #[test]
 fn read_set_signature_rejects_a_traced_self_root_hash_mismatch_on_an_evidence_page() {
-    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> = vec![(verter_type_expr::OwnedStr::from("/w/a.ts"), [0x11; 16])];
+    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> =
+        vec![(verter_type_expr::OwnedStr::from("/w/a.ts"), [0x11; 16])];
     let traced = paged_traced_set(FactVersionRef::FileWholeHash {
         canonical_id: "/w/a.ts".to_string(),
         hash: [0x99; 16],
@@ -684,7 +687,8 @@ fn read_set_signature_rejects_a_traced_self_root_hash_mismatch_on_an_evidence_pa
 /// every traced fact is kept.
 #[test]
 fn a_paged_agreeing_self_root_keeps_its_precise_root() {
-    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> = vec![(verter_type_expr::OwnedStr::from("/w/a.ts"), [0x11; 16])];
+    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> =
+        vec![(verter_type_expr::OwnedStr::from("/w/a.ts"), [0x11; 16])];
     let traced = paged_traced_set(FactVersionRef::FileWholeHash {
         canonical_id: "/w/a.ts".to_string(),
         hash: [0x11; 16],
@@ -717,7 +721,8 @@ fn a_paged_agreeing_self_root_keeps_its_precise_root() {
 /// preserved verbatim.
 #[test]
 fn read_set_signature_merges_traced_cross_file_facts() {
-    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> = vec![(verter_type_expr::OwnedStr::from("/w/a.ts"), [0x11; 16])];
+    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> =
+        vec![(verter_type_expr::OwnedStr::from("/w/a.ts"), [0x11; 16])];
     let traced = vec![FactVersionRef::Parse(
         verter_session_query::facts::fact_cache::ParseFactRef {
             canonical_id: "/w/dep.ts".to_string(),
@@ -749,7 +754,8 @@ fn read_set_signature_merges_traced_cross_file_facts() {
 /// facts rail — a project-shape change still invalidates the entry.
 #[test]
 fn read_set_signature_keeps_traced_project_generation_fact() {
-    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> = vec![(verter_type_expr::OwnedStr::from("/w/a.ts"), [0x11; 16])];
+    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> =
+        vec![(verter_type_expr::OwnedStr::from("/w/a.ts"), [0x11; 16])];
     let traced = vec![FactVersionRef::ProjectGeneration { generation: 7 }];
     let carrier =
         semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &traced)
@@ -908,7 +914,8 @@ fn generic_content_aggregate_is_not_a_strict_self_root_witness() {
 /// carried by its strict-world witness — never refused.
 #[test]
 fn post_finalise_self_root_merge_pages_the_completed_carrier() {
-    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> = vec![(verter_type_expr::OwnedStr::from("/w/root.ts"), [0x11; 16])];
+    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> =
+        vec![(verter_type_expr::OwnedStr::from("/w/root.ts"), [0x11; 16])];
     let traced: Vec<FactVersionRef> = (0..FACT_PAGE_WIDTH)
         .map(|generation| FactVersionRef::ProjectGeneration {
             generation: generation as u64,
@@ -935,7 +942,8 @@ fn post_finalise_self_root_merge_pages_the_completed_carrier() {
 
 #[test]
 fn completed_structural_carrier_at_exactly_one_page_keeps_its_precise_root() {
-    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> = vec![(verter_type_expr::OwnedStr::from("/w/root.ts"), [0x11; 16])];
+    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> =
+        vec![(verter_type_expr::OwnedStr::from("/w/root.ts"), [0x11; 16])];
     let traced: Vec<FactVersionRef> = (0..FACT_PAGE_WIDTH - 1)
         .map(|generation| FactVersionRef::ProjectGeneration {
             generation: generation as u64,

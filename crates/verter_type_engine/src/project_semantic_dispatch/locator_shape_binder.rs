@@ -943,12 +943,13 @@ fn locator_with_path_step(
     locator: &AuthoredBodyLocator,
     step: verter_type_expr::locators::TypeBodyPathStep,
 ) -> AuthoredBodyLocator {
-    let append = |path: &verter_type_expr::OwnedSlice<verter_type_expr::locators::TypeBodyPathStep>| {
-        let mut next = Vec::with_capacity(path.len() + 1);
-        next.extend_from_slice(path);
-        next.push(step);
-        verter_type_expr::OwnedSlice::from(next)
-    };
+    let append =
+        |path: &verter_type_expr::OwnedSlice<verter_type_expr::locators::TypeBodyPathStep>| {
+            let mut next = Vec::with_capacity(path.len() + 1);
+            next.extend_from_slice(path);
+            next.push(step);
+            verter_type_expr::OwnedSlice::from(next)
+        };
     match locator {
         AuthoredBodyLocator::DeclBody(slot) => {
             AuthoredBodyLocator::DeclBody(verter_type_expr::locators::TypeBodySlot {

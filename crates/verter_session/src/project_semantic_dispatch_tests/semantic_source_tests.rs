@@ -490,7 +490,9 @@ fn synthesized_object_source_composes_a_surface_with_lowered_member_values() {
                         symbol: verter_type_expr::OwnedStr::from("Base"),
                         space: LocatorSymbolSpace::Type,
                     },
-                    path: verter_type_expr::OwnedSlice::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+                    path: verter_type_expr::OwnedSlice::from(
+                        Vec::<TypeBodyPathStep>::new().into_boxed_slice(),
+                    ),
                 }),
                 span_origin: MemberSpansOrigin::Synthetic(SourceSynthetic),
             },

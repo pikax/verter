@@ -38,9 +38,9 @@
 //! `NonCacheable`. The walker carries an explicit `BudgetExceeded`
 //! flag that producers check after [`compute_semantic_hash`].
 
-use verter_type_expr::OwnedStr;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use verter_type_expr::OwnedStr;
 
 use verter_type_expr::facts::{EnumPrimitiveDomain, EnumScalar};
 use verter_type_expr::{

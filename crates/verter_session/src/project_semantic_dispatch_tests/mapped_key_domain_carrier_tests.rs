@@ -115,7 +115,8 @@ fn shallow_member_names(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> Vec<String> {
-    let empty_path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::default();
+    let empty_path: verter_type_expr::OwnedSlice<PathSegment> =
+        verter_type_expr::OwnedSlice::default();
     let terminal = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: node,
         path: empty_path,

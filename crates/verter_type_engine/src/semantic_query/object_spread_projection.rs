@@ -1009,7 +1009,10 @@ impl verter_session_query::retention::owned::Measured for PositiveKeyFact {
     /// The key's text and the facets' declaration origin, each an owned
     /// allocation charged by its own cell; proven values are graph
     /// ordinals. Destructured exhaustively.
-    fn heap_bytes(&self, aliases: &mut verter_session_query::retention::allocation::AliasSet) -> usize {
+    fn heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
         use super::allocation_footprint::{copy_inline, OwnedHeap as _};
         let PositiveKeyFact {
             key,
@@ -1047,7 +1050,10 @@ impl verter_session_query::retention::owned::Measured for PositiveKeyFact {
 
 impl verter_session_query::retention::owned::Measured for ObjectProjectionIndex {
     /// The index's declaration origin. Destructured exhaustively.
-    fn heap_bytes(&self, aliases: &mut verter_session_query::retention::allocation::AliasSet) -> usize {
+    fn heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
         use super::allocation_footprint::{copy_inline, OwnedHeap as _};
         let ObjectProjectionIndex {
             domain,
@@ -1068,7 +1074,10 @@ impl verter_session_query::retention::owned::Measured for ObjectProjectionIndex 
 
 impl verter_session_query::retention::owned::Measured for ObjectProjectionSignature {
     /// A signature entry is inline.
-    fn heap_bytes(&self, _aliases: &mut verter_session_query::retention::allocation::AliasSet) -> usize {
+    fn heap_bytes(
+        &self,
+        _aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
         super::allocation_footprint::copy_inline(self)
     }
 }
@@ -1107,13 +1116,19 @@ impl super::allocation_footprint::OwnedHeap for ObjectProjectionAlternative {
                 AlternativeDomain::Open(OpenDomainWitnesses {
                     residual_operands,
                     indeterminate_possible_writes,
-                }) => residual_operands.offer(aliases) + indeterminate_possible_writes.offer(aliases),
+                }) => {
+                    residual_operands.offer(aliases) + indeterminate_possible_writes.offer(aliases)
+                }
             }
             + indices.offer(aliases)
             + signatures.offer(aliases)
             + match excess {
-                ExcessEligibility::Eligible { direct_candidates } => direct_candidates.offer(aliases),
-                ExcessEligibility::SuppressedByGenericSpread | ExcessEligibility::Indeterminate => 0,
+                ExcessEligibility::Eligible { direct_candidates } => {
+                    direct_candidates.offer(aliases)
+                }
+                ExcessEligibility::SuppressedByGenericSpread | ExcessEligibility::Indeterminate => {
+                    0
+                }
             }
     }
 }
@@ -1138,13 +1153,14 @@ pub(crate) mod evaluator_support {
 
     #[must_use]
     pub(crate) fn alternative(input: AlternativeInput) -> ObjectProjectionAlternative {
-        let complete_keys: verter_type_expr::OwnedSlice<PropertyKey> = verter_type_expr::OwnedSlice::from(
-            input
-                .positive
-                .iter()
-                .map(|fact| fact.key.clone())
-                .collect::<Vec<_>>(),
-        );
+        let complete_keys: verter_type_expr::OwnedSlice<PropertyKey> =
+            verter_type_expr::OwnedSlice::from(
+                input
+                    .positive
+                    .iter()
+                    .map(|fact| fact.key.clone())
+                    .collect::<Vec<_>>(),
+            );
         verter_debug_assert_eq!(
             complete_keys
                 .iter()
@@ -1336,7 +1352,9 @@ pub mod test_support {
             positive: verter_type_expr::OwnedSlice::from(positive.into_iter().collect::<Vec<_>>()),
             selector: ObjectProjectionSelector::Surface,
             closed: false,
-            residual_operands: verter_type_expr::OwnedSlice::from(residual_operands.into_iter().collect::<Vec<_>>()),
+            residual_operands: verter_type_expr::OwnedSlice::from(
+                residual_operands.into_iter().collect::<Vec<_>>(),
+            ),
             indeterminate_possible_writes: verter_type_expr::OwnedSlice::from([]),
             indices: verter_type_expr::OwnedSlice::from([]),
             signatures: verter_type_expr::OwnedSlice::from([]),
@@ -1362,10 +1380,14 @@ pub mod test_support {
     ) -> ObjectProjectionFormula {
         evaluator_support::formula([evaluator_support::alternative(
             evaluator_support::AlternativeInput {
-                positive: verter_type_expr::OwnedSlice::from(positive.into_iter().collect::<Vec<_>>()),
+                positive: verter_type_expr::OwnedSlice::from(
+                    positive.into_iter().collect::<Vec<_>>(),
+                ),
                 selector: ObjectProjectionSelector::Surface,
                 closed: false,
-                residual_operands: verter_type_expr::OwnedSlice::from(residual_operands.into_iter().collect::<Vec<_>>()),
+                residual_operands: verter_type_expr::OwnedSlice::from(
+                    residual_operands.into_iter().collect::<Vec<_>>(),
+                ),
                 indeterminate_possible_writes: verter_type_expr::OwnedSlice::from(
                     indeterminate_possible_writes
                         .into_iter()

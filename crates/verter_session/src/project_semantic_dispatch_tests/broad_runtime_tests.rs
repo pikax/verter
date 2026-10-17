@@ -713,7 +713,9 @@ fn opaque_query_fault_is_partial_but_honest_miss_is_complete_unknown() {
     let graph = host.project_type_store().semantic_graph();
     let scope = file_scope(&dispatch, "/query-fault.ts");
     let fault_subject = graph.intern_node_with_scope(
-        SemanticNodeData::Opaque(QueryError::Other(verter_type_expr::OwnedStr::from("fixture fault"))),
+        SemanticNodeData::Opaque(QueryError::Other(verter_type_expr::OwnedStr::from(
+            "fixture fault",
+        ))),
         scope.clone(),
     );
     let miss_subject =

@@ -34,7 +34,9 @@ fn a_nested_error_and_its_declaration_are_charged() {
     let message: Arc<str> = Arc::from("m".repeat(5_000));
     let diagnostic = ShallowDiagnostic::InstantiationError {
         decl,
-        error: DiagnosticError::for_tests(QueryError::Other(verter_type_expr::OwnedStr::from(message.clone()))),
+        error: DiagnosticError::for_tests(QueryError::Other(verter_type_expr::OwnedStr::from(
+            message.clone(),
+        ))),
     };
     assert!(diagnostic.owned_heap_bytes(&mut AliasSet::estimating()) >= 5_000);
 }
@@ -296,7 +298,9 @@ fn an_object_projection_is_charged_for_its_excess_candidate_text() {
         ]))
     };
     let eligible = formula(ExcessEligibility::Eligible {
-        direct_candidates: verter_type_expr::OwnedSlice::from(vec![PropertyKey::String(OwnedStr::from("x".repeat(TEXT)))]),
+        direct_candidates: verter_type_expr::OwnedSlice::from(vec![PropertyKey::String(
+            OwnedStr::from("x".repeat(TEXT)),
+        )]),
     });
     let indeterminate = formula(ExcessEligibility::Indeterminate);
     assert!(value_bytes(eligible) >= value_bytes(indeterminate) + arc_block_bytes(TEXT));

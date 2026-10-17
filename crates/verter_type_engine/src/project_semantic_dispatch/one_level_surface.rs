@@ -483,7 +483,9 @@ pub fn project_one_level_surface<C: crate::resolver_core::ResolverCapabilities>(
                     ctx,
                     dispatch,
                     constraint,
-                    verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                    verter_type_expr::OwnedSlice::from(
+                        Vec::<PathSegment>::new().into_boxed_slice(),
+                    ),
                     context,
                     walker_diagnostics,
                 )
@@ -613,7 +615,9 @@ pub fn project_one_level_surface<C: crate::resolver_core::ResolverCapabilities>(
                     ctx,
                     dispatch,
                     constraint,
-                    verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                    verter_type_expr::OwnedSlice::from(
+                        Vec::<PathSegment>::new().into_boxed_slice(),
+                    ),
                     context,
                     None,
                 )
@@ -1127,7 +1131,9 @@ fn runtime_object_macro_surface<C: crate::resolver_core::ResolverCapabilities>(
         AnalyzedMacroKind::DefineExpose => {
             for field in &mac.expose_fields {
                 entries.push(SurfaceEntry::Member(SurfaceMember {
-                    key: AuthoredPropertyKey::String(verter_type_expr::OwnedStr::from(field.name.as_str())),
+                    key: AuthoredPropertyKey::String(verter_type_expr::OwnedStr::from(
+                        field.name.as_str(),
+                    )),
                     // The exposed value's real type is not re-derived
                     // here (see the doc comment above) — `unknown` is
                     // the honest placeholder, never a fabricated shape.
@@ -1150,7 +1156,9 @@ fn runtime_object_macro_surface<C: crate::resolver_core::ResolverCapabilities>(
         AnalyzedMacroKind::DefineProps => {
             for field in &mac.prop_fields {
                 entries.push(SurfaceEntry::Member(SurfaceMember {
-                    key: AuthoredPropertyKey::String(verter_type_expr::OwnedStr::from(field.name.as_str())),
+                    key: AuthoredPropertyKey::String(verter_type_expr::OwnedStr::from(
+                        field.name.as_str(),
+                    )),
                     value: unknown_member_value_node(dispatch),
                     optional: field.is_optional,
                     readonly: false,
@@ -1244,5 +1252,8 @@ fn decompose_indexed_access_chain_node<C: crate::resolver_core::ResolverCapabili
         }
     }
     rev_path.reverse();
-    (current, verter_type_expr::OwnedSlice::from(rev_path.into_boxed_slice()))
+    (
+        current,
+        verter_type_expr::OwnedSlice::from(rev_path.into_boxed_slice()),
+    )
 }

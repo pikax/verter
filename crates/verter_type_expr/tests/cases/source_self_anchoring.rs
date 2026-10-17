@@ -8,9 +8,9 @@
 //! Each test discriminates: it FAILS against a tree without the deep
 //! normalizer (compile-missing or a shallow-only rewrite) AND PASSES with it.
 
+use std::sync::Arc;
 use verter_type_expr::OwnedSlice;
 use verter_type_expr::OwnedStr;
-use std::sync::Arc;
 
 use verter_type_expr::facts::DeclarationOrigin;
 use verter_type_expr::facts::{

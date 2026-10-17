@@ -7374,7 +7374,9 @@ mod env_scoped_key_identity_guards {
         // DIFFERENT value for the same (decl, args, context), so warm-hitting
         // one on another would hand back a foreign answer.
         let member = |name: &str| {
-            let path: verter_type_expr::OwnedSlice<verter_type_engine::semantic_query::PathSegment> = verter_type_expr::OwnedSlice::from(
+            let path: verter_type_expr::OwnedSlice<
+                verter_type_engine::semantic_query::PathSegment,
+            > = verter_type_expr::OwnedSlice::from(
                 vec![verter_type_engine::semantic_query::PathSegment::Member(
                     verter_type_engine::semantic_query::PropertyKey::identifier(Arc::from(name)),
                 )]
@@ -7387,9 +7389,13 @@ mod env_scoped_key_identity_guards {
         // path vocabulary carries index segments (including computed
         // ones), so the table covers them alongside member segments.
         let index = |name: &str| {
-            let path: verter_type_expr::OwnedSlice<verter_type_engine::semantic_query::PathSegment> = verter_type_expr::OwnedSlice::from(
+            let path: verter_type_expr::OwnedSlice<
+                verter_type_engine::semantic_query::PathSegment,
+            > = verter_type_expr::OwnedSlice::from(
                 vec![verter_type_engine::semantic_query::PathSegment::Index(
-                    verter_type_engine::semantic_query::IndexKey::String(verter_type_expr::OwnedStr::from(name)),
+                    verter_type_engine::semantic_query::IndexKey::String(
+                        verter_type_expr::OwnedStr::from(name),
+                    ),
                 )]
                 .into_boxed_slice(),
             );
@@ -9822,7 +9828,9 @@ mod release_embedded_node_family_tests {
     }
 
     fn computed_index_path(node: SemanticNodeId) -> verter_type_expr::OwnedSlice<PathSegment> {
-        verter_type_expr::OwnedSlice::from([PathSegment::Index(AuthoredPropertyKey::Computed(node))])
+        verter_type_expr::OwnedSlice::from([PathSegment::Index(AuthoredPropertyKey::Computed(
+            node,
+        ))])
     }
 
     fn slot(canonical: &str, name: &str) -> ResolvedDeclSlotIdentity {

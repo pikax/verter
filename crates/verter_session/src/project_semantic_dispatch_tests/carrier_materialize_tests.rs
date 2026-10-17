@@ -168,7 +168,9 @@ fn materialize_typeof_round_trips_type_args() {
             },
             name: verter_type_expr::OwnedStr::from("factory"),
         },
-        verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from("make")].into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(
+            vec![verter_type_expr::OwnedStr::from("make")].into_boxed_slice(),
+        ),
         Arc::from(vec![arg].into_boxed_slice()),
     ));
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -203,7 +205,13 @@ fn materialize_import_type_round_trips() {
     let arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let node = graph.intern_node(SemanticNodeData::new_import_type(
         Arc::from("./module"),
-        verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from("A"), verter_type_expr::OwnedStr::from("B")].into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(
+            vec![
+                verter_type_expr::OwnedStr::from("A"),
+                verter_type_expr::OwnedStr::from("B"),
+            ]
+            .into_boxed_slice(),
+        ),
         Arc::from(vec![arg].into_boxed_slice()),
         true,
     ));

@@ -185,7 +185,11 @@ pub struct ImportedRegistryEntry {
     pub validated_at_generation: u64,
 }
 
-pub type ImportedRegistryKey = (verter_type_expr::OwnedStr, verter_type_expr::TopLevelOwnerId, verter_type_expr::OwnedStr);
+pub type ImportedRegistryKey = (
+    verter_type_expr::OwnedStr,
+    verter_type_expr::TopLevelOwnerId,
+    verter_type_expr::OwnedStr,
+);
 
 /// The value the imported-registry store holds per candidate.
 pub type ImportedRegistryValue = Option<Arc<ResolvedImportedRegistrySymbol>>;
@@ -388,7 +392,11 @@ impl crate::cache_schema::CacheSchemaVersioned for ImportedRegistryDb {
 // 2. DeclarationLookupDb — `(canonical, owner, name) → ResolvedTypeDeclaration`
 // ===========================================================================
 
-pub type DeclarationLookupKey = (verter_type_expr::OwnedStr, verter_type_expr::TopLevelOwnerId, verter_type_expr::OwnedStr);
+pub type DeclarationLookupKey = (
+    verter_type_expr::OwnedStr,
+    verter_type_expr::TopLevelOwnerId,
+    verter_type_expr::OwnedStr,
+);
 
 pub struct DeclarationLookupDb {
     entries: DashMap<DeclarationLookupKey, Arc<CacheEntry<Arc<ResolvedTypeDeclaration>>>>,
@@ -479,7 +487,11 @@ impl Default for DeclarationLookupDb {
 // 3. ResolvabilityDb — `(canonical, owner, name) → bool`
 // ===========================================================================
 
-pub type ResolvabilityKey = (verter_type_expr::OwnedStr, verter_type_expr::TopLevelOwnerId, verter_type_expr::OwnedStr);
+pub type ResolvabilityKey = (
+    verter_type_expr::OwnedStr,
+    verter_type_expr::TopLevelOwnerId,
+    verter_type_expr::OwnedStr,
+);
 
 pub struct ResolvabilityDb {
     entries: DashMap<ResolvabilityKey, Arc<CacheEntry<bool>>>,
@@ -580,7 +592,11 @@ impl Default for ResolvabilityDb {
 // only, not a key or validity-oracle change.
 // ===========================================================================
 
-pub type OwnerCollectionKey = (verter_type_expr::OwnedStr, verter_type_expr::TopLevelOwnerId, verter_type_expr::OwnedStr);
+pub type OwnerCollectionKey = (
+    verter_type_expr::OwnedStr,
+    verter_type_expr::TopLevelOwnerId,
+    verter_type_expr::OwnedStr,
+);
 
 pub struct OwnerCollectionDb {
     entries: DashMap<
@@ -986,7 +1002,9 @@ impl ShapeDemand {
         terminal_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Self {
         Self {
-            path: verter_type_expr::OwnedSlice::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::from(
+                Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice(),
+            ),
             terminal_context,
             key_filter: KeyFilter::All,
             surface: PublishedSurfaceKind::Internal {

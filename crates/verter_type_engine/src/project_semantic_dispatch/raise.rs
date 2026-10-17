@@ -198,7 +198,9 @@ fn canonicalise_for_digest(
         SemanticQueryKey::IndexedAccess { base, index, mode } => {
             Cow::Owned(SemanticQueryKey::ProjectPath {
                 base: *base,
-                path: verter_type_expr::OwnedSlice::from(vec![PathSegment::Index(index.clone())].into_boxed_slice()),
+                path: verter_type_expr::OwnedSlice::from(
+                    vec![PathSegment::Index(index.clone())].into_boxed_slice(),
+                ),
                 context: crate::semantic_query::ProjectionReductionContext::published(*mode),
             })
         }
@@ -2795,7 +2797,9 @@ fn type_param_shell_node<C: crate::resolver_core::ResolverCapabilities>(
 ) -> SemanticNodeId {
     dispatch.graph().intern_node(SemanticNodeData::TypeParam {
         decl: crate::semantic_query::DeclIdentity {
-            canonical_id: verter_type_expr::OwnedStr::from(prepared.root_identity.canonical_id.clone()),
+            canonical_id: verter_type_expr::OwnedStr::from(
+                prepared.root_identity.canonical_id.clone(),
+            ),
             owner: prepared.root_identity.owner,
             whole_hash: crate::semantic_query::HashValue::default(),
             decl_name: verter_type_expr::OwnedStr::from(prepared.root_identity.symbol_name.clone()),
@@ -2981,7 +2985,9 @@ fn prepared_instantiation_key_domain_is_closed_unguarded<
                         || resolved.symbol_name.as_ref() != base.decl_name.as_ref()
                 }) {
                     let resolved = crate::semantic_query::DeclIdentity {
-                        canonical_id: verter_type_expr::OwnedStr::from(resolved.canonical_id.clone()),
+                        canonical_id: verter_type_expr::OwnedStr::from(
+                            resolved.canonical_id.clone(),
+                        ),
                         owner: resolved.owner,
                         whole_hash: crate::semantic_query::HashValue::default(),
                         decl_name: verter_type_expr::OwnedStr::from(resolved.symbol_name.clone()),

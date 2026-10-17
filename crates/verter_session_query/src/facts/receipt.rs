@@ -230,21 +230,29 @@ const ARC_STR_HEADER_BYTES: usize = ARC_HEADER_BYTES;
 /// own facts hold (a consumed receipt is its own charged allocation, so it
 /// costs only its slot here), its aggregated domains and the canonical-set
 /// storage it does not share with the evidence it consumed.
+///
+/// The owned names its facts reach are charged by their own cells: they
+/// are pinned with the evidence (`pin_names_to`), never counted here.
 fn evidence_storage_bytes(
     facts: &[FactVersionRef],
     aggregated: usize,
     canonical_set_bytes: usize,
+    pin_names_to: &std::sync::Arc<crate::retention::SemanticRetentionAccount>,
 ) -> usize {
     use crate::retention::allocation::{arc_block_bytes, fact_heap_bytes, AliasSet};
     let mut aliases = AliasSet::new();
-    arc_block_bytes(std::mem::size_of::<ResultEvidence>())
+    let bytes = arc_block_bytes(std::mem::size_of::<ResultEvidence>())
         + arc_block_bytes(std::mem::size_of_val(facts))
         + facts
             .iter()
             .map(|fact| fact_heap_bytes(fact, &mut aliases))
             .sum::<usize>()
         + arc_block_bytes(aggregated * std::mem::size_of::<CompactionDomain>())
-        + canonical_set_bytes
+        + canonical_set_bytes;
+    aliases
+        .take_handles()
+        .pin(crate::retention::owned::ChargeCtx::new(pin_names_to));
+    bytes
 }
 
 /// A receipt for a completed result: its evidence, shared.
@@ -403,6 +411,7 @@ impl ResultReceipt {
             &facts,
             aggregated.len(),
             canonical_set_bytes,
+            account,
         )));
         Self(Arc::new(ResultEvidence {
             facts: facts.into(),

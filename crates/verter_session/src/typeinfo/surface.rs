@@ -555,7 +555,10 @@ where
 /// The canonical origin file a node was first lowered in, when it is a
 /// single-declaration-file scope. `None` for `Global` / non-file scopes (a
 /// primitive, a structural composed node).
-fn node_origin_file(graph: &SemanticGraphStore, node: SemanticNodeId) -> Option<verter_type_expr::OwnedStr> {
+fn node_origin_file(
+    graph: &SemanticGraphStore,
+    node: SemanticNodeId,
+) -> Option<verter_type_expr::OwnedStr> {
     match graph.node_scope_in_scope(node) {
         Some(NodeScopeId::File { canonical_id, .. }) => Some(canonical_id),
         _ => None,

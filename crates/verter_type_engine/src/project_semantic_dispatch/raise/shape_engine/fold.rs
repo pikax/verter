@@ -133,9 +133,10 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
                         crate::semantic_query::PrintedUnionArm::Node(member) => {
                             fold_node(alg, dispatch, member, active)
                         }
-                        crate::semantic_query::PrintedUnionArm::Enum(decl) => {
-                            Some(alg.reference(std::sync::Arc::<str>::from(decl.decl_name.as_str()), Vec::new()))
-                        }
+                        crate::semantic_query::PrintedUnionArm::Enum(decl) => Some(alg.reference(
+                            std::sync::Arc::<str>::from(decl.decl_name.as_str()),
+                            Vec::new(),
+                        )),
                     })
                     .collect::<Option<_>>()?;
             alg.union(folded)
@@ -394,9 +395,10 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
                 crate::semantic_query::SignatureKind::Construct => alg.constructor_to_out(function),
             }
         }
-        SemanticNodeData::DeclRef { identity } => {
-            alg.reference(std::sync::Arc::<str>::from(identity.decl_name.as_str()), Vec::new())
-        }
+        SemanticNodeData::DeclRef { identity } => alg.reference(
+            std::sync::Arc::<str>::from(identity.decl_name.as_str()),
+            Vec::new(),
+        ),
         // Raised as a FIRST-CLASS operation over its raised operands. NOT
         // `alg.reference(...)`: an intrinsic names no declaration, and
         // raising it as one would conflate it with a userland type spelled
@@ -421,7 +423,10 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
                     })
                 })
                 .collect();
-            alg.reference(std::sync::Arc::<str>::from(base.decl_name.as_str()), raised_args)
+            alg.reference(
+                std::sync::Arc::<str>::from(base.decl_name.as_str()),
+                raised_args,
+            )
         }
         SemanticNodeData::BareRef(_) => {
             let (name, _scope) = data.bare_ref_head().expect("BareRef carrier head");

@@ -636,7 +636,9 @@ impl ArenaInner {
         visitor
             .handles
             .take_handles()
-            .pin(verter_session_query::retention::owned::ChargeCtx::new(account));
+            .pin(verter_session_query::retention::owned::ChargeCtx::new(
+                account,
+            ));
         bytes + (self.shared_heap_table_bytes() - table_before)
     }
 
@@ -812,7 +814,8 @@ fn payload_binds_canonical(data: &SemanticNodeData, canonical_id: &str) -> bool 
     use verter_type_expr::facts::FunctionReturnSource;
 
     let names = |canonical: &str| canonical == canonical_id;
-    let declared_in = |origin: &Option<verter_type_expr::OwnedStr>| origin.as_deref() == Some(canonical_id);
+    let declared_in =
+        |origin: &Option<verter_type_expr::OwnedStr>| origin.as_deref() == Some(canonical_id);
     match data {
         SemanticNodeData::DeclRef { identity } => names(&identity.canonical_id),
         SemanticNodeData::InstantiationRef { base, .. } => names(&base.canonical_id),

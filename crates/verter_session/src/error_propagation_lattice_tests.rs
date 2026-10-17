@@ -164,9 +164,9 @@ fn error_any_never_propagation_lattice() {
     let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
     let never = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
     let unknown = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
-    let error = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(verter_type_expr::OwnedStr::from(
-        "boom",
-    ))));
+    let error = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(
+        verter_type_expr::OwnedStr::from("boom"),
+    )));
 
     let kind = |id: SemanticNodeId| graph.node_data(id).map(|d| d.copy_for_tests());
 
@@ -684,9 +684,9 @@ fn error_type_is_returnonly_prone_any_is_cacheable() {
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
-    let error = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(verter_type_expr::OwnedStr::from(
-        "boom",
-    ))));
+    let error = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(
+        verter_type_expr::OwnedStr::from("boom"),
+    )));
 
     let is_assignable = |a: SemanticNodeId, b: SemanticNodeId| {
         matches!(

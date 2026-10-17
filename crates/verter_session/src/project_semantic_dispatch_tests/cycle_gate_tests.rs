@@ -688,15 +688,17 @@ fn cycle_gate_observed_self_roots_cover_root_and_every_visited_decl() {
     let output = dispatch.build_classify_materialization_cycle_gate_for_tests(&key);
 
     assert!(
-        output
-            .observed_self_roots
-            .contains(&(verter_type_expr::OwnedStr::from(StdArc::from("/cg_roots_root.ts")), root_hash)),
+        output.observed_self_roots.contains(&(
+            verter_type_expr::OwnedStr::from(StdArc::from("/cg_roots_root.ts")),
+            root_hash
+        )),
         "the root declaration is an observed self-root with its observed hash"
     );
     assert!(
-        output
-            .observed_self_roots
-            .contains(&(verter_type_expr::OwnedStr::from(StdArc::from("/cg_roots_helper.ts")), helper_hash)),
+        output.observed_self_roots.contains(&(
+            verter_type_expr::OwnedStr::from(StdArc::from("/cg_roots_helper.ts")),
+            helper_hash
+        )),
         "every visited declaration is an observed self-root with its observed hash"
     );
     assert!(
@@ -875,11 +877,7 @@ fn cycle_gate_classifier_invoked_around_relate_leaves_relation_frames_untouched(
     let instantiate = |name: &str| {
         let id = decl_identity(host, "/cg_relate.ts", name);
         let key = SemanticQueryKey::Instantiate(InstantiateKey::new(
-            dispatch.type_slot_for(
-                id.canonical_id.clone(),
-                id.owner,
-                id.decl_name.clone(),
-            ),
+            dispatch.type_slot_for(id.canonical_id.clone(), id.owner, id.decl_name.clone()),
             StdArc::from(Vec::new().into_boxed_slice()),
             dispatch.instantiate_context_for(
                 "/cg_relate.ts",
@@ -1003,7 +1001,9 @@ mod carrier_descent_tests {
             )),
             graph.intern_node(SemanticNodeData::new_import_type(
                 Arc::from("./m"),
-                verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from("G")].into_boxed_slice()),
+                verter_type_expr::OwnedSlice::from(
+                    vec![verter_type_expr::OwnedStr::from("G")].into_boxed_slice(),
+                ),
                 Arc::clone(&args),
                 false,
             )),

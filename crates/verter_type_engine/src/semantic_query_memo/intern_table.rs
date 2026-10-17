@@ -67,7 +67,10 @@ pub trait InternDomain: Hash + Eq + Send + Sync + Sized + 'static {
     ///
     /// Owned handles the value reaches are offered to `aliases`: the record
     /// pins them, each charged by its own cell.
-    fn value_heap_bytes(&self, aliases: &mut verter_session_query::retention::allocation::AliasSet) -> usize;
+    fn value_heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize;
 
     /// Hand `out` a handle to every same-kind child this value owns,
     /// leaving the value holding none — even when the value's storage is
@@ -296,9 +299,11 @@ impl<T: InternDomain> WeakInternTable<T> {
                 let bytes = verter_session_query::retention::allocation::arc_block_bytes(
                     std::mem::size_of::<InternRecord<T>>(),
                 ) + value.value_heap_bytes(&mut aliases);
-                aliases.take_handles().pin(verter_session_query::retention::owned::ChargeCtx::new(
-                    &verter_session_query::retention::SemanticRetentionAccount::process_local(),
-                ));
+                aliases
+                    .take_handles()
+                    .pin(verter_session_query::retention::owned::ChargeCtx::new(
+                        &verter_session_query::retention::SemanticRetentionAccount::process_local(),
+                    ));
                 Arc::new(InternRecord {
                     arena,
                     digest,

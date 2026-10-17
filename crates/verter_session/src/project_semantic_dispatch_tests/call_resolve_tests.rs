@@ -3991,7 +3991,9 @@ fn incomplete_opaque_callee_is_not_classified_not_callable() {
     );
     for incomplete in [
         verter_type_engine::semantic_query::QueryError::Cancelled,
-        verter_type_engine::semantic_query::QueryError::Other(verter_type_expr::OwnedStr::from("unsettled")),
+        verter_type_engine::semantic_query::QueryError::Other(verter_type_expr::OwnedStr::from(
+            "unsettled",
+        )),
     ] {
         let callee = graph.intern_node(SemanticNodeData::Opaque(incomplete.clone()));
         let step = dispatch.execute_resolve_call(call_key(

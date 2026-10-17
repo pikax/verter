@@ -226,7 +226,9 @@ fn concrete_slots_object_props_skip_define_props_member_route_projection() {
         verter_type_engine::semantic_query::SemanticQueryKey::ResolveDecl(
             verter_type_engine::semantic_query::ResolveDeclKey {
                 scope: verter_type_engine::semantic_query::ScopeId {
-                    canonical_id: verter_type_expr::OwnedStr::from("/workspace/src/button-types.ts"),
+                    canonical_id: verter_type_expr::OwnedStr::from(
+                        "/workspace/src/button-types.ts",
+                    ),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     local_scope: None,
                     binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(

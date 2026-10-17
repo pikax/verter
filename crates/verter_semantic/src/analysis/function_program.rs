@@ -1433,7 +1433,9 @@ fn discover_statement<'ast>(
                             discover_function_inner(
                                 func,
                                 "default",
-                                FunctionPartIdentity::Member { member_path: member_path.into() },
+                                FunctionPartIdentity::Member {
+                                    member_path: member_path.into(),
+                                },
                                 contributor_index,
                                 descent,
                                 0,
@@ -1444,7 +1446,9 @@ fn discover_statement<'ast>(
                             discover_arrow_inner(
                                 arrow,
                                 "default",
-                                FunctionPartIdentity::Member { member_path: member_path.into() },
+                                FunctionPartIdentity::Member {
+                                    member_path: member_path.into(),
+                                },
                                 contributor_index,
                                 descent,
                                 ctx,
@@ -1646,7 +1650,9 @@ fn discover_variable_declaration<'ast>(
                 let served = verter_session_query::function_program::ProgramInitializerSource {
                     function: FlowFunctionReturnIdentity {
                         anchor: AuthoredAnchor {
-                            canonical_id: verter_type_expr::OwnedStr::from(ctx.canonical_id.clone()),
+                            canonical_id: verter_type_expr::OwnedStr::from(
+                                ctx.canonical_id.clone(),
+                            ),
                             owner: anchor.owner,
                             symbol: verter_type_expr::OwnedStr::from(name.as_str()),
                             space: LocatorSymbolSpace::Value,
@@ -1723,7 +1729,9 @@ fn discover_variable_declaration<'ast>(
                             discover_function_inner(
                                 func,
                                 &name,
-                                FunctionPartIdentity::Member { member_path: member_path.into() },
+                                FunctionPartIdentity::Member {
+                                    member_path: member_path.into(),
+                                },
                                 contributor_index,
                                 descent(FunctionDescentStep::ObjectMember {
                                     member_ordinal: u32::try_from(member_ordinal)
@@ -1738,7 +1746,9 @@ fn discover_variable_declaration<'ast>(
                             discover_arrow_inner(
                                 arrow,
                                 &name,
-                                FunctionPartIdentity::Member { member_path: member_path.into() },
+                                FunctionPartIdentity::Member {
+                                    member_path: member_path.into(),
+                                },
                                 contributor_index,
                                 descent(FunctionDescentStep::ObjectMember {
                                     member_ordinal: u32::try_from(member_ordinal)
@@ -2144,7 +2154,9 @@ fn discover_class_members<'ast>(
                 discover_function_inner(
                     &method.value,
                     name,
-                    FunctionPartIdentity::Member { member_path: member_path.into() },
+                    FunctionPartIdentity::Member {
+                        member_path: member_path.into(),
+                    },
                     contributor_index,
                     descent,
                     overload,
@@ -2232,7 +2244,9 @@ fn discover_class_members<'ast>(
                         discover_arrow_inner(
                             arrow,
                             name,
-                            FunctionPartIdentity::Member { member_path: member_path.into() },
+                            FunctionPartIdentity::Member {
+                                member_path: member_path.into(),
+                            },
                             contributor_index,
                             descent,
                             ctx,
@@ -2242,7 +2256,9 @@ fn discover_class_members<'ast>(
                         discover_function_inner(
                             func,
                             name,
-                            FunctionPartIdentity::Member { member_path: member_path.into() },
+                            FunctionPartIdentity::Member {
+                                member_path: member_path.into(),
+                            },
                             contributor_index,
                             descent,
                             0,

@@ -9,9 +9,9 @@
 //! serde round-trip is identity. Split from `fact_witnesses` along the
 //! replay-route boundary.
 
-use crate::OwnedStr;
 use crate::facts::*;
 use crate::locators::*;
+use crate::OwnedStr;
 
 fn empty_projected_surface() -> ProjectedSurfaceFact {
     ProjectedSurfaceFact {

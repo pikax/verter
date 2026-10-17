@@ -3089,12 +3089,13 @@ fn project_member_path(
     base: SemanticNodeId,
     key: &str,
 ) -> SemanticNodeId {
-    let path: verter_type_expr::OwnedSlice<verter_type_engine::semantic_query::PathSegment> = verter_type_expr::OwnedSlice::from(
-        vec![verter_type_engine::semantic_query::PathSegment::Member(
-            verter_type_engine::semantic_query::PropertyKey::identifier(key),
-        )]
-        .into_boxed_slice(),
-    );
+    let path: verter_type_expr::OwnedSlice<verter_type_engine::semantic_query::PathSegment> =
+        verter_type_expr::OwnedSlice::from(
+            vec![verter_type_engine::semantic_query::PathSegment::Member(
+                verter_type_engine::semantic_query::PropertyKey::identifier(key),
+            )]
+            .into_boxed_slice(),
+        );
     match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base,
         path,
@@ -3587,7 +3588,9 @@ fn flow_return_nearest_declaration_wins_between_binders_and_frame_locals() {
                 dispatch,
                 "ClassLocalShadow",
                 FunctionPartIdentity::Member {
-                    member_path: verter_type_expr::OwnedSlice::from(vec![member_ordinal].into_boxed_slice()),
+                    member_path: verter_type_expr::OwnedSlice::from(
+                        vec![member_ordinal].into_boxed_slice(),
+                    ),
                 },
             );
             assert_flow_fails_closed(

@@ -1102,9 +1102,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             projection_evidence.push(index.evidence().clone());
             path.push(PathSegment::Index(IndexKey::Computed(index.node())));
         }
-        Ok(SemanticOperandForceProjection::Path(verter_type_expr::OwnedSlice::from(
-            path.into_boxed_slice(),
-        )))
+        Ok(SemanticOperandForceProjection::Path(
+            verter_type_expr::OwnedSlice::from(path.into_boxed_slice()),
+        ))
     }
 
     pub(super) fn force_semantic_operand(

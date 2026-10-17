@@ -1193,7 +1193,9 @@ fn typeof_carrier_renders_type_args() {
 
     let bare = store.intern_node(SemanticNodeData::new_typeof(
         value_root.clone(),
-        verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from("make")].into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(
+            vec![verter_type_expr::OwnedStr::from("make")].into_boxed_slice(),
+        ),
         Arc::from(Vec::new().into_boxed_slice()),
     ));
     assert_eq!(
@@ -1204,7 +1206,9 @@ fn typeof_carrier_renders_type_args() {
 
     let applied = store.intern_node(SemanticNodeData::new_typeof(
         value_root,
-        verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from("make")].into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(
+            vec![verter_type_expr::OwnedStr::from("make")].into_boxed_slice(),
+        ),
         Arc::from(vec![string_id].into_boxed_slice()),
     ));
     assert_eq!(

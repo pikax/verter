@@ -2664,7 +2664,9 @@ mod tests {
                     canonical_id: verter_type_expr::OwnedStr::from("/source"),
                     owner: target_owner,
                     symbol: verter_type_expr::OwnedStr::from(target),
-                    member_path: verter_type_expr::OwnedSlice::from(Vec::<String>::new().into_boxed_slice()),
+                    member_path: verter_type_expr::OwnedSlice::from(
+                        Vec::<String>::new().into_boxed_slice(),
+                    ),
                 }),
                 classification: ValueAnnotationClass::TypeOfAlias,
                 annotation: None,
@@ -2736,7 +2738,9 @@ mod tests {
                     canonical_id: verter_type_expr::OwnedStr::from("/App.vue"),
                     owner: verter_type_expr::TopLevelOwnerId::instance(0),
                     symbol: verter_type_expr::OwnedStr::from("target"),
-                    member_path: verter_type_expr::OwnedSlice::from(Vec::<String>::new().into_boxed_slice()),
+                    member_path: verter_type_expr::OwnedSlice::from(
+                        Vec::<String>::new().into_boxed_slice(),
+                    ),
                 }),
                 classification: ValueAnnotationClass::TypeOfAlias,
                 annotation: None,

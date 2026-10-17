@@ -339,7 +339,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             let Some((identity, remaining)) = resolved.or_else(|| {
                 self.value_path_declaration(
                     &value_root,
-                    &rest.iter().map(verter_type_expr::OwnedStr::from).collect::<Vec<_>>(),
+                    &rest
+                        .iter()
+                        .map(verter_type_expr::OwnedStr::from)
+                        .collect::<Vec<_>>(),
                     &mut rustc_hash::FxHashSet::default(),
                 )
             }) else {
@@ -968,7 +971,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
                     readonly: true,
                     spans: verter_type_expr::IndexSignatureSpans::default(),
-                    declaration_origin: Some(verter_type_expr::OwnedStr::from(enumeration.decl.canonical_id.clone())),
+                    declaration_origin: Some(verter_type_expr::OwnedStr::from(
+                        enumeration.decl.canonical_id.clone(),
+                    )),
                 },
             )
         });
@@ -976,9 +981,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .members
             .iter()
             .map(|entry| crate::semantic_query::SurfaceMember {
-                key: crate::semantic_query::AuthoredPropertyKey::String(verter_type_expr::OwnedStr::from(
-                    entry.name.as_str(),
-                )),
+                key: crate::semantic_query::AuthoredPropertyKey::String(
+                    verter_type_expr::OwnedStr::from(entry.name.as_str()),
+                ),
                 value: self.enum_member_literal(enumeration, entry),
                 optional: false,
                 readonly: true,
@@ -988,7 +993,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                 // The member inventory carries no per-member source span.
                 spans: verter_type_expr::MemberSpans::default(),
-                declaration_origin: Some(verter_type_expr::OwnedStr::from(enumeration.decl.canonical_id.clone())),
+                declaration_origin: Some(verter_type_expr::OwnedStr::from(
+                    enumeration.decl.canonical_id.clone(),
+                )),
                 declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
                 merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
             })
@@ -1201,7 +1208,11 @@ struct EnumEvaluation {
     /// The read enum each addressed block's `(canonical, owner, name)`
     /// declares.
     declared_at: rustc_hash::FxHashMap<
-        (verter_type_expr::OwnedStr, verter_type_expr::TopLevelOwnerId, verter_type_expr::OwnedStr),
+        (
+            verter_type_expr::OwnedStr,
+            verter_type_expr::TopLevelOwnerId,
+            verter_type_expr::OwnedStr,
+        ),
         DeclIdentity,
     >,
     states: rustc_hash::FxHashMap<EnumMemberKey, MemberState>,

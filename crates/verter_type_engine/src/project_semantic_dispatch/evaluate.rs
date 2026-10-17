@@ -1407,7 +1407,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let probe = self.observe_read(|| {
                         self.execute_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                             scope: ScopeId {
-                                canonical_id: verter_type_expr::OwnedStr::from(identity.canonical_id.clone()),
+                                canonical_id: verter_type_expr::OwnedStr::from(
+                                    identity.canonical_id.clone(),
+                                ),
                                 owner: identity.owner,
                                 local_scope: None,
                                 binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
@@ -2199,9 +2201,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // declaration and augmentation contributor is a strict root,
                 // including whole-file facts retained on evidence pages.
                 roots.extend(signature_entries(&facts).filter_map(|fact| match fact {
-                    FactVersionRef::FileWholeHash { canonical_id, hash } => {
-                        Some((verter_type_expr::OwnedStr::from(canonical_id.as_str()), *hash))
-                    }
+                    FactVersionRef::FileWholeHash { canonical_id, hash } => Some((
+                        verter_type_expr::OwnedStr::from(canonical_id.as_str()),
+                        *hash,
+                    )),
                     _ => None,
                 }));
                 self.ctx

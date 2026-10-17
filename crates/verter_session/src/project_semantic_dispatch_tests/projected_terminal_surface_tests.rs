@@ -73,7 +73,9 @@ fn project_member(
     };
     match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base,
-        path: verter_type_expr::OwnedSlice::from(vec![PathSegment::Member(PropertyKey::identifier(member))]),
+        path: verter_type_expr::OwnedSlice::from(vec![PathSegment::Member(
+            PropertyKey::identifier(member),
+        )]),
         context,
     }) {
         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,

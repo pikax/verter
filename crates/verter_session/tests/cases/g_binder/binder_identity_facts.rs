@@ -561,7 +561,8 @@ pub(crate) fn binder_scope_id_enters_context_sensitive_query_identity() {
     let owner = TopLevelOwnerId::ordinary_file();
     let scope_alpha = ScopeId::file(Arc::from("/w/a.ts"), owner);
     let mut scope_beta = scope_alpha.clone();
-    scope_beta.binder_scope_id = BinderScopeId::namespace_scope(owner, verter_type_expr::OwnedStr::from("Beta"));
+    scope_beta.binder_scope_id =
+        BinderScopeId::namespace_scope(owner, verter_type_expr::OwnedStr::from("Beta"));
 
     let key = |scope: &ScopeId| {
         SemanticQueryKey::ResolveDecl(verter_type_engine::semantic_query::ResolveDeclKey {

@@ -397,7 +397,13 @@ mod tests {
             }),
             QueryError::UnstableState { attempts: 3 },
             QueryError::AliasCycle {
-                chain: verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from("A"), verter_type_expr::OwnedStr::from("B")].into_boxed_slice()),
+                chain: verter_type_expr::OwnedSlice::from(
+                    vec![
+                        verter_type_expr::OwnedStr::from("A"),
+                        verter_type_expr::OwnedStr::from("B"),
+                    ]
+                    .into_boxed_slice(),
+                ),
             },
             QueryError::RecursiveRef {
                 name: verter_type_expr::OwnedStr::from("Tree"),
@@ -532,9 +538,9 @@ mod tests {
             &QueryError::UnrepresentableSurface
         ));
         assert!(
-            !query_error_is_object_surface_sentinel(&QueryError::Other(verter_type_expr::OwnedStr::from(
-                "semanticObjectSurface"
-            ))),
+            !query_error_is_object_surface_sentinel(&QueryError::Other(
+                verter_type_expr::OwnedStr::from("semanticObjectSurface")
+            )),
             "Other(\"semanticObjectSurface\") NEVER acts as the surface sentinel"
         );
         assert!(!query_error_is_object_surface_sentinel(
@@ -567,7 +573,9 @@ mod tests {
         // _discriminates: unmaterialised is BROADER than miss.
         assert!(query_error_is_semantic_miss_sentinel(&QueryError::Miss));
         assert!(
-            !query_error_is_semantic_miss_sentinel(&QueryError::Other(verter_type_expr::OwnedStr::from("semanticMiss"))),
+            !query_error_is_semantic_miss_sentinel(&QueryError::Other(
+                verter_type_expr::OwnedStr::from("semanticMiss")
+            )),
             "Other(\"semanticMiss\") NEVER acts as the miss sentinel"
         );
         assert!(!query_error_is_semantic_miss_sentinel(

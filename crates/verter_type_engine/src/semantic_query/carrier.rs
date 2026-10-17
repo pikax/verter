@@ -61,7 +61,10 @@ use verter_type_expr::facts::ValueDeclIdentityPart;
 /// [`SemanticNodeData::TypeOfNominal`] carrier — `(value_root, path)`,
 /// NEVER the deferred carrier's `type_args` (descend those through
 /// [`SemanticNodeData::carrier_type_args`]).
-pub(crate) type TypeOfHead<'a> = (&'a ValueRootKey, &'a verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>);
+pub(crate) type TypeOfHead<'a> = (
+    &'a ValueRootKey,
+    &'a verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
+);
 
 /// Borrowed head view of a [`SemanticNodeData::BareRef`] carrier —
 /// `(name, scope)`, NEVER its `type_args`.
@@ -69,7 +72,11 @@ pub(crate) type BareRefHead<'a> = (&'a Arc<str>, &'a NodeScopeId);
 
 /// Borrowed head view of a [`SemanticNodeData::ImportType`] carrier —
 /// `(specifier, qualifier, typeof_query)`, NEVER its `type_args`.
-pub(crate) type ImportTypeHead<'a> = (&'a Arc<str>, &'a verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>, bool);
+pub(crate) type ImportTypeHead<'a> = (
+    &'a Arc<str>,
+    &'a verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
+    bool,
+);
 
 /// Deferred `typeof value.path<args>` carrier payload.
 ///

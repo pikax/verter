@@ -1861,7 +1861,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         }
         let key = SemanticQueryKey::ProjectPath {
             base: prefixes.base,
-            path: verter_type_expr::OwnedSlice::from(prefixes.path[..=index].to_vec().into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::from(
+                prefixes.path[..=index].to_vec().into_boxed_slice(),
+            ),
             context: crate::semantic_query::ProjectionReductionContext::published(
                 ProjectionMode::Navigate,
             ),
@@ -2047,7 +2049,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             .and_then(|scope| scope.canonical_file());
         // One entry per index key type: a union key type declares one
         // index signature per constituent, as the checker splits it.
-        let mut string_values: Vec<(SemanticNodeId, Option<verter_type_expr::OwnedStr>)> = Vec::new();
+        let mut string_values: Vec<(SemanticNodeId, Option<verter_type_expr::OwnedStr>)> =
+            Vec::new();
         let mut applicable: Vec<(SemanticNodeId, Option<verter_type_expr::OwnedStr>)> = Vec::new();
         for signature in signatures {
             let origin = signature
@@ -3495,7 +3498,10 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 canonical_id,
                 name,
                 ..
-            }) => Some((std::sync::Arc::<str>::from(canonical_id.as_str()), std::sync::Arc::<str>::from(name.as_str()))),
+            }) => Some((
+                std::sync::Arc::<str>::from(canonical_id.as_str()),
+                std::sync::Arc::<str>::from(name.as_str()),
+            )),
             _ => None,
         }
     }
@@ -3524,7 +3530,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             .graph()
             .node_scope(base)
             .and_then(|scope| scope.canonical_file());
-        let initial_path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(path.to_vec().into_boxed_slice());
+        let initial_path: verter_type_expr::OwnedSlice<PathSegment> =
+            verter_type_expr::OwnedSlice::from(path.to_vec().into_boxed_slice());
         let mut frames: Vec<WalkFrame> = vec![WalkFrame::Step {
             node: base,
             path: initial_path,
@@ -5997,7 +6004,10 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 let name = identity.decl_name.clone();
                 drop(data);
                 match self.execute_read_folding_partial(SemanticQueryKey::ResolveDecl(
-                    ResolveDeclKey { scope, name: name.into() },
+                    ResolveDeclKey {
+                        scope,
+                        name: name.into(),
+                    },
                 )) {
                     QueryResult::Value(id) => id,
                     // A recursive / errored terminal carrier keeps the
@@ -8740,7 +8750,10 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         &mut self,
         target: BufferTarget,
         name: verter_type_expr::OwnedStr,
-        owner: Option<(verter_type_expr::OwnedStr, verter_type_expr::TopLevelOwnerId)>,
+        owner: Option<(
+            verter_type_expr::OwnedStr,
+            verter_type_expr::TopLevelOwnerId,
+        )>,
     ) {
         if matches!(target, BufferTarget::Root) {
             return;
@@ -11760,7 +11773,9 @@ mod overload_carrier_exclusion_tests {
             }
             "ImportType" => SemanticNodeData::new_import_type(
                 Arc::from("./m"),
-                verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from(name)].into_boxed_slice()),
+                verter_type_expr::OwnedSlice::from(
+                    vec![verter_type_expr::OwnedStr::from(name)].into_boxed_slice(),
+                ),
                 empty_args,
                 false,
             ),

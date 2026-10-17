@@ -5964,8 +5964,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             });
         };
         let indexed = serve.indexed;
-        let self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> =
-            vec![(verter_type_expr::OwnedStr::from(canonical), indexed.whole_hash)];
+        let self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> = vec![(
+            verter_type_expr::OwnedStr::from(canonical),
+            indexed.whole_hash,
+        )];
         let source_demand = source_demand.ok_or_else(|| FlowSliceDemandSiteError {
             failure: FlowReturnFailure::Missing,
             self_roots: self_roots.clone(),
@@ -18471,29 +18473,30 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // A segment spelled as a canonical integer is an element read
         // (`a[0]`), which indexes an array, a tuple or a numeric index
         // signature as the type-level `T[0]` does; no identifier spells one.
-        let path: verter_type_expr::OwnedSlice<crate::semantic_query::PathSegment> = verter_type_expr::OwnedSlice::from(
-            segments
-                .iter()
-                .map(|segment| {
-                    match segment
-                        .parse::<i64>()
-                        .ok()
-                        .filter(|index| index.to_string() == segment.as_ref())
-                        .and_then(crate::semantic_query::CanonicalIndexInt::from_canonical_i64)
-                    {
-                        Some(index) => crate::semantic_query::PathSegment::Index(
-                            crate::semantic_query::IndexKey::Number(index),
-                        ),
-                        None => crate::semantic_query::PathSegment::Member(
-                            crate::semantic_query::PropertyKey::identifier(Arc::from(
-                                segment.as_ref(),
-                            )),
-                        ),
-                    }
-                })
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-        );
+        let path: verter_type_expr::OwnedSlice<crate::semantic_query::PathSegment> =
+            verter_type_expr::OwnedSlice::from(
+                segments
+                    .iter()
+                    .map(|segment| {
+                        match segment
+                            .parse::<i64>()
+                            .ok()
+                            .filter(|index| index.to_string() == segment.as_ref())
+                            .and_then(crate::semantic_query::CanonicalIndexInt::from_canonical_i64)
+                        {
+                            Some(index) => crate::semantic_query::PathSegment::Index(
+                                crate::semantic_query::IndexKey::Number(index),
+                            ),
+                            None => crate::semantic_query::PathSegment::Member(
+                                crate::semantic_query::PropertyKey::identifier(Arc::from(
+                                    segment.as_ref(),
+                                )),
+                            ),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            );
         // The member walk may widen a ROOTLESS callable (a function-typed
         // parameter's signature) to its ambient apparent surface; that
         // widening scopes its registry lookup by the lexical demand site,
@@ -18529,7 +18532,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             .dispatch
             .demand_type_node(crate::semantic_query::SemanticQueryKey::ProjectPath {
                 base,
-                path: verter_type_expr::OwnedSlice::from([crate::semantic_query::PathSegment::Member(key)]),
+                path: verter_type_expr::OwnedSlice::from([
+                    crate::semantic_query::PathSegment::Member(key),
+                ]),
                 context: crate::semantic_query::ProjectionReductionContext::published(
                     crate::semantic_query::ProjectionMode::Navigate,
                 ),
@@ -28322,7 +28327,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             anchor: verter_type_expr::locators::AuthoredAnchor {
                                 canonical_id: verter_type_expr::OwnedStr::from(self.canonical),
                                 owner: target.declaration.owner,
-                                symbol: verter_type_expr::OwnedStr::from(target.declaration.name.clone()),
+                                symbol: verter_type_expr::OwnedStr::from(
+                                    target.declaration.name.clone(),
+                                ),
                                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                             },
                             function_part: target.part.clone(),

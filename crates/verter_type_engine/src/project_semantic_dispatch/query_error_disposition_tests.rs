@@ -36,7 +36,13 @@ fn every_variant() -> Vec<QueryError> {
         QueryError::Cancelled,
         QueryError::UnstableState { attempts: 3 },
         QueryError::AliasCycle {
-            chain: verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from("A"), verter_type_expr::OwnedStr::from("B")].into_boxed_slice()),
+            chain: verter_type_expr::OwnedSlice::from(
+                vec![
+                    verter_type_expr::OwnedStr::from("A"),
+                    verter_type_expr::OwnedStr::from("B"),
+                ]
+                .into_boxed_slice(),
+            ),
         },
         QueryError::RecursiveRef {
             name: verter_type_expr::OwnedStr::from("TreeNode"),
@@ -164,7 +170,9 @@ fn decl_placeholder_is_expandable_and_never_missing_dependency() {
 fn cycle_sentinels_remain_control_carriers() {
     for err in [
         QueryError::AliasCycle {
-            chain: verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from("A")].into_boxed_slice()),
+            chain: verter_type_expr::OwnedSlice::from(
+                vec![verter_type_expr::OwnedStr::from("A")].into_boxed_slice(),
+            ),
         },
         QueryError::RaiseAliasCycle,
         QueryError::TypeParamCycle,

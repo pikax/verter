@@ -372,7 +372,11 @@ fn bare_ref_scope_and_resolved_decl(
                     Some(SemanticNodeData::InstantiationRef { base, .. }) => base.clone(),
                     other => panic!("BareRef must resolve to declaration identity; got {other:?}"),
                 };
-                (verter_type_expr::OwnedStr::from(name), Some(scope.clone()), identity)
+                (
+                    verter_type_expr::OwnedStr::from(name),
+                    Some(scope.clone()),
+                    identity,
+                )
             }
             other => panic!("expected reference identity; got {other:?}"),
         };
@@ -1160,11 +1164,15 @@ fn symbolic_projection_rejects_canonical_and_scope_identity_collisions() {
     });
     let indexed_a = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: decl_a,
-        index: verter_type_engine::semantic_query::IndexKey::String(verter_type_expr::OwnedStr::from("value")),
+        index: verter_type_engine::semantic_query::IndexKey::String(
+            verter_type_expr::OwnedStr::from("value"),
+        ),
     });
     let indexed_b = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: decl_b,
-        index: verter_type_engine::semantic_query::IndexKey::String(verter_type_expr::OwnedStr::from("value")),
+        index: verter_type_engine::semantic_query::IndexKey::String(
+            verter_type_expr::OwnedStr::from("value"),
+        ),
     });
     assert_eq!(
         symbolic_projection_eq_for_test(&host, indexed_a, indexed_b),
@@ -1827,7 +1835,9 @@ fn same_spelled_distinct_nominal_identities_cannot_mint_symbolic_equivalence() {
             canonical_id: verter_type_expr::OwnedStr::from(declaring),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             symbol: verter_type_expr::OwnedStr::from("TOKEN"),
-            member_path: verter_type_expr::OwnedSlice::from(Vec::<String>::new().into_boxed_slice()),
+            member_path: verter_type_expr::OwnedSlice::from(
+                Vec::<String>::new().into_boxed_slice(),
+            ),
         };
         let before_retarget = graph.intern_node(
             verter_type_engine::semantic_query::new_nominal_typeof_for_tests(

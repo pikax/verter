@@ -953,7 +953,9 @@ mod tests {
                 symbol: verter_type_expr::OwnedStr::from("Foo"),
                 space: LocatorSymbolSpace::Type,
             },
-            path: verter_type_expr::OwnedSlice::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::from(
+                Vec::<TypeBodyPathStep>::new().into_boxed_slice(),
+            ),
         });
         (slot, locator)
     }
@@ -987,7 +989,9 @@ mod tests {
                 symbol: verter_type_expr::OwnedStr::from("Foo"),
                 space: LocatorSymbolSpace::Type,
             },
-            path: verter_type_expr::OwnedSlice::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::from(
+                Vec::<TypeBodyPathStep>::new().into_boxed_slice(),
+            ),
         });
         let err = LocatorLoweringKey::new_unsubstituted(
             slot,
@@ -1014,7 +1018,9 @@ mod tests {
                 symbol: verter_type_expr::OwnedStr::from("Foo"),
                 space: LocatorSymbolSpace::Type,
             },
-            path: verter_type_expr::OwnedSlice::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::from(
+                Vec::<TypeBodyPathStep>::new().into_boxed_slice(),
+            ),
         });
         let err = LocatorLoweringKey::new_unsubstituted(
             slot,
@@ -1041,7 +1047,9 @@ mod tests {
                 symbol: verter_type_expr::OwnedStr::from("Bar"),
                 space: LocatorSymbolSpace::Type,
             },
-            path: verter_type_expr::OwnedSlice::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::from(
+                Vec::<TypeBodyPathStep>::new().into_boxed_slice(),
+            ),
         });
         let err = LocatorLoweringKey::new_unsubstituted(
             slot,
@@ -1068,7 +1076,9 @@ mod tests {
                 symbol: verter_type_expr::OwnedStr::from("Foo"),
                 space: LocatorSymbolSpace::Value,
             },
-            path: verter_type_expr::OwnedSlice::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::from(
+                Vec::<TypeBodyPathStep>::new().into_boxed_slice(),
+            ),
         });
         let err = LocatorLoweringKey::new_unsubstituted(
             slot,

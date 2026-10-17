@@ -9,8 +9,8 @@
 //! - `PreparedLocalImportedTypeAlias`
 //! - `PreparedImportedDeclContext`
 
-use verter_type_expr::OwnedStr;
 use std::sync::Arc;
+use verter_type_expr::OwnedStr;
 
 use rustc_hash::FxHashMap;
 

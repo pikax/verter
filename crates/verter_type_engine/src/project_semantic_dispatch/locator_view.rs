@@ -266,7 +266,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectionBenchHarness<'
                     symbol: verter_type_expr::OwnedStr::from(symbol),
                     space: LocatorSymbolSpace::Type,
                 },
-                path: verter_type_expr::OwnedSlice::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+                path: verter_type_expr::OwnedSlice::from(
+                    Vec::<TypeBodyPathStep>::new().into_boxed_slice(),
+                ),
             })) {
             crate::semantic_query::QueryResult::Value(root) => root,
             crate::semantic_query::QueryResult::Recursive(root) => root,

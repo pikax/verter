@@ -1923,7 +1923,8 @@ fn member_shape_node_subject_global_single_occurrence_self_test() {
     // the exact false-negative the global newtype pin closes: the
     // bare-`SemanticNodeId` scan never sees the inner ordinal because it is
     // sealed behind the newtype.
-    let rogue_shape_demand = "path: verter_type_expr::OwnedSlice<PathSegment>, decoy: MemberShapeNodeSubject, \
+    let rogue_shape_demand =
+        "path: verter_type_expr::OwnedSlice<PathSegment>, decoy: MemberShapeNodeSubject, \
                               terminal_context: ProjectionReductionContext, \
                               key_filter: KeyFilter, surface: PublishedSurfaceKind";
     let rogue_total = count_ident_tokens(shape_cache_key, "MemberShapeNodeSubject")

@@ -185,7 +185,8 @@ impl BinderIdentityFacts {
         owner: verter_type_expr::TopLevelOwnerId,
         qualified_name: &str,
     ) -> Option<BinderScopeId> {
-        let want = BinderScopeId::namespace_scope(owner, verter_type_expr::OwnedStr::from(qualified_name));
+        let want =
+            BinderScopeId::namespace_scope(owner, verter_type_expr::OwnedStr::from(qualified_name));
         self.scopes
             .iter()
             .find(|record| record.id == want)
@@ -494,9 +495,14 @@ pub(crate) fn project_binder_identity_facts_inputs(
         // with ONLY `namespace Empty {}` otherwise dangles — empty
         // blocks produce no type/value headers).
         note_owner(*owner, &mut file_scope_owners);
-        let id = BinderScopeId::namespace_scope(*owner, verter_type_expr::OwnedStr::from(qualified_name));
+        let id = BinderScopeId::namespace_scope(
+            *owner,
+            verter_type_expr::OwnedStr::from(qualified_name),
+        );
         let parent = match qualified_name.rsplit_once('.') {
-            Some((head, _)) => BinderScopeId::namespace_scope(*owner, verter_type_expr::OwnedStr::from(head)),
+            Some((head, _)) => {
+                BinderScopeId::namespace_scope(*owner, verter_type_expr::OwnedStr::from(head))
+            }
             None => BinderScopeId::file_scope(*owner),
         };
         scopes.push(BinderScopeRecord {
@@ -532,7 +538,10 @@ pub(crate) fn project_binder_identity_facts_inputs(
                     verter_type_engine::semantic_query::BinderScopeKind::AugmentationGlobal,
                 ),
                 AugmentationScopeKind::Module(specifier) => (
-                    BinderScopeId::augmentation_module_scope(owner, verter_type_expr::OwnedStr::from(specifier.as_str())),
+                    BinderScopeId::augmentation_module_scope(
+                        owner,
+                        verter_type_expr::OwnedStr::from(specifier.as_str()),
+                    ),
                     verter_type_engine::semantic_query::BinderScopeKind::AugmentationModule {
                         specifier: verter_type_expr::OwnedStr::from(specifier.as_str()),
                     },

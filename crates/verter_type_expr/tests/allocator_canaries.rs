@@ -1,7 +1,7 @@
-use verter_type_expr::OwnedSlice;
-use verter_type_expr::OwnedStr;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
+use verter_type_expr::OwnedSlice;
+use verter_type_expr::OwnedStr;
 
 /// Counting global allocator. Increments [`ALLOC_COUNTER`] on every
 /// allocating call (`alloc` / `alloc_zeroed` / `realloc`), adds the

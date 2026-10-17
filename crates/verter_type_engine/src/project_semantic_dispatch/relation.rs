@@ -2255,12 +2255,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 identities: (!recursion.repeats[0].identities.is_empty()
                     || !recursion.repeats[1].identities.is_empty())
                 .then(|| {
-                    verter_session_query::retention::owned::Owned::new(crate::semantic_query::RecursionIdentities {
-                        sides: [
-                            recursion.repeats[0].published_identities(),
-                            recursion.repeats[1].published_identities(),
-                        ],
-                    })
+                    verter_session_query::retention::owned::Owned::new(
+                        crate::semantic_query::RecursionIdentities {
+                            sides: [
+                                recursion.repeats[0].published_identities(),
+                                recursion.repeats[1].published_identities(),
+                            ],
+                        },
+                    )
                 }),
             },
             frames: recursion.frames,
@@ -9663,7 +9665,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// The file whose library an apparent type is read from while relating
     /// to `target`: the demand's, else the one the target was declared in.
-    fn relation_wrapper_canonical(&self, target: SemanticNodeId) -> Option<verter_type_expr::OwnedStr> {
+    fn relation_wrapper_canonical(
+        &self,
+        target: SemanticNodeId,
+    ) -> Option<verter_type_expr::OwnedStr> {
         self.wrapper_demand_canonical().or_else(|| {
             self.graph()
                 .node_scope(target)
@@ -10409,8 +10414,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let data = graph.node_data(key)?;
             match &*data {
                 SemanticNodeData::Literal(LiteralValue::String(text)) => {
-                    let property =
-                        crate::semantic_query::PropertyKey::String(verter_type_expr::OwnedStr::from(text.as_str()));
+                    let property = crate::semantic_query::PropertyKey::String(
+                        verter_type_expr::OwnedStr::from(text.as_str()),
+                    );
                     drop(data);
                     members.push(crate::semantic_query::SurfaceMember {
                         key: crate::semantic_query::AuthoredPropertyKey::from_known(property),
@@ -10999,9 +11005,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> SemanticNodeId {
         let graph = self.graph();
         let name = match graph.node_data(value).as_deref() {
-            Some(SemanticNodeData::Opaque(QueryError::RecursiveRef { name, .. })) => {
-                name.clone()
-            }
+            Some(SemanticNodeData::Opaque(QueryError::RecursiveRef { name, .. })) => name.clone(),
             _ => return value,
         };
         let Some(origin) = origin else {
@@ -12004,7 +12008,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .into_iter()
                 .next()
             {
-                Some((canonical, owner, name, _)) => current = (verter_type_expr::OwnedStr::from(canonical), owner, verter_type_expr::OwnedStr::from(name)),
+                Some((canonical, owner, name, _)) => {
+                    current = (
+                        verter_type_expr::OwnedStr::from(canonical),
+                        owner,
+                        verter_type_expr::OwnedStr::from(name),
+                    )
+                }
                 None => break,
             }
         }

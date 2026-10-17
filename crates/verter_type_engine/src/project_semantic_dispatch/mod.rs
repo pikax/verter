@@ -294,7 +294,11 @@ pub use evaluate::StructuralFactDemandOutcome;
 /// `Arc<str>` so membership checks are refcount compares, not string
 /// compares. Lives on [`ProjectSemanticDispatch`] so nested
 /// `build_instantiate` invocations share the active set.
-pub(super) type InstantiateIdentity = (verter_type_expr::OwnedStr, verter_type_expr::TopLevelOwnerId, verter_type_expr::OwnedStr);
+pub(super) type InstantiateIdentity = (
+    verter_type_expr::OwnedStr,
+    verter_type_expr::TopLevelOwnerId,
+    verter_type_expr::OwnedStr,
+);
 
 /// One build on the active-instantiation stack: the declaration it
 /// materialises and the arguments it materialises it over.
@@ -471,7 +475,8 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// nothing scoped through this stack is ever admitted to a shared
     /// cache. Empty when no member-access/call site is on the stack — a
     /// rootless apparent demand then fails closed (`Miss`).
-    pub lexical_demand_scope: std::cell::RefCell<smallvec::SmallVec<[verter_type_expr::OwnedStr; 2]>>,
+    pub lexical_demand_scope:
+        std::cell::RefCell<smallvec::SmallVec<[verter_type_expr::OwnedStr; 2]>>,
     /// The transient per-obligation-root cold-compute frame (design
     /// `.claude/skills/type-resolution/SKILL.md` §2.1): the ONE shared
     /// tagged re-entry / cycle-id space with its generic frame /
@@ -1068,7 +1073,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticQueryKey::ProjectMember { base, member, .. } => {
                 graph.intern_node(SemanticNodeData::IndexedAccess {
                     object: *base,
-                    index: crate::semantic_query::IndexKey::String(verter_type_expr::OwnedStr::from(member)),
+                    index: crate::semantic_query::IndexKey::String(
+                        verter_type_expr::OwnedStr::from(member),
+                    ),
                 })
             }
             SemanticQueryKey::ProjectPath { base, path, .. } => {
@@ -1076,7 +1083,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let index = match segment {
                         crate::semantic_query::PathSegment::Member(key) => match key {
                             crate::semantic_query::PropertyKey::String(value) => {
-                                crate::semantic_query::IndexKey::String(verter_type_expr::OwnedStr::from(value))
+                                crate::semantic_query::IndexKey::String(
+                                    verter_type_expr::OwnedStr::from(value),
+                                )
                             }
                             crate::semantic_query::PropertyKey::Number(value) => {
                                 crate::semantic_query::IndexKey::Number(*value)
@@ -2817,7 +2826,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> SemanticNodeId {
         let read = self.execute_read(crate::semantic_query::SemanticQueryKey::ProjectPath {
             base: handle.node(),
-            path: verter_type_expr::OwnedSlice::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::from(
+                Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice(),
+            ),
             context,
         });
         crate::meta_resolve::emit_dispatch_dep_signature_facts(self, &read.dep_signature);
@@ -3984,7 +3995,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticQueryKey::IndexedAccess { base, index, mode } => {
                 SemanticQueryKey::ProjectPath {
                     base,
-                    path: verter_type_expr::OwnedSlice::from(vec![PathSegment::Index(index)].into_boxed_slice()),
+                    path: verter_type_expr::OwnedSlice::from(
+                        vec![PathSegment::Index(index)].into_boxed_slice(),
+                    ),
                     context: crate::semantic_query::ProjectionReductionContext::published(mode),
                 }
             }
@@ -5412,9 +5425,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         mode: ProjectionMode,
     ) -> CacheRead<QueryResult<SemanticNodeId>> {
         // Hop 1: Navigate to the slot member off the macro payload base.
-        let slot_path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(
-            vec![PathSegment::Member(PropertyKey::identifier(slot_name))].into_boxed_slice(),
-        );
+        let slot_path: verter_type_expr::OwnedSlice<PathSegment> =
+            verter_type_expr::OwnedSlice::from(
+                vec![PathSegment::Member(PropertyKey::identifier(slot_name))].into_boxed_slice(),
+            );
         let slot_read = self.execute_read(SemanticQueryKey::ProjectPath {
             base,
             path: slot_path,
@@ -5484,9 +5498,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // Hop 3: project the binding member off the param Object at the
         // caller's terminal mode (path-precise rule — only the terminal
         // runs in the requested mode).
-        let binding_path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(
-            vec![PathSegment::Member(PropertyKey::identifier(binding_name))].into_boxed_slice(),
-        );
+        let binding_path: verter_type_expr::OwnedSlice<PathSegment> =
+            verter_type_expr::OwnedSlice::from(
+                vec![PathSegment::Member(PropertyKey::identifier(binding_name))].into_boxed_slice(),
+            );
         let binding_read = self.execute_read(SemanticQueryKey::ProjectPath {
             base: param0_ty,
             path: binding_path,

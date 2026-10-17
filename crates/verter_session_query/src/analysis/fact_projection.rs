@@ -14,9 +14,9 @@
 
 #![allow(dead_code)]
 
+use std::sync::Arc;
 use verter_type_expr::OwnedSlice;
 use verter_type_expr::OwnedStr;
-use std::sync::Arc;
 
 use verter_type_expr::facts::{
     AuthoredReferenceArgLocator, AuthoredReferenceHeadFact, DeclaredLiteralFreshness,

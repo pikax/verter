@@ -679,9 +679,9 @@ impl Subscription<'_> {
                 completion,
                 super::test_support::ExhaustedJoinAbortForTests::OtherSentinel
             ) {
-                state.completed = Some(QueryResult::Error(QueryError::Other(verter_type_expr::OwnedStr::from(
-                    "aborted subscriber flight",
-                ))));
+                state.completed = Some(QueryResult::Error(QueryError::Other(
+                    verter_type_expr::OwnedStr::from("aborted subscriber flight"),
+                )));
             }
         }
         if state.aborted && attempt.retries < MAX_INFLIGHT_RETRIES {

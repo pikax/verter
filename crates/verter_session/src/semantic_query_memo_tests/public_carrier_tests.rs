@@ -537,7 +537,9 @@ fn dispatchers_drop_in_any_order_and_never_release_a_live_dispatchers_operands()
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let first = host.semantic_dispatch();
     let second = host.semantic_dispatch();
-    let node = first.opaque(QueryError::Other(verter_type_expr::OwnedStr::from("first's operand")));
+    let node = first.opaque(QueryError::Other(verter_type_expr::OwnedStr::from(
+        "first's operand",
+    )));
     drop(second);
     assert!(
         graph.node_is_live(node),

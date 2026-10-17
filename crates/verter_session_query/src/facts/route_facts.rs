@@ -20,8 +20,8 @@
 //! `canonical_id` to mint frontier-ready external refs. The fingerprint
 //! grammar is untouched.
 
-use verter_type_expr::OwnedStr;
 use std::sync::Arc;
+use verter_type_expr::OwnedStr;
 
 use verter_type_expr::facts::{
     DeferredKeyUtilityEdge, DeferredKeyUtilityKind, ExternalRouteRefFact, FactPropertyKey,

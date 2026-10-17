@@ -1479,7 +1479,9 @@ fn non_empty_contextual_input_point_fails_closed() {
             ),
         );
         key.input = verter_type_engine::semantic_query::FlowInputContext {
-            contextual_parameters: verter_type_expr::OwnedSlice::from(vec![contextual].into_boxed_slice()),
+            contextual_parameters: verter_type_expr::OwnedSlice::from(
+                vec![contextual].into_boxed_slice(),
+            ),
         };
         assert_eq!(eval_key_on(&host, dispatch, key.clone()), Outcome::Miss);
         assert_eq!(
@@ -7126,7 +7128,9 @@ fn a_member_read_through_a_self_reference_walks_on_through_the_declaration() {
         };
         let projected = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
             base: surface,
-            path: verter_type_expr::OwnedSlice::from(vec![member("next"), member("next"), member("v")].into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::from(
+                vec![member("next"), member("next"), member("v")].into_boxed_slice(),
+            ),
             context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
                 verter_type_engine::semantic_query::ProjectionMode::Navigate,
             ),

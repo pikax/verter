@@ -276,9 +276,9 @@ fn parity_opaque_errors_and_raw_fallback() {
     // `Opaque(Other("custom"))` raises to `Unknown { raw: "custom" }` which is
     // NOT in the sentinel set ⇒ MATERIALIZED (proves the sentinel set is exact,
     // not "any Unknown is a miss").
-    let other = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(verter_type_expr::OwnedStr::from(
-        "custom",
-    ))));
+    let other = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(
+        verter_type_expr::OwnedStr::from("custom"),
+    )));
     assert_classifier_parity(&host, other, "opaque-other-nonsentinel");
     assert!(
         !node_contains_semantic_miss_or_unraisable(&host, other),
@@ -457,7 +457,13 @@ fn opaque_arm_routes_through_typed_sentinel_byte_identical_and_keeps_node_domain
         }),
         QueryError::UnstableState { attempts: 3 },
         QueryError::AliasCycle {
-            chain: verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from("A"), verter_type_expr::OwnedStr::from("B")].into_boxed_slice()),
+            chain: verter_type_expr::OwnedSlice::from(
+                vec![
+                    verter_type_expr::OwnedStr::from("A"),
+                    verter_type_expr::OwnedStr::from("B"),
+                ]
+                .into_boxed_slice(),
+            ),
         },
         QueryError::ValueDomainMismatch {
             expected: SemanticQueryValueTag::TypeNode,
@@ -498,9 +504,9 @@ fn opaque_arm_routes_through_typed_sentinel_byte_identical_and_keeps_node_domain
     // The FLIPPED `materialized` equation: an `Other("semanticMiss")` payload
     // is INERT — MATERIALIZED, never a miss (only the typed `Miss` variant is
     // the miss sentinel).
-    let adversarial = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(verter_type_expr::OwnedStr::from(
-        "semanticMiss",
-    ))));
+    let adversarial = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(
+        verter_type_expr::OwnedStr::from("semanticMiss"),
+    )));
     assert!(
         !node_contains_semantic_miss_or_unraisable(&host, adversarial),
         "Opaque(Other(\"semanticMiss\")) is INERT — MATERIALIZED (typed-only classification)"
@@ -738,7 +744,9 @@ fn parity_lazy_carriers() {
 
     let import = graph.intern_node(SemanticNodeData::new_import_type(
         Arc::from("./m"),
-        verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from("A")].into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(
+            vec![verter_type_expr::OwnedStr::from("A")].into_boxed_slice(),
+        ),
         Arc::from(Vec::new().into_boxed_slice()),
         false,
     ));
@@ -920,9 +928,9 @@ fn parity_intersection_arm_drop_and_collapse() {
     // SENTINEL-arm DROP path (distinct from the empty-`Object{}`-arm drop above):
     // `Intersection` filters out `Unknown { raw == SEMANTIC_OBJECT_SURFACE }`
     // arms, so `SurfaceSentinel & RealObject` collapses to RealObject.
-    let non_fn_ctor = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(verter_type_expr::OwnedStr::from(
-        "not-a-fn",
-    ))));
+    let non_fn_ctor = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(
+        verter_type_expr::OwnedStr::from("not-a-fn"),
+    )));
     let surface_sentinel = graph.intern_node(SemanticNodeData::Object(
         verter_type_engine::test_surface_view! {
             members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
@@ -1045,9 +1053,9 @@ fn intersection_drops_only_typed_root_unrepresentable_surface() {
 
     // (3) A `QueryError::Other("semanticObjectSurface")` arm is RETAINED —
     // `Other` never acts as the surface sentinel.
-    let other_surface = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(verter_type_expr::OwnedStr::from(
-        "semanticObjectSurface",
-    ))));
+    let other_surface = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(
+        verter_type_expr::OwnedStr::from("semanticObjectSurface"),
+    )));
     let inter_other_real = graph.intern_node(SemanticNodeData::Intersection(
         verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![other_surface, real_obj].into_boxed_slice(),
@@ -1791,7 +1799,9 @@ fn parity_carriers_with_type_args_and_raise_miss() {
     // NOT a miss.
     let import_arg = graph.intern_node(SemanticNodeData::new_import_type(
         Arc::from("./m"),
-        verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from("A")].into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(
+            vec![verter_type_expr::OwnedStr::from("A")].into_boxed_slice(),
+        ),
         Arc::from(vec![number_id].into_boxed_slice()),
         false,
     ));
@@ -1805,7 +1815,9 @@ fn parity_carriers_with_type_args_and_raise_miss() {
     // outer ImportType still constructs and reads MATERIALIZED.
     let import_miss_arg = graph.intern_node(SemanticNodeData::new_import_type(
         Arc::from("./m"),
-        verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from("A")].into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(
+            vec![verter_type_expr::OwnedStr::from("A")].into_boxed_slice(),
+        ),
         Arc::from(vec![absent].into_boxed_slice()),
         false,
     ));
@@ -2656,7 +2668,9 @@ fn publication_score_corpus(
                         canonical_id: verter_type_expr::OwnedStr::from("/w/m.ts"),
                         owner: verter_type_expr::TopLevelOwnerId::module(0),
                         symbol: verter_type_expr::OwnedStr::from("TOKEN"),
-                        member_path: verter_type_expr::OwnedSlice::from(Vec::<String>::new().into_boxed_slice()),
+                        member_path: verter_type_expr::OwnedSlice::from(
+                            Vec::<String>::new().into_boxed_slice(),
+                        ),
                     },
                 ),
             ),
@@ -2824,7 +2838,9 @@ fn publication_score_corpus(
             "import_type",
             graph.intern_node(SemanticNodeData::new_import_type(
                 Arc::from("./m"),
-                verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from("A")].into_boxed_slice()),
+                verter_type_expr::OwnedSlice::from(
+                    vec![verter_type_expr::OwnedStr::from("A")].into_boxed_slice(),
+                ),
                 Arc::from(Vec::new().into_boxed_slice()),
                 false,
             )),
@@ -2833,7 +2849,9 @@ fn publication_score_corpus(
             "import_type_with_args",
             graph.intern_node(SemanticNodeData::new_import_type(
                 Arc::from("./m"),
-                verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from("A")].into_boxed_slice()),
+                verter_type_expr::OwnedSlice::from(
+                    vec![verter_type_expr::OwnedStr::from("A")].into_boxed_slice(),
+                ),
                 Arc::from(vec![foo].into_boxed_slice()),
                 false,
             )),
@@ -2874,7 +2892,9 @@ fn publication_score_corpus(
                         outer_clauses: verter_type_expr::OwnedSlice::from([
                             verter_session_query::flow::policy::ClassExpressionClause {
                                 container: verter_type_expr::OwnedStr::from("Mixin"),
-                                parameters: verter_type_expr::OwnedSlice::from([verter_type_expr::OwnedStr::from("S")]),
+                                parameters: verter_type_expr::OwnedSlice::from([
+                                    verter_type_expr::OwnedStr::from("S"),
+                                ]),
                             },
                         ]),
                         own_arity: 0,

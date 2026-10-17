@@ -243,7 +243,11 @@ fn a_carriers_top_level_handles_are_charged_by_their_own_cells() {
     drop(holds);
     drop(carrier);
     drop(list);
-    assert_eq!(occupancy(&account), (0, name_charge), "the name alone survives");
+    assert_eq!(
+        occupancy(&account),
+        (0, name_charge),
+        "the name alone survives"
+    );
     drop(name);
     assert_eq!(occupancy(&account), (0, 0));
 }

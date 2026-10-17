@@ -711,9 +711,15 @@ fn nested_function_mapper_and_infer_binders_are_not_captured_by_outer_substituti
         PrimitiveKind::Number,
     );
 
-    let mapper = substituted(verter_type_expr::OwnedSlice::from([TypeBodyPathStep::MappedValue]), "MapBox");
+    let mapper = substituted(
+        verter_type_expr::OwnedSlice::from([TypeBodyPathStep::MappedValue]),
+        "MapBox",
+    );
     assert_type_param(&host, force(&dispatch, &mapper, ProjectionMode::Identity));
-    let infer = substituted(verter_type_expr::OwnedSlice::from([TypeBodyPathStep::ConditionalTrue]), "InferBox");
+    let infer = substituted(
+        verter_type_expr::OwnedSlice::from([TypeBodyPathStep::ConditionalTrue]),
+        "InferBox",
+    );
     assert_infer_ref(&host, force(&dispatch, &infer, ProjectionMode::Identity));
 }
 
@@ -784,8 +790,12 @@ fn defaults_augmentation_and_structural_child_locators_use_canonical_instantiati
             ]
             .as_slice(),
         ),
-        verter_type_expr::OwnedSlice::from([TypeBodyPathStep::TupleElement { ordinal: 1 }].as_slice()),
-        verter_type_expr::OwnedSlice::from([TypeBodyPathStep::FunctionParam { ordinal: 0 }].as_slice()),
+        verter_type_expr::OwnedSlice::from(
+            [TypeBodyPathStep::TupleElement { ordinal: 1 }].as_slice(),
+        ),
+        verter_type_expr::OwnedSlice::from(
+            [TypeBodyPathStep::FunctionParam { ordinal: 0 }].as_slice(),
+        ),
         verter_type_expr::OwnedSlice::from([TypeBodyPathStep::FunctionReturn].as_slice()),
     ];
     for path in paths {
@@ -1157,7 +1167,9 @@ fn node_operand_merges_producer_roots_into_active_candidate() {
 /// The request-side spelling of a statically-known derived path. A
 /// computed index has no static spelling — it is a sealed operand — so a
 /// precision carrying one cannot round-trip through here.
-pub(super) fn demand_from_known_path(path: &verter_type_expr::OwnedSlice<PathSegment>) -> Arc<[ForceProjectionSegment]> {
+pub(super) fn demand_from_known_path(
+    path: &verter_type_expr::OwnedSlice<PathSegment>,
+) -> Arc<[ForceProjectionSegment]> {
     Arc::from(
         path.iter()
             .map(|segment| match segment {

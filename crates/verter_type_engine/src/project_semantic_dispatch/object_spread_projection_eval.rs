@@ -30,7 +30,9 @@ struct CollisionKey(PropertyKey);
 impl CollisionKey {
     fn new(key: &PropertyKey) -> Self {
         Self(match key {
-            PropertyKey::Number(number) => PropertyKey::String(verter_type_expr::OwnedStr::from(number.to_string())),
+            PropertyKey::Number(number) => {
+                PropertyKey::String(verter_type_expr::OwnedStr::from(number.to_string()))
+            }
             _ => key.clone(),
         })
     }
@@ -344,7 +346,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ExcessEligibility::Indeterminate
         } else {
             ExcessEligibility::Eligible {
-                direct_candidates: verter_type_expr::OwnedSlice::from(state.direct_excess_candidates),
+                direct_candidates: verter_type_expr::OwnedSlice::from(
+                    state.direct_excess_candidates,
+                ),
             }
         };
         evaluator_support::alternative(evaluator_support::AlternativeInput {
@@ -352,7 +356,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             selector: selector.clone(),
             closed: state.residual_operands.is_empty(),
             residual_operands: verter_type_expr::OwnedSlice::from(state.residual_operands),
-            indeterminate_possible_writes: verter_type_expr::OwnedSlice::from(state.possible_writes),
+            indeterminate_possible_writes: verter_type_expr::OwnedSlice::from(
+                state.possible_writes,
+            ),
             indices: verter_type_expr::OwnedSlice::from(indices),
             signatures: verter_type_expr::OwnedSlice::from(signatures),
             excess,

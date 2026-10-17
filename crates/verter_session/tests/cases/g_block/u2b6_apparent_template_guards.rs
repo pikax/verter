@@ -301,7 +301,12 @@ fn call_member_origins(host: &VerterHost, node: SemanticNodeId) -> Vec<Option<Ar
                     if name.as_ref() == "call"
             )
         })
-        .map(|member| member.declaration_origin.as_ref().map(|origin| Arc::from(origin.as_str())))
+        .map(|member| {
+            member
+                .declaration_origin
+                .as_ref()
+                .map(|origin| Arc::from(origin.as_str()))
+        })
         .collect()
 }
 

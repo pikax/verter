@@ -748,7 +748,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             ctx.check_raised_unknown_materializing(self, Some(&hot));
             return SourceRaiseOutcome::Raised(hot);
         }
-        let segments: verter_type_expr::OwnedSlice<PathSegment> = path.iter().cloned().map(PathSegment::Member).collect();
+        let segments: verter_type_expr::OwnedSlice<PathSegment> =
+            path.iter().cloned().map(PathSegment::Member).collect();
         let read = self.execute_read(SemanticQueryKey::ProjectPath {
             base,
             path: segments,

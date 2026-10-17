@@ -6988,9 +6988,10 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
 
     // Project ["badge"] off the lowered shell. After Step 1.5 dispatch
     // can navigate the Mapped+Conditional pair to extract the badge slot.
-    let badge_path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(vec![PathSegment::Member(
-        verter_type_engine::semantic_query::PropertyKey::identifier("badge"),
-    )]);
+    let badge_path: verter_type_expr::OwnedSlice<PathSegment> =
+        verter_type_expr::OwnedSlice::from(vec![PathSegment::Member(
+            verter_type_engine::semantic_query::PropertyKey::identifier("badge"),
+        )]);
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: lowered,
         path: badge_path,

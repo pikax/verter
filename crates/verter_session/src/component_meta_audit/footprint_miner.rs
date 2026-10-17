@@ -841,7 +841,9 @@ fn translate_path_segment(seg: &PathSegment) -> ProjectPathSegment {
             key: translate_property_key(key),
         },
         PathSegment::Index(idx) => match idx {
-            IndexKey::String(s) => ProjectPathSegment::Index { key: std::sync::Arc::<str>::from(s.as_str()) },
+            IndexKey::String(s) => ProjectPathSegment::Index {
+                key: std::sync::Arc::<str>::from(s.as_str()),
+            },
             IndexKey::Number(n) => ProjectPathSegment::Index {
                 key: Arc::from(n.to_string()),
             },

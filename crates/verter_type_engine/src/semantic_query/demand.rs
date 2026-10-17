@@ -32,8 +32,8 @@
 //! masked to `⊥` by [`apply_mask`] before a demand could enter any
 //! typed-value cache key.
 
-use verter_type_expr::OwnedSlice;
 use std::sync::Arc;
+use verter_type_expr::OwnedSlice;
 
 // NON-`pub`: these pre-existing types are owned by `semantic_query` and stay on
 // that owner path. The demand module does NOT re-export them (§3.6): the demand

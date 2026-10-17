@@ -91,7 +91,11 @@ fn typeof_carrier_node(
             .into_boxed_slice(),
     );
     let args: Arc<[SemanticNodeId]> = Arc::from(vec![arg_node].into_boxed_slice());
-    graph.intern_node(SemanticNodeData::new_typeof(value_root, verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(path), args))
+    graph.intern_node(SemanticNodeData::new_typeof(
+        value_root,
+        verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(path),
+        args,
+    ))
 }
 
 /// `(type_parameter_count, param0_primitive_name)` for a `Function` node, or
@@ -301,7 +305,9 @@ fn walk_typeof_internal_path_projects_in_navigate_not_caller_mode() {
     };
     let carrier = graph.intern_node(SemanticNodeData::new_typeof(
         value_root,
-        verter_type_expr::OwnedSlice::from(vec![verter_type_expr::OwnedStr::from("make")].into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(
+            vec![verter_type_expr::OwnedStr::from("make")].into_boxed_slice(),
+        ),
         Arc::from(Vec::new().into_boxed_slice()),
     ));
 

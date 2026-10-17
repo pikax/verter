@@ -1227,7 +1227,9 @@ impl VerterHost {
                     ctx,
                     dispatch,
                     payload,
-                    verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                    verter_type_expr::OwnedSlice::from(
+                        Vec::<PathSegment>::new().into_boxed_slice(),
+                    ),
                     ProjectionReductionContext::macro_object_surface(
                         ProjectionMode::Shallow,
                         SurfaceProvenanceContext::MacroTypeArgOwnBody,
@@ -1322,7 +1324,9 @@ impl VerterHost {
                     ctx,
                     dispatch,
                     payload,
-                    verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                    verter_type_expr::OwnedSlice::from(
+                        Vec::<PathSegment>::new().into_boxed_slice(),
+                    ),
                     ProjectionReductionContext::macro_object_surface(
                         ProjectionMode::Shallow,
                         SurfaceProvenanceContext::Structural,

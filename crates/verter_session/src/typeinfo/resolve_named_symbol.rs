@@ -814,8 +814,7 @@ pub(crate) fn materialize_through_aliases(
             )) => {
                 // Materialise the placeholder by dispatching an
                 // empty-args Instantiate against its identity.
-                let base =
-                    dispatch.type_slot_for(canonical_id.clone(), *owner, name.clone());
+                let base = dispatch.type_slot_for(canonical_id.clone(), *owner, name.clone());
                 let key =
                     SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
                         base,

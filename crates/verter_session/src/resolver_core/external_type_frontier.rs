@@ -1612,7 +1612,10 @@ mod tests {
 
         let bound_slot = |ordinal: u32, position: TypeParamBoundPosition| TypeBodySlot {
             anchor: expected_anchor.clone(),
-            path: verter_type_expr::OwnedSlice::from(vec![TypeBodyPathStep::TypeParamBound { ordinal, position }]),
+            path: verter_type_expr::OwnedSlice::from(vec![TypeBodyPathStep::TypeParamBound {
+                ordinal,
+                position,
+            }]),
         };
         assert_eq!(
             resolved.type_parameters,
@@ -1676,7 +1679,10 @@ mod tests {
         };
         let default_bound_slot = |ordinal: u32, position: TypeParamBoundPosition| TypeBodySlot {
             anchor: default_anchor.clone(),
-            path: verter_type_expr::OwnedSlice::from(vec![TypeBodyPathStep::TypeParamBound { ordinal, position }]),
+            path: verter_type_expr::OwnedSlice::from(vec![TypeBodyPathStep::TypeParamBound {
+                ordinal,
+                position,
+            }]),
         };
         assert_eq!(
             default_resolved.type_parameters,

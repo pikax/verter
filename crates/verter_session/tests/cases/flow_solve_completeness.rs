@@ -1451,7 +1451,9 @@ fn stale_basis_or_foreign_contract_cannot_complete() {
             unreachable!()
         };
         key.input = FlowInputContext {
-            contextual_parameters: verter_type_expr::OwnedSlice::from(vec![solve_value().return_type()]),
+            contextual_parameters: verter_type_expr::OwnedSlice::from(vec![
+                solve_value().return_type()
+            ]),
         };
         legs.push(("query input", input));
 
@@ -1609,7 +1611,9 @@ fn execution_selection_survives_obligation_budget_refusal() {
 fn member_navigation_executes_without_expanding_the_proof_contract() {
     use verter_type_engine::semantic_query::demand::Demand;
     let fixture = flow_graph_fixture_for_tests(FIXTURE_SOURCE, 7);
-    let member = PathSegment::Member(PropertyKey::String(verter_type_expr::OwnedStr::from("value")));
+    let member = PathSegment::Member(PropertyKey::String(verter_type_expr::OwnedStr::from(
+        "value",
+    )));
     let mut projected = base_request();
     let SemanticQueryKey::FlowReturn(key) = &mut projected.query else {
         unreachable!()
@@ -2312,9 +2316,8 @@ fn planning_rejects_a_query_that_does_not_name_the_bound_graph() {
 
     assert!(
         matches!(
-            mismatched(
-                &|key| key.function.declaration_slot.defining_canonical = verter_type_expr::OwnedStr::from("/foreign.ts")
-            ),
+            mismatched(&|key| key.function.declaration_slot.defining_canonical =
+                verter_type_expr::OwnedStr::from("/foreign.ts")),
             Err(FlowDemandPlanError::BasisKeyMismatch)
         ),
         "a foreign canonical identity must not plan"
@@ -2329,7 +2332,8 @@ fn planning_rejects_a_query_that_does_not_name_the_bound_graph() {
     );
     assert!(
         matches!(
-            mismatched(&|key| key.function.declaration_slot.merged_symbol_name = verter_type_expr::OwnedStr::from("other")),
+            mismatched(&|key| key.function.declaration_slot.merged_symbol_name =
+                verter_type_expr::OwnedStr::from("other")),
             Err(FlowDemandPlanError::BasisKeyMismatch)
         ),
         "a foreign merged-symbol name must not plan"
