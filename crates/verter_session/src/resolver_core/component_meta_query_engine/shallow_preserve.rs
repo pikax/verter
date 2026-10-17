@@ -452,7 +452,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             let args = data_ref.carrier_type_args();
                             let utility = data_ref.bare_ref_head().is_some_and(|(name, _)| {
                             verter_session_query::type_solver::builtin::BuiltinUtility::from_name(
-                                name.as_ref(),
+                                name,
                             )
                             .is_some()
                         });

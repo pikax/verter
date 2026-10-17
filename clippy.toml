@@ -41,6 +41,9 @@ disallowed-macros = [
 # An owned, self-charged handle (`Owned`, `OwnedSlice`, `OwnedStr`) reaches
 # its cell's charge slot solely to charge and release its allocation; its
 # `Eq`/`Ord`/`Hash` read only the immutable value.
+# A graph payload read (`NodeData`) reaches its payload cell's release slot
+# solely to give back the payload's charge when its last holder drops; its
+# `Eq`/`Hash` read only the immutable payload.
 ignore-interior-mutability = [
   "bytes::Bytes",
   "verter_session_query::facts::receipt::ResultReceipt",
@@ -51,4 +54,5 @@ ignore-interior-mutability = [
   "verter_retention::owned::OwnedSlice",
   "verter_retention::owned::OwnedStr",
   "verter_retention::RetentionCharge",
+  "verter_type_engine::semantic_query_memo::arena::NodeData",
 ]

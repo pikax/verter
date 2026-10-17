@@ -896,8 +896,7 @@ fn an_artifact_entry_charges_its_bookkeeping_and_its_value_cell_outlives_it() {
         let bookkeeping = entry.charge_bytes_for_tests();
         let value = read.charge_bytes().expect("the value cell is charged");
         assert!(
-            bookkeeping >= verter_session_query::retention::ENTRY_OVERHEAD_BYTES
-                && bookkeeping < TEXT,
+            (verter_session_query::retention::ENTRY_OVERHEAD_BYTES..TEXT).contains(&bookkeeping),
             "the entry charges its slot and block, not the value: {bookkeeping}"
         );
         assert!(

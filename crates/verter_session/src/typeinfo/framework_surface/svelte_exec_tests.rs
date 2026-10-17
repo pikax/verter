@@ -2420,9 +2420,7 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
     };
     let args_data = graph.node_data(*args_node).expect("Args graph node");
     assert_eq!(
-        args_data
-            .bare_ref_head()
-            .map(|(name, _scope)| name.as_ref()),
+        args_data.bare_ref_head().map(|(name, _scope)| name),
         Some("Args"),
         "the unresolved exact-owner import stays an authored BareRef"
     );
