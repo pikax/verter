@@ -891,7 +891,7 @@ fn a_close_never_revokes_a_held_node_and_drains_when_the_holder_drops() {
         assert!(graph.node_is_live(*id), "node {id:?} stays live while held");
         let now = graph.node_data(*id).expect("still readable");
         assert!(
-            Arc::ptr_eq(&now, payload),
+            verter_type_engine::semantic_query_memo::NodeData::ptr_eq(&now, payload),
             "node {id:?} reads the same payload it read before the close"
         );
     }

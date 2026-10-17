@@ -343,6 +343,18 @@ impl OwnedHandles {
         hold_nodes(&self.0, ctx)
     }
 
+    /// A cache's holds on all of them; on refusal they are charged to
+    /// their callers instead, so a value returned uncached is charged
+    /// whatever the pressure.
+    ///
+    /// # Errors
+    ///
+    /// The account's refusal: nothing is retained; every allocation is
+    /// pinned for the callers keeping it.
+    pub fn hold_or_pin(self, ctx: ChargeCtx<'_>) -> Result<Box<[OwnedHold]>, RetentionRefusal> {
+        hold_nodes(&self.0, ctx).inspect_err(|_| self.pin(ctx))
+    }
+
     /// `charge` holding these allocations too: the retaining cache's whole
     /// footprint as one token ([`RetentionCharge::holding`]).
     ///

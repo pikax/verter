@@ -42,7 +42,10 @@ fn template(host: &VerterHost, quasis: &[&str], expressions: &[SemanticNodeId]) 
     host.project_type_store()
         .semantic_graph()
         .intern_node(SemanticNodeData::TemplateLiteral {
-            quasis: quasis.iter().map(|q| Arc::from(*q)).collect(),
+            quasis: quasis
+                .iter()
+                .map(|q| verter_type_expr::OwnedStr::from(*q))
+                .collect(),
             expressions: verter_type_engine::semantic_query::PayloadArray::from(
                 expressions.to_vec().into_boxed_slice(),
             ),
@@ -215,7 +218,7 @@ fn truthiness_rules_match_the_pinned_checker() {
             param_index: 0,
             constraint,
             default: None,
-            display_name: Arc::from("T"),
+            display_name: verter_type_expr::OwnedStr::from("T"),
         })
     };
     assert_eq!(

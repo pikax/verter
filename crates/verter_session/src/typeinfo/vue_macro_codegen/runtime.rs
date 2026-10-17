@@ -43,8 +43,7 @@ pub(super) fn direct_member_dependency_is_missing(
             }
             SemanticNodeData::BareRef(_) => {
                 let (name, _) = data.bare_ref_head().expect("BareRef carrier head");
-                let tracked_dependency =
-                    tracked_dependency || dependency_names.contains(name.as_ref());
+                let tracked_dependency = tracked_dependency || dependency_names.contains(name);
                 drop(data);
                 let Some(resolved) = resolve_member_carrier(
                     dispatch,

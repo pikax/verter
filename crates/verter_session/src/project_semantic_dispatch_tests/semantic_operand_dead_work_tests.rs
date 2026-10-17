@@ -160,7 +160,10 @@ fn stats(host: &VerterHost) -> verter_type_engine::semantic_query::SemanticGraph
     host.project_type_store().semantic_graph().stats_snapshot()
 }
 
-fn graph_node_data(host: &VerterHost, node: SemanticNodeId) -> Arc<SemanticNodeData> {
+fn graph_node_data(
+    host: &VerterHost,
+    node: SemanticNodeId,
+) -> verter_type_engine::semantic_query_memo::NodeData {
     host.project_type_store()
         .semantic_graph()
         .node_data(node)

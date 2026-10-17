@@ -3833,6 +3833,16 @@ dependencies = [
  "verter_debug_assert",
  "verter_no_storedspan",
  "verter_no_typeexpr",
+ "verter_retention_derive",
+]
+
+[[package]]
+name = "verter_retention_derive"
+version = "0.0.1-beta.6"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]

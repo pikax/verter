@@ -14,6 +14,7 @@
 
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use verter_type_expr::OwnedStr;
 
 use rustc_hash::{FxHashSet, FxHasher};
 
@@ -769,7 +770,7 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
         let strict = self.strict_null();
         let (receiver, positional) = crate::semantic_query::split_this_receiver(&params);
         let to_param = |p: &crate::semantic_query::FunctionParam| ParamInput {
-            name: p.name.clone(),
+            name: p.name.as_deref().map(Arc::<str>::from),
             ty: p.ty,
             optional: p.optional,
             includes_undefined: p.optional && strict,
@@ -792,7 +793,7 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
             match shape.as_deref() {
                 Some(SemanticNodeData::Array { element, .. }) => {
                     rest = Some(RestInput {
-                        name: param.name.clone(),
+                        name: param.name.as_deref().map(Arc::<str>::from),
                         ty: *element,
                         generic: false,
                         tail: Vec::new(),
@@ -804,7 +805,7 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
                     for element in elements.iter() {
                         let optional = element.optional;
                         let as_param = ParamInput {
-                            name: element.label.clone(),
+                            name: element.label.as_deref().map(Arc::<str>::from),
                             ty: element.value,
                             optional,
                             includes_undefined: optional && strict,
@@ -823,7 +824,7 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
                     }
                     if let Some(element) = run {
                         rest = Some(RestInput {
-                            name: param.name.clone(),
+                            name: param.name.as_deref().map(Arc::<str>::from),
                             ty: element,
                             generic: false,
                             tail,
@@ -832,7 +833,7 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
                 }
                 _ => {
                     rest = Some(RestInput {
-                        name: param.name.clone(),
+                        name: param.name.as_deref().map(Arc::<str>::from),
                         ty: param.ty,
                         generic: true,
                         tail: Vec::new(),
@@ -843,7 +844,7 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
         let binders: Vec<BinderInput> = type_parameters
             .iter()
             .map(|decl| BinderInput {
-                name: Arc::clone(&decl.name),
+                name: Arc::<str>::from(&decl.name),
                 param: decl.param,
                 constraint: decl.constraint,
                 default: decl.default,
@@ -2031,7 +2032,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                     .map(|element| match element {
                                         RawRestElement::Whole { node, array, label } => {
                                             crate::semantic_query::TupleElement {
-                                                label: label.clone(),
+                                                label: label.as_deref().map(OwnedStr::from),
                                                 value: whole(*node, *array),
                                                 optional: false,
                                                 rest: true,
@@ -2042,7 +2043,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                             optional,
                                             label,
                                         } => crate::semantic_query::TupleElement {
-                                            label: label.clone(),
+                                            label: label.as_deref().map(OwnedStr::from),
                                             value: *node,
                                             optional: *optional,
                                             rest: false,

@@ -88,6 +88,7 @@
 
 use std::ops::ControlFlow;
 use std::sync::Arc;
+use verter_type_expr::OwnedStr;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -382,12 +383,12 @@ mod literal_provenance_tests {
 
     #[test]
     fn literal_provenance_hash_collision_still_compares_exact_values() {
-        let left = LiteralValueIdentity::new(Arc::new(SemanticNodeData::Literal(
-            LiteralValue::String("left".into()),
-        )));
-        let mut right = LiteralValueIdentity::new(Arc::new(SemanticNodeData::Literal(
-            LiteralValue::String("right".into()),
-        )));
+        let left = LiteralValueIdentity::new(crate::semantic_query_memo::NodeData::new(
+            SemanticNodeData::Literal(LiteralValue::String("left".into())),
+        ));
+        let mut right = LiteralValueIdentity::new(crate::semantic_query_memo::NodeData::new(
+            SemanticNodeData::Literal(LiteralValue::String("right".into())),
+        ));
         // A hash is only a candidate filter. Force the rare collision without
         // relying on particular hash output or a source fingerprint.
         right.semantic_hash = left.semantic_hash;
@@ -522,12 +523,12 @@ pub enum LiteralProvenanceResult {
 /// operation-local inventory computes its semantic hash only on first read.
 #[derive(Clone)]
 struct LiteralValueIdentity {
-    data: Arc<SemanticNodeData>,
+    data: crate::semantic_query_memo::NodeData,
     semantic_hash: u64,
 }
 
 impl LiteralValueIdentity {
-    fn new(data: Arc<SemanticNodeData>) -> Self {
+    fn new(data: crate::semantic_query_memo::NodeData) -> Self {
         use std::hash::{Hash, Hasher};
         #[cfg(test)]
         literal_provenance_tests::PAYLOAD_HASHES.with(|count| count.set(count.get() + 1));
@@ -569,7 +570,7 @@ impl LiteralValueIdentity {
 
 impl PartialEq for LiteralValueIdentity {
     fn eq(&self, other: &Self) -> bool {
-        if Arc::ptr_eq(&self.data, &other.data) {
+        if crate::semantic_query_memo::NodeData::ptr_eq(&self.data, &other.data) {
             return true;
         }
         if self.semantic_hash != other.semantic_hash {
@@ -623,7 +624,7 @@ fn inspect_literal_provenance_with_budget(
     }
     enum InspectedPayload {
         Literal(LiteralValueIdentity),
-        Nonliteral(Arc<SemanticNodeData>),
+        Nonliteral(crate::semantic_query_memo::NodeData),
     }
     const PRESENT: u8 = 1;
     const FRESH: u8 = 2;
@@ -1361,10 +1362,10 @@ fn canonicalize_with(
     //    order; wider sets narrow the candidates by a payload hash first.
     //    Either way only an exact payload match deduplicates.
     let mut kept: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
-    let mut child_bearing: Vec<(usize, Arc<SemanticNodeData>)> = Vec::new();
+    let mut child_bearing: Vec<(usize, crate::semantic_query_memo::NodeData)> = Vec::new();
     if arms.len() <= TIER1_DIRECT_SCAN_MAX {
         let mut kept_payloads: smallvec::SmallVec<
-            [(SemanticNodeId, Arc<SemanticNodeData>); TIER1_DIRECT_SCAN_MAX],
+            [(SemanticNodeId, crate::semantic_query_memo::NodeData); TIER1_DIRECT_SCAN_MAX],
         > = smallvec::SmallVec::new();
         'direct: for &m in &arms {
             let Some(data) = graph.node_data(m) else {
@@ -1386,7 +1387,7 @@ fn canonicalize_with(
                 }
             }
             if !payload_is_childless(&data) {
-                child_bearing.push((kept.len(), Arc::clone(&data)));
+                child_bearing.push((kept.len(), data.clone()));
             }
             kept_payloads.push((m, data));
             kept.push(m);
@@ -1422,7 +1423,7 @@ fn canonicalize_with(
             }
             bucket.push(m);
             if !payload_is_childless(&data) {
-                child_bearing.push((kept.len(), Arc::clone(&data)));
+                child_bearing.push((kept.len(), data.clone()));
             }
             kept.push(m);
         }
@@ -1676,7 +1677,7 @@ fn remove_redundant_supertypes(
     arms: &mut Vec<SemanticNodeId>,
     supertype_reduction: SupertypeReduction,
 ) {
-    let data: Vec<Option<Arc<SemanticNodeData>>> =
+    let data: Vec<Option<crate::semantic_query_memo::NodeData>> =
         arms.iter().map(|arm| graph.node_data(*arm)).collect();
     let is_empty_object = |d: &SemanticNodeData| matches!(d, SemanticNodeData::Object(view) if view.closed().is_empty());
     let present = |test: &dyn Fn(&SemanticNodeData) -> bool| data.iter().flatten().any(|d| test(d));
@@ -3993,7 +3994,7 @@ fn classify_node(
             quasis,
             expressions,
         }) => {
-            let quasis = Arc::clone(quasis);
+            let quasis = quasis.clone();
             let expressions = Arc::clone(expressions.as_arc());
             classify_template(walk, &quasis, &expressions)
         }
@@ -4059,7 +4060,7 @@ fn literal_is_truthy(literal: &LiteralValue) -> bool {
 
 fn classify_template(
     walk: &mut TruthinessWalk<'_>,
-    quasis: &[Arc<str>],
+    quasis: &[OwnedStr],
     expressions: &[SemanticNodeId],
 ) -> crate::semantic_query::TruthinessDomain {
     use crate::semantic_query::TruthinessInhabitance as Tri;
@@ -4165,7 +4166,7 @@ fn render_domain(walk: &mut TruthinessWalk<'_>, node: SemanticNodeId) -> RenderD
             quasis,
             expressions,
         }) => {
-            let quasis = Arc::clone(quasis);
+            let quasis = quasis.clone();
             let expressions = Arc::clone(expressions.as_arc());
             let nested = classify_template(walk, &quasis, &expressions);
             // A template denotes strings, so its render domain IS its

@@ -9069,7 +9069,9 @@ mod prepared_identity_bijection {
             ),
             SemanticQueryKeyTag::TemplateLiteralReduce => (
                 SemanticQueryKey::TemplateLiteralReduce {
-                    pattern: Arc::from([Arc::from("a")]),
+                    pattern: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from([
+                        verter_type_expr::OwnedStr::from("a"),
+                    ]),
                     args: nodes(&[]),
                     context: TemplateLiteralReduceContext {
                         resolve_env_hash: h16(0),
@@ -9079,7 +9081,9 @@ mod prepared_identity_bijection {
                     },
                 },
                 SemanticQueryKey::TemplateLiteralReduce {
-                    pattern: Arc::from([Arc::from("b")]),
+                    pattern: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from([
+                        verter_type_expr::OwnedStr::from("b"),
+                    ]),
                     args: nodes(&[]),
                     context: TemplateLiteralReduceContext {
                         resolve_env_hash: h16(0),
@@ -9488,7 +9492,7 @@ fn release_type_param(canonical: &str, hash: u8, name: &str) -> SemanticNodeData
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from(name),
+        display_name: verter_type_expr::OwnedStr::from(name),
     }
 }
 
@@ -10045,7 +10049,7 @@ mod release_embedded_node_family_tests {
                     true_branch: live,
                     false_branch: live,
                     distributive: false,
-                    pending: Some(Arc::new(
+                    pending: Some(verter_session_query::retention::owned::Owned::new(
                         ConditionalPendingSubstitution::empty().append_both(node, live),
                     )),
                 }),

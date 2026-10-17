@@ -52,7 +52,7 @@ fn outer_type_param(
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from(name),
+        display_name: verter_type_expr::OwnedStr::from(name),
     })
 }
 

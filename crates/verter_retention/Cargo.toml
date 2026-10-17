@@ -20,6 +20,7 @@ test-support = []
 [dependencies]
 verter_audit = { path = "../verter_audit" }
 verter_debug_assert = { workspace = true }
+verter_retention_derive = { workspace = true }
 verter_no_storedspan = { workspace = true }
 verter_no_typeexpr = { workspace = true }
 parking_lot = "0.12.5"

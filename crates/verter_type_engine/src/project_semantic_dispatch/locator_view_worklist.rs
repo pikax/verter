@@ -136,19 +136,19 @@ enum ProjectionFrame {
     CompositeResume {
         node: SemanticNodeId,
         context: ProjectionReductionContext,
-        data: Arc<SemanticNodeData>,
+        data: crate::semantic_query_memo::NodeData,
         next_child: usize,
     },
     ConditionalAfterCheck {
         node: SemanticNodeId,
         context: ProjectionReductionContext,
-        data: Arc<SemanticNodeData>,
+        data: crate::semantic_query_memo::NodeData,
         check: SemanticNodeId,
     },
     ConditionalAfterExtends {
         node: SemanticNodeId,
         context: ProjectionReductionContext,
-        data: Arc<SemanticNodeData>,
+        data: crate::semantic_query_memo::NodeData,
         extends_context: ProjectionReductionContext,
     },
     ConditionalSelectedFinish {
@@ -159,19 +159,19 @@ enum ProjectionFrame {
     ConditionalAfterTrue {
         node: SemanticNodeId,
         context: ProjectionReductionContext,
-        data: Arc<SemanticNodeData>,
+        data: crate::semantic_query_memo::NodeData,
         extends_context: ProjectionReductionContext,
     },
     ConditionalFinish {
         node: SemanticNodeId,
         context: ProjectionReductionContext,
-        data: Arc<SemanticNodeData>,
+        data: crate::semantic_query_memo::NodeData,
         extends_context: ProjectionReductionContext,
     },
     MappedAfterSource {
         node: SemanticNodeId,
         context: ProjectionReductionContext,
-        data: Arc<SemanticNodeData>,
+        data: crate::semantic_query_memo::NodeData,
         source: SemanticNodeId,
     },
     ReferenceArgsResume {
@@ -896,7 +896,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         frames.push(ProjectionFrame::CompositeResume {
                             node,
                             context,
-                            data: Arc::clone(&data),
+                            data: data.clone(),
                             next_child: cursor + 1,
                         });
                         match self.schedule_projection_node(
@@ -1032,14 +1032,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         pending.as_deref(),
                         false,
                     );
-                    let data = Arc::new(SemanticNodeData::Conditional {
-                        check: *check,
-                        extends: *extends,
-                        true_branch_ref: true_branch,
-                        false_branch_ref: false_branch,
-                        distributive: *distributive,
-                        pending: None,
-                    });
+                    let data =
+                        crate::semantic_query_memo::NodeData::new(SemanticNodeData::Conditional {
+                            check: *check,
+                            extends: *extends,
+                            true_branch_ref: true_branch,
+                            false_branch_ref: false_branch,
+                            distributive: *distributive,
+                            pending: None,
+                        });
                     frames.push(ProjectionFrame::ConditionalAfterTrue {
                         node,
                         context,
@@ -1307,7 +1308,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         context: ProjectionReductionContext,
         memo: &mut ViewMemo,
         work_credit: &mut ConnectedWorkCredit<'_, '_>,
-    ) -> Result<Option<Arc<SemanticNodeData>>, ProjectionFailure> {
+    ) -> Result<Option<crate::semantic_query_memo::NodeData>, ProjectionFailure> {
         if memo.contains_key(&(node, context)) {
             return Ok(None);
         }
@@ -1377,7 +1378,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
-        data: &Arc<SemanticNodeData>,
+        data: &crate::semantic_query_memo::NodeData,
         children: &[SemanticNodeId],
         child_context: ProjectionReductionContext,
         next_child: usize,
@@ -1459,7 +1460,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             frames.push(ProjectionFrame::CompositeResume {
                 node,
                 context,
-                data: Arc::clone(data),
+                data: data.clone(),
                 next_child: cursor + 1,
             });
             if self.schedule_projection_node(
@@ -1563,7 +1564,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
-        data: Arc<SemanticNodeData>,
+        data: crate::semantic_query_memo::NodeData,
         inputs: &LocatorViewInputs<'_>,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         memo: &mut ViewMemo,

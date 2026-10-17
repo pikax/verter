@@ -151,7 +151,7 @@ fn proof_reference_map(root: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> Option<
                 references.insert(
                     path.clone(),
                     ProofReferenceIdentity::Bare {
-                        name: std::sync::Arc::clone(name),
+                        name: std::sync::Arc::<str>::from(name),
                         scope: scope.clone(),
                     },
                 );

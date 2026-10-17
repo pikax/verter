@@ -295,7 +295,10 @@ fn raise(host: &VerterHost, source: &SemanticTypeSource) -> Option<SemanticNodeI
     out
 }
 
-fn node_data(host: &VerterHost, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
+fn node_data(
+    host: &VerterHost,
+    node: SemanticNodeId,
+) -> Option<verter_type_engine::semantic_query_memo::NodeData> {
     let mut out = None;
     crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
         out = verter_type_engine::project_semantic_dispatch::node_data_for(

@@ -7499,7 +7499,7 @@ fn deferred_scc_member_finalizes_after_per_key_substitution() {
             param_index: 0,
             constraint: None,
             default: None,
-            display_name: Arc::from("T"),
+            display_name: verter_type_expr::OwnedStr::from("T"),
         });
         let key_of = |name: &str| FlowReturnKey {
             function: dispatch.flow_function_slot_for(
