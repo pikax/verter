@@ -520,10 +520,10 @@ fn normalized_type_args_distinguishes_distinct_decl_instantiations() {
 
     fn decl(canonical_id: &str, decl_name: &str) -> DeclIdentity {
         DeclIdentity {
-            canonical_id: Arc::from(canonical_id),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical_id),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: Default::default(),
-            decl_name: Arc::from(decl_name),
+            decl_name: verter_type_expr::OwnedStr::from(decl_name),
         }
     }
 

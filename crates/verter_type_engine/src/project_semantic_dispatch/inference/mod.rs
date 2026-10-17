@@ -46,7 +46,7 @@ pub(in crate::project_semantic_dispatch) trait InferenceDemandDriver {
     fn locator_binder_frame_from_narrow_params(
         &self,
         scope: &NodeScopeId,
-        owner_symbol: &Arc<str>,
+        owner_symbol: &verter_type_expr::OwnedStr,
         type_parameters: &[verter_type_expr::facts::NarrowTypeParam],
     ) -> Vec<(Arc<str>, SemanticNodeId)>;
     fn normalize_node_for_structural_fact_demand(
@@ -122,7 +122,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> InferenceDemandDriver
     fn locator_binder_frame_from_narrow_params(
         &self,
         scope: &NodeScopeId,
-        owner_symbol: &Arc<str>,
+        owner_symbol: &verter_type_expr::OwnedStr,
         type_parameters: &[verter_type_expr::facts::NarrowTypeParam],
     ) -> Vec<(Arc<str>, SemanticNodeId)> {
         ProjectSemanticDispatch::locator_binder_frame_from_narrow_params(
@@ -241,7 +241,7 @@ impl<D: InferenceDemandDriver> InferenceTxn<'_, D> {
     pub(in crate::project_semantic_dispatch) fn locator_binder_frame_from_narrow_params(
         &self,
         scope: &NodeScopeId,
-        owner_symbol: &Arc<str>,
+        owner_symbol: &verter_type_expr::OwnedStr,
         type_parameters: &[verter_type_expr::facts::NarrowTypeParam],
     ) -> Vec<(Arc<str>, SemanticNodeId)> {
         self.driver

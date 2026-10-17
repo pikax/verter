@@ -399,7 +399,7 @@ fn precedence_is_structural_not_string_sniffing() {
     // structural parens by the current impl → `A | B['x']`.
     let idx = store.intern_node(SemanticNodeData::IndexedAccess {
         object: union_ab,
-        index: IndexKey::String(Arc::from("x")),
+        index: IndexKey::String(verter_type_expr::OwnedStr::from("x")),
     });
     assert_eq!(render(&store, idx), "(A | B)['x']");
 
@@ -1201,19 +1201,21 @@ fn typeof_carrier_renders_type_args() {
     let string_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let value_root = ValueRootKey {
         scope: ScopeId {
-            canonical_id: Arc::from("/m.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/m.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
-        name: Arc::from("factory"),
+        name: verter_type_expr::OwnedStr::from("factory"),
     };
 
     let bare = store.intern_node(SemanticNodeData::new_typeof(
         value_root.clone(),
-        Arc::from(vec![Arc::<str>::from("make")].into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(
+            vec![verter_type_expr::OwnedStr::from("make")].into_boxed_slice(),
+        ),
         Arc::from(Vec::new().into_boxed_slice()),
     ));
     assert_eq!(
@@ -1224,7 +1226,9 @@ fn typeof_carrier_renders_type_args() {
 
     let applied = store.intern_node(SemanticNodeData::new_typeof(
         value_root,
-        Arc::from(vec![Arc::<str>::from("make")].into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(
+            vec![verter_type_expr::OwnedStr::from("make")].into_boxed_slice(),
+        ),
         Arc::from(vec![string_id].into_boxed_slice()),
     ));
     assert_eq!(

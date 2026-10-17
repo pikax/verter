@@ -129,10 +129,10 @@ fn lower_mapped(host: &Arc<VerterHost>) -> SemanticNodeId {
             },
         )) => {
             let identity = verter_type_engine::semantic_query::DeclIdentity {
-                canonical_id: Arc::clone(canonical_id),
+                canonical_id: canonical_id.clone(),
                 owner: *owner,
                 whole_hash: *whole_hash,
-                decl_name: Arc::clone(name),
+                decl_name: name.clone(),
             };
             let key = verter_session::for_tests::instantiate_key_for_tests(
                 host,

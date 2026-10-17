@@ -15,7 +15,7 @@ const DRAINED_CAPACITY_BOUND: usize = RETAINED_SLOT_FLOOR * 4;
 struct Plain(u64);
 intern_domain!(Plain {
     /// A `u64`: inline.
-    fn value_heap_bytes(&self) -> usize {
+    fn value_heap_bytes(&self, _aliases: &mut verter_session_query::retention::allocation::AliasSet) -> usize {
         0
     }
 });
@@ -24,7 +24,7 @@ intern_domain!(Plain {
 struct Shared(u64);
 intern_domain!(Shared {
     /// A `u64`: inline.
-    fn value_heap_bytes(&self) -> usize {
+    fn value_heap_bytes(&self, _aliases: &mut verter_session_query::retention::allocation::AliasSet) -> usize {
         0
     }
 });
@@ -36,7 +36,7 @@ struct Counted {
 }
 intern_domain!(Counted {
     /// The shared drop counter's block.
-    fn value_heap_bytes(&self) -> usize {
+    fn value_heap_bytes(&self, _aliases: &mut verter_session_query::retention::allocation::AliasSet) -> usize {
         verter_session_query::retention::allocation::arc_block_bytes(std::mem::size_of::<
             AtomicUsize,
         >())
@@ -65,7 +65,7 @@ impl Drop for Counted {
 struct Colliding(u64);
 intern_domain!(Colliding {
     /// A `u64`: inline.
-    fn value_heap_bytes(&self) -> usize {
+    fn value_heap_bytes(&self, _aliases: &mut verter_session_query::retention::allocation::AliasSet) -> usize {
         0
     }
 });
@@ -81,7 +81,7 @@ impl Hash for Colliding {
 struct CollidingPeer(u64);
 intern_domain!(CollidingPeer {
     /// A `u64`: inline.
-    fn value_heap_bytes(&self) -> usize {
+    fn value_heap_bytes(&self, _aliases: &mut verter_session_query::retention::allocation::AliasSet) -> usize {
         0
     }
 });
@@ -97,7 +97,7 @@ impl Hash for CollidingPeer {
 struct Observed(u64);
 intern_domain!(Observed {
     /// A `u64`: inline.
-    fn value_heap_bytes(&self) -> usize {
+    fn value_heap_bytes(&self, _aliases: &mut verter_session_query::retention::allocation::AliasSet) -> usize {
         0
     }
 });
@@ -115,7 +115,7 @@ enum Tree {
 }
 intern_domain!(Tree {
     /// A node's child list; each child is its own record.
-    fn value_heap_bytes(&self) -> usize {
+    fn value_heap_bytes(&self, _aliases: &mut verter_session_query::retention::allocation::AliasSet) -> usize {
         match self {
             Tree::Leaf(_) => 0,
             Tree::Node(children) => verter_session_query::retention::allocation::vec_bytes(children),

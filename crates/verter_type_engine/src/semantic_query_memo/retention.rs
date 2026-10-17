@@ -14,7 +14,7 @@ use crate::semantic_query::{QueryResult, SemanticQueryValue};
 /// One memo candidate's charges.
 ///
 /// * `own` — the candidate's cache-only bookkeeping
-///   ([`MemoEntry::own_retained_footprint_bytes`]), and every evidence page
+///   ([`MemoEntry::own_retained_footprint`]), and every evidence page
 ///   its carrier newly retains. Nothing here is handed to a caller, so it
 ///   is released the moment the candidate drains.
 /// * `carrier` — the fact rail and self-root list, shared by every
@@ -59,64 +59,42 @@ impl MemoRetention {
 /// and owns fresh copies of its boxes — exactly what measuring the key
 /// again under the same aliases counts. The candidates themselves are
 /// charged with each candidate.
-pub(super) fn family_container_bytes(family: &super::family::FamilyKey) -> usize {
+///
+/// The key's owned names are charged by their own cells, once however
+/// many key copies reach them; the family holds them beside its charge.
+pub(super) fn family_container_footprint(
+    family: &super::family::FamilyKey,
+) -> verter_session_query::retention::Footprint {
     use super::family_footprint::family_key_heap_bytes;
     let mut aliases = verter_session_query::retention::allocation::AliasSet::new();
     let map_key = family_key_heap_bytes(family, &mut aliases);
     let ledger_key = family_key_heap_bytes(family, &mut aliases);
-    std::mem::size_of::<(super::family::FamilyKey, super::family::FamilySlots)>()
-        + 1
-        + std::mem::size_of::<(u64, super::family::FamilyKey)>()
-        + map_key
-        + ledger_key
+    verter_session_query::retention::Footprint {
+        bytes: std::mem::size_of::<(super::family::FamilyKey, super::family::FamilySlots)>()
+            + 1
+            + std::mem::size_of::<(u64, super::family::FamilyKey)>()
+            + map_key
+            + ledger_key,
+        handles: aliases.take_handles(),
+    }
 }
 
-/// Receives the one owned allocation a result's value keeps reachable
-/// outside the graph — its outermost allocation, which carries the value's
-/// charge and every nested owned allocation's.
-pub(super) trait ValueAllocation {
-    type Output;
-    fn allocation<T: verter_session_query::retention::owned::Measured>(
-        self,
-        allocation: &verter_session_query::retention::owned::Owned<T>,
-    ) -> Self::Output;
+/// [`family_container_footprint`]'s own bytes: a figure for fixtures.
+#[cfg(test)]
+pub(super) fn family_container_bytes(family: &super::family::FamilyKey) -> usize {
+    family_container_footprint(family).bytes
 }
 
-/// Offer `result`'s value allocation to `visit`; `None` for a value that
-/// keeps nothing reachable outside the graph.
-pub(super) fn with_value_allocation<V: ValueAllocation>(
+/// The owned allocations a delivered result reaches: its value's owned
+/// carriers and every owned name its error holds. A delivered result keeps
+/// nothing reachable outside the graph except through these, so each is
+/// charged by its own cell.
+pub(super) fn result_handles(
     result: &QueryResult<SemanticQueryValue>,
-    visit: V,
-) -> Option<V::Output> {
-    let QueryResult::Value(value) = result else {
-        return None;
-    };
-    Some(match value {
-        SemanticQueryValue::ObjectProjection(formula) => visit.allocation(formula.product_owned()),
-        SemanticQueryValue::DeclarationAnalysis(analysis) => {
-            visit.allocation(&analysis.contributors)
-        }
-        SemanticQueryValue::OverloadSet(signatures) => visit.allocation(signatures),
-        SemanticQueryValue::Relation(payload) => visit.allocation(&payload.bindings),
-        SemanticQueryValue::BroadRuntime(classification) => {
-            visit.allocation(classification.kinds_owned())
-        }
-        SemanticQueryValue::FlowReturn(flow) => visit.allocation(flow),
-        SemanticQueryValue::ResolveCall(call) => visit.allocation(call),
-        SemanticQueryValue::SignatureSet(set) => visit.allocation(&set.nodes),
-        SemanticQueryValue::MaterializationCycleGate(
-            crate::semantic_query::MaterializationCycleGateOutcome::LegacyFallback {
-                reasons, ..
-            },
-        ) => visit.allocation(&reasons.0),
-        SemanticQueryValue::TypeNode(_)
-        | SemanticQueryValue::ProgramAnalysis(_)
-        | SemanticQueryValue::MaterializationCycleGate(
-            crate::semantic_query::MaterializationCycleGateOutcome::Decided(_),
-        )
-        | SemanticQueryValue::TruthinessDomain(_)
-        | SemanticQueryValue::SignatureResult(_)
-        | SemanticQueryValue::DiagnosticAnalysis(_) => return None,
+) -> verter_session_query::retention::owned::OwnedHandles {
+    use crate::semantic_query::allocation_footprint::OwnedHeap as _;
+    verter_session_query::retention::owned::OwnedHandles::of(|aliases| {
+        result.owned_heap_bytes(aliases)
     })
 }
 
@@ -231,14 +209,15 @@ impl SemanticGraphStore {
         registered_canonicals: usize,
     ) -> Result<MemoRetention, RetentionRefusal> {
         let shared = self.hold_shared_allocations(SharedParts::of(entry))?;
-        let own_bytes =
-            own_reservation_bytes(entry, family, populated_slots, registered_canonicals);
+        let own = own_reservation(entry, family, populated_slots, registered_canonicals);
         match verter_session_query::facts::receipt::reserve_retained_with_evidence(
             self.retention_account(),
-            own_bytes,
+            own.bytes,
             &[&entry.read_set_signature.facts],
         ) {
-            RetentionAdmission::Admitted(own) => Ok(shared.with_own(own)),
+            RetentionAdmission::Admitted(charge) => {
+                Ok(shared.with_own(own.handles.retained_with(charge, self.charge_ctx())?))
+            }
             RetentionAdmission::Refused(refusal) => Err(refusal),
         }
     }
@@ -269,32 +248,11 @@ impl SemanticGraphStore {
         if let Some(rail) = parts.dep_signature.owned() {
             owned.push(rail.hold(self.charge_ctx())?);
         }
-        if let Some(value) = self.hold_value_allocation(parts.result) {
-            owned.push(value?);
-        }
+        owned.extend(result_handles(parts.result).hold(self.charge_ctx())?);
         Ok(SharedHolds {
             carrier: carrier.into_boxed_slice(),
             delivered: owned.into_boxed_slice(),
         })
-    }
-
-    /// A cache hold on the allocation a result's value keeps reachable
-    /// outside the graph.
-    fn hold_value_allocation(
-        &self,
-        result: &QueryResult<SemanticQueryValue>,
-    ) -> Option<Result<OwnedHold, RetentionRefusal>> {
-        struct Hold<'a>(ChargeCtx<'a>);
-        impl ValueAllocation for Hold<'_> {
-            type Output = Result<OwnedHold, RetentionRefusal>;
-            fn allocation<T: verter_session_query::retention::owned::Measured>(
-                self,
-                allocation: &verter_session_query::retention::owned::Owned<T>,
-            ) -> Self::Output {
-                allocation.hold(self.0)
-            }
-        }
-        with_value_allocation(result, Hold(self.charge_ctx()))
     }
 
     /// Charge the allocations a delivery hands its caller to that caller:
@@ -305,29 +263,19 @@ impl SemanticGraphStore {
         &self,
         delivered: &super::delivery_lease::DeliveredAllocations<'_>,
     ) {
-        struct Pin<'a>(ChargeCtx<'a>);
-        impl ValueAllocation for Pin<'_> {
-            type Output = ();
-            fn allocation<T: verter_session_query::retention::owned::Measured>(
-                self,
-                allocation: &verter_session_query::retention::owned::Owned<T>,
-            ) {
-                allocation.pin(self.0);
-            }
-        }
         if let Some(diagnostics) = delivered.diagnostics.and_then(|list| list.owned()) {
             diagnostics.pin(self.charge_ctx());
         }
         if let Some(rail) = delivered.dep_signature.and_then(|rail| rail.owned()) {
             rail.pin(self.charge_ctx());
         }
-        with_value_allocation(delivered.result, Pin(self.charge_ctx()));
+        result_handles(delivered.result).pin(self.charge_ctx());
     }
 
     /// Where this store's self-charged allocations are charged: its
-    /// account, sharing raw leaf names through its registry.
+    /// account.
     pub(super) fn charge_ctx(&self) -> ChargeCtx<'_> {
-        ChargeCtx::new(self.retention_account(), &self.alias_charges)
+        ChargeCtx::new(self.retention_account())
     }
 
     /// The slots of `family`, keyed under the held `entries` lock: an
@@ -367,10 +315,7 @@ impl SemanticGraphStore {
                 )),
                 true,
             )),
-            Entry::Vacant(slot) => match self.retention_account().reserve(
-                verter_session_query::retention::ChargeClass::Retained,
-                family_container_bytes(family),
-            ) {
+            Entry::Vacant(slot) => match self.reserve_family_container(family) {
                 RetentionAdmission::Admitted(charge) => Some((
                     slot.insert(super::family::FamilySlots::charged(charge)),
                     true,
@@ -382,6 +327,27 @@ impl SemanticGraphStore {
                     None
                 }
             },
+        }
+    }
+
+    /// A newly keyed family's container charge, holding the key's owned
+    /// names: refusable, all or nothing.
+    pub(super) fn reserve_family_container(
+        &self,
+        family: &super::family::FamilyKey,
+    ) -> RetentionAdmission {
+        let footprint = family_container_footprint(family);
+        match self.retention_account().reserve(
+            verter_session_query::retention::ChargeClass::Retained,
+            footprint.bytes,
+        ) {
+            RetentionAdmission::Admitted(charge) => {
+                match footprint.handles.retained_with(charge, self.charge_ctx()) {
+                    Ok(charge) => RetentionAdmission::Admitted(charge),
+                    Err(refusal) => RetentionAdmission::Refused(refusal),
+                }
+            }
+            refused @ RetentionAdmission::Refused(_) => refused,
         }
     }
 
@@ -471,11 +437,11 @@ impl SharedHolds {
 /// What `entry`'s own reservation covers: its bookkeeping for
 /// `populated_slots` slots registered under `registered_canonicals`
 /// canonicals each.
-pub(super) fn own_reservation_bytes(
+pub(super) fn own_reservation(
     entry: &MemoEntry,
     family: &super::family::FamilyKey,
     populated_slots: usize,
     registered_canonicals: usize,
-) -> usize {
-    entry.own_retained_footprint_bytes(family, populated_slots, registered_canonicals)
+) -> verter_session_query::retention::Footprint {
+    entry.own_retained_footprint(family, populated_slots, registered_canonicals)
 }

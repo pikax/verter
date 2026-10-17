@@ -37,7 +37,7 @@ fn demand_error(error: QueryError) -> SymbolIdentityDemandOutcome {
 fn partial_identity_reasons_are_typed_and_carry_no_node() {
     assert_eq!(
         demand_error(QueryError::RecursiveRef {
-            name: Arc::from("Cycle"),
+            name: verter_type_expr::OwnedStr::from("Cycle"),
             args: Default::default(),
         }),
         SymbolIdentityDemandOutcome::Partial(PropCallableRoleUnresolvedReason::Cycle)

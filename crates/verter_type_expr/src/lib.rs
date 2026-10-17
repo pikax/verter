@@ -24,6 +24,8 @@ use verter_span::Span;
 
 mod property_key;
 pub use property_key::{AuthoredPropertyKey, CanonicalIndexInt, PropertyKey};
+/// The owned, self-charged text allocation identity strings carry.
+pub use verter_retention::owned::{OwnedSlice, OwnedStr};
 
 /// In-place declaration-site span transforms over [`TypeExpr`]
 /// ([`TypeExpr::shift_spans`] / [`TypeExpr::clear_spans`]).

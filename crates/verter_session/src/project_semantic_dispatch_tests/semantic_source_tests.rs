@@ -88,12 +88,12 @@ defineProps<{ msg: string; count: number }>();\n\
 fn decl_body_locator(canonical: &str, symbol: &str) -> AuthoredBodyLocator {
     AuthoredBodyLocator::DeclBody(TypeBodySlot {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(symbol),
+            symbol: verter_type_expr::OwnedStr::from(symbol),
             space: LocatorSymbolSpace::Type,
         },
-        path: Arc::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
     })
 }
 
@@ -172,9 +172,9 @@ fn authored_macro_type_argument_routes_to_the_sole_hot_mirror_producer() {
 
     let locator = AuthoredBodyLocator::MacroPayload(MacroPayloadLocator {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(SFC_ID),
+            canonical_id: verter_type_expr::OwnedStr::from(SFC_ID),
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
-            symbol: Arc::from("default"),
+            symbol: verter_type_expr::OwnedStr::from("default"),
             space: LocatorSymbolSpace::Value,
         },
         macro_index: u32::try_from(macro_index).unwrap(),
@@ -339,9 +339,9 @@ fn synthesized_symbol_ref_uses_exact_anchor_owner_when_module_import_has_same_na
     let dispatch = ProjectSemanticDispatch::new(&host);
     let source = SemanticTypeSource::Synthesized(ResolvedLocalShape::Ref(SymbolBodyLocator {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(OWNER),
+            canonical_id: verter_type_expr::OwnedStr::from(OWNER),
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
-            symbol: Arc::from("Shared"),
+            symbol: verter_type_expr::OwnedStr::from("Shared"),
             space: LocatorSymbolSpace::Type,
         },
     }));
@@ -485,12 +485,14 @@ fn synthesized_object_source_composes_a_surface_with_lowered_member_values() {
                 optional: true,
                 ty: FactOrLocator::Locator(TypeBodySlot {
                     anchor: AuthoredAnchor {
-                        canonical_id: Arc::from(OWNER_ID),
+                        canonical_id: verter_type_expr::OwnedStr::from(OWNER_ID),
                         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                        symbol: Arc::from("Base"),
+                        symbol: verter_type_expr::OwnedStr::from("Base"),
                         space: LocatorSymbolSpace::Type,
                     },
-                    path: Arc::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+                    path: verter_type_expr::OwnedSlice::from(
+                        Vec::<TypeBodyPathStep>::new().into_boxed_slice(),
+                    ),
                 }),
                 span_origin: MemberSpansOrigin::Synthetic(SourceSynthetic),
             },
@@ -665,7 +667,7 @@ fn fenced_serve_synthetic_binding_deepen_is_not_admitted() {
                 SemanticNodeData::new_bare_ref(
                     Arc::from("Anchor"),
                     NodeScopeId::File {
-                        canonical_id: Arc::from(SCOPE),
+                        canonical_id: verter_type_expr::OwnedStr::from(SCOPE),
                         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         whole_hash,
                         local_scope: None,
@@ -673,7 +675,7 @@ fn fenced_serve_synthetic_binding_deepen_is_not_admitted() {
                     Arc::from(Vec::new().into_boxed_slice()),
                 ),
                 NodeScopeId::File {
-                    canonical_id: Arc::from(SCOPE),
+                    canonical_id: verter_type_expr::OwnedStr::from(SCOPE),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     whole_hash,
                     local_scope: None,
@@ -836,7 +838,7 @@ mod query_error_raise_routing {
     #[test]
     fn recursive_ref_raises_as_a_carrier_not_absence() {
         let outcome = route(QueryError::RecursiveRef {
-            name: Arc::from("TreeNode"),
+            name: verter_type_expr::OwnedStr::from("TreeNode"),
             args: Default::default(),
         });
         let SourceRaiseOutcome::Raised(hot) = outcome else {
@@ -848,9 +850,9 @@ mod query_error_raise_routing {
     #[test]
     fn decl_placeholder_raises_as_the_expandable_carrier() {
         let outcome = route(QueryError::DeclPlaceholder {
-            canonical_id: Arc::from("/a.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/a.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            name: Arc::from("Foo"),
+            name: verter_type_expr::OwnedStr::from("Foo"),
             whole_hash: Default::default(),
         });
         let SourceRaiseOutcome::Raised(hot) = outcome else {
@@ -865,7 +867,7 @@ mod query_error_raise_routing {
     fn an_unmintable_control_carrier_stays_typed() {
         let outcome = SourceRaiseOutcome::from_error(
             QueryError::RecursiveRef {
-                name: Arc::from("TreeNode"),
+                name: verter_type_expr::OwnedStr::from("TreeNode"),
                 args: Default::default(),
             },
             |_| None,
@@ -884,7 +886,7 @@ mod query_error_raise_routing {
         let chain: Arc<[Arc<str>]> =
             Arc::from(vec![Arc::<str>::from("A"), Arc::<str>::from("B")].into_boxed_slice());
         let outcome = route(QueryError::AliasCycle {
-            chain: Arc::clone(&chain),
+            chain: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(chain.clone()),
         });
         let SourceRaiseOutcome::Failed(QueryError::AliasCycle { chain: observed }) = outcome else {
             panic!("AliasCycle must stay a typed control carrier, got {outcome:?}");
@@ -920,9 +922,9 @@ mod query_error_raise_routing {
     #[test]
     fn genuine_failures_travel_as_typed_failures() {
         for err in [
-            QueryError::Other(Arc::from("boom")),
+            QueryError::Other(verter_type_expr::OwnedStr::from("boom")),
             QueryError::UnsupportedIntrinsic {
-                name: Arc::from("NoSuchIntrinsic"),
+                name: verter_type_expr::OwnedStr::from("NoSuchIntrinsic"),
             },
             QueryError::ValueDomainMismatch {
                 expected: SemanticQueryValueTag::TypeNode,
@@ -1113,7 +1115,7 @@ fn closed_leaf_union_multi_arm_re_anchors_to_the_owning_fact_scope() {
     assert_eq!(
         graph.node_scope(raised.node()),
         Some(verter_type_engine::semantic_query::NodeScopeId::File {
-            canonical_id: Arc::from(OWNER_ID),
+            canonical_id: verter_type_expr::OwnedStr::from(OWNER_ID),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash,
             local_scope: None,
@@ -1180,7 +1182,7 @@ fn nested_leaf_union_multi_arm_re_anchors_to_the_owning_fact_scope() {
     assert_eq!(
         graph.node_scope(element),
         Some(verter_type_engine::semantic_query::NodeScopeId::File {
-            canonical_id: Arc::from(OWNER_ID),
+            canonical_id: verter_type_expr::OwnedStr::from(OWNER_ID),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash,
             local_scope: None,

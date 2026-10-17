@@ -27,7 +27,7 @@ use std::sync::Arc;
 #[cfg(test)]
 use rustc_hash::FxHashSet;
 use verter_session_query::retention::allocation::{
-    arc_block_bytes, box_bytes, string_bytes, vec_bytes,
+    arc_block_bytes, box_bytes, string_bytes, vec_bytes, AliasSet,
 };
 
 use super::composite::{CompositeKind, CompositeList};
@@ -57,6 +57,13 @@ pub(crate) trait PayloadHeapVisitor {
     /// nested allocations are offered once per enclosing allocation, never
     /// once per path to it.
     fn shared(&mut self, key: usize, bytes: usize) -> bool;
+    /// An owned, self-charged allocation ([`OwnedStr`], [`OwnedSlice`]):
+    /// charged by its own cell, never by the payload. `offer` offers it to
+    /// the visitor's measurement.
+    ///
+    /// [`OwnedStr`]: verter_type_expr::OwnedStr
+    /// [`OwnedSlice`]: verter_type_expr::OwnedSlice
+    fn handle(&mut self, offer: &mut dyn FnMut(&mut AliasSet) -> usize);
 }
 
 /// Payload types whose owned heap can be visited.
@@ -75,7 +82,8 @@ pub(crate) fn payload_heap_bytes(data: &SemanticNodeData) -> usize {
     visitor.bytes
 }
 
-/// Sums owned and first-seen shared bytes for one measurement.
+/// Sums owned and first-seen shared bytes for one measurement. An owned
+/// handle counts nothing: its own cell charges it.
 #[cfg(test)]
 #[derive(Default)]
 struct SingleChargeVisitor {
@@ -96,6 +104,8 @@ impl PayloadHeapVisitor for SingleChargeVisitor {
         }
         first
     }
+
+    fn handle(&mut self, _offer: &mut dyn FnMut(&mut AliasSet) -> usize) {}
 }
 
 /// The address an `Arc` allocation is keyed by: its data pointer, which is
@@ -120,6 +130,20 @@ fn visit_arc_slice<T: PayloadHeap>(slice: &[T], visitor: &mut dyn PayloadHeapVis
 fn visit_arc_str(text: &str, visitor: &mut dyn PayloadHeapVisitor) {
     // Leaf text: nothing to descend into.
     let _ = visitor.shared(allocation_key(text.as_ptr()), arc_block_bytes(text.len()));
+}
+
+impl PayloadHeap for verter_type_expr::OwnedStr {
+    fn visit_payload_heap(&self, visitor: &mut dyn PayloadHeapVisitor) {
+        visitor.handle(&mut |aliases| self.offer(aliases));
+    }
+}
+
+impl<T: verter_session_query::retention::owned::Measured> PayloadHeap
+    for verter_type_expr::OwnedSlice<T>
+{
+    fn visit_payload_heap(&self, visitor: &mut dyn PayloadHeapVisitor) {
+        visitor.handle(&mut |aliases| self.offer(aliases));
+    }
 }
 
 impl PayloadHeap for Arc<str> {

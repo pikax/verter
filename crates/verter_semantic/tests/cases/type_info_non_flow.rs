@@ -178,9 +178,9 @@ fn macro_payload_locator() -> Option<MacroPayloadLocator> {
     // Content-free locator: presence is what the inventory reads.
     Some(MacroPayloadLocator {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(OWNER),
+            canonical_id: verter_type_expr::OwnedStr::from(OWNER),
             owner: TopLevelOwnerId::default(),
-            symbol: Arc::from("__macro_fixture__"),
+            symbol: verter_type_expr::OwnedStr::from("__macro_fixture__"),
             space: LocatorSymbolSpace::Type,
         },
         macro_index: 0,

@@ -204,10 +204,10 @@ fn truthiness_rules_match_the_pinned_checker() {
     // `T extends "a"` leaves the falsy edge, `T extends string` keeps
     // it); unconstrained is `unknown`'s domain (measured q1).
     let decl = verter_type_engine::semantic_query::DeclIdentity {
-        canonical_id: Arc::from("/wb/t.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/wb/t.ts"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: Default::default(),
-        decl_name: Arc::from("f"),
+        decl_name: verter_type_expr::OwnedStr::from("f"),
     };
     let param = |constraint: Option<SemanticNodeId>| {
         graph.intern_node(SemanticNodeData::TypeParam {

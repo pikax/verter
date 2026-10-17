@@ -36,10 +36,10 @@ fn deferred_signature_sources_capture_outer_binders_and_exclude_their_own_clause
     let string = prim(&d, PrimitiveKind::String);
     let v = d.graph().intern_node(SemanticNodeData::TypeParam {
         decl: verter_type_engine::semantic_query::DeclIdentity {
-            canonical_id: Arc::from(CANONICAL),
+            canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: host.shallow_file_state(CANONICAL).unwrap().whole_hash,
-            decl_name: Arc::from("V"),
+            decl_name: verter_type_expr::OwnedStr::from("V"),
         },
         param_index: 0,
         constraint: None,
@@ -48,9 +48,9 @@ fn deferred_signature_sources_capture_outer_binders_and_exclude_their_own_clause
     });
     let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: Arc::from(CANONICAL),
+            canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("generic"),
+            symbol: verter_type_expr::OwnedStr::from("generic"),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
         function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
@@ -77,7 +77,7 @@ fn deferred_signature_sources_capture_outer_binders_and_exclude_their_own_clause
     function.flow_return = Some(Box::new(identity.clone()));
     let expr = TypeExpr::Function(Arc::new(function));
     let scope = NodeScopeId::File {
-        canonical_id: Arc::from(CANONICAL),
+        canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: host.shallow_file_state(CANONICAL).unwrap().whole_hash,
         local_scope: None,
@@ -127,9 +127,9 @@ fn deferred_signature_sources_capture_outer_binders_and_exclude_their_own_clause
     }
     let mut lexical = FunctionExpr::synthetic(Vec::new(), None, Vec::new());
     let mut lexical_identity = identity;
-    lexical_identity.anchor.symbol = Arc::from("Lexical");
+    lexical_identity.anchor.symbol = verter_type_expr::OwnedStr::from("Lexical");
     lexical_identity.function_part = verter_type_expr::facts::FunctionPartIdentity::Member {
-        member_path: Arc::from([0]),
+        member_path: verter_type_expr::OwnedSlice::from([0]),
     };
     lexical.flow_return = Some(Box::new(lexical_identity));
     let callee = d.shallow_lower_type_expr_with_context_for_tests(
@@ -1505,7 +1505,7 @@ fn untyped_javascript_signatures_publish_the_untyped_flag() {
     let string = prim(&d, PrimitiveKind::String);
     let flagged = |file: &str, param_ty: SemanticNodeId| {
         let mut occ = occurrence("f", 0);
-        occ.function.anchor.canonical_id = Arc::from(file);
+        occ.function.anchor.canonical_id = verter_type_expr::OwnedStr::from(file);
         let identity = occ.function.clone();
         let node = d.graph().intern_node(SemanticNodeData::Signature {
             kind: SignatureKind::Call,
@@ -1738,7 +1738,7 @@ fn deferred_callable_headers_keep_event_parameters_without_demanding_the_return(
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
     let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
     let scope = NodeScopeId::File {
-        canonical_id: Arc::from(CANONICAL),
+        canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
         owner,
         whole_hash: host.shallow_file_state(CANONICAL).unwrap().whole_hash,
         local_scope: None,
@@ -1756,9 +1756,9 @@ fn deferred_callable_headers_keep_event_parameters_without_demanding_the_return(
     function.flow_return = Some(Box::new(
         verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: Arc::from(CANONICAL),
+                canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
                 owner,
-                symbol: Arc::from("emit"),
+                symbol: verter_type_expr::OwnedStr::from("emit"),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
             },
             function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
@@ -1817,7 +1817,7 @@ fn with_deferred_utility_header(
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
     let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
     let scope = NodeScopeId::File {
-        canonical_id: Arc::from(CANONICAL),
+        canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
         owner,
         whole_hash: host.shallow_file_state(CANONICAL).unwrap().whole_hash,
         local_scope: None,
@@ -1825,9 +1825,9 @@ fn with_deferred_utility_header(
     function.flow_return = Some(Box::new(
         verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: Arc::from(CANONICAL),
+                canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
                 owner,
-                symbol: Arc::from(symbol),
+                symbol: verter_type_expr::OwnedStr::from(symbol),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
             },
             function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,

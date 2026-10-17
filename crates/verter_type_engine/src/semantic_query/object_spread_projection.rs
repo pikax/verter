@@ -33,7 +33,7 @@ pub(crate) fn note_collision_comparison() {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ObjectProjectionSelector {
     Key(PropertyKey),
-    RelationShape(Arc<[PropertyKey]>),
+    RelationShape(verter_type_expr::OwnedSlice<PropertyKey>),
     Surface,
     IndexDomain(IndexDomain),
     Signature(ObjectSignatureKind),
@@ -198,7 +198,7 @@ pub struct MemberFacets {
     has_implementation_body: bool,
     visibility: verter_type_expr::MemberVisibility,
     spans: verter_type_expr::MemberSpans,
-    declaration_origin: Option<Arc<str>>,
+    declaration_origin: Option<verter_type_expr::OwnedStr>,
     declared_in_macro_type_arg: super::MacroOwnBodyStamp,
     merge_role: super::MergeRoleStamp,
     excess_origin: verter_type_expr::ExcessPropertyOrigin,
@@ -231,7 +231,7 @@ impl MemberFacets {
     }
 
     #[must_use]
-    pub fn declaration_origin(&self) -> Option<&Arc<str>> {
+    pub fn declaration_origin(&self) -> Option<&verter_type_expr::OwnedStr> {
         self.declaration_origin.as_ref()
     }
 
@@ -290,7 +290,7 @@ pub struct ObjectProjectionIndex {
     value: ProjectionEvidence<SemanticNodeId>,
     readonly: ProjectionEvidence<bool>,
     spans: verter_type_expr::IndexSignatureSpans,
-    declaration_origin: Option<Arc<str>>,
+    declaration_origin: Option<verter_type_expr::OwnedStr>,
 }
 
 impl ObjectProjectionIndex {
@@ -320,7 +320,7 @@ impl ObjectProjectionIndex {
     }
 
     #[must_use]
-    pub fn declaration_origin(&self) -> Option<&Arc<str>> {
+    pub fn declaration_origin(&self) -> Option<&verter_type_expr::OwnedStr> {
         self.declaration_origin.as_ref()
     }
 }
@@ -348,7 +348,7 @@ impl ObjectProjectionSignature {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ExcessEligibility {
     Eligible {
-        direct_candidates: Arc<[PropertyKey]>,
+        direct_candidates: verter_type_expr::OwnedSlice<PropertyKey>,
     },
     SuppressedByGenericSpread,
     Indeterminate,
@@ -356,7 +356,7 @@ pub enum ExcessEligibility {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ClosedDomainData {
-    complete_keys: Arc<[PropertyKey]>,
+    complete_keys: verter_type_expr::OwnedSlice<PropertyKey>,
     scope: ClosedDomainScope,
 }
 
@@ -405,8 +405,8 @@ impl ClosedDomainScope {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OpenDomainWitnesses {
-    residual_operands: Arc<[SemanticNodeId]>,
-    indeterminate_possible_writes: Arc<[PropertyKey]>,
+    residual_operands: verter_type_expr::OwnedSlice<SemanticNodeId>,
+    indeterminate_possible_writes: verter_type_expr::OwnedSlice<PropertyKey>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -420,7 +420,7 @@ enum AlternativeDomain {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SelectedProjection {
     Key(PropertyKey),
-    RelationShape(Arc<[PropertyKey]>),
+    RelationShape(verter_type_expr::OwnedSlice<PropertyKey>),
     Surface,
     IndexDomain(IndexDomain),
     Signature(ObjectSignatureKind),
@@ -432,7 +432,7 @@ impl From<&ObjectProjectionSelector> for SelectedProjection {
     fn from(selector: &ObjectProjectionSelector) -> Self {
         match selector {
             ObjectProjectionSelector::Key(key) => Self::Key(key.clone()),
-            ObjectProjectionSelector::RelationShape(keys) => Self::RelationShape(Arc::clone(keys)),
+            ObjectProjectionSelector::RelationShape(keys) => Self::RelationShape(keys.clone()),
             ObjectProjectionSelector::Surface => Self::Surface,
             ObjectProjectionSelector::IndexDomain(domain) => Self::IndexDomain(*domain),
             ObjectProjectionSelector::Signature(kind) => Self::Signature(*kind),
@@ -450,11 +450,11 @@ impl From<&ObjectProjectionSelector> for SelectedProjection {
 /// exposes positive facts and open-safe selected-key evidence only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectProjectionAlternative {
-    positive: Arc<[PositiveKeyFact]>,
+    positive: verter_type_expr::OwnedSlice<PositiveKeyFact>,
     selected: SelectedProjection,
     domain: AlternativeDomain,
-    indices: Arc<[ObjectProjectionIndex]>,
-    signatures: Arc<[ObjectProjectionSignature]>,
+    indices: verter_type_expr::OwnedSlice<ObjectProjectionIndex>,
+    signatures: verter_type_expr::OwnedSlice<ObjectProjectionSignature>,
     excess: ExcessEligibility,
 }
 
@@ -534,7 +534,7 @@ impl ObjectProjectionAlternative {
         match &self.selected {
             SelectedProjection::Key(key) => ObjectProjectionSelector::Key(key.clone()),
             SelectedProjection::RelationShape(keys) => {
-                ObjectProjectionSelector::RelationShape(Arc::clone(keys))
+                ObjectProjectionSelector::RelationShape(keys.clone())
             }
             SelectedProjection::Surface => ObjectProjectionSelector::Surface,
             SelectedProjection::IndexDomain(domain) => {
@@ -636,15 +636,6 @@ impl ObjectProjectionFormula {
         Self {
             product: verter_session_query::retention::owned::Owned::new(product),
         }
-    }
-
-    /// The product's owned allocation, which carries the formula's charge.
-    pub(crate) fn product_owned(
-        &self,
-    ) -> &verter_session_query::retention::owned::Owned<
-        crate::project_semantic_dispatch::object_spread_product::SpreadProduct,
-    > {
-        &self.product
     }
 
     pub(crate) fn product(
@@ -979,94 +970,101 @@ impl super::allocation_footprint::OwnedHeap for ObjectProjectionIndex {
     }
 }
 
+impl verter_session_query::retention::owned::Measured for PositiveKeyFact {
+    /// The key's text and the facets' declaration origin, each an owned
+    /// allocation charged by its own cell; proven values are graph ordinals.
+    fn heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        use super::allocation_footprint::{copy_inline, OwnedHeap as _};
+        let PositiveKeyFact {
+            key,
+            presence,
+            value,
+            facets,
+        } = self;
+        key.owned_heap_bytes(aliases)
+            + copy_inline(presence)
+            + match value {
+                ProjectionEvidence::Proven(node) => copy_inline(node),
+                ProjectionEvidence::Indeterminate => 0,
+            }
+            + match facets {
+                ProjectionEvidence::Proven(facets) => facets.owned_heap_bytes(aliases),
+                ProjectionEvidence::Indeterminate => 0,
+            }
+    }
+}
+
+impl verter_session_query::retention::owned::Measured for ObjectProjectionIndex {
+    fn heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        use super::allocation_footprint::OwnedHeap as _;
+        self.owned_heap_bytes(aliases)
+    }
+}
+
+impl verter_session_query::retention::owned::Measured for ObjectProjectionSignature {
+    /// A signature entry is inline.
+    fn heap_bytes(
+        &self,
+        _aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        super::allocation_footprint::copy_inline(self)
+    }
+}
+
 impl super::allocation_footprint::OwnedHeap for ObjectProjectionAlternative {
-    /// Every fact, key, witness, index, signature and excess array with
-    /// their key text and declaration origins. Proven values are graph
-    /// ordinals. Destructured exhaustively: a new field fails to compile
-    /// until its heap is counted.
+    /// Every fact, key, witness, index, signature and excess list is an
+    /// owned allocation charged by its own cell. Destructured exhaustively:
+    /// a new field fails to compile until its heap is counted.
     fn owned_heap_bytes(
         &self,
         aliases: &mut verter_session_query::retention::allocation::AliasSet,
     ) -> usize {
-        use super::allocation_footprint::{copy_inline, copy_slice_inline};
-        use verter_session_query::retention::allocation::{arc_slice_block_bytes, AliasSet};
-        fn fact(fact: &PositiveKeyFact, aliases: &mut AliasSet) -> usize {
-            let PositiveKeyFact {
-                key,
-                presence,
-                value,
-                facets,
-            } = fact;
-            key.owned_heap_bytes(aliases)
-                + copy_inline(presence)
-                + match value {
-                    ProjectionEvidence::Proven(node) => copy_inline(node),
-                    ProjectionEvidence::Indeterminate => 0,
-                }
-                + match facets {
-                    ProjectionEvidence::Proven(facets) => facets.owned_heap_bytes(aliases),
-                    ProjectionEvidence::Indeterminate => 0,
-                }
-        }
-        fn alternative_bytes(
-            alternative: &ObjectProjectionAlternative,
-            aliases: &mut AliasSet,
-        ) -> usize {
-            let ObjectProjectionAlternative {
-                positive,
-                selected,
-                domain,
-                indices,
-                signatures,
-                excess,
-            } = alternative;
-            let mut bytes = 0;
-            if let Some(block) = arc_slice_block_bytes(positive, aliases) {
-                bytes += block;
-                for item in positive.iter() {
-                    bytes += fact(item, aliases);
-                }
-            }
-            bytes += match selected {
+        use super::allocation_footprint::copy_inline;
+        let ObjectProjectionAlternative {
+            positive,
+            selected,
+            domain,
+            indices,
+            signatures,
+            excess,
+        } = self;
+        positive.offer(aliases)
+            + match selected {
                 SelectedProjection::Key(key) => key.owned_heap_bytes(aliases),
-                SelectedProjection::RelationShape(shape) => shape.owned_heap_bytes(aliases),
+                SelectedProjection::RelationShape(shape) => shape.offer(aliases),
                 SelectedProjection::IndexDomain(domain)
                 | SelectedProjection::EnumerableValueEnvelope(domain) => copy_inline(domain),
                 SelectedProjection::Signature(kind) => copy_inline(kind),
                 SelectedProjection::Surface | SelectedProjection::ExcessEligibility => 0,
-            };
-            bytes += match domain {
+            }
+            + match domain {
                 AlternativeDomain::Closed(ClosedDomainData {
                     complete_keys,
                     scope,
-                }) => complete_keys.owned_heap_bytes(aliases) + copy_inline(scope),
+                }) => complete_keys.offer(aliases) + copy_inline(scope),
                 AlternativeDomain::Open(OpenDomainWitnesses {
                     residual_operands,
                     indeterminate_possible_writes,
                 }) => {
-                    residual_operands.owned_heap_bytes(aliases)
-                        + indeterminate_possible_writes.owned_heap_bytes(aliases)
-                }
-            };
-            if let Some(block) = arc_slice_block_bytes(indices, aliases) {
-                bytes += block;
-                for item in indices.iter() {
-                    bytes += item.owned_heap_bytes(aliases);
+                    residual_operands.offer(aliases) + indeterminate_possible_writes.offer(aliases)
                 }
             }
-            bytes += arc_slice_block_bytes(signatures, aliases).unwrap_or(0)
-                + copy_slice_inline(signatures);
-            bytes += match excess {
+            + indices.offer(aliases)
+            + signatures.offer(aliases)
+            + match excess {
                 ExcessEligibility::Eligible { direct_candidates } => {
-                    direct_candidates.owned_heap_bytes(aliases)
+                    direct_candidates.offer(aliases)
                 }
                 ExcessEligibility::SuppressedByGenericSpread | ExcessEligibility::Indeterminate => {
                     0
                 }
-            };
-            bytes
-        }
-        alternative_bytes(self, aliases)
+            }
     }
 }
 
@@ -1078,25 +1076,26 @@ pub(crate) mod evaluator_support {
 
     #[derive(Debug, Clone)]
     pub(crate) struct AlternativeInput {
-        pub(crate) positive: Arc<[PositiveKeyFact]>,
+        pub(crate) positive: verter_type_expr::OwnedSlice<PositiveKeyFact>,
         pub(crate) selector: ObjectProjectionSelector,
         pub(crate) closed: bool,
-        pub(crate) residual_operands: Arc<[SemanticNodeId]>,
-        pub(crate) indeterminate_possible_writes: Arc<[PropertyKey]>,
-        pub(crate) indices: Arc<[ObjectProjectionIndex]>,
-        pub(crate) signatures: Arc<[ObjectProjectionSignature]>,
+        pub(crate) residual_operands: verter_type_expr::OwnedSlice<SemanticNodeId>,
+        pub(crate) indeterminate_possible_writes: verter_type_expr::OwnedSlice<PropertyKey>,
+        pub(crate) indices: verter_type_expr::OwnedSlice<ObjectProjectionIndex>,
+        pub(crate) signatures: verter_type_expr::OwnedSlice<ObjectProjectionSignature>,
         pub(crate) excess: ExcessEligibility,
     }
 
     #[must_use]
     pub(crate) fn alternative(input: AlternativeInput) -> ObjectProjectionAlternative {
-        let complete_keys: Arc<[PropertyKey]> = Arc::from(
-            input
-                .positive
-                .iter()
-                .map(|fact| fact.key.clone())
-                .collect::<Vec<_>>(),
-        );
+        let complete_keys: verter_type_expr::OwnedSlice<PropertyKey> =
+            verter_type_expr::OwnedSlice::from(
+                input
+                    .positive
+                    .iter()
+                    .map(|fact| fact.key.clone())
+                    .collect::<Vec<_>>(),
+            );
         verter_debug_assert_eq!(
             complete_keys
                 .iter()
@@ -1163,7 +1162,7 @@ pub(crate) mod evaluator_support {
         has_implementation_body: bool,
         visibility: verter_type_expr::MemberVisibility,
         spans: verter_type_expr::MemberSpans,
-        declaration_origin: Option<Arc<str>>,
+        declaration_origin: Option<verter_type_expr::OwnedStr>,
         declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp,
         merge_role: crate::semantic_query::MergeRoleStamp,
         excess_origin: verter_type_expr::ExcessPropertyOrigin,
@@ -1188,7 +1187,7 @@ pub(crate) mod evaluator_support {
         value: ProjectionEvidence<SemanticNodeId>,
         readonly: ProjectionEvidence<bool>,
         spans: verter_type_expr::IndexSignatureSpans,
-        declaration_origin: Option<Arc<str>>,
+        declaration_origin: Option<verter_type_expr::OwnedStr>,
     ) -> ObjectProjectionIndex {
         ObjectProjectionIndex {
             domain,
@@ -1256,15 +1255,15 @@ pub mod test_support {
         positive: impl IntoIterator<Item = PositiveKeyFact>,
     ) -> ObjectProjectionAlternative {
         evaluator_support::alternative(evaluator_support::AlternativeInput {
-            positive: Arc::from(positive.into_iter().collect::<Vec<_>>()),
+            positive: verter_type_expr::OwnedSlice::from(positive.into_iter().collect::<Vec<_>>()),
             selector: ObjectProjectionSelector::Surface,
             closed: true,
-            residual_operands: Arc::from([]),
-            indeterminate_possible_writes: Arc::from([]),
-            indices: Arc::from([]),
-            signatures: Arc::from([]),
+            residual_operands: verter_type_expr::OwnedSlice::from([]),
+            indeterminate_possible_writes: verter_type_expr::OwnedSlice::from([]),
+            indices: verter_type_expr::OwnedSlice::from([]),
+            signatures: verter_type_expr::OwnedSlice::from([]),
             excess: ExcessEligibility::Eligible {
-                direct_candidates: Arc::from([]),
+                direct_candidates: verter_type_expr::OwnedSlice::from([]),
             },
         })
     }
@@ -1299,13 +1298,15 @@ pub mod test_support {
         residual_operands: impl IntoIterator<Item = SemanticNodeId>,
     ) -> ObjectProjectionAlternative {
         evaluator_support::alternative(evaluator_support::AlternativeInput {
-            positive: Arc::from(positive.into_iter().collect::<Vec<_>>()),
+            positive: verter_type_expr::OwnedSlice::from(positive.into_iter().collect::<Vec<_>>()),
             selector: ObjectProjectionSelector::Surface,
             closed: false,
-            residual_operands: Arc::from(residual_operands.into_iter().collect::<Vec<_>>()),
-            indeterminate_possible_writes: Arc::from([]),
-            indices: Arc::from([]),
-            signatures: Arc::from([]),
+            residual_operands: verter_type_expr::OwnedSlice::from(
+                residual_operands.into_iter().collect::<Vec<_>>(),
+            ),
+            indeterminate_possible_writes: verter_type_expr::OwnedSlice::from([]),
+            indices: verter_type_expr::OwnedSlice::from([]),
+            signatures: verter_type_expr::OwnedSlice::from([]),
             excess: ExcessEligibility::SuppressedByGenericSpread,
         })
     }
@@ -1331,17 +1332,19 @@ pub mod test_support {
         indeterminate_possible_writes: impl IntoIterator<Item = PropertyKey>,
     ) -> ObjectProjectionAlternative {
         evaluator_support::alternative(evaluator_support::AlternativeInput {
-            positive: Arc::from(positive.into_iter().collect::<Vec<_>>()),
+            positive: verter_type_expr::OwnedSlice::from(positive.into_iter().collect::<Vec<_>>()),
             selector: ObjectProjectionSelector::Surface,
             closed: false,
-            residual_operands: Arc::from(residual_operands.into_iter().collect::<Vec<_>>()),
-            indeterminate_possible_writes: Arc::from(
+            residual_operands: verter_type_expr::OwnedSlice::from(
+                residual_operands.into_iter().collect::<Vec<_>>(),
+            ),
+            indeterminate_possible_writes: verter_type_expr::OwnedSlice::from(
                 indeterminate_possible_writes
                     .into_iter()
                     .collect::<Vec<_>>(),
             ),
-            indices: Arc::from([]),
-            signatures: Arc::from([]),
+            indices: verter_type_expr::OwnedSlice::from([]),
+            signatures: verter_type_expr::OwnedSlice::from([]),
             excess: ExcessEligibility::SuppressedByGenericSpread,
         })
     }

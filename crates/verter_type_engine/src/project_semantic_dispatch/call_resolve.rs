@@ -561,10 +561,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .iter()
                 .any(|(canonical, _)| canonical == &key.point.canonical_id)
             {
-                self_roots.push((
-                    Arc::clone(&key.point.canonical_id),
-                    serve.indexed.whole_hash,
-                ));
+                self_roots.push((key.point.canonical_id.clone(), serve.indexed.whole_hash));
             }
             true
         } else {
@@ -1246,7 +1243,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // call site is that site.
         let _demand_scope = super::LexicalDemandScopeGuard::push(
             &self.lexical_demand_scope,
-            Arc::clone(&key.point.canonical_id),
+            key.point.canonical_id.clone(),
         );
         let explicit_type_args: Arc<[SemanticNodeId]> = Arc::from(
             key.explicit_type_args
@@ -1856,7 +1853,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .indexed_expression_source(point.canonical_id.as_ref())
                         .ok_or(ResolveCallFailure::Undecidable)?;
                     let indexed_point = verter_type_expr::facts::ProgramExpressionIdentity {
-                        canonical_id: Arc::clone(&point.canonical_id),
+                        canonical_id: std::sync::Arc::<str>::from(point.canonical_id.as_str()),
                         offset: point.offset,
                     };
                     let program_index = source_demand.function_program_index();
@@ -3873,11 +3870,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let oracle_demand = ProjectionReductionContext::structural_transit_with_mode(
             crate::semantic_query::ProjectionMode::Navigate,
         );
-        let owner_canonical = Arc::clone(&base.canonical_id);
+        let owner_canonical = base.canonical_id.clone();
         let slot = self.type_slot_for(
-            Arc::clone(&base.canonical_id),
+            base.canonical_id.clone(),
             base.owner,
-            Arc::clone(&base.decl_name),
+            base.decl_name.clone(),
         );
         let args = Arc::clone(args.as_arc());
         let read = self.execute_read(SemanticQueryKey::Instantiate(

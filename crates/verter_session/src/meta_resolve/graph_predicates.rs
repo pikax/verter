@@ -57,7 +57,7 @@ mod tests {
             let read = dispatch.execute_read(
                 verter_type_engine::semantic_query::SemanticQueryKey::ProjectPath {
                     base: node,
-                    path: Arc::from([]),
+                    path: verter_type_expr::OwnedSlice::from([]),
                     context:
                         verter_type_engine::semantic_query::ProjectionReductionContext::published(
                             verter_type_engine::semantic_query::ProjectionMode::Navigate,

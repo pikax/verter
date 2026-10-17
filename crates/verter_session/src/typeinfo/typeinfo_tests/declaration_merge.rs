@@ -357,14 +357,14 @@ fn expanded_surface_expr(host: &VerterHost, canonical_id: &str, name: &str) -> T
 
     let base = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::from(canonical_id),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical_id),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
-        name: Arc::from(name),
+        name: verter_type_expr::OwnedStr::from(name),
     })) {
         verter_type_engine::semantic_query::QueryResult::Value(
             verter_type_engine::semantic_query::SemanticQueryOutput { value: node, .. },
@@ -374,7 +374,7 @@ fn expanded_surface_expr(host: &VerterHost, canonical_id: &str, name: &str) -> T
 
     let terminal = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(Vec::new().into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::default(),
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     }) {
         verter_type_engine::semantic_query::QueryResult::Value(

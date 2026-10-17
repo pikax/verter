@@ -103,16 +103,21 @@ impl RefusalSummary {
     /// carrier's evidence pages are claimed into this reservation, a page
     /// being charged once however many summaries and candidates share it
     /// ([`verter_session_query::facts::receipt::reserve_retained_with_evidence`]).
-    fn own_retained_bytes(&self) -> usize {
+    /// The owned allocations the paid lists reach are returned with them,
+    /// for the summary's charge to hold.
+    fn own_retained_footprint(
+        &self,
+    ) -> (usize, verter_session_query::retention::owned::OwnedHandles) {
         use verter_session_query::retention::allocation::{arc_block_bytes, AliasSet};
         let mut aliases = AliasSet::new();
-        arc_block_bytes(std::mem::size_of::<Self>())
+        let bytes = arc_block_bytes(std::mem::size_of::<Self>())
             + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
             + self
                 .prefix
                 .request
                 .as_ref()
-                .map_or(0, |spent| spent.owned_heap_bytes(&mut aliases))
+                .map_or(0, |spent| spent.owned_heap_bytes(&mut aliases));
+        (bytes, aliases.take_handles())
     }
 
     fn shared_parts(&self) -> super::retention::SharedParts<'_> {
@@ -231,12 +236,22 @@ impl SemanticGraphStore {
             Ok(shared) => shared,
             Err(refusal) => return refuse(refusal),
         };
+        let (own_bytes, own_handles) = summary.own_retained_footprint();
         match verter_session_query::facts::receipt::reserve_retained_with_evidence(
             self.retention_account(),
-            summary.own_retained_bytes(),
+            own_bytes,
             &[&summary.carrier.facts],
         ) {
             RetentionAdmission::Admitted(own) => {
+                let own = match own_handles.retained_with(
+                    own,
+                    verter_session_query::retention::owned::ChargeCtx::new(
+                        self.retention_account(),
+                    ),
+                ) {
+                    Ok(own) => own,
+                    Err(refusal) => return refuse(refusal),
+                };
                 let retention = shared.with_own(own);
                 summary.retention = Some(retention);
             }

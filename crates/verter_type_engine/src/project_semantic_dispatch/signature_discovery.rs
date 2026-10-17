@@ -576,12 +576,12 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
             Some(SemanticNodeData::DeclRef { identity })
                 if d.runtime_nominal_identity(identity).is_some() =>
             {
-                (Arc::clone(&identity.decl_name), Vec::new())
+                (identity.decl_name.clone(), Vec::new())
             }
             Some(SemanticNodeData::InstantiationRef { base, args })
                 if d.runtime_nominal_identity(base).is_some() =>
             {
-                (Arc::clone(&base.decl_name), args.iter().copied().collect())
+                (base.decl_name.clone(), args.iter().copied().collect())
             }
             _ => return None,
         };
@@ -989,7 +989,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 };
                 nodes_of.push(crate::signature_kernel::SignatureCandidateNodes {
                     authored: walk.authored.get(&candidate.signature).copied(),
-                    constituents: Arc::from(nodes.into_boxed_slice()),
+                    constituents: verter_type_expr::OwnedSlice::from(nodes.into_boxed_slice()),
                 });
             }
             let set = set_from_candidates(store, list)?;

@@ -31,16 +31,25 @@
 use std::sync::Arc;
 
 use verter_session_query::retention::allocation::{
-    arc_slice_block_bytes, heap_block_bytes, AliasSet,
+    arc_block_bytes, arc_slice_block_bytes, heap_block_bytes, AliasSet,
 };
 
 use super::ProjectSemanticDispatch;
-use crate::semantic_query::allocation_footprint::{arc_value_bytes, copy_inline, OwnedHeap};
+use crate::semantic_query::allocation_footprint::{copy_inline, OwnedHeap};
 use crate::semantic_query::{
     ExactOptionalPropertyPolicy, MemberFacets, ObjectProjectionAlternative,
     ObjectProjectionFormula, ObjectProjectionIndex, ObjectProjectionSelector, PartialReasonSet,
     PositiveKeyFact, PositiveKeyPresence, ProjectionEvidence, PropertyKey, SemanticNodeId,
 };
+
+/// An `Arc<T>`'s block and the heap its value owns, once per `aliases`.
+fn arc_value_bytes<T: OwnedHeap>(value: &Arc<T>, aliases: &mut AliasSet) -> usize {
+    if aliases.first(value) {
+        arc_block_bytes(std::mem::size_of::<T>()) + T::owned_heap_bytes(value, aliases)
+    } else {
+        0
+    }
+}
 
 /// One positively known named member a fragment writes or a fold holds.
 #[derive(Debug, Clone, PartialEq, Eq)]

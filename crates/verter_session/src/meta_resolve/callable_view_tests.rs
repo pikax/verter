@@ -162,10 +162,10 @@ fn instantiation_ref(
 ) -> SemanticNodeId {
     graph.intern_node(SemanticNodeData::InstantiationRef {
         base: DeclIdentity {
-            canonical_id: Arc::from("__builtin__"),
+            canonical_id: verter_type_expr::OwnedStr::from("__builtin__"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
-            decl_name: Arc::from(base_name),
+            decl_name: verter_type_expr::OwnedStr::from(base_name),
         },
         args: verter_type_engine::semantic_query::PayloadArray::from(args.into_boxed_slice()),
     })
@@ -1303,8 +1303,8 @@ fn exact_instance_owner_prepared_body_locator_materializes_without_ordinary_fall
 
     let resolved = match dispatch
         .execute_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
-            scope: ScopeId::file(Arc::clone(&identity.canonical_id), identity.owner),
-            name: Arc::clone(&identity.decl_name),
+            scope: ScopeId::file(identity.canonical_id.clone(), identity.owner),
+            name: identity.decl_name.clone(),
         }))
         .value()
         .clone()
@@ -1327,9 +1327,9 @@ fn exact_instance_owner_prepared_body_locator_materializes_without_ordinary_fall
     let instantiated = match dispatch
         .execute_read(SemanticQueryKey::Instantiate(InstantiateKey::new(
             dispatch.type_slot_for(
-                Arc::clone(&identity.canonical_id),
+                identity.canonical_id.clone(),
                 identity.owner,
-                Arc::clone(&identity.decl_name),
+                identity.decl_name.clone(),
             ),
             Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             dispatch.instantiate_context_for(
@@ -3079,14 +3079,14 @@ fn event_names_concrete_non_literal_arm_is_skipped_not_failed() {
         verter_type_engine::semantic_query::new_nominal_typeof_for_tests(
             verter_type_engine::semantic_query::ValueRootKey {
                 scope: ScopeId::file(Arc::from("/events.ts"), owner),
-                name: Arc::from("TOKEN"),
+                name: verter_type_expr::OwnedStr::from("TOKEN"),
             },
             Arc::from([]),
             verter_type_expr::facts::ValueDeclIdentityPart {
-                canonical_id: Arc::from("/events.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/events.ts"),
                 owner,
-                symbol: Arc::from("TOKEN"),
-                member_path: Arc::from([]),
+                symbol: verter_type_expr::OwnedStr::from("TOKEN"),
+                member_path: verter_type_expr::OwnedSlice::from([]),
             },
         ),
     );

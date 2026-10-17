@@ -3,8 +3,6 @@
 
 use crate::semantic_query::{ResultEvaluationContextId, SemanticContextId};
 
-use std::sync::Arc;
-
 use crate::semantic_query::SemanticNodeId;
 
 use super::records::{AppliedResultId, CallSubstitutionId, SignatureDescriptorId, SignatureSetRef};
@@ -183,7 +181,7 @@ pub struct SignatureCandidateNodes {
     /// For a composite, the authored node of each constituent in
     /// constituent-sequence order; empty for a leaf, and empty when the walk
     /// never published one of them.
-    pub(crate) constituents: Arc<[SemanticNodeId]>,
+    pub(crate) constituents: verter_type_expr::OwnedSlice<SemanticNodeId>,
 }
 
 impl SignatureCandidateNodes {
