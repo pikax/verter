@@ -724,9 +724,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// related to the union whatever its other arms are
     /// (`someTypeRelatedToType`), so an arm the lane cannot read never takes
     /// that branch away. Only the true branch is proven so — the false one
-    /// needs every arm — and only for a check that is no lattice extreme or
-    /// union, over operands holding no type parameter and an `extends`
-    /// inferring nothing. `None` when no arm relates completely.
+    /// needs every arm — and only for a check that neither absorbs nor
+    /// distributes as the type it names (`type An = any`, `Two<"a">` naming
+    /// `"a" | "z"`, a closed `keyof`): the checker decides such a check by
+    /// its lattice row or member by member, never as a whole related to one
+    /// arm. Operands hold no type parameter and the `extends` infers
+    /// nothing. `None` when no arm relates completely.
     fn true_through_written_arm(
         &self,
         check: SemanticNodeId,
@@ -736,17 +739,21 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             Some(SemanticNodeData::Union(members)) => members.members_arc(),
             _ => return None,
         };
-        if self.peek_special(check).is_some()
-            || matches!(
-                self.graph().node_data(check).as_deref(),
-                Some(SemanticNodeData::Union(_) | SemanticNodeData::IndexedAccess { .. })
-            )
-            || !matches!(
-                self.conditional_infer_route(extends),
-                ConditionalInferRoute::None
-            )
-            || !self.type_params_within(&[check, extends]).is_empty()
+        if !matches!(
+            self.conditional_infer_route(extends),
+            ConditionalInferRoute::None
+        ) || !self.type_params_within(&[check, extends]).is_empty()
         {
+            return None;
+        }
+        // Whether the check absorbs or distributes is read off the type it
+        // names; that read is evidence of the decision only when complete.
+        let plain = self.observe_read(|| self.check_neither_absorbs_nor_distributes(check));
+        if !plain.observations_are_complete() || !*plain.value() {
+            let _ = plain.discard();
+            return None;
+        }
+        if plain.adopt(self).is_err() {
             return None;
         }
         for arm in arms.iter() {
@@ -762,6 +769,21 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             let _ = read.discard();
         }
         None
+    }
+
+    /// A check no lattice row absorbs and no distribution splits: neither it
+    /// nor the type it names is an extreme, a union or an indexed access.
+    fn check_neither_absorbs_nor_distributes(&self, check: SemanticNodeId) -> bool {
+        let declared = self.union_as_constructed(self.declared_operand_where_written(check));
+        let absorbed = self.indexed_access_where_written(declared);
+        [check, declared, absorbed].into_iter().all(|operand| {
+            self.peek_special(operand).is_none()
+                && !matches!(
+                    self.graph().node_data(operand).as_deref(),
+                    Some(SemanticNodeData::Union(_) | SemanticNodeData::IndexedAccess { .. })
+                )
+                && self.distributive_check_union_members(operand).is_none()
+        })
     }
 
     /// A conditional's operands as the checker constructs them before it

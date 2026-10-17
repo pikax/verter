@@ -513,3 +513,63 @@ fn indexed_members_of_an_augmented_interface_relate_as_their_type() {
         ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Conditionals whose `extends` union holds an arm the lane cannot read:
+/// `Dom<1>` reads `typeof globalThis`, which no standard library supplies.
+const UNREADABLE_ARM_SOURCE: &str = r#"
+type Dom<T> = typeof globalThis extends { window: unknown } ? T : never;
+interface Bag { a: Dom<1>; b: boolean }
+type F2<T> = T extends string | Bag[keyof Bag] ? { v: T } : 0;
+type Two<X> = X | "z";
+type An = any;
+type AB = "a" | "b";
+export function u1() { return null! as ("a" extends string | Dom<1> ? 1 : 2); }
+export function u2() { return null! as F2<"a">; }
+export function u3() { return null! as F2<Two<"a">>; }
+export function u4() { return null! as (An extends string | Dom<1> ? 1 : 2); }
+export function u5() { return null! as F2<never>; }
+export function u6() { return null! as F2<AB>; }
+export function u7() { return null! as F2<An>; }
+export function u8() { return null! as F2<keyof { a: 1; b: 2 }>; }
+"#;
+
+/// A check related to one readable arm of a union `extends` is related to
+/// the union whatever its unreadable arms are, so a plain check takes the
+/// true branch. A check that distributes or absorbs — a union named
+/// through an alias or an instantiation, `any`, `never` and a closed
+/// `keyof` — is decided per member or by its lattice row, never by
+/// relating the whole check to one arm: those stay unavailable until every
+/// member is decided.
+#[test]
+fn a_written_arm_proves_only_a_check_that_neither_distributes_nor_absorbs() {
+    let failures = Matrix::new(UNREADABLE_ARM_SOURCE)
+        .settings(&ALL)
+        .returns(&[("u1", "1"), ("u2", "{ v: \"a\"; }")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    let rows = [
+        ("u3", "{ v: \"a\"; } | { v: \"z\"; }"),
+        ("u4", "1 | 2"),
+        ("u5", "never"),
+        ("u6", "{ v: \"a\"; } | { v: \"b\"; }"),
+        ("u7", "0 | { v: any; }"),
+        ("u8", "{ v: \"a\"; } | { v: \"b\"; }"),
+    ];
+    let reads: Vec<(Read<'_>, Vec<&str>)> = rows
+        .iter()
+        .map(|(function, answer)| (Read::Return(function), vec![*answer; ALL.len()]))
+        .collect();
+    let verdicts = Matrix::new(UNREADABLE_ARM_SOURCE)
+        .settings(&ALL)
+        .verdicts(&reads);
+    for ((read, _), row) in reads.iter().zip(&verdicts) {
+        for verdict in row {
+            assert!(
+                verdict.matched || verdict.class == "GAP",
+                "`{}` is the checker's answer or unavailable, not {} ({})",
+                read.text(),
+                verdict.class,
+                verdict.lane
+            );
+        }
+    }
+}
