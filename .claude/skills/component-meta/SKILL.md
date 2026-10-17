@@ -418,6 +418,8 @@ The shared Rust pipeline owns all fallthrough and root inheritance semantics. `v
 - `@click` and `:onClick` normalize to the same canonical listener name (`click`)
 - Declared props/events always take precedence over inherited names
 
+**Persistent composition**: a parent folds a child surface into its own without copying the child's chain or evidence into every ancestor. `FallthroughBranch::root_chain` is a persistent ordered `RootChain` (outermost step first): a component hop prepends one step and shares the child's chain. The child's evidence enters the parent's `fact_versions` as ONE `FactVersionRef::Receipt` over the child's own list, so an N-hop chain's evidence is each hop's facts plus one edge per hop — an edit at any depth still invalidates the owner, because a receipt validates only when every fact it reaches does. Cross-file observation goes through `resolver_core::cross_file_fallthrough_facts`, which expands a receipt only when it reaches the owner. Pinned by `deep_root_chains_compose_in_linear_work` (128–1024 hops, opt-in `FallthroughCompositionWork` counts) and `deep_chain_edit_invalidates_the_owner_and_leaves_held_results_intact`.
+
 **Authority chain**: analysis extracts `RootReachability` -- host resolves `FallthroughResolution` -- `get_component_meta()` populates `accepted_*` and `fallthrough_surface` -- FFI maps to JSON -- TS consumes.
 
 **Two consumers, one resolver.** The resolved surface answers two different questions and BOTH consume it, neither re-derives it:
