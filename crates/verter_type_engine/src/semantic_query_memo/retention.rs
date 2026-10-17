@@ -46,6 +46,13 @@ impl MemoRetention {
         self._own.bytes()
     }
 
+    /// How many holds the candidate keeps in each of its two hold slices:
+    /// its carrier holds, and its holds on the allocations it delivers.
+    #[cfg(test)]
+    pub(super) fn hold_slice_lens(&self) -> (usize, usize) {
+        (self._carrier.len(), self._delivered.len())
+    }
+
     /// The candidate's registered holds on its carrier.
     #[cfg(test)]
     pub(super) fn shared_holds(&self) -> impl Iterator<Item = &CacheHold> {

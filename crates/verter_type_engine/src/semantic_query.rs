@@ -5219,14 +5219,21 @@ impl DepSignature {
         Self(rail)
     }
 
-    /// An interned rail of `entries`, whose cell block its interner keeps
-    /// allocated and charges.
+    /// An interned rail of `entries`, whose cell block its interner's weak
+    /// entry may keep allocated past the rail: the block is charged by the
+    /// returned share, which the rail keeps and the interner's entry keeps
+    /// a clone of, so it stays charged until both have let go.
     pub(crate) fn interned_rail(
         entries: Vec<DepEntry>,
-    ) -> verter_session_query::retention::owned::Owned<DepRail> {
-        verter_session_query::retention::owned::Owned::new_with_block_charged_elsewhere(DepRail(
-            entries.into_boxed_slice(),
-        ))
+        ctx: verter_session_query::retention::owned::ChargeCtx<'_>,
+    ) -> (
+        verter_session_query::retention::owned::Owned<DepRail>,
+        verter_session_query::retention::owned::BlockShare,
+    ) {
+        verter_session_query::retention::owned::Owned::new_with_shared_block(
+            DepRail(entries.into_boxed_slice()),
+            ctx,
+        )
     }
 
     /// Whether two signatures share one allocation.

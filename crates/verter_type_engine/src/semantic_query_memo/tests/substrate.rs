@@ -3051,60 +3051,80 @@ fn display_and_union_by_ordinal_answer_only_inside_a_construction_lane() {
     ));
 }
 
-/// The interner keeps every interned rail's cell block allocated for as
-/// long as its entry lives, so it charges those blocks, its entry lists and
-/// its tables, and gives every byte back once the rails drain and are
-/// swept. A rail's entries are the rail's own: charged by its cell once an
-/// owner keeps it, never by the interner.
+/// An interned rail's cell block lives until the rail's last handle AND its
+/// interner entry have let go, so it is charged by a share both keep: in
+/// either release order the block stays charged until the last of them
+/// drops, never longer. The interner charges its own entry lists and
+/// tables, and gives every byte back once the rails drain and are swept. A
+/// rail's entries are the rail's own: charged by its cell once an owner
+/// keeps it, never by the interner.
 #[test]
-fn dep_signature_interner_charges_the_rail_blocks_it_keeps_until_swept() {
-    use verter_session_query::retention::owned::{ChargeCtx, Owned};
+fn dep_signature_interner_and_its_rails_share_each_rail_blocks_charge() {
+    use verter_session_query::retention::owned::{BlockShare, ChargeCtx};
     use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
 
     const RAILS: usize = 64;
     const WIDTH: usize = 256;
-    let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
-    let interner = DepSignatureInterner::charged(&account);
-    let rails: Vec<_> = (0..RAILS)
-        .map(|rail| {
-            let payload: Vec<_> = (0..WIDTH)
-                .map(|entry| {
-                    crate::semantic_query::DepEntry::new(
-                        &format!("/w/{rail}/{entry}.ts"),
-                        DepVersion::ProjectGeneration(entry as u64),
-                    )
-                })
-                .collect();
-            interner.intern(&payload)
-        })
-        .collect();
-    let blocks = RAILS * Owned::<crate::semantic_query::DepRail>::cell_block_bytes();
-    assert!(
-        interner.storage_charge_bytes() >= blocks,
-        "every interned rail's block is charged: {} < {blocks}",
-        interner.storage_charge_bytes()
-    );
-    assert_eq!(
-        account.snapshot().pinned_bytes,
-        interner.storage_charge_bytes()
-    );
+    for rails_first in [true, false] {
+        let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+        let interner = DepSignatureInterner::charged(&account);
+        let rails: Vec<_> = (0..RAILS)
+            .map(|rail| {
+                let payload: Vec<_> = (0..WIDTH)
+                    .map(|entry| {
+                        crate::semantic_query::DepEntry::new(
+                            &format!("/w/{rail}/{entry}.ts"),
+                            DepVersion::ProjectGeneration(entry as u64),
+                        )
+                    })
+                    .collect();
+                interner.intern(&payload)
+            })
+            .collect();
+        let blocks = RAILS * BlockShare::bytes_for::<crate::semantic_query::DepRail>();
+        assert!(interner.storage_charge_bytes() > 0);
+        assert_eq!(
+            account.snapshot().pinned_bytes,
+            interner.storage_charge_bytes() + blocks,
+            "every interned rail's block is charged once, beside the interner's storage"
+        );
 
-    // A caller keeping a rail pays for its entries, never its block again.
-    rails[0]
-        .owned()
-        .expect("a nonempty rail")
-        .pin(ChargeCtx::new(&account));
-    let entries = verter_session_query::retention::allocation::heap_block_bytes(
-        WIDTH * std::mem::size_of::<crate::semantic_query::DepEntry>(),
-    );
-    assert_eq!(rails[0].charge_bytes(), Some(entries));
+        // A caller keeping a rail pays for its entries, never its block again.
+        rails[0]
+            .owned()
+            .expect("a nonempty rail")
+            .pin(ChargeCtx::new(&account));
+        let entries = verter_session_query::retention::allocation::heap_block_bytes(
+            WIDTH * std::mem::size_of::<crate::semantic_query::DepEntry>(),
+        ) + verter_session_query::retention::owned::child_registration_bytes(WIDTH);
+        assert_eq!(rails[0].charge_bytes(), Some(entries));
+        let canonicals: usize = (0..WIDTH)
+            .map(|entry| {
+                verter_session_query::retention::owned::OwnedStr::charge_for_len(
+                    format!("/w/0/{entry}.ts").len(),
+                )
+            })
+            .sum();
 
-    drop(rails);
-    assert!(
-        interner.storage_charge_bytes() >= blocks,
-        "a dead rail's block stays allocated, and charged, until its entry is pruned"
-    );
-    interner.sweep();
-    assert_eq!(interner.storage_charge_bytes(), 0);
-    assert_eq!(account.snapshot().total_bytes(), 0);
+        if rails_first {
+            drop(rails);
+            assert_eq!(
+                account.snapshot().pinned_bytes,
+                interner.storage_charge_bytes() + blocks,
+                "a dead rail's block stays allocated, and charged, until its entry is pruned"
+            );
+            interner.sweep();
+            assert_eq!(interner.storage_charge_bytes(), 0);
+            drop(interner);
+        } else {
+            drop(interner);
+            assert_eq!(
+                account.snapshot().pinned_bytes,
+                blocks + entries + canonicals,
+                "the rails outlive the interner: each keeps its block charged"
+            );
+            drop(rails);
+        }
+        assert_eq!(account.snapshot().total_bytes(), 0);
+    }
 }
