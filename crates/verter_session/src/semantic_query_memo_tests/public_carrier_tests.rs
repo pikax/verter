@@ -636,3 +636,56 @@ fn a_resolved_node_that_cannot_be_rooted_is_a_typed_fault() {
         "an ordinal the graph never allocated does not root"
     );
 }
+
+/// A delivered flow-return result owns its return node for as long as the
+/// caller holds it: after its request ends, every cache is invalidated and
+/// the declaring document is closed, the node is still live; the result's
+/// last drop destroys it.
+///
+/// Discriminating: a result carrying only the raw return ordinal leaves the
+/// node owned by caches alone, so the invalidation destroys it under the
+/// caller.
+#[test]
+fn a_delivered_flow_return_result_owns_its_node_past_its_request_and_close() {
+    const FLOW: &str = "/public/flow.ts";
+    let host = VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        ..HostConfig::default()
+    });
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        FLOW,
+        "export function pf() { return { owned: [1, 'two'] as const }; }\n",
+        crate::FileLanguage::script_ts(),
+    );
+    let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
+        anchor: verter_type_expr::locators::AuthoredAnchor {
+            canonical_id: Arc::from(FLOW),
+            owner: TopLevelOwnerId::ordinary_file(),
+            symbol: Arc::from("pf"),
+            space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+        },
+        function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+        overload_ordinal: 0,
+    };
+    let result = host
+        .get_flow_return_type_with_audit(
+            &identity,
+            verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        )
+        .into_result()
+        .expect("the flow return answers");
+    let node = result.return_type();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    graph.invalidate_all();
+    host.evict(FLOW);
+    assert!(
+        graph.node_is_live(node),
+        "the delivered result owns its node after every cache let go"
+    );
+    drop(result);
+    assert!(
+        !graph.node_is_live(node),
+        "the result's last drop destroys its node"
+    );
+}

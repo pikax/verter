@@ -26,11 +26,14 @@ struct Fixture {
     roots: Vec<SemanticNodeId>,
     partial: Arc<[SemanticNodeId]>,
     result: SemanticNodeId,
+    /// The fixture's union, owned for as long as the fixture is measured.
+    _held: verter_type_engine::semantic_query_memo::node_roots::NodeRootSet,
 }
 
 impl Fixture {
     fn new(input_count: usize, arms: usize, payload: Payload, payload_len: usize) -> Self {
         let graph = SemanticGraphStore::new();
+        let scope = graph.enter_node_root_scope();
         let literals: Vec<_> = (0..arms)
             .map(|index| {
                 let value = format!("{}{index:04}", "7".repeat(payload_len));
@@ -49,11 +52,17 @@ impl Fixture {
         let roots = vec![result; input_count];
         let mut partial = literals[..arms / 2].to_vec();
         partial.sort_unstable();
+        let held = graph
+            .root_nodes([result])
+            .expect("the fixture union is live");
+        drop(algebra);
+        drop(scope);
         Self {
             graph,
             roots,
             partial: partial.into(),
             result,
+            _held: held,
         }
     }
 

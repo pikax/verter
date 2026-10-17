@@ -239,6 +239,27 @@ pub fn dispatch_inject_parse_fact_for_tests(
 /// `ProjectSemanticDispatch` is `pub(crate)`, so test crates in
 /// `crates/verter_session/tests/**` cannot construct it directly; this forwards
 /// to the one canonical dispatch and hands back its result unchanged.
+/// Hand `nodes` — construction ordinals a helper's own dispatcher produced —
+/// to the caller's construction scope once that dispatcher is gone, so the
+/// caller reads them for as long as its scope lives. With no caller scope
+/// they are released with the dispatcher.
+fn hand_to_caller_scope<'h>(
+    host: &'h crate::VerterHost,
+    dispatch: verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        'h,
+        crate::resolver_core::HostCapabilities,
+    >,
+    nodes: impl IntoIterator<Item = verter_type_engine::semantic_query::SemanticNodeId>,
+) {
+    let roots = host
+        .project_type_store()
+        .semantic_graph()
+        .root_nodes(nodes)
+        .unwrap_or_default();
+    drop(dispatch);
+    roots.retain_for_construction();
+}
+
 pub fn dispatch_execute_type_node_for_tests(
     host: &crate::VerterHost,
     key: verter_type_engine::semantic_query::SemanticQueryKey,
@@ -248,8 +269,16 @@ pub fn dispatch_execute_type_node_for_tests(
     >,
 > {
     use verter_type_engine::semantic_query::SemanticQueryApi;
-    verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host)
-        .execute_type_node(key)
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let read = dispatch.execute_type_node(key);
+    let node = match &read {
+        verter_type_engine::semantic_query::QueryResult::Value(output) => Some(output.value),
+        verter_type_engine::semantic_query::QueryResult::Recursive(node) => Some(*node),
+        verter_type_engine::semantic_query::QueryResult::Error(_) => None,
+    };
+    hand_to_caller_scope(host, dispatch, node);
+    read
 }
 
 /// Production-shaped, NON-DECONSTRUCTABLE builder of a sealed
@@ -319,8 +348,11 @@ pub fn dispatch_lower_type_expr_in_scope_with_context_for_tests(
     expr: &verter_type_expr::TypeExpr,
     context: verter_type_engine::semantic_query::ProjectionReductionContext,
 ) -> Option<verter_type_engine::semantic_query::SemanticNodeId> {
-    verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host)
-        .lower_type_expr_in_scope_with_context(scope_canonical_id, expr, context)
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let node = dispatch.lower_type_expr_in_scope_with_context(scope_canonical_id, expr, context);
+    hand_to_caller_scope(host, dispatch, node);
+    node
 }
 
 /// Relate the type named `source` to the type named `target`, both declared
@@ -412,7 +444,9 @@ pub fn dispatch_substitute_for_tests(
 ) -> verter_type_engine::semantic_query::SemanticNodeId {
     let dispatch =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
-    dispatch.substitute_semantic_type_param_for_tests(node, parameter_node, arg)
+    let node = dispatch.substitute_semantic_type_param_for_tests(node, parameter_node, arg);
+    hand_to_caller_scope(host, dispatch, [node]);
+    node
 }
 
 /// Integration-test shim that drives the
@@ -444,7 +478,9 @@ pub fn dispatch_evaluate_deferred_for_tests(
 ) {
     let dispatch =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
-    dispatch.evaluate_deferred_semantic_node_with_context_for_tests(node, context)
+    let outcome = dispatch.evaluate_deferred_semantic_node_with_context_for_tests(node, context);
+    hand_to_caller_scope(host, dispatch, [outcome.0]);
+    outcome
 }
 
 /// Observe whether a base request's private lifecycle carries a session view.
@@ -1149,7 +1185,10 @@ pub fn dispatch_resolve_type_decl_for_tests(
         },
         name: Arc::from(name),
     })) {
-        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+        QueryResult::Value(SemanticQueryOutput { value, .. }) => {
+            hand_to_caller_scope(host, dispatch, [value]);
+            value
+        }
         other => panic!("ResolveDecl({canonical}#{name}) must anchor, got {other:?}"),
     }
 }

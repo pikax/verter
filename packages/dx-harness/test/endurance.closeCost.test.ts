@@ -2,17 +2,18 @@
  * Close-cost lane (WSP6, review item C): what a document close costs on a
  * realistically large workspace.
  *
- * `release_canonical` walks the live semantic node set to find what the
- * closing document rooted or bound (an O(live nodes) scan paid at the close,
- * instead of a canonical→node reverse index charged to every hot intern).
- * This lane collects the evidence for that choice where it matters: on the
+ * A close evicts the semantic caches bound to the closing document's content,
+ * classifying each cached node by what it reaches (paid at the close, not as
+ * a canonical→node reverse index charged to every hot intern); the content's
+ * nodes are then destroyed as their last owner lets go. This lane collects
+ * the evidence of that cost where it matters: on the
  * WSP equal-work synthetic SFC slice (2615 generated Vue files, the
  * PrimeVue-equivalent workload of WSP1B) it opens, edits, hovers and closes
- * corpus documents and records, per close, the server's own release receipt
- * (`retention.lastRelease`: wall time, nodes scanned, nodes released, physical
- * slots before/after, the wait behind in-flight computations) together with
- * the exact heap, the process-tree resident set and the retained-object
- * counters read just before the close and once the release landed. It judges
+ * corpus documents and records, per close, the server's own close receipt
+ * (`retention.lastClose`: wall time and the memo entries, union views,
+ * signature-token roots, sidecar entries and shape entries it evicted)
+ * together with the exact heap, the process-tree resident set and the
+ * retained-object counters read just before the close and once it landed. It judges
  * nothing but its own completeness: the numbers are the deliverable, read
  * against the same lane on the base build (a server without the retention
  * fields still yields hover latency and resident set, the rest reads as
@@ -46,7 +47,7 @@ import {
 import {
   describeRetentionReading,
   extractRetentionReading,
-  type LastReleaseReading,
+  type LastCloseReading,
   type RetentionReading,
 } from "../src/endurance/scenarios/churn.js";
 import { disposeRig, spawnRig, type EnduranceRig } from "./endurance.helpers.js";
@@ -74,10 +75,10 @@ interface CloseCostSample {
   /** Retention readings, or null on a server without the retention fields. */
   readonly before: RetentionReading | null;
   readonly after: RetentionReading | null;
-  readonly release: LastReleaseReading | null;
+  readonly release: LastCloseReading | null;
   readonly rssBefore: ProcessTreeRssSample;
   readonly rssAfter: ProcessTreeRssSample;
-  /** Wall time from the close notification to the release landing (or the fixed settle). */
+  /** Wall time from the close notification to the close landing (or the fixed settle). */
   readonly settleMs: number;
 }
 
@@ -134,8 +135,8 @@ async function readRetention(rig: EnduranceRig): Promise<RetentionReading | null
   return extractRetentionReading(snapshot);
 }
 
-/** Poll until one more release has been applied than `appliedBefore`, or give up. */
-async function settleRelease(
+/** Poll until one more close has been applied than `appliedBefore`, or give up. */
+async function settleClose(
   rig: EnduranceRig,
   appliedBefore: number | null,
   deadlineMs: number,
@@ -147,13 +148,12 @@ async function settleRelease(
   }
   for (;;) {
     const reading = await readRetention(rig);
-    if (reading !== null && reading.releasesApplied > appliedBefore) {
+    if (reading !== null && reading.closesApplied > appliedBefore) {
       return { reading, settleMs: performance.now() - started };
     }
     if (performance.now() - started > deadlineMs) {
       throw new Error(
-        `the close's release did not land within ${deadlineMs}ms: ` +
-          `${describeRetentionReading(reading)}`,
+        `the close did not land within ${deadlineMs}ms: ` + `${describeRetentionReading(reading)}`,
       );
     }
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -167,7 +167,7 @@ function summarize(samples: readonly CloseCostSample[]): string {
   const hovers = samples.map((s) => s.hoverMs).sort((a, b) => a - b);
   const pickOf = (sorted: readonly number[], q: number) =>
     sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))];
-  const releases = samples.map((s) => s.release).filter((r): r is LastReleaseReading => r !== null);
+  const releases = samples.map((s) => s.release).filter((r): r is LastCloseReading => r !== null);
   const micros = releases.map((r) => r.elapsedMicros).sort((a, b) => a - b);
   const lines = [
     `close cost over ${samples.length} closes: hover p50 ${pickOf(hovers, 0.5).toFixed(0)}ms ` +
@@ -177,13 +177,11 @@ function summarize(samples: readonly CloseCostSample[]): string {
         samples[samples.length - 1].rssAfter.members[0]?.rssBytes ?? 0,
       )}MiB`,
     releases.length === 0
-      ? "  release receipts: UNAVAILABLE (the server reports no retention fields)"
-      : `  release wall time p50 ${ms(pickOf(micros, 0.5))}ms p95 ${ms(pickOf(micros, 0.95))}ms ` +
-        `max ${ms(micros[micros.length - 1])}ms; wait behind computations max ` +
-        `${ms(Math.max(...releases.map((r) => r.waitMicros)))}ms; live nodes scanned ` +
-        `${Math.min(...releases.map((r) => r.nodesScanned))}..${Math.max(...releases.map((r) => r.nodesScanned))}, ` +
-        `released per close ${Math.min(...releases.map((r) => r.nodesReleased))}..${Math.max(...releases.map((r) => r.nodesReleased))}, ` +
-        `slots ${releases[0].storageSlotsBefore}→${releases[releases.length - 1].storageSlotsAfter}`,
+      ? "  close receipts: UNAVAILABLE (the server reports no retention fields)"
+      : `  close wall time p50 ${ms(pickOf(micros, 0.5))}ms p95 ${ms(pickOf(micros, 0.95))}ms ` +
+        `max ${ms(micros[micros.length - 1])}ms; memo entries evicted per close ` +
+        `${Math.min(...releases.map((r) => r.memoEntriesEvicted))}..${Math.max(...releases.map((r) => r.memoEntriesEvicted))}, ` +
+        `sidecar entries dropped ${Math.min(...releases.map((r) => r.sidecarEntriesDropped))}..${Math.max(...releases.map((r) => r.sidecarEntriesDropped))}`,
   ];
   for (const s of samples) {
     const heap =
@@ -192,9 +190,10 @@ function summarize(samples: readonly CloseCostSample[]): string {
         : "heap n/a";
     const rss = `rss ${mib(s.rssBefore.totalBytes ?? 0)}→${mib(s.rssAfter.totalBytes ?? 0)}MiB`;
     const release = s.release
-      ? `release took ${ms(s.release.elapsedMicros)}ms (wait ${ms(s.release.waitMicros)}ms) scanned ${s.release.nodesScanned} ` +
-        `released ${s.release.nodesReleased} slots ${s.release.storageSlotsBefore}→${s.release.storageSlotsAfter} memo -${s.release.memoEntriesEvicted}`
-      : "release receipt n/a";
+      ? `close took ${ms(s.release.elapsedMicros)}ms memo -${s.release.memoEntriesEvicted} ` +
+        `unionViews -${s.release.unionViewsReleased} tokens -${s.release.signatureTokensReleased} ` +
+        `sidecars -${s.release.sidecarEntriesDropped} shapes -${s.release.shapeEntriesReleased}`
+      : "close receipt n/a";
     const counters =
       s.before && s.after
         ? `nodes ${s.before.semanticNodes}→${s.after.semanticNodes} memo ${s.before.semanticMemoEntries}→${s.after.semanticMemoEntries}`
@@ -236,7 +235,7 @@ describe.sequential(`endurance: close cost on the WSP equal-work slice [${config
     if (generated) disposeWorkspace(root);
   });
 
-  it("records what a close costs: the release receipt, heap, resident set and counters around each close", async () => {
+  it("records what a close costs: the close receipt, heap, resident set and counters around each close", async () => {
     const probes: EnduranceProbe[] = derivation.lanes
       .flatMap((section) => section.probes)
       .filter((probe) => probe.kind === "hover");
@@ -273,14 +272,14 @@ describe.sequential(`endurance: close cost on the WSP equal-work slice [${config
       const before = await readRetention(rig);
       const rssBefore = await sampleProcessTreeRss(serverPid);
       rig.session.closeFile(relativePath);
-      const { reading: after, settleMs } = await settleRelease(
+      const { reading: after, settleMs } = await settleClose(
         rig,
-        before === null ? null : before.releasesApplied,
+        before === null ? null : before.closesApplied,
         30_000,
       );
       const rssAfter = await sampleProcessTreeRss(serverPid);
-      if (before !== null && after !== null && !after.lastRelease) {
-        failures.push(`${relativePath}: no release receipt after the close`);
+      if (before !== null && after !== null && !after.lastClose) {
+        failures.push(`${relativePath}: no close receipt after the close`);
         continue;
       }
       samples.push({
@@ -288,7 +287,7 @@ describe.sequential(`endurance: close cost on the WSP equal-work slice [${config
         hoverMs,
         before,
         after,
-        release: after?.lastRelease ?? null,
+        release: after?.lastClose ?? null,
         rssBefore,
         rssAfter,
         settleMs,
@@ -304,10 +303,6 @@ describe.sequential(`endurance: close cost on the WSP equal-work slice [${config
         `${JSON.stringify({ root: generated ? "generated WSP1B slice" : root, slice: SLICE, samples }, null, 2)}\n`,
       );
     }
-    expect(failures, "every close must answer its hover and land its release").toEqual([]);
-    const last = samples[samples.length - 1]!.after;
-    if (last !== null) {
-      expect(last.deferredReleases, "no release may stay queued once the lane is idle").toBe(0);
-    }
+    expect(failures, "every close must answer its hover and land its receipt").toEqual([]);
   }, 3_600_000);
 });

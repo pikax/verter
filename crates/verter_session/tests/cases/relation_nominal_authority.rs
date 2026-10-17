@@ -625,6 +625,10 @@ fn value_member_unique_symbols_carry_their_own_nominal_identity() {
 #[test]
 fn nominal_assignability_survives_composite_and_inference_frames() {
     let host = make_audit_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     upsert(
         &host,
         "/relation-authority/token.ts",
@@ -914,6 +918,10 @@ fn comparable_shared_members_use_one_relation_check() {
 #[test]
 fn comparable_treats_unreduced_operands_as_undecided() {
     let host = make_audit_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     upsert(
         &host,
         "/relation-authority/deferred.ts",
@@ -1337,6 +1345,10 @@ fn relation_nominal_identity_survives_qualified_namespace_reference() {
 #[test]
 fn qualified_typeof_key_does_not_truncate_trailing_segments() {
     let host = make_audit_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     upsert(
         &host,
         "/relation-authority/decl.ts",

@@ -21,6 +21,8 @@ const CHILD_STACK_BYTES: usize = 2 * 1024 * 1024;
 fn run_deep_finite_keyof_child() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let graph = host.project_type_store().semantic_graph();
+    // This thread owns the chain while the worker evaluates it.
+    let _scope = graph.enter_node_root_scope();
     let leaf = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let mut root = leaf;
     for _ in 0..CHAIN_DEPTH {

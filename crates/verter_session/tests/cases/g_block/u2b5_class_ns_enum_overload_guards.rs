@@ -73,6 +73,16 @@ fn dummy_node() -> SemanticNodeId {
 fn count_for_b_after_publishing_a(a: &SemanticQueryKey, b: &SemanticQueryKey) -> usize {
     let host = host();
     let graph = host.project_type_store().semantic_graph();
+    // The keys name fixture ordinals: this graph holds a live node at
+    // each, so every ordinal a key names is one it owns.
+    let _scope = graph.enter_node_root_scope();
+    let _fixture_ordinals: Vec<_> = (0..128u32)
+        .map(|n| {
+            graph.intern_node(SemanticNodeData::Literal(
+                verter_type_engine::semantic_query::LiteralValue::Number(f64::from(n)),
+            ))
+        })
+        .collect();
     let node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     graph.publish_with_carrier_dispatch_and_generation_for_tests(
         a.clone(),
@@ -505,6 +515,16 @@ fn assert_execute_is_honest_miss_admitting_nothing(host: &VerterHost, key: Seman
     );
     // (b) admitted / cached NOTHING — an `Error` result is never warm-published.
     let graph = host.project_type_store().semantic_graph();
+    // The keys name fixture ordinals: this graph holds a live node at
+    // each, so every ordinal a key names is one it owns.
+    let _scope = graph.enter_node_root_scope();
+    let _fixture_ordinals: Vec<_> = (0..128u32)
+        .map(|n| {
+            graph.intern_node(SemanticNodeData::Literal(
+                verter_type_engine::semantic_query::LiteralValue::Number(f64::from(n)),
+            ))
+        })
+        .collect();
     assert_eq!(
         graph.slot_candidate_count_for_tests(&key),
         0,
@@ -639,6 +659,16 @@ fn class_dual_space_routes_instance_and_static_through_distinct_shared_paths() {
     // private OXC re-parse / per-surface walker (which would never land in
     // the family memo).
     let graph = host.project_type_store().semantic_graph();
+    // The keys name fixture ordinals: this graph holds a live node at
+    // each, so every ordinal a key names is one it owns.
+    let _scope = graph.enter_node_root_scope();
+    let _fixture_ordinals: Vec<_> = (0..128u32)
+        .map(|n| {
+            graph.intern_node(SemanticNodeData::Literal(
+                verter_type_engine::semantic_query::LiteralValue::Number(f64::from(n)),
+            ))
+        })
+        .collect();
     let instance_key = SemanticQueryKey::ResolveClassSurface {
         decl_slot: decl_slot.clone(),
         type_args: Arc::from(Vec::new().into_boxed_slice()),

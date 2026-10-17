@@ -95,6 +95,10 @@ fn lower(host: &Arc<VerterHost>, expr: &TypeExpr) -> SemanticNodeId {
 #[test]
 fn repeated_evaluate_with_same_node_and_context_hits_memo() {
     let host = make_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let carrier = lower_indexed_access(&host);
     let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
 
@@ -138,6 +142,10 @@ fn repeated_evaluate_with_same_node_and_context_hits_memo() {
 #[test]
 fn an_operand_finished_as_itself_takes_no_memo_probe() {
     let host = make_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let expr = TypeExpr::IndexedAccess {
         object: Arc::new(TypeExpr::Ref {
             name: Arc::from("DeepSource"),
@@ -186,6 +194,10 @@ fn an_operand_finished_as_itself_takes_no_memo_probe() {
 #[test]
 fn a_root_finished_as_itself_takes_no_memo_probe() {
     let host = make_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let carrier = lower_alias_carrier(&host, "Indirect");
     let store = host.project_type_store().semantic_graph();
     assert!(
@@ -217,6 +229,10 @@ fn a_root_finished_as_itself_takes_no_memo_probe() {
 #[test]
 fn different_contexts_produce_distinct_memo_keys() {
     let host = make_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let carrier = lower_indexed_access(&host);
 
     let store = host.project_type_store().semantic_graph();
@@ -265,6 +281,10 @@ fn different_contexts_produce_distinct_memo_keys() {
 #[test]
 fn invalidate_canonical_clears_evaluate_deferred_memo() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let store = host.project_type_store().semantic_graph();
 
     // Construct a synthetic Alias chain. The evaluator walks the

@@ -1,29 +1,30 @@
-# Counted semantic-node ownership substrate
+# Counted semantic-node ownership
 
-`SemanticGraphStore` production constructors retain canonical-sweep reclamation.
-The arena's counted last-root destruction is inactive in production, including
-ordinary constructors in a build with `test-support`. Canonical ownership,
-ordinal watermarks and `SemanticActivityGate` remain the close/reload authority.
-Preparatory roots do not promise survival across a legacy canonical release.
-Signature epochs, identity records, cache reservations and ordinary `Arc` owners
-still release their own storage normally.
+Counted ownership is the sole lifetime authority of every production
+`SemanticGraphStore`. A node lives while an owner holds it and its last
+release destroys it, iteratively, with every child it alone owned. There is no
+canonical payload sweep, no ordinal watermark, no activity gate and no
+inactive or test-only reclamation mode: every constructor — `new`,
+`with_account`, `with_provenance`, the host's composed store — reclaims the
+same way. A document close evicts cache owners, never a held node (see
+"Document close and sidecars" below).
 
-`semantic_query_memo::ownership_harness::CountedOwnershipHarness` is available
-only under `cfg(test)` or `test-support`. Its `run` method establishes an
-unaudited construction scope on the calling thread. This is the sole controlled
-activation interface; production callers cannot configure counted destruction.
-The production absence contract is an automatically discovered session
-compile-fail fixture; ordinary-constructor and legacy-sweep negative controls
-are arena unit tests.
+`semantic_query_memo::graph_fixture::GraphFixture` (`test` / `test-support`)
+wraps an ordinary production store for ownership tests: `run` opens an
+unaudited construction scope on the calling thread and `live_nodes` reads the
+live count. `ProjectSemanticDispatch::with_graph_fixture` binds the fixture's
+graph to a test context; like every dispatcher it opens its own construction
+scope over the graph it is bound to. Neither selects a different lifetime.
 
-`ProjectSemanticDispatch::with_ownership_harness` consumes that same fixture
-and binds its counted graph to a test context; like every dispatcher it opens
-its own construction scope over the graph it is bound to (see "Public carriers
-and capabilities" below). `VerterHost::new_standalone_with_counted_ownership_for_test`
-composes a whole host over a counted graph (`GraphOwnership::CountedForTests`),
-so a test proves what a host's public delivery keeps alive. Both are restricted
-to `test` or `test-support` builds; `GraphOwnership` has no counted variant in a
-production build.
+The sole-authority boundary is executable: `production_constructor_destroys_a_node_on_its_last_release`
+(arena) and `every_production_graph_constructor_destroys_on_last_release`
+(fixture module) fail for any constructor that leaves a slot to a later
+sweep; `close_canonical_keeps_the_live_substrate_flat_across_open_close_cycles`
+and `a_root_survives_its_documents_close_and_drains_with_its_last_clone` fail
+for a close that revokes a held node or queues its release; and the host tests
+`a_close_never_revokes_a_held_node_and_drains_when_the_holder_drops` /
+`a_close_keeps_nodes_interned_after_it` fail for a deferred or watermarked
+release. Public raw-ordinal routes stay sealed by the compile contracts.
 
 ## Roots, retained edges and destruction
 
@@ -46,12 +47,41 @@ holds only weak payload references. Lookup checks the candidate's live slot and
 acquires its root under the arena lock while holding the dedup shard lock; a dead
 external payload cannot hide an equal live peer. Last release processes a
 worklist, releases outgoing occurrences and retires weak entries iteratively.
-Only the twelve global primitive vocabulary nodes are permanent in the harness.
+Only the twelve global primitive vocabulary nodes are permanent.
 
-Production sweeps tombstone dormant owner counts along with their node slots,
-retire dedup entries and notify signature storage of released tokens. Dropping
-an older root then skips the tombstone. It cannot revive an ordinal or decrement
-a newly allocated slot: arena ordinals are not reused.
+Arena ordinals are never reused: a destroyed id reads as the shared
+`Opaque(Miss)` placeholder and refuses every root acquisition as
+`StaleSemanticOperand`; an id never handed out is `ForeignSemanticOperand`.
+Fail-safe boundaries turn either into a typed, uncached refusal rather than a
+panic or a resurrected node: key preparation (`try_prepare_rooted_key` →
+`refused_operand_cache_read`), a settled build whose output cannot be leased
+(its flight is retired), a deferred evaluation over a gone operand
+(`EvaluateDeferredOutcome::refused_operand`) and identity-record rooting
+(`root_in_arena` retains only live operands).
+
+## Document close and sidecars
+
+`SemanticGraphStore::close_canonical` (host: `ProjectTypeStore::close_canonical`,
+reached from `VerterHost::evict`) evicts every CACHE owner bound to the closed
+content: memo candidates whose key or result reaches it or whose validity is
+bound to the canonical, union views over it, the hash-cons / substitute /
+deferred memos, the signature epoch's roots on its tokens (replacing the epoch
+once stranded tokens dominate) and, through `memo::close_canonical_with_shapes`,
+the shape-cache entries. "Closed content" is decided per cached node by
+`NodeArenaCore::reaches_canonical_content` (file scope, a payload binding the
+content identity, or a retained child reaching such a node), memoized for one
+close — never by sweeping the arena. Nodes are destroyed when their last owner
+lets go; a caller still holding one keeps reading it. Artifact-attached macro
+mirrors own their carriers with their artifact, so an unchanged reload is
+served the same live handle.
+
+Per-node sidecars (structure bits, member-ordinal indexes, origin edges,
+stable-key classes) own nothing. Each marks the slot it describes
+(`track_sidecar`); destroying a marked slot appends its id to the arena's
+pending log, which a close or any sidecar write past
+`DESTROYED_DRAIN_THRESHOLD` drains (`reclaim_destroyed_sidecars`). The log
+never outgrows the stale entries it removes; `pending_destroyed_nodes` is its
+current count.
 
 ## Internal delivery and retained holders
 
@@ -132,7 +162,7 @@ ordinal the delivery roots), `SignatureSetValue::node`, `ReducedOutputNode::node
 `MaterializedOutputTypeExpr::node` and `NodeRootScope::node_ref` (a construction
 ordinal, rooted in that scope). `NodeRef::read` leases the payload under a fresh
 root; `SemanticGraphStore::read` additionally refuses a capability another graph
-minted (`ForeignSemanticOperand`). A slot a legacy close released reads as
+minted (`ForeignSemanticOperand`). A destroyed slot reads as
 `StaleSemanticOperand`, never as a live payload. `NodeRef::to_root` upgrades to
 an owning `NodeRoot`; two roots are equal when they name the same node of the
 same graph.
@@ -226,4 +256,6 @@ builds. Detailed provenance/attribution remains behind the existing default-off
 `semantic-observe` feature; the substrate adds no always-on observation history.
 
 Field/store/hook classification is recorded in
-[`SKR-OWN-PREP.md`](../../../../crates/verter_type_engine/observe-inventory/SKR-OWN-PREP.md).
+[`SKR-OWN-PREP.md`](../../../../crates/verter_type_engine/observe-inventory/SKR-OWN-PREP.md)
+and, for the production lifetime authority, close and sidecar cleanup, in
+[`SKR-OWN-3.md`](../../../../crates/verter_type_engine/observe-inventory/SKR-OWN-3.md).

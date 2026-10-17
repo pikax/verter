@@ -300,7 +300,12 @@ pub struct InlineMemberFlight {
     /// The member's decided value, owned from the moment its component
     /// closes until the batched publish stages it: the construction scope
     /// that computed it may close first.
-    held: super::delivery_lease::SemanticDeliveryLease,
+    /// The root set's own block is pinned against the store's retention
+    /// account for as long as it is held.
+    held: Option<(
+        super::node_roots::NodeRootSet,
+        verter_session_query::retention::shared::CallerHold,
+    )>,
 }
 
 impl std::fmt::Debug for InlineMemberFlight {
@@ -312,18 +317,29 @@ impl std::fmt::Debug for InlineMemberFlight {
 }
 
 impl InlineMemberFlight {
-    /// Own `value` — the member's decided value — until this flight is
-    /// published or aborted. A value whose operands are not live cannot be
-    /// held; the batched publish then refuses the member.
+    /// Own the graph nodes of `value` — the member's decided value — until
+    /// this flight is published or aborted. A value whose operands are not
+    /// live cannot be held; the batched publish then refuses the member.
     pub(crate) fn hold_value(
         &mut self,
         graph: &super::SemanticGraphStore,
         value: &crate::semantic_query::QueryResult<crate::semantic_query::SemanticQueryValue>,
     ) {
-        if let Ok(lease) =
-            graph.lease_delivery(super::delivery_lease::DeliveredAllocations::value(value))
-        {
-            self.held = lease;
+        let mut nodes = Vec::new();
+        value.for_each_retained_node(|node| {
+            if node.0 < super::UNALLOCATABLE_ID_FLOOR {
+                nodes.push(node);
+            }
+        });
+        if nodes.is_empty() {
+            return;
+        }
+        if let Ok(roots) = graph.root_nodes(nodes) {
+            let charge = verter_session_query::retention::shared::CallerHold::pin(
+                graph.retention_account(),
+                roots.heap_bytes(),
+            );
+            self.held = Some((roots, charge));
         }
     }
 
@@ -374,7 +390,7 @@ impl super::SemanticGraphStore {
             prepared,
             inflight,
             _task: task,
-            held: Default::default(),
+            held: None,
         })
     }
 
