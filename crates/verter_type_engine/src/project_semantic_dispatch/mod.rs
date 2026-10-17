@@ -3935,9 +3935,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 };
             }
         }
-        // An instantiation read for its value alone, outside any drive, runs
-        // on the continuation runtime: the chain of instantiations its body
-        // reaches waits in heap-owned frames instead of nesting natively.
+        // An instantiation or a `typeof` read for its value alone, outside
+        // any drive, runs on the continuation runtime: the chain of
+        // instantiations and `typeof`s its body reaches waits in heap-owned
+        // frames instead of nesting natively.
         if publication.is_none() && operand_evidence.is_none() && self.drives_on_the_runtime(&key) {
             return self.drive_query(key);
         }

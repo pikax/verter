@@ -901,12 +901,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// Begin a `typeof` build on the continuation runtime: answer it at
-    /// once, or — when the value's type is its authored annotation — begin
-    /// lowering that annotation as a projection that stops at each
-    /// instantiation it reaches, the build [`Self::drain_typeof`] carries
-    /// on. A chain of instantiations the annotation names (an interface
-    /// whose heritage nests a hundred levels) then waits in heap-owned
-    /// frames instead of nesting natively.
+    /// once, or — when the value's type is lowered from its authored value
+    /// position (its annotation, its inferred initializer or its
+    /// const-object shape) — begin that lowering as a projection that stops
+    /// at each instantiation and `typeof` it reaches, the build
+    /// [`Self::drain_typeof`] carries on. A chain of instantiations the
+    /// annotation names (an interface whose heritage nests a hundred
+    /// levels), or of values each initialized from the one before, then
+    /// waits in heap-owned frames instead of nesting natively.
     pub(super) fn begin_typeof(
         &self,
         value_root: &ValueRootKey,
@@ -919,6 +921,82 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(build) => TypeofStart::Build(build),
             None => TypeofStart::Done(Box::new(output)),
         }
+    }
+
+    /// Lower a value's type from the authored value position `locator` —
+    /// its annotation, its inferred initializer or its const-object shape —
+    /// or, on the continuation runtime (`suspend`), begin that lowering as a
+    /// projection that stops at each instantiation and `typeof` it reaches,
+    /// the build [`Self::drain_typeof`] carries on. `None` means the build
+    /// suspended: a chain of values each typed by the one before then waits
+    /// in heap-owned frames instead of nesting natively.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_typeof_body_or_suspend(
+        &self,
+        locator: verter_type_expr::locators::AuthoredBodyLocator,
+        suspend: Option<&mut Option<Box<TypeofBuild>>>,
+        lowering: TypeofBodyScope<'_>,
+        value_root: &ValueRootKey,
+        path: &[Arc<str>],
+        context: crate::semantic_query::ProjectionReductionContext,
+        observed_hash: verter_session_query::analysis::types::Hash16,
+    ) -> Option<SemanticNodeId> {
+        let TypeofBodyScope {
+            prepared,
+            env,
+            scope,
+            scope_payload,
+            shadowing,
+            mut substitutions,
+        } = lowering;
+        let Some(suspended) = suspend else {
+            return Some(self.lower_located_body_with_provenance(
+                locator,
+                verter_session_query::declarations::TypeDeclKind::Alias,
+                &[],
+                &prepared.name_resolution,
+                &env,
+                &scope,
+                scope_payload.as_ref(),
+                &shadowing,
+                &mut substitutions,
+                context,
+            ));
+        };
+        let self_value = match &locator {
+            verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot)
+                if slot.anchor.space == verter_type_expr::locators::LocatorSymbolSpace::Value =>
+            {
+                Some(slot.anchor.clone())
+            }
+            _ => None,
+        };
+        let body = self.begin_located_body_lowering(
+            locator,
+            verter_session_query::declarations::TypeDeclKind::Alias,
+            &[],
+            &env,
+            &scope,
+            &mut substitutions,
+            context,
+            &[],
+            super::locator_view_worklist::ProjectionSeam::suspending(),
+        );
+        *suspended = Some(Box::new(TypeofBuild {
+            prepared: Arc::clone(prepared),
+            env,
+            scope,
+            scope_payload,
+            shadowing,
+            substitutions,
+            self_value,
+            body,
+            value_root: value_root.clone(),
+            path: Arc::from(path.to_vec().into_boxed_slice()),
+            context,
+            observed_hash,
+        }));
+        None
     }
 
     /// Carry a suspended `typeof` build on: its annotation's projection
@@ -1010,7 +1088,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// [`Self::build_typeof`], which with `suspend` stops where the value's
-    /// type is its authored annotation: it hands the annotation's lowering
+    /// type lowers from its authored value position (its annotation, its
+    /// inferred initializer, its const-object shape): it hands that lowering
     /// over in `suspend` for [`Self::drain_typeof`] to carry on, and its own
     /// output is then not the answer.
     fn build_typeof_suspending(
@@ -1723,84 +1802,41 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         &mut substitutions,
                         context,
                     ),
-                    Some(verter_type_expr::facts::SemanticTypeSource::Authored(locator)) => {
-                        if let Some(suspended) = suspend {
-                            let self_value = match locator {
-                                verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot)
-                                    if slot.anchor.space
-                                        == verter_type_expr::locators::LocatorSymbolSpace::Value =>
-                                {
-                                    Some(slot.anchor.clone())
-                                }
-                                _ => None,
-                            };
-                            let body = self.begin_located_body_lowering(
-                                locator.clone(),
-                                verter_session_query::declarations::TypeDeclKind::Alias,
-                                &[],
-                                &empty_env,
-                                &scope,
-                                &mut substitutions,
-                                context,
-                                &[],
-                                super::locator_view_worklist::ProjectionSeam::suspending(),
-                            );
-                            *suspended = Some(Box::new(TypeofBuild {
-                                prepared: Arc::clone(&prepared),
+                    // An authored annotation lowers its own position; a
+                    // complex INFERRED annotation carries no closed fact and
+                    // is recovered by demand through the SAME authored
+                    // value-position locator (the transient value-part
+                    // re-borrow serves the initializer-inferred typed IR).
+                    annotation => {
+                        let locator = match annotation {
+                            Some(verter_type_expr::facts::SemanticTypeSource::Authored(
+                                locator,
+                            )) => locator.clone(),
+                            _ => value_position_locator(&prepared),
+                        };
+                        match self.lower_typeof_body_or_suspend(
+                            locator,
+                            suspend,
+                            TypeofBodyScope {
+                                prepared: &prepared,
                                 env: empty_env,
                                 scope,
                                 scope_payload,
                                 shadowing,
                                 substitutions,
-                                self_value,
-                                body,
-                                value_root: value_root.clone(),
-                                path: Arc::from(path.to_vec().into_boxed_slice()),
-                                context,
-                                observed_hash,
-                            }));
-                            return (QueryResult::Error(QueryError::Miss), empty_signature())
-                                .into();
-                        }
-                        self.lower_located_body_with_provenance(
-                            locator.clone(),
-                            verter_session_query::declarations::TypeDeclKind::Alias,
-                            &[],
-                            &prepared.name_resolution,
-                            &empty_env,
-                            &scope,
-                            scope_payload.as_ref(),
-                            &shadowing,
-                            &mut substitutions,
-                            context,
-                        )
-                    }
-                    // A complex INFERRED annotation carries no closed fact — it is
-                    // recovered by demand through the SAME authored value-position
-                    // locator (the transient value-part re-borrow serves the
-                    // initializer-inferred typed IR).
-                    _ => self.lower_located_body_with_provenance(
-                        verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
-                            verter_type_expr::locators::TypeBodySlot {
-                                anchor: verter_type_expr::locators::AuthoredAnchor {
-                                    canonical_id: Arc::clone(&prepared.root_identity.canonical_id),
-                                    owner: prepared.root_identity.owner,
-                                    symbol: Arc::clone(&prepared.root_identity.symbol_name),
-                                    space: verter_type_expr::locators::LocatorSymbolSpace::Value,
-                                },
-                                path: Arc::from(Vec::new().into_boxed_slice()),
                             },
-                        ),
-                        verter_session_query::declarations::TypeDeclKind::Alias,
-                        &[],
-                        &prepared.name_resolution,
-                        &empty_env,
-                        &scope,
-                        scope_payload.as_ref(),
-                        &shadowing,
-                        &mut substitutions,
-                        context,
-                    ),
+                            value_root,
+                            path,
+                            context,
+                            observed_hash,
+                        ) {
+                            Some(node) => node,
+                            None => {
+                                return (QueryResult::Error(QueryError::Miss), empty_signature())
+                                    .into()
+                            }
+                        }
+                    }
                 }
             }
         } else if prepared.object_shape.is_some() {
@@ -1808,28 +1844,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // free locators of the authored object — lower the WHOLE authored
             // value position through the located body source (the transient
             // value-part re-borrow serves the object initializer's typed IR).
-            self.lower_located_body_with_provenance(
-                verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
-                    verter_type_expr::locators::TypeBodySlot {
-                        anchor: verter_type_expr::locators::AuthoredAnchor {
-                            canonical_id: Arc::clone(&prepared.root_identity.canonical_id),
-                            owner: prepared.root_identity.owner,
-                            symbol: Arc::clone(&prepared.root_identity.symbol_name),
-                            space: verter_type_expr::locators::LocatorSymbolSpace::Value,
-                        },
-                        path: Arc::from(Vec::new().into_boxed_slice()),
-                    },
-                ),
-                verter_session_query::declarations::TypeDeclKind::Alias,
-                &[],
-                &prepared.name_resolution,
-                &empty_env,
-                &scope,
-                scope_payload.as_ref(),
-                &shadowing,
-                &mut substitutions,
+            match self.lower_typeof_body_or_suspend(
+                value_position_locator(&prepared),
+                suspend,
+                TypeofBodyScope {
+                    prepared: &prepared,
+                    env: empty_env,
+                    scope,
+                    scope_payload,
+                    shadowing,
+                    substitutions,
+                },
+                value_root,
+                path,
                 context,
-            )
+                observed_hash,
+            ) {
+                Some(node) => node,
+                None => return (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
+            }
         } else if !prepared.signatures.is_empty() {
             // The composed constructor-like object is interned directly.
             let is_class =
@@ -19555,12 +19588,41 @@ struct MappedIndexKey {
 pub(super) enum TypeofStart {
     /// The `typeof` is answered.
     Done(Box<crate::project_semantic_dispatch::walk::QueryBuildOutput>),
-    /// Its value's authored annotation is being lowered.
+    /// Its value's authored value position is being lowered.
     Build(Box<TypeofBuild>),
 }
 
-/// A `typeof` whose value's authored annotation is lowering, between the
-/// steps of its frame: the lowering's scope, the projection itself, and
+/// The declaration scope a `typeof`'s value-position lowering runs in.
+struct TypeofBodyScope<'p> {
+    prepared: &'p Arc<verter_session_query::type_solver::PreparedValueDecl>,
+    env: FxHashMap<String, SemanticNodeId>,
+    scope: NodeScopeId,
+    scope_payload: Option<crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
+    shadowing: crate::resolver_core::scope_shadowing::ScopeShadowing,
+    substitutions: Vec<(Arc<str>, SemanticNodeId)>,
+}
+
+/// The authored value position of `prepared`'s own declaration: where its
+/// inferred initializer type and its const-object shape are recovered.
+fn value_position_locator(
+    prepared: &verter_session_query::type_solver::PreparedValueDecl,
+) -> verter_type_expr::locators::AuthoredBodyLocator {
+    verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+        verter_type_expr::locators::TypeBodySlot {
+            anchor: verter_type_expr::locators::AuthoredAnchor {
+                canonical_id: Arc::clone(&prepared.root_identity.canonical_id),
+                owner: prepared.root_identity.owner,
+                symbol: Arc::clone(&prepared.root_identity.symbol_name),
+                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+            },
+            path: Arc::from(Vec::new().into_boxed_slice()),
+        },
+    )
+}
+
+/// A `typeof` whose value position (its annotation, its inferred
+/// initializer or its const-object shape) is lowering, between the steps of
+/// its frame: the lowering's scope, the projection itself, and
 /// what the build's output roots on.
 pub(super) struct TypeofBuild {
     prepared: Arc<verter_session_query::type_solver::PreparedValueDecl>,

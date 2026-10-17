@@ -816,3 +816,157 @@ fn a_member_flight_outliving_its_entry_is_waited_on_not_refused_as_a_cycle() {
     drop(flight);
     assert_eq!(store.wait_graph_counts_for_tests(), (0, 0));
 }
+
+/// Counts how many times the flight woke it.
+struct CountingWaker(std::sync::atomic::AtomicUsize);
+
+impl std::task::Wake for CountingWaker {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// A polled subscription to an open producer is pending: it holds its
+/// wait-for edge and leaves its waker on the flight without blocking. The
+/// producer settling on another thread wakes it exactly once, and the next
+/// poll reads the delivered result and releases the edge. A re-poll before
+/// the delivery registers the same waker once, not twice.
+#[test]
+fn a_polled_subscription_is_pending_until_the_producer_wakes_it() {
+    let (host, hash) = keyed_host();
+    let store = SemanticGraphStore::new();
+    let first = store.task_registry_for_tests().register_task();
+    let second = store.task_registry_for_tests().register_task();
+    let (claimed, _first_attempt) = claim(&store, &host, &first);
+    let Claim::Produce(lease) = claimed else {
+        panic!("the first claim of a cold key produces it");
+    };
+    let (subscribed, mut attempt) = claim(&store, &host, &second);
+    let Claim::Subscribed(mut subscription) = subscribed else {
+        panic!("another task's claim subscribes to the open producer");
+    };
+    let counter = Arc::new(CountingWaker(Default::default()));
+    let waker = std::task::Waker::from(Arc::clone(&counter));
+    for _ in 0..2 {
+        let mut capture = ReadCapture::default();
+        assert!(
+            subscription
+                .poll(
+                    &host,
+                    host.request_flags(),
+                    &mut attempt,
+                    &mut capture,
+                    &waker
+                )
+                .is_pending(),
+            "an unsettled producer leaves the subscription pending"
+        );
+    }
+    assert_eq!(
+        store.wait_graph_counts_for_tests().1,
+        1,
+        "the pending subscriber holds one wait-for edge"
+    );
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let mut capture = ReadCapture::default();
+                let flags = host.request_flags();
+                let Ok(mut settled) = lease.settle(&host, flags, keyed_output(&store, hash), None)
+                else {
+                    panic!("an uncancelled producer settles");
+                };
+                settled
+                    .admit(&host, flags, &mut capture)
+                    .expect("an uncancelled producer is admitted");
+                settled.complete(&host, &mut capture)
+            })
+            .join()
+            .expect("the producer thread completes")
+    });
+    assert_eq!(
+        counter.0.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the settled producer wakes the registered waker exactly once"
+    );
+    let mut capture = ReadCapture::default();
+    match subscription.poll(
+        &host,
+        host.request_flags(),
+        &mut attempt,
+        &mut capture,
+        &waker,
+    ) {
+        std::task::Poll::Ready(Joined::Read(read)) => assert!(
+            matches!(read.value(), QueryResult::Value(_)),
+            "the woken subscriber reads the producer's value"
+        ),
+        std::task::Poll::Ready(Joined::Retry) => panic!("a same-view subscriber reuses the value"),
+        std::task::Poll::Ready(Joined::Recursive(recursion)) => {
+            panic!("no cycle of waits exists: {recursion:?}")
+        }
+        std::task::Poll::Pending => panic!("a settled producer resolves the subscription"),
+    }
+    assert_eq!(store.wait_graph_counts_for_tests().1, 0);
+    drop(subscription);
+    drop((first, second));
+    assert_eq!(store.wait_graph_counts_for_tests(), (0, 0));
+}
+
+/// Dropping a pending subscription — its execution stopped or was dropped
+/// — releases its wait-for edge and takes its waker off the flight: the
+/// producer settling afterwards wakes nobody.
+#[test]
+fn dropping_a_pending_subscription_releases_its_edge_and_waker() {
+    let (host, hash) = keyed_host();
+    let store = SemanticGraphStore::new();
+    let first = store.task_registry_for_tests().register_task();
+    let second = store.task_registry_for_tests().register_task();
+    let (claimed, _first_attempt) = claim(&store, &host, &first);
+    let Claim::Produce(lease) = claimed else {
+        panic!("the first claim of a cold key produces it");
+    };
+    let (subscribed, mut attempt) = claim(&store, &host, &second);
+    let Claim::Subscribed(mut subscription) = subscribed else {
+        panic!("another task's claim subscribes to the open producer");
+    };
+    let counter = Arc::new(CountingWaker(Default::default()));
+    let waker = std::task::Waker::from(Arc::clone(&counter));
+    let mut capture = ReadCapture::default();
+    assert!(subscription
+        .poll(
+            &host,
+            host.request_flags(),
+            &mut attempt,
+            &mut capture,
+            &waker
+        )
+        .is_pending());
+    assert_eq!(store.wait_graph_counts_for_tests().1, 1);
+    drop(subscription);
+    assert_eq!(
+        store.wait_graph_counts_for_tests().1,
+        0,
+        "the dropped subscriber's wait-for edge is gone"
+    );
+    let mut capture = ReadCapture::default();
+    let flags = host.request_flags();
+    let Ok(mut settled) = lease.settle(&host, flags, keyed_output(&store, hash), None) else {
+        panic!("an uncancelled producer settles");
+    };
+    settled
+        .admit(&host, flags, &mut capture)
+        .expect("an uncancelled producer is admitted");
+    let _ = settled.complete(&host, &mut capture);
+    assert_eq!(
+        counter.0.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a dropped subscriber's waker is never woken"
+    );
+    drop((first, second));
+    assert_eq!(store.wait_graph_counts_for_tests(), (0, 0));
+}

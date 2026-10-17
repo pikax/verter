@@ -1509,7 +1509,7 @@ impl SemanticGraphStore {
                         state.dep_signature = Some(empty_signature());
                     }
                 }
-                inflight.ready.notify_all();
+                inflight.wake_subscribers();
                 // Test-only injection point: parked while iterating the
                 // collected entries and locking per-entry `state` — with
                 // the `inflight` table lock NOT held. A race test arms it
@@ -1699,7 +1699,7 @@ impl SemanticGraphStore {
                         state.dep_signature = Some(empty_signature());
                     }
                 }
-                inflight.ready.notify_all();
+                inflight.wake_subscribers();
                 // Test-only injection point: parked while iterating the
                 // collected entries and locking per-entry `state` — with
                 // the `inflight` table lock NOT held. A race test arms it
@@ -2377,7 +2377,7 @@ impl SemanticGraphStore {
             );
             // A cancellation abort is a partial with its own precise class.
         }
-        inflight.ready.notify_all();
+        inflight.wake_subscribers();
         #[cfg(any(test, feature = "test-support"))]
         {
             let gate = self.cancellation_abort_pre_retire_gate.lock().clone();

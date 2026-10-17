@@ -43,9 +43,29 @@
 //! A drive has one root, and a frame waits on at most one demand, so the
 //! frames form a single chain from the root to the one frame that can run.
 //! When that frame's demand waits on a producer outside the execution nothing
-//! else can run, and the drive loop blocks on the subscription
-//! ([`Program::wait`]). Every open demand is therefore on the chain of the
-//! frame that needs it.
+//! else can run. Every open demand is therefore on the chain of the frame
+//! that needs it.
+//!
+//! # Polling
+//!
+//! An execution is driven by polls ([`SemanticExecution::poll`]): a poll
+//! runs every frame that can run and returns `Ready` with the root's
+//! outcome, or `Pending` once the chain's tip waits on an outside producer.
+//! The program polls that producer's subscription with the poll's waker
+//! ([`Program::poll_subscription`]), registering it atomically with the
+//! readiness check, so a producer that resolves between the two is never
+//! missed: the waker fires and the next poll finds it resolved. A pending
+//! execution keeps everything it suspended — frames, demand records,
+//! completed results and the one subscription — and dropping it releases
+//! each on its own. [`SemanticExecution::drive`] is the blocking driver:
+//! it polls with a waker that unparks the driving thread.
+//!
+//! One poller drives an execution at a time (`poll` takes it exclusively);
+//! its state is `Send` whenever the program's frames, demands, values and
+//! subscriptions are, so a pending execution may resume on another thread.
+//! The request context bound to an execution
+//! ([`SemanticExecution::bind_request_context`]) is installed for each step
+//! and restored after it, on whichever thread the step runs.
 //!
 //! # Nesting
 //!
@@ -63,6 +83,8 @@
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::hash::Hash;
+use std::sync::Arc;
+use std::task::{Poll, Wake, Waker};
 
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -178,9 +200,16 @@ pub(crate) trait Program {
     /// this execution.
     fn reusable(&self, demand: &Self::Demand, value: &Self::Value) -> bool;
 
-    /// Block until an outside producer resolves the subscription. Called only
-    /// when no frame of the execution can run.
-    fn wait(&mut self, subscription: Self::Subscription) -> External<Self>;
+    /// Poll the outside producer of a subscription: `Ready` once it resolved,
+    /// else `Pending` with `waker` registered to fire when it does. Checking
+    /// and registering are one atomic step against the producer, so a
+    /// resolution between them still wakes. Called only when no frame of the
+    /// execution can run; a resolved subscription is dropped by the runtime.
+    fn poll_subscription(
+        &mut self,
+        subscription: &mut Self::Subscription,
+        waker: &Waker,
+    ) -> Poll<External<Self>>;
 
     /// The failure that stops the whole drive, when it must stop
     /// (cancellation). Checked before every step.
@@ -221,8 +250,12 @@ pub(crate) struct ExecutionCounters {
     pub(crate) reuses: u64,
     /// Needs that closed a cycle.
     pub(crate) cycles: u64,
-    /// Waits on outside producers.
+    /// Outside producers' subscriptions resolved.
     pub(crate) external_waits: u64,
+    /// Polls that returned `Pending`, waiting on an outside producer.
+    /// Observation only.
+    #[cfg(any(test, feature = "semantic-observe"))]
+    pub(crate) pending_polls: u64,
     /// Most frames alive at once.
     pub(crate) peak_frames: usize,
     /// Subscription slots inspected to find the one to wait on. Test-only.
@@ -239,6 +272,28 @@ thread_local! {
     /// reaches synchronously sees it set, and evaluates in place what it
     /// would otherwise drive.
     static DRIVES_RUNNING: Cell<u32> = const { Cell::new(0) };
+}
+
+/// How long a blocking drive parks before it looks for a stop again when
+/// no producer woke it.
+const PARK_SLICE: std::time::Duration = std::time::Duration::from_millis(2);
+
+/// Wakes the thread that created it: the waker a blocking drive polls with.
+struct UnparkThread(std::thread::Thread);
+
+impl Wake for UnparkThread {
+    fn wake(self: Arc<Self>) {
+        self.0.unpark();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.unpark();
+    }
+}
+
+thread_local! {
+    /// This thread's blocking-drive waker, built once per thread.
+    static PARK_WAKER: Waker = Waker::from(Arc::new(UnparkThread(std::thread::current())));
 }
 
 /// Marks a drive as running for its extent, unwinding included.
@@ -302,8 +357,13 @@ pub(crate) struct SemanticExecution<P: Program> {
     /// drive runs one chain, and a demand is subscribed only when that
     /// chain's tip needs it, so at most one is live; a wait takes it.
     subscription: Option<(DemandId, P::Subscription)>,
+    /// The open drive's root, from its first poll until it is ready.
+    root: Option<DemandId>,
     /// The drive root's outcome once it completes.
     root_outcome: Option<Outcome<P>>,
+    /// The request context each step runs under, when the execution may be
+    /// stepped away from the thread that began it.
+    request_context: Option<verter_execution::request_context::OpaqueRequestContext>,
     counters: ExecutionCounters,
 }
 
@@ -323,7 +383,9 @@ impl<P: Program> SemanticExecution<P> {
             live_frames: 0,
             ready: VecDeque::new(),
             subscription: None,
+            root: None,
             root_outcome: None,
+            request_context: None,
             counters: ExecutionCounters::default(),
         }
     }
@@ -345,38 +407,81 @@ impl<P: Program> SemanticExecution<P> {
         self.live_frames
     }
 
-    /// Evaluate `root` to completion. The only way an execution runs: frames
-    /// never drive, and a drive never begins inside a frame's step. A stop
-    /// abandons every open demand; completed results stay for a later drive.
+    /// Run every step under `context`: it is installed into the stepping
+    /// thread's request TLS before each step and the thread's own restored
+    /// after it, so a pending execution resumed on another thread steps
+    /// under its own request.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "bound by the poller that resumes an execution away from the thread that began it"
+        )
+    )]
+    pub(crate) fn bind_request_context(
+        &mut self,
+        context: verter_execution::request_context::OpaqueRequestContext,
+    ) {
+        self.request_context = Some(context);
+    }
+
+    /// Whether a drive is open: polled at least once and not yet ready.
+    #[cfg(test)]
+    pub(crate) fn is_pending(&self) -> bool {
+        self.root.is_some()
+    }
+
+    /// Evaluate `root` to completion, blocking the calling thread whenever
+    /// the chain waits on an outside producer until that producer wakes it.
+    /// A stop abandons every open demand; completed results stay for a
+    /// later drive.
     pub(crate) fn drive(&mut self, program: &mut P, root: P::Demand) -> Outcome<P> {
+        let mut root = Some(root);
+        PARK_WAKER.with(|waker| loop {
+            match self.poll(program, root.take(), waker) {
+                Poll::Ready(outcome) => return outcome,
+                // Timed parking keeps a stop observable while the producer
+                // has not woken this thread.
+                Poll::Pending => std::thread::park_timeout(PARK_SLICE),
+            }
+        })
+    }
+
+    /// Advance the drive of `root` as far as it can go. The first poll of a
+    /// drive names its root; later polls of the same drive pass `None`.
+    /// `Ready` carries the root's outcome (or the stop that abandoned every
+    /// open demand); `Pending` means the chain's tip waits on an outside
+    /// producer that will wake `waker`. The only way an execution runs:
+    /// frames never drive, and a poll never runs inside a frame's step.
+    pub(crate) fn poll(
+        &mut self,
+        program: &mut P,
+        root: Option<P::Demand>,
+        waker: &Waker,
+    ) -> Poll<Outcome<P>> {
         verter_debug_assert!(
             !step_running(),
             "a frame step must not drive a nested execution"
         );
-        verter_debug_assert!(
-            self.live_frames == 0 && self.ready.is_empty(),
-            "a drive begins with no open demand"
-        );
         let _drive = DriveScope::enter();
-        if let Some(&id) = self.index.get(&root) {
-            let record = &self.demands[id.0 as usize];
-            verter_debug_assert!(record.state == DemandState::Complete);
-            self.counters.reuses += 1;
-            return Ok(record
-                .value
-                .clone()
-                .expect("a complete demand holds its value"));
-        }
-        self.root_outcome = None;
-        let root = self.insert_demand(root);
-        self.begin(program, root, root);
+        let root = match (self.root, root) {
+            (Some(open), None) => open,
+            (None, Some(root)) => match self.open(program, root) {
+                Ok(open) => open,
+                Err(outcome) => return Poll::Ready(outcome),
+            },
+            (Some(_), Some(_)) => unreachable!("a pending drive is polled without a new root"),
+            (None, None) => unreachable!("a drive's first poll names its root"),
+        };
         loop {
             if let Some(outcome) = self.root_outcome.take() {
-                return outcome;
+                self.root = None;
+                return Poll::Ready(outcome);
             }
             if let Some(failure) = program.stop() {
                 self.abandon();
-                return Err(failure);
+                self.root = None;
+                return Poll::Ready(Err(failure));
             }
             if let Some(frame) = self.ready.pop_front() {
                 self.run(program, frame, root);
@@ -387,15 +492,50 @@ impl<P: Program> SemanticExecution<P> {
             {
                 self.counters.subscription_inspections += 1;
             }
-            let Some((demand, subscription)) = self.subscription.take() else {
+            let Some((demand, subscription)) = self.subscription.as_mut() else {
                 unreachable!("an open drive always has a runnable frame or a subscription");
             };
+            let demand = *demand;
+            let external = match program.poll_subscription(subscription, waker) {
+                Poll::Pending => {
+                    #[cfg(any(test, feature = "semantic-observe"))]
+                    {
+                        self.counters.pending_polls += 1;
+                    }
+                    return Poll::Pending;
+                }
+                Poll::Ready(external) => external,
+            };
+            self.subscription = None;
             self.counters.external_waits += 1;
-            match program.wait(subscription) {
+            match external {
                 External::Complete(outcome) => self.complete(program, demand, outcome, root),
                 External::Restart => self.begin(program, demand, root),
             }
         }
+    }
+
+    /// Open a drive of `root`: begin it, or answer it from the execution's
+    /// completed result for it.
+    fn open(&mut self, program: &mut P, root: P::Demand) -> Result<DemandId, Outcome<P>> {
+        verter_debug_assert!(
+            self.live_frames == 0 && self.ready.is_empty() && self.subscription.is_none(),
+            "a drive begins with no open demand"
+        );
+        if let Some(&id) = self.index.get(&root) {
+            let record = &self.demands[id.0 as usize];
+            verter_debug_assert!(record.state == DemandState::Complete);
+            self.counters.reuses += 1;
+            return Err(Ok(record
+                .value
+                .clone()
+                .expect("a complete demand holds its value")));
+        }
+        self.root_outcome = None;
+        let root = self.insert_demand(root);
+        self.root = Some(root);
+        self.begin(program, root, root);
+        Ok(root)
     }
 
     /// Ask the program to start the demand `id` and install what it returns.
@@ -434,6 +574,12 @@ impl<P: Program> SemanticExecution<P> {
         self.demands[produces.0 as usize].state = DemandState::Running(id);
         self.counters.steps += 1;
         let step = {
+            // The bound request context for this step alone; dropping the
+            // handle restores the thread's own, unwinding included.
+            let _context = self
+                .request_context
+                .as_ref()
+                .map(|context| Arc::clone(&context.0).install_tls());
             let record = self.frame_mut(id);
             let _scope = StepScope::enter();
             program.step(&mut record.frame, delivery)

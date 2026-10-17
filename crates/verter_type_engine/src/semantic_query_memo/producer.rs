@@ -224,6 +224,31 @@ pub struct Subscription<'s> {
     store: &'s SemanticGraphStore,
     inflight: Arc<FlightCell>,
     waiter: TaskId,
+    /// Set once the subscriber parked: the wait-for edge it holds to the
+    /// producer's task, when it began waiting, and the waker a poll left on
+    /// the flight. Dropping the subscription releases all three.
+    parked: Option<Parked>,
+}
+
+/// A parked subscriber's registrations.
+struct Parked {
+    _edge: verter_execution::tasks::WaitEdge,
+    since: Instant,
+    waker: Option<std::task::Waker>,
+}
+
+impl Drop for Subscription<'_> {
+    fn drop(&mut self) {
+        // A subscriber abandoned while parked (its execution stopped or was
+        // dropped) takes its waker off the flight; the edge drops with it.
+        if let Some(waker) = self.parked.take().and_then(|parked| parked.waker) {
+            self.inflight
+                .state
+                .lock()
+                .wakers
+                .retain(|registered| !registered.will_wake(&waker));
+        }
+    }
 }
 
 /// How a subscription resolved.
@@ -559,6 +584,7 @@ impl SemanticGraphStore {
                         store: self,
                         inflight,
                         waiter: task.id(),
+                        parked: None,
                     });
                 }
                 state.claimed = true;
@@ -612,49 +638,126 @@ impl SemanticGraphStore {
 
 impl Subscription<'_> {
     /// Wait for the producer's completion. Blocks the calling thread: only a
-    /// synchronous entry, or a drive with nothing else to run, waits.
+    /// synchronous entry waits this way.
     pub fn wait<C: crate::resolver_core::ResolverCapabilities>(
-        self,
+        mut self,
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
         flags: &crate::resolver_core::resolver_context::RequestFlags,
         attempt: &mut ClaimAttempt,
         capture: &mut ReadCapture<'_>,
     ) -> Joined {
-        let Self {
-            store,
-            inflight,
-            waiter,
-        } = self;
-        let prepared = &attempt.prepared;
+        let inflight = Arc::clone(&self.inflight);
         let mut state = inflight.state.lock();
-        let wait_edge = if state.completed.is_none() && !state.aborted && !flags.is_cancelled() {
-            let producer = state.owner.unwrap_or(waiter);
-            match store.task_registry.register_wait(waiter, producer) {
-                Ok(edge) => Some(edge),
-                Err(WaitCycle) => return Joined::Recursive(Recursion::WaitCycle),
+        if !flight_resolved(&state, flags) {
+            if let Err(WaitCycle) = self.park(&state) {
+                return Joined::Recursive(Recursion::WaitCycle);
             }
-        } else {
-            None
-        };
-        // Cooperative wait on the flight's condvar until it completes, is
-        // aborted by a canonical-invalidation sweep, or this request is
-        // cancelled. Subscribers never busy-spin.
-        let wait_start = Instant::now();
-        // Test-only: record that this subscriber is about to SUSPEND on the
-        // condvar (it holds `state` and is one statement from the wait,
-        // which atomically releases `state` and parks).
-        #[cfg(any(test, feature = "test-support"))]
-        store.joiner_on_condvar_count.fetch_add(1, Ordering::SeqCst);
-        while state.completed.is_none() && !state.aborted && !flags.is_cancelled() {
-            // Timed parking is the cancellation observation rail. A canceled
-            // subscriber detaches by returning; it never marks the shared
-            // flight aborted, so it cannot disturb an uncancelled producer or
-            // sibling.
-            inflight
-                .ready
-                .wait_for(&mut state, std::time::Duration::from_millis(2));
+            // Cooperative wait on the flight's condvar until it completes,
+            // is aborted by a canonical-invalidation sweep, or this request
+            // is cancelled. Subscribers never busy-spin.
+            while !flight_resolved(&state, flags) {
+                // Timed parking is the cancellation observation rail. A
+                // canceled subscriber detaches by returning; it never marks
+                // the shared flight aborted, so it cannot disturb an
+                // uncancelled producer or sibling.
+                inflight
+                    .ready
+                    .wait_for(&mut state, std::time::Duration::from_millis(2));
+            }
         }
-        drop(wait_edge);
+        self.resolve(state, ctx, flags, attempt, capture)
+    }
+
+    /// Poll the producer's completion without blocking: `Ready` once the
+    /// flight resolved, else `Pending` with `waker` registered on the flight.
+    /// The readiness check and the registration happen under the flight's
+    /// lock, and the producer wakes every registered waker after it
+    /// resolves the flight under the same lock, so a completion between a
+    /// poll's check and its registration is never lost. A wait that would
+    /// close a cycle of waiting tasks answers at once.
+    pub fn poll<C: crate::resolver_core::ResolverCapabilities>(
+        &mut self,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
+        flags: &crate::resolver_core::resolver_context::RequestFlags,
+        attempt: &mut ClaimAttempt,
+        capture: &mut ReadCapture<'_>,
+        waker: &std::task::Waker,
+    ) -> std::task::Poll<Joined> {
+        let inflight = Arc::clone(&self.inflight);
+        let mut state = inflight.state.lock();
+        if flight_resolved(&state, flags) {
+            return std::task::Poll::Ready(self.resolve(state, ctx, flags, attempt, capture));
+        }
+        if self.parked.is_none() {
+            if let Err(WaitCycle) = self.park(&state) {
+                return std::task::Poll::Ready(Joined::Recursive(Recursion::WaitCycle));
+            }
+        }
+        let parked = self
+            .parked
+            .as_mut()
+            .expect("a pending subscriber is parked");
+        let registered = parked
+            .waker
+            .as_ref()
+            .is_some_and(|previous| previous.will_wake(waker))
+            && state.wakers.iter().any(|w| w.will_wake(waker));
+        if !registered {
+            if let Some(previous) = parked.waker.take() {
+                state.wakers.retain(|w| !w.will_wake(&previous));
+            }
+            state.wakers.push(waker.clone());
+            parked.waker = Some(waker.clone());
+        }
+        std::task::Poll::Pending
+    }
+
+    /// Register this subscriber's wait-for edge to the flight's producer.
+    fn park(&mut self, state: &super::inflight::InflightState) -> Result<(), WaitCycle> {
+        let producer = state.owner.unwrap_or(self.waiter);
+        let edge = self
+            .store
+            .task_registry
+            .register_wait(self.waiter, producer)?;
+        // Test-only: record that this subscriber is about to SUSPEND (it
+        // holds `state`, and either parks on the condvar, which atomically
+        // releases `state`, or returns pending with its waker registered).
+        #[cfg(any(test, feature = "test-support"))]
+        self.store
+            .joiner_on_condvar_count
+            .fetch_add(1, Ordering::SeqCst);
+        self.parked = Some(Parked {
+            _edge: edge,
+            since: Instant::now(),
+            waker: None,
+        });
+        Ok(())
+    }
+
+    /// Read the resolved flight: release the wait registrations and return
+    /// the producer's result as it holds for this subscriber.
+    fn resolve<C: crate::resolver_core::ResolverCapabilities>(
+        &mut self,
+        mut state: parking_lot::MutexGuard<'_, super::inflight::InflightState>,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
+        flags: &crate::resolver_core::resolver_context::RequestFlags,
+        attempt: &mut ClaimAttempt,
+        capture: &mut ReadCapture<'_>,
+    ) -> Joined {
+        let store = self.store;
+        let inflight = Arc::clone(&self.inflight);
+        let prepared = &attempt.prepared;
+        // The flight resolved: whatever it woke, this subscriber's waker
+        // and wait-for edge are spent.
+        let wait_start = match self.parked.take() {
+            Some(parked) => {
+                if let Some(waker) = &parked.waker {
+                    state.wakers.retain(|w| !w.will_wake(waker));
+                }
+                parked.since
+            }
+            None => Instant::now(),
+        };
         store
             .stats
             .waits_ms
@@ -824,6 +927,15 @@ impl Subscription<'_> {
             receipt: cost_receipt.into(),
         })
     }
+}
+
+/// Whether a subscriber stops waiting on the flight: it completed, it was
+/// aborted, or the subscriber's request was cancelled.
+fn flight_resolved(
+    state: &super::inflight::InflightState,
+    flags: &crate::resolver_core::resolver_context::RequestFlags,
+) -> bool {
+    state.completed.is_some() || state.aborted || flags.is_cancelled()
 }
 
 /// A build's output settled into the rails every read of it carries, however
@@ -1354,7 +1466,7 @@ impl SettledProducer<'_> {
                 true
             }
         };
-        inflight.ready.notify_all();
+        inflight.wake_subscribers();
         if flight_aborted {
             let value = match &result {
                 QueryResult::Error(error)

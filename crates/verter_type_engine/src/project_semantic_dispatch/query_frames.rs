@@ -1,15 +1,18 @@
 //! Instantiations on the continuation runtime.
 //!
-//! An instantiation evaluated outside any drive is driven: its build runs
-//! as a frame whose declaration-body projection, where it would evaluate an
-//! instantiation in place, needs it instead, so a chain of instantiations
+//! An instantiation or a `typeof` evaluated outside any drive is driven:
+//! its build runs as a frame whose declaration-body projection, where it
+//! would evaluate an instantiation in place, needs it instead, so a chain
+//! of instantiations
 //! (an alias chain, a reference whose arguments are applications) is a
 //! chain of heap-owned frames, never of native calls. A body projection
 //! that reaches a value's `typeof` needs it the same way, and the `typeof`
-//! of a value declared with an authored annotation builds as a frame too,
-//! whose annotation projection needs each instantiation it reaches: an
+//! of a value typed by its authored value position (an annotation, an
+//! inferred initializer, a const-object shape) builds as a frame too,
+//! whose projection needs each instantiation and `typeof` it reaches: an
 //! interface heritage a hundred levels deep, named by an annotation, is a
-//! hundred frames. Each frame owns what
+//! hundred frames, and so is a chain of a hundred constants each
+//! initialized from the one before. Each frame owns what
 //! its build owns across its steps — the build's state, its producer lease
 //! on the memo, its fact tracer and its build-local taint — and installs
 //! the tracer and taint only while one of its steps runs. A delivery
@@ -123,7 +126,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> Drop for InstantiateFrame<'_
 pub(super) struct PendingClaim<'p> {
     key: SemanticQueryKey,
     subscription: Subscription<'p>,
-    attempt: ClaimAttempt,
+    /// Taken when the subscription resolves, for the claim to continue.
+    attempt: Option<ClaimAttempt>,
     /// How the claim's result is read: the needed key's frame depth.
     nesting: Nesting,
 }
@@ -206,7 +210,7 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
             Claim::Subscribed(subscription) => Start::Subscribe(PendingClaim {
                 key: key.clone(),
                 subscription,
-                attempt,
+                attempt: Some(attempt),
                 nesting,
             }),
             Claim::Produce(lease) => {
@@ -282,24 +286,37 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
         !delivery.read.cache_suppress && !delivery.read.result_is_partial()
     }
 
-    fn wait(&mut self, pending: PendingClaim<'p>) -> External<Self> {
+    fn poll_subscription(
+        &mut self,
+        pending: &mut PendingClaim<'p>,
+        waker: &std::task::Waker,
+    ) -> std::task::Poll<External<Self>> {
         let dispatch = self.dispatch;
-        let PendingClaim {
-            key,
-            subscription,
-            mut attempt,
-            nesting,
-        } = pending;
         let mut carrier = None;
         let joined = {
             let mut capture = ReadCapture::deferring_carrier(&mut carrier);
-            subscription.wait(
+            match pending.subscription.poll(
                 dispatch.ctx,
                 dispatch.snapshot.flags(),
-                &mut attempt,
+                pending
+                    .attempt
+                    .as_mut()
+                    .expect("a pending subscription holds its claim"),
                 &mut capture,
-            )
+                waker,
+            ) {
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+                std::task::Poll::Ready(joined) => joined,
+            }
         };
+        let key = pending.key.clone();
+        let nesting = pending.nesting;
+        // The runtime drops a resolved subscription; its claim continues
+        // in `retries` when the demand starts again.
+        let mut attempt = pending
+            .attempt
+            .take()
+            .expect("a pending subscription holds its claim");
         // A joined result this demand cannot pay for is computed instead.
         if let Joined::Read(CacheRead {
             receipt: ReadReceipt::Priced(receipt),
@@ -314,10 +331,10 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
             {
                 attempt.recompute();
                 self.retries.insert(key, attempt);
-                return External::Restart;
+                return std::task::Poll::Ready(External::Restart);
             }
         }
-        match joined {
+        std::task::Poll::Ready(match joined {
             Joined::Read(read) => {
                 External::Complete(Ok(dispatch.answered(&key, read, carrier, nesting)))
             }
@@ -331,7 +348,7 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
                 self.retries.insert(key, attempt);
                 External::Restart
             }
-        }
+        })
     }
 
     fn stop(&self) -> Option<()> {
@@ -341,15 +358,23 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     /// Whether `key` runs on the continuation runtime when it is evaluated
-    /// outside any drive: an instantiation read for its value alone.
+    /// outside any drive: an instantiation or a `typeof` read for its value
+    /// alone. A `typeof` whose value's type lowers from its authored value
+    /// position (its annotation, its inferred initializer, its const-object
+    /// shape) builds as a frame, so a chain of values each typed by the one
+    /// before is a chain of frames; any other `typeof` completes in the
+    /// frame's first step.
     pub(super) fn drives_on_the_runtime(&self, key: &SemanticQueryKey) -> bool {
-        matches!(key, SemanticQueryKey::Instantiate(_))
-            && !crate::semantic_execution::drive_running()
+        matches!(
+            key,
+            SemanticQueryKey::Instantiate(_) | SemanticQueryKey::TypeOf { .. }
+        ) && !crate::semantic_execution::drive_running()
             && self.active_operand_evidence.borrow().is_empty()
     }
 
     /// Evaluate `key` on the continuation runtime: the synchronous entry
-    /// of an instantiation. A warm result answers without the runtime.
+    /// of an instantiation or a `typeof`. A warm result answers without the
+    /// runtime.
     pub(super) fn drive_query(&self, key: SemanticQueryKey) -> ValueRead {
         // The connected demand spans the whole drive; the entry itself is
         // charged exactly as a synchronous entry is.
