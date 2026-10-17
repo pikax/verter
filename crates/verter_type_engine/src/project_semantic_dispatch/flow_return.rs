@@ -9666,6 +9666,8 @@ use contextual::ContextualSignature;
 mod correlation;
 #[path = "flow_return_destructure.rs"]
 mod destructure;
+#[path = "flow_return_footprint.rs"]
+mod footprint;
 
 #[path = "flow_return_schedule.rs"]
 pub mod schedule;

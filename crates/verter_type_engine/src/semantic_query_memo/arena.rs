@@ -230,8 +230,9 @@ fn chunk_storage_bytes() -> usize {
 }
 
 /// The bytes one live payload's `Arc` block costs. What the payload owns
-/// beyond its inline record — its member arrays and text — is shared
-/// between payloads (`PayloadArray::share`) and is not charged here.
+/// beyond its inline record — its member arrays and text, often shared
+/// between payloads (`PayloadArray::share`) — is charged through the
+/// arena's shared-heap table ([`ArenaInner::charge_payload_heap`]).
 fn payload_block_bytes() -> usize {
     verter_session_query::retention::allocation::arc_block_bytes(std::mem::size_of::<
         SemanticNodeData,
@@ -522,12 +523,113 @@ pub(super) struct ArenaInner {
     /// Live slots across every chunk, maintained on every allocation and
     /// release so the live count is O(1).
     live: usize,
-    /// The live chunks' slot storage and the live payloads' blocks, pinned
-    /// while they live.
+    /// The live chunks' slot storage, the live payloads' blocks and the heap
+    /// they reach, pinned while they live.
     storage: Option<verter_session_query::retention::granular::GranularPin>,
+    /// Owners of every shared allocation a live payload or scope reaches,
+    /// keyed by address: a payload, or an enclosing shared allocation. An
+    /// allocation is charged when it gains its first owner and released
+    /// with its last, so one shared between many payloads
+    /// (`PayloadArray::share`, an interned name) is charged once.
+    shared_heap: rustc_hash::FxHashMap<usize, usize>,
+}
+
+/// Bytes one bucket of the arena's shared-heap table holds: its key, its
+/// owner count and its control byte.
+const SHARED_HEAP_BUCKET_BYTES: usize = std::mem::size_of::<(usize, usize)>() + 1;
+
+/// Charges the heap a payload gains as it becomes live, counting each shared
+/// allocation once arena-wide.
+struct ChargeHeap<'a> {
+    shared: &'a mut rustc_hash::FxHashMap<usize, usize>,
+    bytes: usize,
+}
+
+impl crate::semantic_query::node_payload_footprint::PayloadHeapVisitor for ChargeHeap<'_> {
+    fn owned(&mut self, bytes: usize) {
+        self.bytes += bytes;
+    }
+
+    fn shared(&mut self, key: usize, bytes: usize) -> bool {
+        let owners = self.shared.entry(key).or_insert(0);
+        *owners += 1;
+        let first = *owners == 1;
+        if first {
+            self.bytes += bytes;
+        }
+        first
+    }
+}
+
+/// Releases the heap a payload held as its slot is freed: a shared
+/// allocation is released with its last owner.
+struct ReleaseHeap<'a> {
+    shared: &'a mut rustc_hash::FxHashMap<usize, usize>,
+    bytes: usize,
+}
+
+impl crate::semantic_query::node_payload_footprint::PayloadHeapVisitor for ReleaseHeap<'_> {
+    fn owned(&mut self, bytes: usize) {
+        self.bytes += bytes;
+    }
+
+    fn shared(&mut self, key: usize, bytes: usize) -> bool {
+        let owners = self
+            .shared
+            .get_mut(&key)
+            .expect("a live payload's shared allocation has an owner record");
+        *owners -= 1;
+        let last = *owners == 0;
+        if last {
+            self.shared.remove(&key);
+            self.bytes += bytes;
+        }
+        last
+    }
 }
 
 impl ArenaInner {
+    /// The shared-heap table's bucket bytes.
+    fn shared_heap_table_bytes(&self) -> usize {
+        self.shared_heap.capacity() * SHARED_HEAP_BUCKET_BYTES
+    }
+
+    /// The heap `payload` and `scope` reach that is not charged yet, now
+    /// owned by one more live slot, plus the table growth recording it.
+    fn charge_payload_heap(&mut self, payload: &SemanticNodeData, scope: &NodeScopeId) -> usize {
+        use crate::semantic_query::node_payload_footprint::PayloadHeap as _;
+        let table_before = self.shared_heap_table_bytes();
+        let mut visitor = ChargeHeap {
+            shared: &mut self.shared_heap,
+            bytes: 0,
+        };
+        payload.visit_payload_heap(&mut visitor);
+        scope.visit_payload_heap(&mut visitor);
+        let bytes = visitor.bytes;
+        bytes + (self.shared_heap_table_bytes() - table_before)
+    }
+
+    /// The heap a freed slot's `payload` and `scope` held that no other
+    /// live slot reaches, and the table backing given back with it.
+    fn release_payload_heap(&mut self, payload: &SemanticNodeData, scope: &NodeScopeId) -> usize {
+        use crate::semantic_query::node_payload_footprint::PayloadHeap as _;
+        let table_before = self.shared_heap_table_bytes();
+        let mut visitor = ReleaseHeap {
+            shared: &mut self.shared_heap,
+            bytes: 0,
+        };
+        payload.visit_payload_heap(&mut visitor);
+        scope.visit_payload_heap(&mut visitor);
+        let bytes = visitor.bytes;
+        let len = self.shared_heap.len();
+        if len == 0 {
+            self.shared_heap = rustc_hash::FxHashMap::default();
+        } else if len * 4 <= self.shared_heap.capacity() {
+            self.shared_heap.shrink_to(len * 2);
+        }
+        bytes + (table_before - self.shared_heap_table_bytes())
+    }
+
     fn slot(&self, id: SemanticNodeId) -> Slot<'_> {
         if id.0 >= self.next_id {
             return Slot::Unallocated;
@@ -562,6 +664,11 @@ impl ArenaInner {
             storage.add(chunk_storage_bytes());
         }
         storage.add(payload_block_bytes());
+        let heap = self.charge_payload_heap(&payload, &scope);
+        self.storage
+            .as_mut()
+            .expect("the storage pin was created above")
+            .add(heap);
         let chunk = self.chunks.get_or_insert_empty(id.0 >> CHUNK_BITS);
         let index = (id.0 & CHUNK_MASK) as usize;
         chunk.nodes[index] = Some(payload);
@@ -579,20 +686,23 @@ impl ArenaInner {
             return false;
         };
         let index = (id.0 & CHUNK_MASK) as usize;
-        if chunk.nodes[index].take().is_none() {
+        let Some(payload) = chunk.nodes[index].take() else {
             return false;
-        }
-        chunk.scopes[index] = None;
+        };
+        let scope = chunk.scopes[index]
+            .take()
+            .expect("a live slot has its scope");
         chunk.owners[index] = 0;
         chunk.permanent[index] = false;
         chunk.live -= 1;
         self.live -= 1;
-        let freed = if chunk.live == 0 {
+        let mut freed = if chunk.live == 0 {
             self.chunks.remove(&key);
             payload_block_bytes() + chunk_storage_bytes()
         } else {
             payload_block_bytes()
         };
+        freed += self.release_payload_heap(&payload, &scope);
         if let Some(storage) = self.storage.as_mut() {
             storage.sub(freed);
         }
@@ -829,6 +939,7 @@ enum ArenaRaceEvent {
     BeforeDedupRetain,
     BeforeRootRelease { blocked: bool },
     AfterRootRelease,
+    BeforeShardStorageSnapshot,
 }
 
 #[cfg(test)]
@@ -880,12 +991,20 @@ impl NodeArenaCore {
 
     /// Bytes the arena's storage — its live chunks and payload blocks and
     /// its dedup shards — is charged.
+    ///
+    /// Interning takes a shard and then `inner`, so the slot figure is read
+    /// in its own statement: its `inner` guard is gone before any shard is
+    /// locked, and a snapshot never holds `inner` while waiting on a shard.
     pub(super) fn storage_charge_bytes(&self) -> usize {
-        self.inner
+        let slots = self
+            .inner
             .read()
             .storage
             .as_ref()
-            .map_or(0, |storage| storage.charged())
+            .map_or(0, |storage| storage.charged());
+        #[cfg(test)]
+        self.race_event(ArenaRaceEvent::BeforeShardStorageSnapshot);
+        slots
             + self
                 .shards
                 .iter()

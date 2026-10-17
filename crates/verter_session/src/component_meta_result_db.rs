@@ -3,11 +3,11 @@
 use std::sync::Arc;
 use verter_session_query::analysis::types::Hash16;
 pub use verter_type_engine::component_meta_result_db::{
-    classify_final_component_retention, final_component_refusal_status, footprint,
-    refusal_identity_for, ComponentMetaOptionsFingerprint, ComponentMetaRefusalClass,
-    ComponentMetaRefusalIdentity, ComponentMetaRefusalQuery, ComponentMetaResultDb,
-    ComponentMetaResultEntry, ComponentMetaResultKey, ComponentMetaRetainedRefusal,
-    FinalComponentAdmissionProof, FinalComponentRetention,
+    classify_final_component_retention, final_component_refusal_status, refusal_identity_for,
+    ComponentMetaOptionsFingerprint, ComponentMetaRefusalClass, ComponentMetaRefusalIdentity,
+    ComponentMetaRefusalQuery, ComponentMetaResultDb, ComponentMetaResultEntry,
+    ComponentMetaResultKey, ComponentMetaRetainedRefusal, FinalComponentAdmissionProof,
+    FinalComponentRetention,
 };
 use verter_type_engine::semantic_query::{FactStatus, ResultCompleteness};
 

@@ -333,3 +333,65 @@ fn chunk_table_storage_follows_live_chunks_not_allocation_history() {
         )))
     );
 }
+
+/// A storage snapshot taken while an interner holds a shard and waits for
+/// `inner` must not hold `inner` while it waits for that shard: both finish.
+#[test]
+fn storage_snapshot_completes_beside_an_interner_holding_a_shard() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    const WAIT: Duration = Duration::from_secs(30);
+    let arena = Arc::new(NodeArena::counted_for_tests());
+    let (parked_tx, parked_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel::<()>();
+    let resume_rx = parking_lot::Mutex::new(resume_rx);
+    let (snapshot_tx, snapshot_rx) = mpsc::channel();
+    let parked = AtomicBool::new(false);
+    let snapshotting = AtomicBool::new(false);
+    *arena.race_hook.lock() = Some(Arc::new(move |event| match event {
+        ArenaRaceEvent::BeforeDedupLookup if !parked.swap(true, Ordering::SeqCst) => {
+            parked_tx.send(()).unwrap();
+            let _ = resume_rx.lock().recv_timeout(WAIT);
+        }
+        ArenaRaceEvent::BeforeShardStorageSnapshot
+            if !snapshotting.swap(true, Ordering::SeqCst) =>
+        {
+            snapshot_tx.send(()).unwrap();
+        }
+        _ => {}
+    }));
+    // Detached workers: a regression deadlocks them, and the assertions
+    // below then fail on their timeouts instead of hanging on a join.
+    let (interned_tx, interned_rx) = mpsc::channel();
+    let interner = Arc::clone(&arena);
+    std::thread::spawn(move || {
+        let root = interner.intern_owned(
+            SemanticNodeData::Literal(LiteralValue::String("snapshot".into())),
+            NodeScopeId::Global,
+        );
+        interned_tx.send(root.id()).unwrap();
+    });
+    parked_rx.recv_timeout(WAIT).unwrap();
+    let (charged_tx, charged_rx) = mpsc::channel();
+    let snapshot = Arc::clone(&arena);
+    std::thread::spawn(move || {
+        charged_tx.send(snapshot.storage_charge_bytes()).unwrap();
+    });
+    // The snapshot has read its slot figure and is about to wait for the
+    // parked interner's shard; the interner now needs `inner`.
+    snapshot_rx.recv_timeout(WAIT).unwrap();
+    resume_tx.send(()).unwrap();
+    let interned = interned_rx.recv_timeout(WAIT);
+    let charged = charged_rx.recv_timeout(WAIT);
+    *arena.race_hook.lock() = None;
+    assert!(
+        interned.is_ok(),
+        "the interner acquires `inner` and finishes"
+    );
+    assert!(
+        charged.is_ok(),
+        "the snapshot acquires the shard and finishes"
+    );
+}

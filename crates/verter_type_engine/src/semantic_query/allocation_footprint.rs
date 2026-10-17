@@ -223,7 +223,12 @@ impl OwnedHeap for ShallowDiagnostic {
 
 impl OwnedHeap for super::InferBinding {
     fn owned_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
-        self.name.owned_heap_bytes(aliases)
+        let Self {
+            param: _,
+            name,
+            bound: _,
+        } = self;
+        name.owned_heap_bytes(aliases)
     }
 }
 
@@ -233,24 +238,32 @@ impl OwnedHeap for SemanticQueryValue {
     fn owned_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
         match self {
             SemanticQueryValue::TypeNode(_)
-            | SemanticQueryValue::ProgramAnalysis(_)
-            | SemanticQueryValue::MaterializationCycleGate(_)
-            | SemanticQueryValue::TruthinessDomain(_)
-            | SemanticQueryValue::DiagnosticAnalysis(_) => 0,
+            | SemanticQueryValue::ProgramAnalysis(super::ProgramAnalysisValue { node: _ })
+            | SemanticQueryValue::DiagnosticAnalysis(super::DiagnosticAnalysisShell) => 0,
+            SemanticQueryValue::TruthinessDomain(domain) => copy_inline(domain),
+            SemanticQueryValue::MaterializationCycleGate(outcome) => {
+                outcome.owned_heap_bytes(aliases)
+            }
             SemanticQueryValue::ObjectProjection(formula) => formula.owned_heap_bytes(aliases),
-            SemanticQueryValue::DeclarationAnalysis(value) => {
-                value.contributors.owned_heap_bytes(aliases)
-            }
+            SemanticQueryValue::DeclarationAnalysis(super::DeclarationAnalysisValue {
+                contributors,
+            }) => contributors.owned_heap_bytes(aliases),
             SemanticQueryValue::OverloadSet(signatures) => signatures.owned_heap_bytes(aliases),
-            SemanticQueryValue::Relation(payload) => payload.bindings.owned_heap_bytes(aliases),
+            SemanticQueryValue::Relation(payload) => payload.owned_heap_bytes(aliases),
             SemanticQueryValue::BroadRuntime(classification) => {
-                classification.kinds_arc().owned_heap_bytes(aliases)
+                classification.owned_heap_bytes(aliases)
             }
-            SemanticQueryValue::FlowReturn(result) => sized_arc_bytes(result, aliases),
-            SemanticQueryValue::ResolveCall(result) => sized_arc_bytes(result, aliases),
+            SemanticQueryValue::FlowReturn(result) => arc_value_bytes(result, aliases),
+            SemanticQueryValue::ResolveCall(result) => arc_value_bytes(result, aliases),
             SemanticQueryValue::SignatureSet(value) => value.owned_heap_bytes(aliases),
-            // The applied result lives in the signature epoch's tables.
-            SemanticQueryValue::SignatureResult(_) => 0,
+            // The epoch lease and the applied result live in the signature
+            // epoch's tables.
+            SemanticQueryValue::SignatureResult(
+                crate::signature_kernel::SignatureResultValue {
+                    version: _,
+                    result: _,
+                },
+            ) => 0,
         }
     }
 }
@@ -265,15 +278,76 @@ impl<T: OwnedHeap> OwnedHeap for QueryResult<T> {
     }
 }
 
-/// An `Arc<T>`'s block, once per `aliases`.
-pub(crate) fn sized_arc_bytes<T>(value: &Arc<T>, aliases: &mut AliasSet) -> usize {
+/// An `Arc<T>`'s block and the heap its value owns, once per `aliases`.
+pub(crate) fn arc_value_bytes<T: OwnedHeap>(value: &Arc<T>, aliases: &mut AliasSet) -> usize {
     if aliases.first(value) {
-        arc_block_bytes(std::mem::size_of::<T>())
+        arc_block_bytes(std::mem::size_of::<T>()) + T::owned_heap_bytes(value, aliases)
     } else {
         0
     }
 }
 
+/// A field whose type is `Copy` owns no heap: the bound is the proof, so a
+/// field that later gains an allocation stops compiling here.
+pub(crate) const fn copy_inline<T: Copy>(_: &T) -> usize {
+    0
+}
+
+/// [`copy_inline`] for every element of a slice.
+pub(crate) const fn copy_slice_inline<T: Copy>(_: &[T]) -> usize {
+    0
+}
+
 #[cfg(test)]
 #[path = "allocation_footprint_tests.rs"]
 mod tests;
+
+// ---------------------------------------------------------------------------
+// Sealed query-key components.
+//
+// These keys keep their node sets and substitution frames private; the memo
+// family that embeds them measures them here, where the fields are visible.
+// Each counts its `Arc` slice block and its root attachment's owner, once
+// per `aliases`; the node ids inside are the arena's.
+// ---------------------------------------------------------------------------
+
+/// The node-set block and root attachment of a sealed node-set key.
+macro_rules! node_set_key_heap_bytes {
+    ($($key:ty),* $(,)?) => {
+        $(impl $key {
+            pub(crate) fn key_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
+                arc_slice_block_bytes(&self.0, aliases).unwrap_or(0)
+                    + self.1 .0.owned_heap_bytes(aliases)
+            }
+        })*
+    };
+}
+
+node_set_key_heap_bytes!(
+    super::FlowNarrowingKey,
+    super::ContextualTypingKey,
+    super::InferableParamSetId,
+    super::CanonicalTypeSubstitution,
+);
+
+impl super::PendingSubstitutionFrame {
+    /// The frame's pair list.
+    pub(crate) fn key_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
+        let Self { pairs } = self;
+        arc_slice_block_bytes(pairs, aliases).unwrap_or(0)
+    }
+}
+
+impl super::ConditionalPendingSubstitution {
+    /// Both branch frames; the distribution parameter is a node id.
+    pub(crate) fn key_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
+        let Self {
+            true_branch,
+            false_branch,
+            distribution,
+        } = self;
+        true_branch.key_heap_bytes(aliases)
+            + false_branch.key_heap_bytes(aliases)
+            + copy_inline(distribution)
+    }
+}

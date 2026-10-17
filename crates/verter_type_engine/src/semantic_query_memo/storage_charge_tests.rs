@@ -90,3 +90,107 @@ fn a_retired_signature_epoch_releases_its_storage_with_its_last_holder() {
         "the retired epoch's storage is released with its last holder"
     );
 }
+
+/// The reverse index copies each registered canonical's text into its
+/// shard key: that copy, and the shard table's unused buckets, are charged
+/// to the index while it holds them and given back when the shard drains.
+#[test]
+fn a_reverse_index_shard_charges_its_canonical_text_until_it_drains() {
+    use crate::semantic_query::{PrimitiveKind, RelateMemoKey, RelationContext, RelationOutcome};
+    use verter_session_query::facts::fact_cache::{FactVersionRef, ReadSetSignature};
+
+    const CANONICAL_LEN: usize = 10_000;
+    let account = account();
+    let store = SemanticGraphStore::with_account(StoreAccount::new(Arc::clone(&account)));
+    let canonical = format!("/ws/{}.ts", "r".repeat(CANONICAL_LEN));
+    let carrier = ReadSetSignature::new(Arc::from(vec![FactVersionRef::FileWholeHash {
+        canonical_id: canonical.clone(),
+        hash: [3; 16],
+    }]));
+    let roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(canonical.as_str())]);
+    let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    store.insert_relation_payload_for_tests(
+        RelateMemoKey::assignable(source, target, RelationContext::default()),
+        carrier,
+        roots,
+        store.relation_payload_for_tests(RelationOutcome::Assignable),
+        0,
+    );
+    assert_eq!(store.canonical_to_entries_count(&canonical), 1);
+    let charged = store.canonical_to_entries.storage_charge_bytes();
+    assert!(
+        charged >= arc_block_bytes(canonical.len()),
+        "the shard's copy of the oversized canonical is charged: {charged}"
+    );
+
+    assert_eq!(store.invalidate_canonical(&canonical), 1);
+    assert!(
+        store.canonical_to_entries.storage_charge_bytes() < arc_block_bytes(canonical.len()),
+        "the drained shard's text is no longer charged"
+    );
+    store.invalidate_all();
+    assert_eq!(
+        store.canonical_to_entries.storage_charge_bytes(),
+        0,
+        "an emptied index holds no storage and no charge"
+    );
+}
+
+/// A payload's own heap — a literal's text, a template's quasi array and
+/// names — is charged with its graph storage, and an allocation two live
+/// payloads share is charged once; every byte is released with the last
+/// payload reaching it.
+#[test]
+fn graph_storage_charges_payload_heap_once_per_shared_allocation() {
+    use crate::semantic_query::PayloadArray;
+
+    const TEXT: usize = 1 << 20;
+    let account = account();
+    let harness = CountedOwnershipHarness::with_account(StoreAccount::new(Arc::clone(&account)));
+    let pinned = || account.snapshot().pinned_bytes;
+    let quasi: Arc<str> = Arc::from("q".repeat(TEXT));
+    let quasis: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&quasi)]);
+    harness.run(|store| {
+        let small = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "small".into(),
+        )));
+        let before = pinned();
+        let _literal = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "l".repeat(TEXT),
+        )));
+        assert!(
+            pinned() - before >= TEXT,
+            "a literal's text is charged with its payload: {} < {TEXT}",
+            pinned() - before
+        );
+
+        let before = pinned();
+        let _first = store.intern_node(SemanticNodeData::TemplateLiteral {
+            quasis: Arc::clone(&quasis),
+            expressions: PayloadArray::from(Vec::new()),
+        });
+        assert!(
+            pinned() - before >= TEXT,
+            "the quasi array and its text are charged with the first payload reaching them"
+        );
+        let before = pinned();
+        let _second = store.intern_node(SemanticNodeData::TemplateLiteral {
+            quasis: Arc::clone(&quasis),
+            expressions: PayloadArray::from(vec![small]),
+        });
+        assert!(
+            pinned() - before < TEXT / 2,
+            "a second payload sharing the quasis is not charged for them again: {}",
+            pinned() - before
+        );
+    });
+    assert_eq!(harness.live_nodes(), 0);
+    assert!(
+        pinned() < TEXT,
+        "the released payloads' heap is no longer charged: {}",
+        pinned()
+    );
+    drop(harness);
+    assert_eq!(account.snapshot().total_bytes(), 0);
+}

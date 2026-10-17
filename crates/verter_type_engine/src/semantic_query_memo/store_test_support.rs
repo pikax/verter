@@ -271,8 +271,16 @@ impl SemanticGraphStore {
             QueryResult::Recursive(node) => QueryResult::Recursive(node),
             QueryResult::Error(error) => QueryResult::Error(error),
         };
+        let walker_diagnostics = super::empty_diagnostics();
         let lease = self
-            .lease_candidate(&family, &result, &[])
+            .lease_candidate(
+                &family,
+                super::delivery_lease::DeliveredAllocations::read(
+                    &result,
+                    &walker_diagnostics,
+                    &dispatch_dep_signature,
+                ),
+            )
             .expect("fixture candidate operands are live");
         let mut entry = MemoEntry {
             lease,
@@ -280,7 +288,7 @@ impl SemanticGraphStore {
             read_set_signature: read_set_signature.clone(),
             dispatch_dep_signature: Arc::clone(&dispatch_dep_signature),
             self_root_canonicals,
-            walker_diagnostics: Arc::from([]),
+            walker_diagnostics,
             satisfied_projection,
             retention: None,
             validated_at_generation,
@@ -295,12 +303,12 @@ impl SemanticGraphStore {
             reverse_index::ReverseIndexInputs::new(&read_set_signature, &dispatch_dep_signature);
         let Ok(retention) = self.reserve_memo_candidate(
             &entry,
+            &family,
             populated_slots,
             reverse_index_inputs.canonical_count(),
         ) else {
             return 0;
         };
-        entry.lease.attach_retention(|| retention.callers());
         entry.retention = Some(retention);
         let cap = family.candidate_cap();
         let eviction = match view {
@@ -524,7 +532,6 @@ impl SemanticGraphStore {
             satisfied_projection,
             &super::scc_publish::fixture_receipt(prepared.family()),
             inflight,
-            &Default::default(),
         )
     }
 

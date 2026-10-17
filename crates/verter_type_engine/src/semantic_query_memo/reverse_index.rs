@@ -32,7 +32,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 use super::family::{FamilyKey, FamilySlots, MemoEntry, ModeSlot};
-use super::{CanonicalToEntries, RegisteredFacts};
+use super::RegisteredFacts;
 use crate::instant::Instant;
 use crate::semantic_query::DepSignature;
 
@@ -116,22 +116,173 @@ impl<'a> RegisteredCanonicals<'a> {
     }
 }
 
+/// One canonical's shard: its registrations, keyed by `(admission_seq, slot)`.
+type ShardMap = FxHashMap<(u64, ModeSlot), (Arc<FamilyKey>, RegisteredFacts)>;
+
+/// Bytes one registration record's bucket holds in a shard's table: the
+/// record and its control byte.
+const RECORD_BUCKET_BYTES: usize =
+    std::mem::size_of::<((u64, ModeSlot), (Arc<FamilyKey>, RegisteredFacts))>() + 1;
+
+/// Bytes one shard's bucket holds in the outer table: the canonical's
+/// handle, the shard's lock and table header, and the control byte.
+const SHARD_BUCKET_BYTES: usize = std::mem::size_of::<(Arc<str>, Mutex<ShardMap>)>() + 1;
+
+/// Granule the index's own storage is charged in.
+const INDEX_STORAGE_GRANULE: usize = 4 * 1024;
+
+/// The per-canonical reverse index, and the charge of the storage it holds
+/// beside its records.
+///
+/// Every registration record is charged by the candidate that registered it
+/// ([`registration_bytes`]). Everything else the index holds is charged
+/// here, pinned while it is held: each shard's copy of its canonical's
+/// text, every shard table's unused buckets (capacity beyond its live
+/// records), and the outer table's buckets. A shard table gives its backing
+/// back as its records drain, and a shard is dropped with its last record.
+///
+/// Every mutation runs under the family memo's `entries` lock (see the
+/// module docs), so the storage figures settle without racing each other.
+pub(super) struct CanonicalToEntries {
+    map: dashmap::DashMap<Arc<str>, Mutex<ShardMap>>,
+    storage: Mutex<IndexStorage>,
+}
+
+#[derive(Default)]
+struct IndexStorage {
+    pin: Option<verter_session_query::retention::granular::GranularPin>,
+    account: Option<Arc<verter_session_query::retention::SemanticRetentionAccount>>,
+    /// The outer table's bucket bytes the pin currently counts.
+    outer_bytes: usize,
+}
+
+impl IndexStorage {
+    fn adjust(&mut self, added: usize, freed: usize) {
+        if added == freed {
+            return;
+        }
+        let account = self.account.get_or_insert_with(
+            verter_session_query::retention::SemanticRetentionAccount::process_local,
+        );
+        let pin = self.pin.get_or_insert_with(|| {
+            verter_session_query::retention::granular::GranularPin::new(
+                account,
+                INDEX_STORAGE_GRANULE,
+            )
+        });
+        if added > freed {
+            pin.add(added - freed);
+        } else {
+            pin.sub(freed - added);
+        }
+    }
+}
+
+/// The unused bucket bytes a shard table holds beyond its live records.
+fn shard_slack_bytes(map: &ShardMap) -> usize {
+    (map.capacity() - map.len()) * RECORD_BUCKET_BYTES
+}
+
+/// Give back the backing a shard table no longer needs.
+fn shrink_drained_shard(map: &mut ShardMap) {
+    let len = map.len();
+    if len == 0 {
+        *map = FxHashMap::default();
+    } else if len * 4 <= map.capacity() {
+        map.shrink_to(len * 2);
+    }
+}
+
+impl std::ops::Deref for CanonicalToEntries {
+    type Target = dashmap::DashMap<Arc<str>, Mutex<ShardMap>>;
+    fn deref(&self) -> &Self::Target {
+        &self.map
+    }
+}
+
+impl CanonicalToEntries {
+    /// An empty index whose storage is charged to `account`.
+    pub(super) fn charged(
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) -> Self {
+        Self {
+            map: dashmap::DashMap::new(),
+            storage: Mutex::new(IndexStorage {
+                account: Some(Arc::clone(account)),
+                ..IndexStorage::default()
+            }),
+        }
+    }
+
+    /// Settle the outer table's bucket charge with its capacity. Called with
+    /// no shard guard held.
+    fn settle_outer(&self, storage: &mut IndexStorage) {
+        let bytes = self.map.capacity() * SHARD_BUCKET_BYTES;
+        let before = storage.outer_bytes;
+        storage.outer_bytes = bytes;
+        storage.adjust(bytes, before);
+    }
+
+    /// Remove `canonical`'s whole shard. Its records' charges belong to the
+    /// candidates that registered them; the shard's own storage is released
+    /// here.
+    pub(super) fn remove_shard(&self, canonical: &str) -> Option<(Arc<str>, Mutex<ShardMap>)> {
+        let removed = self.map.remove(canonical)?;
+        let mut storage = self.storage.lock();
+        let freed = {
+            let map = removed.1.lock();
+            verter_session_query::retention::allocation::arc_block_bytes(removed.0.len())
+                + shard_slack_bytes(&map)
+        };
+        storage.adjust(0, freed);
+        self.settle_outer(&mut storage);
+        Some(removed)
+    }
+
+    /// Remove every shard and give back the outer table's backing.
+    pub(super) fn clear_shards(&self) {
+        let mut storage = self.storage.lock();
+        let mut freed = 0;
+        for shard in self.map.iter() {
+            freed +=
+                verter_session_query::retention::allocation::arc_block_bytes(shard.key().len())
+                    + shard_slack_bytes(&shard.value().lock());
+        }
+        self.map.clear();
+        self.map.shrink_to_fit();
+        storage.adjust(0, freed);
+        self.settle_outer(&mut storage);
+    }
+
+    /// Bytes the index's own storage is charged.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn storage_charge_bytes(&self) -> usize {
+        self.storage.lock().pin.as_ref().map_or(
+            0,
+            verter_session_query::retention::granular::GranularPin::charged,
+        )
+    }
+}
+
 /// Bytes the reverse-index registrations of one candidate keep: one record
-/// per `(populated slot × registered canonical)` in the canonical's shard
-/// map — its key, its value and its control byte, with the map's growth
-/// slack (a shard table is at most seven-eighths full) — and the one
-/// `Arc<FamilyKey>` every record of the candidate shares. A canonical's
-/// shard itself is the index's container, created with its first record
-/// and dropped with its last.
-pub(super) fn registration_bytes(registered_canonicals: usize, populated_slots: usize) -> usize {
+/// bucket per `(populated slot × registered canonical)` in the canonical's
+/// shard table, and the one `Arc<FamilyKey>` clone of `family` every record
+/// of the candidate shares — its block and the boxes the clone copies (its
+/// `Arc`s it shares with `family`). A shard's own storage — its canonical's
+/// text, its unused buckets — is charged by the index
+/// ([`CanonicalToEntries`]).
+pub(super) fn registration_bytes(
+    family: &FamilyKey,
+    registered_canonicals: usize,
+    populated_slots: usize,
+) -> usize {
     use verter_session_query::retention::allocation::arc_block_bytes;
-    type Record = ((u64, ModeSlot), (Arc<FamilyKey>, RegisteredFacts));
     if registered_canonicals == 0 || populated_slots == 0 {
         return 0;
     }
-    let records = registered_canonicals * populated_slots;
-    (records * (std::mem::size_of::<Record>() + 1)).div_ceil(7) * 8
+    registered_canonicals * populated_slots * RECORD_BUCKET_BYTES
         + arc_block_bytes(std::mem::size_of::<FamilyKey>())
+        + super::family_footprint::family_key_clone_heap_bytes(family)
 }
 
 /// Register the just-published candidate's reverse-index entries.
@@ -238,18 +389,33 @@ pub(super) fn prune_reverse_index_registration(
     canonical: &str,
     (slot, seq): (ModeSlot, u64),
 ) {
+    let mut storage = canonical_to_entries.storage.lock();
     let emptied = match canonical_to_entries.get(canonical) {
         Some(shard) => {
             let mut map = shard.value().lock();
-            map.remove(&(seq, slot));
+            let before = shard_slack_bytes(&map);
+            if map.remove(&(seq, slot)).is_some() {
+                shrink_drained_shard(&mut map);
+            }
+            storage.adjust(shard_slack_bytes(&map), before);
             map.is_empty()
         }
         None => return,
     };
     // Only a shard this removal emptied can be dropped; the drop re-checks
     // emptiness under the shard write lock.
-    if emptied {
-        canonical_to_entries.remove_if(canonical, |_, mutex| mutex.lock().is_empty());
+    if emptied
+        && canonical_to_entries
+            .map
+            .remove_if(canonical, |_, mutex| mutex.lock().is_empty())
+            .is_some()
+    {
+        // An empty shard keeps no table: only its canonical's text is left.
+        storage.adjust(
+            0,
+            verter_session_query::retention::allocation::arc_block_bytes(canonical.len()),
+        );
+        canonical_to_entries.settle_outer(&mut storage);
     }
 }
 
@@ -274,14 +440,19 @@ fn register_canonical_slots(
     } else {
         None
     };
-    let insert = |map: &mut FxHashMap<_, _>| {
+    // Each record's bucket is its candidate's charge; the slack the table
+    // grows beyond its records is the index's.
+    let insert = |map: &mut ShardMap, storage: &mut IndexStorage| {
+        let before = shard_slack_bytes(map);
         for populated in populated_slots {
             map.insert(
                 (admission_seq, *populated),
                 (Arc::clone(family), Arc::clone(registered_facts)),
             );
         }
+        storage.adjust(shard_slack_bytes(map), before);
     };
+    let mut storage = canonical_to_entries.storage.lock();
     // An existing shard takes the registration under its read lock; only a
     // canonical without one copies its name into a new shard. A shard the
     // prune drops between the two steps is re-created by the second, as the
@@ -289,15 +460,29 @@ fn register_canonical_slots(
     if let Some(shard) = canonical_to_entries.get(canonical) {
         let mut map = shard.value().lock();
         record_lock_wait(lock_start);
-        insert(&mut map);
+        insert(&mut map, &mut storage);
         return;
     }
-    let shard = canonical_to_entries
-        .entry(Arc::from(canonical))
-        .or_insert_with(|| Mutex::new(FxHashMap::default()));
-    let mut map = shard.value().lock();
-    record_lock_wait(lock_start);
-    insert(&mut map);
+    let mut created = false;
+    {
+        let shard = canonical_to_entries
+            .map
+            .entry(Arc::from(canonical))
+            .or_insert_with(|| {
+                created = true;
+                Mutex::new(FxHashMap::default())
+            });
+        let mut map = shard.value().lock();
+        record_lock_wait(lock_start);
+        insert(&mut map, &mut storage);
+    }
+    if created {
+        storage.adjust(
+            verter_session_query::retention::allocation::arc_block_bytes(canonical.len()),
+            0,
+        );
+        canonical_to_entries.settle_outer(&mut storage);
+    }
 }
 
 fn record_lock_wait(lock_start: Option<Instant>) {

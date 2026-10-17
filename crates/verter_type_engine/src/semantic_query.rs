@@ -108,6 +108,8 @@ mod outcome_tests;
 mod semantic_context_tests;
 
 pub(crate) mod allocation_footprint;
+/// The heap a graph payload owns beyond its inline record.
+pub(crate) mod node_payload_footprint;
 /// Selector-aware projection facts for authored object-spread programs.
 ///
 /// The result is an opaque correlated formula. Exact absence, emptiness,
@@ -5645,7 +5647,7 @@ impl<T> CacheRead<T> {
             lease: Default::default(),
             value,
             dep_signature,
-            walker_diagnostics: Arc::from([]),
+            walker_diagnostics: crate::semantic_query_memo::empty_diagnostics(),
             cache_suppress: false,
             fact_status: FactStatus::Complete,
             receipt: ReadReceipt::Unpriced,

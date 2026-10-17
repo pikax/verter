@@ -31,12 +31,17 @@ disallowed-macros = [
 # which never participates in a receipt's identity. `bytes::Bytes` keeps
 # clippy's default. Per-crate clippy.toml files carry their own copy (clippy
 # does not merge this file into a crate that has its own).
+# A `RetentionCharge` reaches the retention account's counters solely to
+# release its bytes; a charge carried by a self-charged record (an interned
+# identity, a budget profile) never participates in that record's equality or
+# hash.
 # Node roots and signature epoch leases reach mutable storage solely for
 # lifetime management. Their immutable operands/version attachments never
 # mutate a key's semantic equality or hash (see IdentityNodeRoots/SignatureVersion).
 ignore-interior-mutability = [
   "bytes::Bytes",
   "verter_session_query::facts::receipt::ResultReceipt",
+  "verter_session_query::retention::RetentionCharge",
   "verter_type_engine::semantic_query_memo::node_roots::NodeRootSet",
   "verter_type_engine::signature_kernel::lifetime::SignatureEpochLease",
 ]

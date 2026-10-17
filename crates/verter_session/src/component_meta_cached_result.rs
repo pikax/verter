@@ -9,34 +9,11 @@ use verter_session_query::analysis::types::Hash16;
 use verter_type_engine::semantic_query::ProjectionMode;
 
 impl verter_session_query::retention::RetainedFootprint for CachedComponentMetaResult {
+    /// The result's `Arc` block and every allocation its payload keeps
+    /// alive (see [`crate::component_meta_footprint`]).
     fn retained_footprint_bytes(&self) -> usize {
-        let analysis = &self.analysis;
-        let surfaces = analysis.props.len()
-            + analysis.events.len()
-            + analysis.slots.len()
-            + analysis.models.len()
-            + analysis.exposed.len()
-            + analysis.accepted_props.len()
-            + analysis.accepted_events.len();
-        let structural = analysis.components.len()
-            + analysis.template_refs.len()
-            + analysis.imports.len()
-            + analysis.bindings.len()
-            + analysis.vue_api_calls.len()
-            + analysis.styles.len();
-        let types = analysis.type_registry.len()
-            + self.resolution_template.resolved_type_registry.len()
-            + self.resolution_template.resolved_type_registry_meta.len()
-            + self.resolution_template.resolved_macros.len();
-        surfaces * crate::component_meta_result_db::footprint::SURFACE_RECORD_BYTES
-            + structural * crate::component_meta_result_db::footprint::STRUCTURAL_RECORD_BYTES
-            + types * crate::component_meta_result_db::footprint::TYPE_RECORD_BYTES
-            + verter_session_query::retention::allocation::fact_vec_bytes(
-                &self.resolution_template.fact_versions,
-                &mut verter_session_query::retention::allocation::AliasSet::new(),
-            )
-            + self.canonical_id.len()
-            + std::mem::size_of::<Self>()
+        verter_session_query::retention::allocation::arc_block_bytes(std::mem::size_of::<Self>())
+            + crate::component_meta_footprint::cached_result_heap_bytes(self)
     }
 }
 

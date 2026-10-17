@@ -515,3 +515,6 @@ fn flow_return_value_is_unresolved(
 ) -> bool {
     graph.node_reaches_unresolved(root)
 }
+
+#[path = "result_footprint.rs"]
+mod result_footprint;

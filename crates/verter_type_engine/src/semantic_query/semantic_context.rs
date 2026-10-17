@@ -146,8 +146,32 @@ impl SemanticContextId {
     }
 }
 
-intern_domain!(SemanticContext);
-intern_domain!(OrderDomainKey);
+intern_domain!(SemanticContext {
+    /// The explicit `lib` selection, when the options name one.
+    fn value_heap_bytes(&self) -> usize {
+        use verter_session_query::retention::allocation::{string_bytes, vec_bytes};
+        let SemanticContext {
+            effective_semantic_options,
+            resolver_library_project_environment: _,
+            policy_set: _,
+            project_identity: _,
+        } = self;
+        effective_semantic_options.lib.as_ref().map_or(0, |lib| {
+            vec_bytes(lib) + lib.iter().map(string_bytes).sum::<usize>()
+        })
+    }
+});
+intern_domain!(OrderDomainKey {
+    /// Every field is inline.
+    fn value_heap_bytes(&self) -> usize {
+        let OrderDomainKey {
+            env: _,
+            project_identity: _,
+            policy_set: _,
+        } = self;
+        0
+    }
+});
 
 /// Private projection: the context's union-order policy.
 #[must_use]

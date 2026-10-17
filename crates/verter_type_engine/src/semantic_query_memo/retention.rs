@@ -11,10 +11,6 @@ use super::{family::MemoEntry, SemanticGraphStore};
 use crate::semantic_query::allocation_footprint::OwnedHeap as _;
 use crate::semantic_query::{QueryResult, SemanticQueryValue};
 
-/// Allocations a delivery aliases from the candidate that retains them: its
-/// walker diagnostics, its dependency rail and its value.
-pub(super) const DELIVERED_ALLOCATIONS: usize = 3;
-
 /// One memo candidate's charges.
 ///
 /// * `own` — the candidate's cache-only bookkeeping
@@ -27,40 +23,19 @@ pub(super) const DELIVERED_ALLOCATIONS: usize = 3;
 ///   charges them again and the last surviving sibling still pays for
 ///   them.
 /// * `delivered` — the walker diagnostics, dependency rail and value a
-///   read hands its caller: one registered charge each, whose caller holds
-///   ride every delivery of the candidate, so a caller that outlives the
-///   cache keeps the allocation charged (pinned) instead of uncharged.
-///
-/// An empty shared slice is only its counters: those are charged with the
-/// candidate's own bookkeeping instead of a registration that would cost
-/// more than the allocation.
+///   read hands its caller: one registered charge each. Every delivery
+///   holds the same charges as a caller from the moment it is minted
+///   ([`super::delivery_lease`]), so a caller that outlives the cache keeps
+///   the allocation charged (pinned), and a delivery the cache refuses was
+///   charged all along.
 #[derive(Debug)]
 pub(super) struct MemoRetention {
     _own: RetentionCharge,
     _carrier: Box<[CacheHold]>,
-    delivered: Box<[(usize, CacheHold)]>,
+    _delivered: Box<[CacheHold]>,
 }
 
 impl MemoRetention {
-    /// Caller holds for every delivered allocation.
-    pub(super) fn callers(&self) -> Box<[CallerHold]> {
-        self.delivered
-            .iter()
-            .map(|(_, hold)| hold.caller())
-            .collect()
-    }
-
-    /// Caller holds for the delivered allocations among `allocations` — a
-    /// cold producer's own delivery aliases only the ones it shares with
-    /// the candidate.
-    pub(super) fn callers_for(&self, allocations: &[usize]) -> Box<[CallerHold]> {
-        self.delivered
-            .iter()
-            .filter(|(allocation, _)| allocations.contains(allocation))
-            .map(|(_, hold)| hold.caller())
-            .collect()
-    }
-
     /// The candidate's own reservation.
     #[cfg(test)]
     pub(super) fn own_bytes(&self) -> usize {
@@ -70,53 +45,68 @@ impl MemoRetention {
     /// The candidate's shared holds, carrier first.
     #[cfg(test)]
     pub(super) fn shared_holds(&self) -> impl Iterator<Item = &CacheHold> {
-        self._carrier
-            .iter()
-            .chain(self.delivered.iter().map(|(_, hold)| hold))
+        self._carrier.iter().chain(self._delivered.iter())
     }
 }
 
 /// The bytes one memo family keeps beside its candidates: its key and slot
-/// lists in the family map (with the map's control byte) and its record in
-/// the retention budget's ledger. The candidates themselves are charged
-/// with each candidate.
-pub(super) fn family_container_bytes() -> usize {
+/// lists in the family map (with the map's control byte), its record in the
+/// retention budget's ledger, and the heap each of those two key copies
+/// keeps reachable. The map's key counts the whole key heap; the ledger
+/// holds a clone, which shares every `Arc` the map's key already counted
+/// and owns fresh copies of its boxes — exactly what measuring the key
+/// again under the same aliases counts. The candidates themselves are
+/// charged with each candidate.
+pub(super) fn family_container_bytes(family: &super::family::FamilyKey) -> usize {
+    use super::family_footprint::family_key_heap_bytes;
+    let mut aliases = verter_session_query::retention::allocation::AliasSet::new();
+    let map_key = family_key_heap_bytes(family, &mut aliases);
+    let ledger_key = family_key_heap_bytes(family, &mut aliases);
     std::mem::size_of::<(super::family::FamilyKey, super::family::FamilySlots)>()
         + 1
         + std::mem::size_of::<(u64, super::family::FamilyKey)>()
+        + map_key
+        + ledger_key
 }
 
-/// The address an `Arc` names: the key of its registered charge.
-pub(super) fn allocation_key<T: ?Sized>(allocation: &Arc<T>) -> usize {
-    Arc::as_ptr(allocation).cast::<()>() as usize
+/// Receives the one allocation a result's value keeps reachable outside the
+/// graph — its outermost shared allocation, which owns the value's heap.
+pub(super) trait ValueAllocation {
+    type Output;
+    fn allocation<T: ?Sized + Send + Sync + 'static>(self, allocation: &Arc<T>) -> Self::Output;
 }
 
-/// The value allocation a result keeps reachable outside the graph, and its
-/// key, when it has one.
-pub(super) fn value_allocation_key(result: &QueryResult<SemanticQueryValue>) -> Option<usize> {
+/// Offer `result`'s value allocation to `visit`; `None` for a value that
+/// keeps nothing reachable outside the graph.
+pub(super) fn with_value_allocation<V: ValueAllocation>(
+    result: &QueryResult<SemanticQueryValue>,
+    visit: V,
+) -> Option<V::Output> {
     let QueryResult::Value(value) = result else {
         return None;
     };
-    match value {
+    Some(match value {
         SemanticQueryValue::ObjectProjection(formula) => {
-            Some(allocation_key(formula.alternatives_arc()))
+            visit.allocation(formula.alternatives_arc())
         }
-        SemanticQueryValue::DeclarationAnalysis(value) => Some(allocation_key(&value.contributors)),
-        SemanticQueryValue::OverloadSet(signatures) => Some(allocation_key(signatures)),
-        SemanticQueryValue::Relation(payload) => Some(allocation_key(&payload.bindings)),
+        SemanticQueryValue::DeclarationAnalysis(analysis) => {
+            visit.allocation(&analysis.contributors)
+        }
+        SemanticQueryValue::OverloadSet(signatures) => visit.allocation(signatures),
+        SemanticQueryValue::Relation(payload) => visit.allocation(&payload.bindings),
         SemanticQueryValue::BroadRuntime(classification) => {
-            Some(allocation_key(classification.kinds_arc()))
+            visit.allocation(classification.kinds_arc())
         }
-        SemanticQueryValue::FlowReturn(result) => Some(allocation_key(result)),
-        SemanticQueryValue::ResolveCall(result) => Some(allocation_key(result)),
-        SemanticQueryValue::SignatureSet(value) => Some(allocation_key(&value.nodes)),
+        SemanticQueryValue::FlowReturn(flow) => visit.allocation(flow),
+        SemanticQueryValue::ResolveCall(call) => visit.allocation(call),
+        SemanticQueryValue::SignatureSet(set) => visit.allocation(&set.nodes),
         SemanticQueryValue::TypeNode(_)
         | SemanticQueryValue::ProgramAnalysis(_)
         | SemanticQueryValue::MaterializationCycleGate(_)
         | SemanticQueryValue::TruthinessDomain(_)
         | SemanticQueryValue::SignatureResult(_)
-        | SemanticQueryValue::DiagnosticAnalysis(_) => None,
-    }
+        | SemanticQueryValue::DiagnosticAnalysis(_) => return None,
+    })
 }
 
 impl SemanticGraphStore {
@@ -215,6 +205,7 @@ impl SemanticGraphStore {
     pub(super) fn reserve_memo_candidate(
         &self,
         entry: &MemoEntry,
+        family: &super::family::FamilyKey,
         populated_slots: usize,
         registered_canonicals: usize,
     ) -> Result<Arc<MemoRetention>, RetentionRefusal> {
@@ -222,7 +213,12 @@ impl SemanticGraphStore {
             .cost_receipt
             .reserve_retention(self.retention_account())
         {
-            Ok(()) => self.reserve_candidate_charges(entry, populated_slots, registered_canonicals),
+            Ok(()) => self.reserve_candidate_charges(
+                entry,
+                family,
+                populated_slots,
+                registered_canonicals,
+            ),
             Err(refusal) => Err(refusal),
         };
         reserved.map(Arc::new).inspect_err(|refusal| {
@@ -238,11 +234,13 @@ impl SemanticGraphStore {
     fn reserve_candidate_charges(
         &self,
         entry: &MemoEntry,
+        family: &super::family::FamilyKey,
         populated_slots: usize,
         registered_canonicals: usize,
     ) -> Result<MemoRetention, RetentionRefusal> {
         let shared = self.hold_shared_allocations(SharedParts::of(entry))?;
-        let own_bytes = own_reservation_bytes(entry, populated_slots, registered_canonicals);
+        let own_bytes =
+            own_reservation_bytes(entry, family, populated_slots, registered_canonicals);
         match verter_session_query::facts::receipt::reserve_retained_with_evidence(
             self.retention_account(),
             own_bytes,
@@ -258,40 +256,36 @@ impl SemanticGraphStore {
         &self,
         parts: SharedParts<'_>,
     ) -> Result<SharedHolds, RetentionRefusal> {
-        use verter_session_query::retention::allocation::{
-            arc_str_list_bytes, fact_slice_bytes, AliasSet,
-        };
+        use verter_session_query::retention::allocation::{arc_str_list_bytes, fact_slice_bytes};
         let account = self.retention_account();
-        let mut carrier = Vec::with_capacity(2);
-        if !parts.facts.is_empty() {
-            carrier.push(self.alias_charges.hold(account, parts.facts, || {
-                fact_slice_bytes(parts.facts, &mut AliasSet::new())
-            })?);
-        }
-        if !parts.self_roots.is_empty() {
-            carrier.push(self.alias_charges.hold(account, parts.self_roots, || {
-                arc_str_list_bytes(parts.self_roots, &mut AliasSet::new())
-            })?);
-        }
-        let mut delivered = Vec::with_capacity(DELIVERED_ALLOCATIONS);
-        if !parts.diagnostics.is_empty() {
-            delivered.push((
-                allocation_key(parts.diagnostics),
-                self.alias_charges.hold(account, parts.diagnostics, || {
-                    parts.diagnostics.owned_heap_bytes(&mut AliasSet::new())
+        let carrier = vec![
+            self.alias_charges.hold(account, parts.facts, |aliases| {
+                fact_slice_bytes(parts.facts, aliases)
+            })?,
+            self.alias_charges
+                .hold(account, parts.self_roots, |aliases| {
+                    arc_str_list_bytes(parts.self_roots, aliases)
                 })?,
-            ));
+        ];
+        let mut delivered = Vec::with_capacity(3);
+        if !super::is_static_empty(parts.diagnostics) {
+            delivered.push(
+                self.alias_charges
+                    .hold(account, parts.diagnostics, |aliases| {
+                        parts.diagnostics.owned_heap_bytes(aliases)
+                    })?,
+            );
         }
-        if !parts.dep_signature.is_empty() {
-            delivered.push((
-                allocation_key(parts.dep_signature),
-                self.alias_charges.hold(account, parts.dep_signature, || {
-                    parts.dep_signature.owned_heap_bytes(&mut AliasSet::new())
-                })?,
-            ));
+        if !super::is_static_empty(parts.dep_signature) {
+            delivered.push(
+                self.alias_charges
+                    .hold(account, parts.dep_signature, |aliases| {
+                        dep_rail_heap_bytes(parts.dep_signature, aliases)
+                    })?,
+            );
         }
-        if let Some(value) = self.hold_value_allocation(parts.result)? {
-            delivered.push(value);
+        if let Some(value) = self.hold_value_allocation(parts.result) {
+            delivered.push(value?);
         }
         Ok(SharedHolds {
             carrier: carrier.into_boxed_slice(),
@@ -299,54 +293,83 @@ impl SemanticGraphStore {
         })
     }
 
-    /// Hold the allocation a result's value keeps reachable outside the
-    /// graph, keyed by the value's outermost shared allocation.
+    /// A cache hold on the allocation a result's value keeps reachable
+    /// outside the graph.
     fn hold_value_allocation(
         &self,
         result: &QueryResult<SemanticQueryValue>,
-    ) -> Result<Option<(usize, CacheHold)>, RetentionRefusal> {
-        use verter_session_query::retention::allocation::AliasSet;
+    ) -> Option<Result<CacheHold, RetentionRefusal>> {
+        struct Hold<'a>(&'a SemanticGraphStore, &'a SemanticQueryValue);
+        impl ValueAllocation for Hold<'_> {
+            type Output = Result<CacheHold, RetentionRefusal>;
+            fn allocation<T: ?Sized + Send + Sync + 'static>(
+                self,
+                allocation: &Arc<T>,
+            ) -> Self::Output {
+                let Self(store, value) = self;
+                store
+                    .alias_charges
+                    .hold(store.retention_account(), allocation, |aliases| {
+                        value.owned_heap_bytes(aliases)
+                    })
+            }
+        }
         let QueryResult::Value(value) = result else {
-            return Ok(None);
+            return None;
         };
+        with_value_allocation(result, Hold(self, value))
+    }
+
+    /// A delivery's holds on the allocations it hands its caller, taken as
+    /// the caller's: pinned, never refused, and shared with any holder of
+    /// the same allocation.
+    pub(super) fn hold_delivered_allocations(
+        &self,
+        delivered: &super::delivery_lease::DeliveredAllocations<'_>,
+    ) -> Box<[CallerHold]> {
+        struct Pin<'a>(&'a SemanticGraphStore, &'a SemanticQueryValue);
+        impl ValueAllocation for Pin<'_> {
+            type Output = CallerHold;
+            fn allocation<T: ?Sized + Send + Sync + 'static>(
+                self,
+                allocation: &Arc<T>,
+            ) -> Self::Output {
+                let Self(store, value) = self;
+                store
+                    .alias_charges
+                    .pin_caller(store.retention_account(), allocation, |aliases| {
+                        value.owned_heap_bytes(aliases)
+                    })
+            }
+        }
         let account = self.retention_account();
-        let bytes = || value.owned_heap_bytes(&mut AliasSet::new());
-        let hold = match value {
-            SemanticQueryValue::ObjectProjection(formula) => {
+        let mut holds = Vec::with_capacity(3);
+        if let Some(diagnostics) = delivered
+            .diagnostics
+            .filter(|diagnostics| !super::is_static_empty(diagnostics))
+        {
+            holds.push(
                 self.alias_charges
-                    .hold(account, formula.alternatives_arc(), bytes)?
-            }
-            SemanticQueryValue::DeclarationAnalysis(analysis) => {
+                    .pin_caller(account, diagnostics, |aliases| {
+                        diagnostics.owned_heap_bytes(aliases)
+                    }),
+            );
+        }
+        if let Some(dep_signature) = delivered
+            .dep_signature
+            .filter(|dep_signature| !super::is_static_empty(dep_signature))
+        {
+            holds.push(
                 self.alias_charges
-                    .hold(account, &analysis.contributors, bytes)?
-            }
-            SemanticQueryValue::OverloadSet(signatures) => {
-                self.alias_charges.hold(account, signatures, bytes)?
-            }
-            SemanticQueryValue::Relation(payload) => {
-                self.alias_charges.hold(account, &payload.bindings, bytes)?
-            }
-            SemanticQueryValue::BroadRuntime(classification) => {
-                self.alias_charges
-                    .hold(account, classification.kinds_arc(), bytes)?
-            }
-            SemanticQueryValue::FlowReturn(flow) => {
-                self.alias_charges.hold(account, flow, bytes)?
-            }
-            SemanticQueryValue::ResolveCall(call) => {
-                self.alias_charges.hold(account, call, bytes)?
-            }
-            SemanticQueryValue::SignatureSet(set) => {
-                self.alias_charges.hold(account, &set.nodes, bytes)?
-            }
-            SemanticQueryValue::TypeNode(_)
-            | SemanticQueryValue::ProgramAnalysis(_)
-            | SemanticQueryValue::MaterializationCycleGate(_)
-            | SemanticQueryValue::TruthinessDomain(_)
-            | SemanticQueryValue::SignatureResult(_)
-            | SemanticQueryValue::DiagnosticAnalysis(_) => return Ok(None),
-        };
-        Ok(value_allocation_key(result).map(|key| (key, hold)))
+                    .pin_caller(account, dep_signature, |aliases| {
+                        dep_rail_heap_bytes(dep_signature, aliases)
+                    }),
+            );
+        }
+        if let QueryResult::Value(value) = delivered.result {
+            holds.extend(with_value_allocation(delivered.result, Pin(self, value)));
+        }
+        holds.into_boxed_slice()
     }
 
     /// The slots of `family`, keyed under the held `entries` lock: an
@@ -388,7 +411,7 @@ impl SemanticGraphStore {
             )),
             Entry::Vacant(slot) => match self.retention_account().reserve(
                 verter_session_query::retention::ChargeClass::Retained,
-                family_container_bytes(),
+                family_container_bytes(family),
             ) {
                 RetentionAdmission::Admitted(charge) => Some((
                     slot.insert(super::family::FamilySlots::charged(charge)),
@@ -416,6 +439,18 @@ impl SemanticGraphStore {
     #[cfg(any(test, feature = "test-support"))]
     pub fn graph_storage_charge_for_tests(&self) -> usize {
         self.arena.core.storage_charge_bytes()
+    }
+
+    /// Bytes the store's own storage is pinned for: its graph storage, its
+    /// reverse index's shards, its shared-charge registry's table and its
+    /// dependency-rail interner. Everything else a store's account pins is
+    /// a caller's: the allocations live deliveries hold and their metadata.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn store_storage_pins_for_tests(&self) -> usize {
+        self.graph_storage_charge_bytes()
+            + self.canonical_to_entries.storage_charge_bytes()
+            + self.alias_charges.table_charged_bytes()
+            + self.dep_signature_interner.storage_charge_bytes()
     }
 
     /// The registry of shared allocation charges this store's candidates
@@ -449,28 +484,12 @@ impl<'a> SharedParts<'a> {
             result: &entry.result,
         }
     }
-
-    /// The counters of the empty shared slices, charged with the owner's
-    /// own bookkeeping (see [`MemoRetention`]).
-    pub(super) fn empty_slice_bytes(&self) -> usize {
-        use verter_session_query::retention::allocation::arc_block_bytes;
-        [
-            self.facts.is_empty(),
-            self.self_roots.is_empty(),
-            self.diagnostics.is_empty(),
-            self.dep_signature.is_empty(),
-        ]
-        .into_iter()
-        .filter(|empty| *empty)
-        .count()
-            * arc_block_bytes(0)
-    }
 }
 
 /// A candidate's shared holds, before its own reservation is granted.
 pub(super) struct SharedHolds {
     carrier: Box<[CacheHold]>,
-    delivered: Box<[(usize, CacheHold)]>,
+    delivered: Box<[CacheHold]>,
 }
 
 impl SharedHolds {
@@ -479,19 +498,33 @@ impl SharedHolds {
         MemoRetention {
             _own: own,
             _carrier: self.carrier,
-            delivered: self.delivered,
+            _delivered: self.delivered,
         }
     }
 }
 
 /// What `entry`'s own reservation covers: its bookkeeping for
 /// `populated_slots` slots registered under `registered_canonicals`
-/// canonicals each, and the counters of its empty shared slices.
+/// canonicals each.
 pub(super) fn own_reservation_bytes(
     entry: &MemoEntry,
+    family: &super::family::FamilyKey,
     populated_slots: usize,
     registered_canonicals: usize,
 ) -> usize {
-    entry.own_retained_footprint_bytes(populated_slots, registered_canonicals)
-        + SharedParts::of(entry).empty_slice_bytes()
+    entry.own_retained_footprint_bytes(family, populated_slots, registered_canonicals)
+}
+
+/// The heap a holder of a dependency rail pays for: the whole rail, or —
+/// for an interned rail, whose block its interner keeps allocated and
+/// charges — only the names its elements hold.
+fn dep_rail_heap_bytes(
+    rail: &crate::semantic_query::DepSignature,
+    aliases: &mut verter_session_query::retention::allocation::AliasSet,
+) -> usize {
+    if super::interner::is_interned_rail(rail) {
+        super::interner::interned_rail_heap_bytes(rail, aliases)
+    } else {
+        rail.owned_heap_bytes(aliases)
+    }
 }

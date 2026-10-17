@@ -90,9 +90,10 @@ fn a_digest_collision_never_makes_two_evidences_equal() {
         aggregated: Arc::from(Vec::new()),
         resolution_evidence: false,
         kind: EvidenceKind::Result,
-        reaches_charged_evidence: false,
         evidence_claimed: std::sync::atomic::AtomicBool::new(false),
-        retention: None,
+        retention: parking_lot::Mutex::new(
+            crate::retention::SemanticRetentionAccount::process_local().pin(0),
+        ),
     }));
     assert_ne!(a, forged);
     assert_ne!(a.cmp(&forged), std::cmp::Ordering::Equal);
@@ -170,9 +171,10 @@ fn equal_chains_assembled_apart_compare_without_native_recursion() {
                             aggregated: Arc::clone(&built.0.aggregated),
                             resolution_evidence: false,
                             kind: EvidenceKind::Result,
-                            reaches_charged_evidence: false,
                             evidence_claimed: std::sync::atomic::AtomicBool::new(false),
-                            retention: None,
+                            retention: parking_lot::Mutex::new(
+                                crate::retention::SemanticRetentionAccount::process_local().pin(0),
+                            ),
                         })),
                     });
                 }

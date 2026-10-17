@@ -987,60 +987,137 @@ impl<'a> ClosedObjectProjectionFormula<'a> {
 }
 
 impl super::allocation_footprint::OwnedHeap for ObjectProjectionFormula {
-    /// Every alternative's fact, key and witness arrays with their key text
-    /// and declaration origins. Proven values are graph ordinals.
+    /// Every alternative's fact, key, witness, index, signature and excess
+    /// arrays with their key text and declaration origins. Proven values
+    /// are graph ordinals. Destructured exhaustively: a new field fails to
+    /// compile until its heap is counted.
     fn owned_heap_bytes(
         &self,
         aliases: &mut verter_session_query::retention::allocation::AliasSet,
     ) -> usize {
-        use verter_session_query::retention::allocation::arc_slice_block_bytes;
-        fn keys(
-            keys: &Arc<[PropertyKey]>,
-            aliases: &mut verter_session_query::retention::allocation::AliasSet,
-        ) -> usize {
-            keys.owned_heap_bytes(aliases)
+        use super::allocation_footprint::{copy_inline, copy_slice_inline};
+        use verter_session_query::retention::allocation::{arc_slice_block_bytes, AliasSet};
+        fn evidence<T>(evidence: &ProjectionEvidence<T>, heap: impl FnOnce(&T) -> usize) -> usize {
+            match evidence {
+                ProjectionEvidence::Proven(value) => heap(value),
+                ProjectionEvidence::Indeterminate => 0,
+            }
         }
-        let Some(mut bytes) = arc_slice_block_bytes(&self.alternatives, aliases) else {
+        fn fact(fact: &PositiveKeyFact, aliases: &mut AliasSet) -> usize {
+            let PositiveKeyFact {
+                key,
+                presence,
+                value,
+                facets,
+            } = fact;
+            key.owned_heap_bytes(aliases)
+                + copy_inline(presence)
+                + evidence(value, copy_inline)
+                + evidence(facets, |facets| {
+                    let MemberFacets {
+                        readonly,
+                        method_kind,
+                        has_implementation_body,
+                        visibility,
+                        spans,
+                        declaration_origin,
+                        declared_in_macro_type_arg,
+                        merge_role,
+                        excess_origin,
+                    } = facets;
+                    copy_inline(readonly)
+                        + copy_inline(method_kind)
+                        + copy_inline(has_implementation_body)
+                        + copy_inline(visibility)
+                        + copy_inline(spans)
+                        + declaration_origin.owned_heap_bytes(aliases)
+                        + copy_inline(declared_in_macro_type_arg)
+                        + copy_inline(merge_role)
+                        + copy_inline(excess_origin)
+                })
+        }
+        fn index(index: &ObjectProjectionIndex, aliases: &mut AliasSet) -> usize {
+            let ObjectProjectionIndex {
+                domain,
+                key_type,
+                value,
+                readonly,
+                spans,
+                declaration_origin,
+            } = index;
+            copy_inline(domain)
+                + copy_inline(key_type)
+                + evidence(value, copy_inline)
+                + evidence(readonly, copy_inline)
+                + copy_inline(spans)
+                + declaration_origin.owned_heap_bytes(aliases)
+        }
+        fn alternative(alternative: &ObjectProjectionAlternative, aliases: &mut AliasSet) -> usize {
+            let ObjectProjectionAlternative {
+                positive,
+                selected,
+                domain,
+                indices,
+                signatures,
+                excess,
+            } = alternative;
+            let mut bytes = 0;
+            if let Some(block) = arc_slice_block_bytes(positive, aliases) {
+                bytes += block;
+                for item in positive.iter() {
+                    bytes += fact(item, aliases);
+                }
+            }
+            bytes += match selected {
+                SelectedProjection::Key(key) => key.owned_heap_bytes(aliases),
+                SelectedProjection::RelationShape(shape) => shape.owned_heap_bytes(aliases),
+                SelectedProjection::IndexDomain(domain)
+                | SelectedProjection::EnumerableValueEnvelope(domain) => copy_inline(domain),
+                SelectedProjection::Signature(kind) => copy_inline(kind),
+                SelectedProjection::Surface | SelectedProjection::ExcessEligibility => 0,
+            };
+            bytes += match domain {
+                AlternativeDomain::Closed(ClosedDomainData {
+                    complete_keys,
+                    scope,
+                }) => complete_keys.owned_heap_bytes(aliases) + copy_inline(scope),
+                AlternativeDomain::Open(OpenDomainWitnesses {
+                    residual_operands,
+                    indeterminate_possible_writes,
+                }) => {
+                    residual_operands.owned_heap_bytes(aliases)
+                        + indeterminate_possible_writes.owned_heap_bytes(aliases)
+                }
+            };
+            if let Some(block) = arc_slice_block_bytes(indices, aliases) {
+                bytes += block;
+                for item in indices.iter() {
+                    bytes += index(item, aliases);
+                }
+            }
+            bytes += arc_slice_block_bytes(signatures, aliases).unwrap_or(0)
+                + copy_slice_inline(signatures);
+            bytes += match excess {
+                ExcessEligibility::Eligible { direct_candidates } => {
+                    direct_candidates.owned_heap_bytes(aliases)
+                }
+                ExcessEligibility::SuppressedByGenericSpread | ExcessEligibility::Indeterminate => {
+                    0
+                }
+            };
+            bytes
+        }
+        let Self {
+            alternatives,
+            closed_keyof,
+        } = self;
+        let Some(mut bytes) = arc_slice_block_bytes(alternatives, aliases) else {
             return 0;
         };
-        for alternative in self.alternatives.iter() {
-            if let Some(block) = arc_slice_block_bytes(&alternative.positive, aliases) {
-                bytes += block;
-                for fact in alternative.positive.iter() {
-                    bytes += fact.key.owned_heap_bytes(aliases);
-                    if let ProjectionEvidence::Proven(facets) = &fact.facets {
-                        bytes += facets.declaration_origin.owned_heap_bytes(aliases);
-                    }
-                }
-            }
-            bytes += match &alternative.selected {
-                SelectedProjection::Key(key) => key.owned_heap_bytes(aliases),
-                SelectedProjection::RelationShape(shape) => keys(shape, aliases),
-                SelectedProjection::Surface
-                | SelectedProjection::IndexDomain(_)
-                | SelectedProjection::Signature(_)
-                | SelectedProjection::EnumerableValueEnvelope(_)
-                | SelectedProjection::ExcessEligibility => 0,
-            };
-            bytes += match &alternative.domain {
-                AlternativeDomain::Closed(closed) => keys(&closed.complete_keys, aliases),
-                AlternativeDomain::Open(open) => {
-                    open.residual_operands.owned_heap_bytes(aliases)
-                        + keys(&open.indeterminate_possible_writes, aliases)
-                }
-            };
-            if let Some(block) = arc_slice_block_bytes(&alternative.indices, aliases) {
-                bytes += block;
-                for index in alternative.indices.iter() {
-                    bytes += index.declaration_origin.owned_heap_bytes(aliases);
-                }
-            }
-            bytes += arc_slice_block_bytes(&alternative.signatures, aliases).unwrap_or(0);
+        for item in alternatives.iter() {
+            bytes += alternative(item, aliases);
         }
-        if let Some(closed) = &self.closed_keyof {
-            bytes += keys(closed, aliases);
-        }
-        bytes
+        bytes + closed_keyof.owned_heap_bytes(aliases)
     }
 }
 

@@ -2901,3 +2901,50 @@ fn display_and_union_by_ordinal_answer_only_inside_a_construction_lane() {
         Some(SemanticNodeData::Union(_))
     ));
 }
+
+/// The interner keeps every interned rail's block allocated for as long as
+/// its entry lives, so it charges those blocks, its entry lists and its
+/// tables — sized by the rails, not by a fixed figure — and gives every
+/// byte back once the rails drain and are swept.
+#[test]
+fn dep_signature_interner_charges_the_rail_blocks_it_keeps_until_swept() {
+    use verter_session_query::retention::allocation::arc_block_bytes;
+    use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
+
+    const RAILS: usize = 64;
+    const WIDTH: usize = 256;
+    let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+    let interner = DepSignatureInterner::charged(&account);
+    let rails: Vec<_> = (0..RAILS)
+        .map(|rail| {
+            let payload: Vec<_> = (0..WIDTH)
+                .map(|entry| {
+                    (
+                        Arc::<str>::from(format!("/w/{rail}/{entry}.ts")),
+                        DepVersion::ProjectGeneration(entry as u64),
+                    )
+                })
+                .collect();
+            interner.intern(&payload)
+        })
+        .collect();
+    let blocks = RAILS * arc_block_bytes(WIDTH * std::mem::size_of::<(Arc<str>, DepVersion)>());
+    assert!(
+        interner.storage_charge_bytes() >= blocks,
+        "every interned rail's block is charged: {} < {blocks}",
+        interner.storage_charge_bytes()
+    );
+    assert_eq!(
+        account.snapshot().pinned_bytes,
+        interner.storage_charge_bytes()
+    );
+
+    drop(rails);
+    assert!(
+        interner.storage_charge_bytes() >= blocks,
+        "a dead rail's block stays allocated, and charged, until its entry is pruned"
+    );
+    interner.sweep();
+    assert_eq!(interner.storage_charge_bytes(), 0);
+    assert_eq!(account.snapshot().total_bytes(), 0);
+}

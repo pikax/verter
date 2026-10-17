@@ -1928,3 +1928,254 @@ defineProps<{
         "the reopen re-interned the closed document's declarations"
     );
 }
+
+/// Retained footprint of the cached component-meta payload: admission is
+/// charged by the allocations the payload keeps alive, so two results with
+/// equal record counts but different payload sizes must cost differently.
+mod cached_result_footprint {
+    use std::sync::Arc;
+
+    use verter_session_query::analysis::component_meta::{
+        AcceptedSurfaceCompleteness, ComponentMetaAnalysis, ComponentMetaFlags, FallthroughSurface,
+        NoFallthroughReason, PropAnalysis, RootReachability, StyleAnalysis,
+    };
+    use verter_session_query::retention::allocation::{arc_block_bytes, heap_block_bytes};
+    use verter_session_query::retention::RetainedFootprint;
+    use verter_type_expr::facts::{SemanticTypeSource, SourcePosition, TopLevelOwnerId};
+    use verter_type_expr::locators::{
+        AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodySlot,
+    };
+    use verter_type_expr::publication::{
+        PublicationPolicy, ResolutionExactness, ResolutionProvenance, TypePublication,
+    };
+
+    use crate::component_meta_cached_result::{CachedComponentMetaResult, ResolutionTemplate};
+
+    const LARGE: usize = 50_000;
+
+    fn authored_source(canonical_id: Arc<str>) -> SourcePosition {
+        SourcePosition::Present(SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(
+            TypeBodySlot {
+                anchor: AuthoredAnchor {
+                    canonical_id,
+                    owner: TopLevelOwnerId::default(),
+                    symbol: Arc::from("Props"),
+                    space: LocatorSymbolSpace::Type,
+                },
+                path: Arc::from(Vec::new()),
+            },
+        )))
+    }
+
+    fn publication(canonical_id: Arc<str>) -> TypePublication {
+        TypePublication::from_source_position(
+            &authored_source(canonical_id),
+            ResolutionExactness::ExactConcrete,
+            ResolutionProvenance::SemanticEvaluator,
+            Arc::from(Vec::new()),
+            None,
+            &PublicationPolicy::exact_only(),
+        )
+    }
+
+    fn prop(description: String, publication: TypePublication) -> PropAnalysis {
+        PropAnalysis {
+            name: "label".to_string(),
+            callable_role: verter_type_expr::PropCallableRole::Other,
+            publication,
+            type_expansion: None,
+            required: true,
+            has_default: false,
+            default_value: None,
+            description: Some(description),
+            tags: Vec::new(),
+            declared_in_macro_type_arg: true,
+        }
+    }
+
+    fn style(class: String) -> StyleAnalysis {
+        StyleAnalysis {
+            lang: verter_session_query::analysis::style::StyleAnalysisLang::Css,
+            scoped: false,
+            is_module: false,
+            module_name: None,
+            block_ref: None,
+            classes: vec![class],
+            ids: Vec::new(),
+            custom_properties: Vec::new(),
+            v_binds: Vec::new(),
+            selectors: Vec::new(),
+        }
+    }
+
+    fn registry_meta(text: String) -> crate::meta_resolve::ResolvedTypeRegistryMeta {
+        crate::meta_resolve::ResolvedTypeRegistryMeta {
+            name: "Props".to_string(),
+            declaration: verter_session_query::declarations::metadata::ResolvedTypeDeclaration {
+                requested_name: "Props".to_string(),
+                declaration_id: None,
+                resolved_name: "Props".to_string(),
+                canonical_source: "/src/types.ts".to_string(),
+                owner: TopLevelOwnerId::default(),
+                span: verter_span::Span::new(0, 0),
+                kind:
+                    verter_session_query::declarations::metadata::ResolvedDeclarationKind::Interface,
+                text: Some(text),
+            },
+        }
+    }
+
+    fn result(props: Vec<PropAnalysis>) -> CachedComponentMetaResult {
+        CachedComponentMetaResult {
+            analysis: ComponentMetaAnalysis {
+                domain_guarantees: Default::default(),
+                props,
+                events: Vec::new(),
+                slots: Vec::new(),
+                models: Vec::new(),
+                exposed: Vec::new(),
+                public_instance: None,
+                ordered_sfc_structure: None,
+                type_registry: Vec::new(),
+                components: Vec::new(),
+                template_refs: Vec::new(),
+                imports: Vec::new(),
+                bindings: Vec::new(),
+                vue_api_calls: Vec::new(),
+                styles: vec![style("c".to_string())],
+                flags: ComponentMetaFlags::default(),
+                root_reachability: RootReachability::NoFallthrough {
+                    reason: NoFallthroughReason::NoTemplate,
+                },
+                accepted_props: Vec::new(),
+                accepted_events: Vec::new(),
+                accepted_surface_completeness: AcceptedSurfaceCompleteness::Exact,
+                fallthrough_surface: FallthroughSurface::None {
+                    reason: NoFallthroughReason::NoTemplate,
+                },
+                macro_expansion_diagnostics: Vec::new(),
+                options_api: false,
+                file_path: "/src/Owner.vue".to_string(),
+            },
+            resolution_template: ResolutionTemplate {
+                mode: verter_type_engine::semantic_query::ProjectionMode::Expanded,
+                whole_hash: [0u8; 16],
+                resolved_macros: Vec::new(),
+                resolved_type_registry: Vec::new(),
+                resolved_type_registry_meta: vec![registry_meta("t".to_string())],
+                evaluated_types: None,
+                fact_versions: Vec::new(),
+                surface_identities: None,
+                origin_graph: None,
+                completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
+                synthesis_should_suppress: false,
+            },
+            canonical_id: Arc::from("/src/Owner.vue"),
+            whole_hash: [0u8; 16],
+        }
+    }
+
+    fn base() -> CachedComponentMetaResult {
+        result(vec![prop("d".to_string(), publication(Arc::from("/a.ts")))])
+    }
+
+    /// Enlarging one owned string anywhere in the payload — a surface
+    /// record, a structural record, a resolution-template record — grows
+    /// the charge by at least that string's backing, with every record
+    /// count unchanged.
+    #[test]
+    fn enlarged_payload_text_is_charged_by_its_backing_at_equal_record_counts() {
+        type Enlarge = fn(&mut CachedComponentMetaResult, String) -> usize;
+        let cases: [(&str, Enlarge); 3] = [
+            ("prop description", |result, text| {
+                let slot = result.analysis.props[0].description.as_mut().unwrap();
+                let small = slot.capacity();
+                *slot = text;
+                small
+            }),
+            ("style class", |result, text| {
+                let slot = &mut result.analysis.styles[0].classes[0];
+                let small = slot.capacity();
+                *slot = text;
+                small
+            }),
+            ("registry declaration text", |result, text| {
+                let slot = result.resolution_template.resolved_type_registry_meta[0]
+                    .declaration
+                    .text
+                    .as_mut()
+                    .unwrap();
+                let small = slot.capacity();
+                *slot = text;
+                small
+            }),
+        ];
+        for (label, enlarge) in cases {
+            let small_result = base();
+            let mut large_result = base();
+            let text = "x".repeat(LARGE);
+            let large_capacity = text.capacity();
+            let small_capacity = enlarge(&mut large_result, text);
+            let expected = heap_block_bytes(large_capacity) - heap_block_bytes(small_capacity);
+            let small = small_result.retained_footprint_bytes();
+            let large = large_result.retained_footprint_bytes();
+            assert!(
+                large >= small + expected,
+                "{label}: a {LARGE}-byte string must add at least its {expected}-byte \
+                 backing ({small} -> {large})"
+            );
+        }
+    }
+
+    /// Nested type data counts: a long canonical id inside a prop's
+    /// published source costs its `Arc<str>` block, and a second prop that
+    /// shares the same published source does not count it again.
+    #[test]
+    fn nested_type_text_is_charged_once_per_shared_allocation() {
+        let small = base().retained_footprint_bytes();
+        let long: Arc<str> = Arc::from("y".repeat(LARGE));
+        let shared = publication(Arc::clone(&long));
+        let one = result(vec![prop("d".to_string(), shared.clone())]);
+        let two = result(vec![
+            prop("d".to_string(), shared.clone()),
+            prop("d".to_string(), shared),
+        ]);
+        let one_bytes = one.retained_footprint_bytes();
+        let expected = arc_block_bytes(LARGE) - arc_block_bytes("/a.ts".len());
+        assert!(
+            one_bytes >= small + expected,
+            "a {LARGE}-byte canonical in the published source must add at least \
+             {expected} bytes ({small} -> {one_bytes})"
+        );
+        let two_bytes = two.retained_footprint_bytes();
+        assert!(
+            two_bytes > one_bytes && two_bytes - one_bytes < arc_block_bytes(LARGE),
+            "a second prop sharing the published source must not recount its \
+             {LARGE}-byte canonical ({one_bytes} -> {two_bytes})"
+        );
+    }
+
+    /// A collection costs its backing capacity, not its length.
+    #[test]
+    fn record_collection_is_charged_by_capacity() {
+        let small_result = base();
+        let mut large_result = base();
+        let small_capacity = small_result.analysis.props.capacity();
+        large_result.analysis.props.reserve_exact(4096);
+        let large_capacity = large_result.analysis.props.capacity();
+        assert_eq!(
+            large_result.analysis.props.len(),
+            small_result.analysis.props.len()
+        );
+        let slot = std::mem::size_of::<PropAnalysis>();
+        let expected =
+            heap_block_bytes(large_capacity * slot) - heap_block_bytes(small_capacity * slot);
+        let small = small_result.retained_footprint_bytes();
+        let large = large_result.retained_footprint_bytes();
+        assert!(
+            large >= small + expected,
+            "reserving {large_capacity} prop slots must add at least {expected} bytes \
+             ({small} -> {large})"
+        );
+    }
+}

@@ -144,7 +144,13 @@ mod tests {
                 let read = crate::semantic_query::QueryResult::Value(
                     crate::semantic_query::SemanticQueryValue::TypeNode(node),
                 );
-                let lease = graph.lease_delivery(&read, &[]).unwrap();
+                let lease = graph
+                    .lease_delivery(
+                        crate::semantic_query_memo::delivery_lease::DeliveredAllocations::value(
+                            &read,
+                        ),
+                    )
+                    .unwrap();
                 drop(lease);
                 node
             };
@@ -288,7 +294,12 @@ mod tests {
                 "delivered".into(),
             )));
         let read = QueryResult::Value(SemanticQueryValue::TypeNode(node));
-        let lease = harness.graph.lease_delivery(&read, &[]).unwrap();
+        let lease = harness
+            .graph
+            .lease_delivery(
+                crate::semantic_query_memo::delivery_lease::DeliveredAllocations::value(&read),
+            )
+            .unwrap();
         for _ in 0..64 {
             drop(lease.clone());
         }
@@ -359,7 +370,13 @@ mod tests {
                 ),
             );
             store.replace_epoch().unwrap();
-            let lease = graph.lease_delivery(&result, &[]).unwrap();
+            let lease = graph
+                .lease_delivery(
+                    crate::semantic_query_memo::delivery_lease::DeliveredAllocations::value(
+                        &result,
+                    ),
+                )
+                .unwrap();
             assert_eq!(
                 lease
                     .signature()

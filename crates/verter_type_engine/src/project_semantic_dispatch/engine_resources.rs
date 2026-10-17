@@ -283,7 +283,11 @@ mod tests {
                     "retained member".into(),
                 )));
                 let delivery = graph
-                    .lease_delivery(&QueryResult::Value(SemanticQueryValue::TypeNode(node)), &[])
+                    .lease_delivery(
+                        crate::semantic_query_memo::delivery_lease::DeliveredAllocations::value(
+                            &QueryResult::Value(SemanticQueryValue::TypeNode(node)),
+                        ),
+                    )
                     .unwrap();
                 (node, delivery)
             };

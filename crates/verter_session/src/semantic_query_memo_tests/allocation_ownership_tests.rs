@@ -83,14 +83,14 @@ fn build(store: &SemanticGraphStore) -> QueryBuildOutput<SemanticNodeId> {
 }
 
 /// What the delivered rail costs, from its allocations alone: the slice
-/// block holding the one diagnostic, the two texts it names, and its one
-/// registration. A charge missing the name, or a second registration of the
-/// rail, misses this figure.
+/// block holding the one diagnostic and the two texts it names, each its
+/// own registered allocation. A charge missing the name, or a second
+/// registration of any of them, misses this figure.
 fn rail_charge() -> usize {
     arc_block_bytes(std::mem::size_of::<ShallowDiagnostic>())
         + arc_block_bytes(NAME_LEN)
         + arc_block_bytes(OWNER.len())
-        + registration_bytes()
+        + 3 * registration_bytes()
 }
 
 fn read(
@@ -120,15 +120,22 @@ fn registrations(harness: &CountedOwnershipHarness) -> usize {
     harness.run(|store| store.shared_allocation_registrations_for_tests())
 }
 
-/// Pinned bytes beyond the graph's own storage pin: what callers hold.
+/// Pinned bytes beyond the store's own storage pins: what callers hold —
+/// the allocations live deliveries hold and their metadata.
 fn caller_pinned(harness: &CountedOwnershipHarness, account: &SemanticRetentionAccount) -> usize {
-    account.snapshot().pinned_bytes - harness.run(|store| store.graph_storage_charge_bytes())
+    account.snapshot().pinned_bytes - harness.run(|store| store.store_storage_pins_for_tests())
+}
+
+/// The bytes a delivery's own metadata is pinned for.
+fn metadata<T>(read: &CacheRead<T>) -> usize {
+    read.lease().own_charge_bytes_for_tests()
 }
 
 /// Cache first: the candidate drains while a warm read still holds the
 /// diagnostics. Exactly the rail stays charged, now pinned to that read —
 /// the candidate's own bookkeeping and its carrier are released with it —
-/// and the read's drop restores the account.
+/// beside the read's own delivery metadata, and the read's drop restores
+/// the account.
 #[test]
 fn a_read_outliving_its_candidate_keeps_exactly_the_delivered_rail_charged() {
     let host = host();
@@ -142,7 +149,16 @@ fn a_read_outliving_its_candidate_keeps_exactly_the_delivered_rail_charged() {
         retained.retained_bytes >= rail_charge(),
         "the retained candidate is charged for the diagnostic text it delivers: {retained:?}"
     );
-    assert_eq!(caller_pinned(&harness, &account), 0);
+    assert!(
+        metadata(&cold) > 0 && metadata(&warm) > 0,
+        "each delivery owner pins its own metadata"
+    );
+    assert_eq!(
+        caller_pinned(&harness, &account),
+        metadata(&cold) + metadata(&warm),
+        "while the candidate retains the rail, callers pin only their delivery metadata: \
+         the cold winner's owner and the candidate's, which the warm read shares"
+    );
     drop(cold);
 
     harness.run(|store| store.invalidate_all());
@@ -150,14 +166,14 @@ fn a_read_outliving_its_candidate_keeps_exactly_the_delivered_rail_charged() {
     let held: RetentionAccountSnapshot = account.snapshot();
     assert_eq!(
         caller_pinned(&harness, &account),
-        rail_charge(),
-        "the delivered rail moves to the read that holds it, whole and once; nothing \
-         the cache alone kept stays charged"
+        rail_charge() + metadata(&warm),
+        "the delivered rail moves to the read that holds it, whole and once, beside the \
+         read's own metadata; nothing the cache alone kept stays charged"
     );
     assert_eq!(
         registrations(&harness),
-        1,
-        "only the held rail stays registered"
+        3,
+        "only the held rail and its two names stay registered"
     );
     assert!(
         held.retained_bytes + caller_pinned(&harness, &account) < retained.retained_bytes,
@@ -188,15 +204,19 @@ fn reads_dropped_first_leave_one_retained_charge_until_the_candidate_drains() {
     let warm = warm_read(&harness, &host);
     let warm_again = warm.clone();
     let retained = account.snapshot();
+    let candidate_metadata = metadata(&warm);
 
     drop((cold, warm, warm_again));
     assert_eq!(
-        account.snapshot(),
-        RetentionAccountSnapshot {
-            releases: account.snapshot().releases,
-            ..retained
-        },
-        "a reader's drop changes nothing while the candidate retains the allocation"
+        account.snapshot().retained_bytes,
+        retained.retained_bytes,
+        "a reader's drop changes nothing the candidate retains"
+    );
+    assert_eq!(
+        caller_pinned(&harness, &account),
+        candidate_metadata,
+        "the cold winner's metadata is released with it; the warm reads shared the \
+         candidate's owner, which the candidate still holds"
     );
 
     harness.run(|store| store.invalidate_all());
@@ -208,10 +228,11 @@ fn reads_dropped_first_leave_one_retained_charge_until_the_candidate_drains() {
     assert_eq!(account.snapshot().total_bytes(), 0);
 }
 
-/// Zero headroom: the complete value is returned uncached, nothing is
-/// charged and nothing is registered, and the caller still owns its value.
+/// Zero headroom: the complete value is returned uncached, and the caller
+/// still owns its value — charged as the caller's, pinned, for exactly as
+/// long as the delivery holds it, never refused and never retained.
 #[test]
-fn a_refused_admission_returns_the_complete_value_with_nothing_charged() {
+fn a_refused_admission_returns_the_complete_value_charged_to_its_caller() {
     let host = host();
     let account = SemanticRetentionAccount::new(RetentionLimits {
         aggregate_ceiling_bytes: 0,
@@ -226,11 +247,21 @@ fn a_refused_admission_returns_the_complete_value_with_nothing_charged() {
     assert_eq!(account.snapshot().retained_bytes, 0);
     assert_eq!(
         caller_pinned(&harness, &account),
-        0,
-        "only the graph's storage is pinned"
+        rail_charge() + metadata(&delivered),
+        "the delivered rail, oversized name included, and the delivery's metadata are \
+         the caller's, charged despite the refusal"
     );
-    assert_eq!(registrations(&harness), 0);
+    assert_eq!(registrations(&harness), 3, "the rail and its two names");
+    let clone = delivered.clone();
     drop(delivered);
+    assert_eq!(
+        caller_pinned(&harness, &account),
+        rail_charge() + metadata(&clone),
+        "a clone of the read holds the same charges"
+    );
+    drop(clone);
+    assert_eq!(caller_pinned(&harness, &account), 0);
+    assert_eq!(registrations(&harness), 0);
     assert_eq!(harness.live_nodes(), 0);
 }
 
@@ -316,7 +347,7 @@ fn a_sealed_refusal_hands_its_delivered_rail_to_a_surviving_read() {
     harness.run(|store| store.invalidate_all());
     assert_eq!(
         caller_pinned(&harness, &account),
-        rail_charge(),
+        rail_charge() + metadata(&held),
         "the held read keeps exactly the rail charged once the summary is gone"
     );
     drop(held);
@@ -347,5 +378,111 @@ fn an_aborted_flight_releases_its_storage_pin() {
         caller_pinned(&harness, &account),
         before,
         "the aborted flight's cell is released with its last holder"
+    );
+}
+
+/// A member whose family was keyed when the batch staged it, then evicted
+/// by the family budget before the batch's lock while another holder spent
+/// the headroom, must still be keyed under the lock: the batch publishes
+/// every member or none, never a component missing the member whose keying
+/// was refused.
+#[test]
+fn an_scc_batch_never_publishes_without_a_member_whose_family_was_evicted_meanwhile() {
+    use verter_session_query::facts::fact_cache::{FactVersionRef, ReadSetSignature};
+    use verter_type_engine::semantic_query::{RelateMemoKey, RelationContext, RelationOutcome};
+    use verter_type_engine::semantic_query_memo::{
+        MemoFamilyBound, PendingRelationMember, SccRootWitness,
+    };
+
+    const CEILING: usize = 64 * 1024 * 1024;
+    let account = SemanticRetentionAccount::new(RetentionLimits {
+        aggregate_ceiling_bytes: CEILING,
+        active_ceiling_bytes: CEILING,
+        max_entry_bytes: CEILING,
+        pin_threshold_bytes: CEILING,
+    });
+    // Three resident families at most: keying two more evicts the oldest.
+    let store = SemanticGraphStore::with_account(StoreAccount::new(Arc::clone(&account)))
+        .with_memo_family_bound(MemoFamilyBound::ForTest(3));
+    let carrier = ReadSetSignature::new(Arc::from(vec![FactVersionRef::FileWholeHash {
+        canonical_id: "/w/scc.ts".to_owned(),
+        hash: [5; 16],
+    }]));
+    let roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from("/w/scc.ts")]);
+    let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
+    let key_for = |kind| {
+        RelateMemoKey::assignable(
+            store.intern_node(SemanticNodeData::Primitive(kind)),
+            target,
+            RelationContext::default(),
+        )
+    };
+    let seed = |key: &RelateMemoKey, outcome| {
+        store.insert_relation_payload_for_tests(
+            key.clone(),
+            carrier.clone(),
+            Arc::clone(&roots),
+            store.relation_payload_for_tests(outcome),
+            0,
+        );
+    };
+    // The member's family is keyed first (oldest), the root's second.
+    let member_key = key_for(PrimitiveKind::Number);
+    let root_key = key_for(PrimitiveKind::String);
+    seed(&member_key, RelationOutcome::NotAssignable);
+    seed(&root_key, RelationOutcome::Assignable);
+    let root_seq = store
+        .relation_published_carrier(&root_key)
+        .expect("published root")
+        .admission_seq;
+    let flight = store
+        .begin_inline_relation_flight(&member_key)
+        .expect("member flight");
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let _gate = store.test_relation_member_pre_entries_gate(Arc::clone(&barrier));
+    let published = std::thread::scope(|scope| {
+        let publisher = scope.spawn(|| {
+            store.publish_scc_members_fenced_for_tests(
+                None::<
+                    &dyn verter_type_engine::resolver_core::ResolverContext<
+                        crate::resolver_core::HostCapabilities,
+                    >,
+                >,
+                &SccRootWitness::relate(root_key.clone(), root_seq),
+                &carrier,
+                &roots,
+                0,
+                vec![PendingRelationMember {
+                    key: member_key.clone(),
+                    payload: store.relation_payload_for_tests(RelationOutcome::Assignable),
+                    flight,
+                }],
+                Vec::new(),
+                Vec::new(),
+            )
+        });
+        barrier.wait();
+        // Inside the window: two more families key in, so the budget evicts
+        // the oldest — the member's — and a live handle elsewhere spends
+        // all the headroom.
+        seed(
+            &key_for(PrimitiveKind::Boolean),
+            RelationOutcome::Assignable,
+        );
+        seed(&key_for(PrimitiveKind::BigInt), RelationOutcome::Assignable);
+        assert!(
+            store.relation_published_carrier(&member_key).is_none(),
+            "the member's family was evicted"
+        );
+        assert!(store.relation_published_carrier(&root_key).is_some());
+        let pressure = account.pin(CEILING);
+        barrier.wait();
+        let published = publisher.join().expect("publisher");
+        drop(pressure);
+        published
+    });
+    assert!(
+        !published || store.relation_published_carrier(&member_key).is_some(),
+        "a batch that reports publication published every member"
     );
 }

@@ -175,6 +175,35 @@ impl PreparedKeyHandle {
         self.0.as_ref()
     }
 
+    /// The heap a prepared identity keeps reachable beyond its own block,
+    /// when `producer` is one: its key, the family projected from it (which
+    /// shares the key's slices and names), its requested path and point,
+    /// and its operand roots, each `Arc` allocation once per `aliases`. The
+    /// signature epoch a lease pins is the epoch's own charge.
+    pub(crate) fn producer_heap_bytes(
+        producer: &dyn verter_execution::tasks::ProducerIdentity,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> Option<usize> {
+        use crate::semantic_query::allocation_footprint::OwnedHeap as _;
+        let PreparedQueryIdentity {
+            _signature,
+            _roots,
+            key,
+            family,
+            slot: _,
+            requested_path,
+            requested_point,
+            cached_hash: _,
+        } = producer.downcast_ref::<PreparedQueryIdentity>()?;
+        Some(
+            super::family_footprint::query_key_heap_bytes(key, aliases)
+                + super::family_footprint::family_key_heap_bytes(family, aliases)
+                + requested_path.owned_heap_bytes(aliases)
+                + requested_point.path().owned_heap_bytes(aliases)
+                + _roots.owned_heap_bytes(aliases),
+        )
+    }
+
     /// Whether `producer` is the semantic producer for exactly `key`, whose
     /// prepared hash is `key_hash`.
     pub(super) fn producer_matches_key(

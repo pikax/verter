@@ -122,13 +122,15 @@ impl MemoEntry {
     /// The bytes of this candidate's cache-only bookkeeping, held for exactly
     /// as long as the candidate: its entry in every slot its publication may
     /// populate (with each slot's container convention), its materialised
-    /// point record, its delivery lease's ownership metadata, and its
-    /// reverse-index registrations. None of these is handed to a caller, so
-    /// none outlives the candidate. The carrier, the delivered rails and the
-    /// value are shared allocations, charged once through
+    /// point record, and its reverse-index registrations. None of these is
+    /// handed to a caller, so none outlives the candidate. Its delivery
+    /// lease is caller metadata warm reads share, charged by the lease's own
+    /// owner for as long as it lives; the carrier, the delivered rails and
+    /// the value are shared allocations, charged once through
     /// [`super::retention::MemoRetention`]'s shared holds.
     pub(super) fn own_retained_footprint_bytes(
         &self,
+        family: &FamilyKey,
         populated_slots: usize,
         registered_canonicals: usize,
     ) -> usize {
@@ -137,8 +139,11 @@ impl MemoEntry {
         populated_slots
             * (std::mem::size_of::<Self>() + verter_session_query::retention::ENTRY_OVERHEAD_BYTES)
             + self.satisfied_projection.owned_heap_bytes(&mut aliases)
-            + self.lease.owned_heap_bytes(&mut aliases)
-            + super::reverse_index::registration_bytes(registered_canonicals, populated_slots)
+            + super::reverse_index::registration_bytes(
+                family,
+                registered_canonicals,
+                populated_slots,
+            )
     }
 }
 
@@ -778,6 +783,72 @@ fn w_object_spread_projection_family_identity(identity: &ObjectSpreadProjectionF
     let _: &crate::semantic_query::SurfaceProvenanceContext = provenance;
     let _: &crate::semantic_query::MemberMergeRole = merge_role;
     let _: &VueHeritagePolicy = vue_heritage_policy;
+}
+
+impl InstantiateAuthoredFamilyIdentity {
+    /// Heap the identity keeps reachable beyond its own block (see
+    /// [`super::family_footprint`]).
+    pub(super) fn key_heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        use super::family_footprint as footprint;
+        let Self {
+            base,
+            args,
+            authored,
+            projection,
+            resolve_env_hash,
+            body_source,
+            provenance,
+            merge_role,
+            vue_heritage_policy,
+        } = self;
+        footprint::decl_slot_heap_bytes(base, aliases)
+            + footprint::copy_slice_bytes(args, aliases)
+            + footprint::authored_operand_heap_bytes(authored, aliases)
+            + footprint::force_projection_heap_bytes(projection, aliases)
+            + footprint::inline(resolve_env_hash)
+            + footprint::inline(body_source)
+            + footprint::inline(provenance)
+            + footprint::inline(merge_role)
+            + footprint::inline(vue_heritage_policy)
+    }
+}
+
+impl ObjectSpreadProjectionFamilyIdentity {
+    /// Heap the identity keeps reachable beyond its own block (see
+    /// [`super::family_footprint`]).
+    pub(super) fn key_heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        use super::family_footprint as footprint;
+        let Self {
+            program,
+            selector,
+            resolve_env_hash,
+            type_env_hash,
+            lib_env_hash,
+            project_identity,
+            substitution,
+            optional_property_policy,
+            provenance,
+            merge_role,
+            vue_heritage_policy,
+        } = self;
+        footprint::object_selector_heap_bytes(selector, aliases)
+            + footprint::inline(program)
+            + footprint::inline(resolve_env_hash)
+            + footprint::inline(type_env_hash)
+            + footprint::inline(lib_env_hash)
+            + footprint::inline(project_identity)
+            + footprint::inline(substitution)
+            + footprint::inline(optional_property_policy)
+            + footprint::inline(provenance)
+            + footprint::inline(merge_role)
+            + footprint::inline(vue_heritage_policy)
+    }
 }
 
 impl FamilyKey {

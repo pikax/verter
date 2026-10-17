@@ -94,9 +94,50 @@ impl IntersectionInputId {
     pub fn recipe(&self) -> &IntersectionRecipe {
         self.0.value()
     }
+
+    /// The heap this input handle owns: its root attachment. The recipe is
+    /// a self-charged record, and so is every nested subgroup recipe.
+    pub(crate) fn key_heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        self.1 .0.owned_heap_bytes(aliases)
+    }
 }
 
 intern_domain!(IntersectionRecipe {
+    /// The operand or step list, and each nested subgroup handle's root
+    /// attachment; a subgroup's recipe is its own self-charged record.
+    fn value_heap_bytes(&self) -> usize {
+        use verter_session_query::retention::allocation::{arc_block_bytes, AliasSet};
+        let mut aliases = AliasSet::new();
+        match self {
+            IntersectionRecipe::OrderedOperands(operands) => {
+                arc_block_bytes(std::mem::size_of_val::<[_]>(operands))
+            }
+            IntersectionRecipe::OrderedSteps(steps) => {
+                arc_block_bytes(std::mem::size_of_val::<[_]>(steps))
+                    + steps
+                        .iter()
+                        .map(|step| match step {
+                            IntersectionTerm::Value(_)
+                            | IntersectionTerm::EvaluateSubgroup {
+                                input:
+                                    IntersectionInputRef::Empty
+                                    | IntersectionInputRef::Unary(_)
+                                    | IntersectionInputRef::Binary(..),
+                                purpose: _,
+                            } => 0,
+                            IntersectionTerm::EvaluateSubgroup {
+                                input: IntersectionInputRef::Recipe(child),
+                                purpose: _,
+                            } => child.key_heap_bytes(&mut aliases),
+                        })
+                        .sum::<usize>()
+            }
+        }
+    }
+
     fn take_children(&mut self, out: &mut Vec<Interned<Self>>) {
         let IntersectionRecipe::OrderedSteps(steps) = self else {
             return;

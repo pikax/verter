@@ -31,11 +31,13 @@
 //!   allocation is counted once ([`AliasSet`]). Allocations several
 //!   independently charged owners share are charged once process-wide
 //!   through [`super::shared::AliasCharges`].
-//! * **Leaf text.** A leaf `Arc<str>` name inside a charged carrier (a
+//! * **Leaf text.** A leaf `Arc<str>` name inside a registered carrier (a
 //!   fact's interned names, a dependency's canonical, a diagnostic's name)
-//!   is counted with the carrier that holds it. Leaf text has no charge of
-//!   its own to share, so each carrier batch covers the text it keeps
-//!   reachable — counted in full, never as a fixed per-name proxy.
+//!   is its own shared allocation: measuring a carrier for registration
+//!   collects its leaves instead of counting them ([`AliasSet::collecting`])
+//!   and the registry charges each leaf once, held by every carrier that
+//!   reaches it ([`super::shared::AliasCharges`]). Outside registration a
+//!   measurement counts each distinct leaf it reaches in full.
 //!
 //! The figures are admission ESTIMATES (see the module docs of
 //! [`super`]): nothing in cache validity reads them.
@@ -98,6 +100,9 @@ pub const fn box_bytes<T>() -> usize {
 pub struct AliasSet {
     inline: smallvec::SmallVec<[usize; ALIAS_INLINE]>,
     spilled: Option<FxHashSet<usize>>,
+    /// When collecting, the distinct leaf names the measurement reached,
+    /// which it then does not count.
+    leaves: Option<Vec<Arc<str>>>,
 }
 
 /// Allocations an [`AliasSet`] tracks before it spills to a hash set.
@@ -108,6 +113,23 @@ impl AliasSet {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An empty set that collects every distinct leaf name a measurement
+    /// reaches instead of counting it: a registered carrier's leaves are
+    /// charged as allocations of their own.
+    #[must_use]
+    pub fn collecting() -> Self {
+        Self {
+            leaves: Some(Vec::new()),
+            ..Self::default()
+        }
+    }
+
+    /// The leaf names a collecting measurement reached, each once.
+    #[must_use]
+    pub fn take_leaves(&mut self) -> Vec<Arc<str>> {
+        self.leaves.take().unwrap_or_default()
     }
 
     /// `true` the first time `arc`'s allocation is offered, `false` after.
@@ -148,10 +170,15 @@ impl AliasSet {
 /// its allocation.
 #[must_use]
 pub fn arc_str_bytes(value: &Arc<str>, aliases: &mut AliasSet) -> usize {
-    if aliases.first(value) {
-        arc_block_bytes(value.len())
-    } else {
-        0
+    if !aliases.first(value) {
+        return 0;
+    }
+    match aliases.leaves.as_mut() {
+        Some(leaves) => {
+            leaves.push(Arc::clone(value));
+            0
+        }
+        None => arc_block_bytes(value.len()),
     }
 }
 
@@ -213,8 +240,9 @@ pub fn fact_vec_bytes(facts: &Vec<FactVersionRef>, aliases: &mut AliasSet) -> us
 
 /// Heap one fact owns beyond its inline slot.
 ///
-/// A [`FactVersionRef::Receipt`] costs nothing here: a page's storage rides
-/// its own charge, claimed by the first retaining admission
+/// A [`FactVersionRef::Receipt`] costs nothing here: every receipt — a
+/// result's evidence or a page — carries its own charge from birth, claimed
+/// by the first retaining admission
 /// ([`crate::facts::receipt::reserve_retained_with_evidence`]).
 #[must_use]
 pub fn fact_heap_bytes(fact: &FactVersionRef, aliases: &mut AliasSet) -> usize {

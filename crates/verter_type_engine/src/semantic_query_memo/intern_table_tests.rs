@@ -13,18 +13,35 @@ const DRAINED_CAPACITY_BOUND: usize = RETAINED_SLOT_FLOOR * 4;
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct Plain(u64);
-intern_domain!(Plain);
+intern_domain!(Plain {
+    /// A `u64`: inline.
+    fn value_heap_bytes(&self) -> usize {
+        0
+    }
+});
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct Shared(u64);
-intern_domain!(Shared);
+intern_domain!(Shared {
+    /// A `u64`: inline.
+    fn value_heap_bytes(&self) -> usize {
+        0
+    }
+});
 
 /// A value that counts its own destruction.
 struct Counted {
     key: u64,
     drops: Arc<AtomicUsize>,
 }
-intern_domain!(Counted);
+intern_domain!(Counted {
+    /// The shared drop counter's block.
+    fn value_heap_bytes(&self) -> usize {
+        verter_session_query::retention::allocation::arc_block_bytes(std::mem::size_of::<
+            AtomicUsize,
+        >())
+    }
+});
 
 impl PartialEq for Counted {
     fn eq(&self, other: &Self) -> bool {
@@ -46,7 +63,12 @@ impl Drop for Counted {
 /// A value whose every instance shares one digest.
 #[derive(Debug, PartialEq, Eq)]
 struct Colliding(u64);
-intern_domain!(Colliding);
+intern_domain!(Colliding {
+    /// A `u64`: inline.
+    fn value_heap_bytes(&self) -> usize {
+        0
+    }
+});
 impl Hash for Colliding {
     fn hash<H: Hasher>(&self, state: &mut H) {
         0u64.hash(state);
@@ -57,7 +79,12 @@ impl Hash for Colliding {
 /// perturbed by the aliasing test's records.
 #[derive(Debug, PartialEq, Eq)]
 struct CollidingPeer(u64);
-intern_domain!(CollidingPeer);
+intern_domain!(CollidingPeer {
+    /// A `u64`: inline.
+    fn value_heap_bytes(&self) -> usize {
+        0
+    }
+});
 impl Hash for CollidingPeer {
     fn hash<H: Hasher>(&self, state: &mut H) {
         0u64.hash(state);
@@ -68,7 +95,12 @@ impl Hash for CollidingPeer {
 /// through the production occupancy accessor.
 #[derive(Debug, PartialEq, Eq)]
 struct Observed(u64);
-intern_domain!(Observed);
+intern_domain!(Observed {
+    /// A `u64`: inline.
+    fn value_heap_bytes(&self) -> usize {
+        0
+    }
+});
 impl Hash for Observed {
     fn hash<H: Hasher>(&self, state: &mut H) {
         (if self.0.is_multiple_of(2) { 0 } else { self.0 }).hash(state);
@@ -81,7 +113,15 @@ enum Tree {
     Leaf(u64),
     Node(Vec<Interned<Tree>>),
 }
-intern_domain!(Tree);
+intern_domain!(Tree {
+    /// A node's child list; each child is its own record.
+    fn value_heap_bytes(&self) -> usize {
+        match self {
+            Tree::Leaf(_) => 0,
+            Tree::Node(children) => verter_session_query::retention::allocation::vec_bytes(children),
+        }
+    }
+});
 
 #[test]
 fn content_equal_values_share_one_record() {
@@ -244,5 +284,45 @@ fn occupancy_reports_held_records_and_both_backing_capacities_until_owners_drain
     assert!(
         drained.digest_capacity <= DRAINED_CAPACITY_BOUND,
         "the digest map returns its backing capacity: {drained:?} after {live:?}"
+    );
+}
+
+/// A record is charged its block and its value's own heap for exactly as
+/// long as a handle names it, and the index charges its own backing by
+/// capacity, giving it back as the index drains.
+#[test]
+fn a_record_and_its_index_backing_are_charged_until_the_last_handle_drops() {
+    use verter_session_query::retention::allocation::{arc_block_bytes, vec_bytes};
+    const CHILDREN: usize = 4_096;
+    let children: Vec<Interned<Tree>> = (0..CHILDREN as u64)
+        .map(|leaf| Interned::new(Tree::Leaf(leaf + 1_000_000)))
+        .collect();
+    let list = vec_bytes(&children);
+    let parent = Interned::new(Tree::Node(children));
+    let record = arc_block_bytes(std::mem::size_of::<super::InternRecord<Tree>>());
+    assert_eq!(
+        parent.record_charge_bytes(),
+        record + list,
+        "the parent is charged its block and its child list"
+    );
+    let leaf = Interned::new(Tree::Leaf(1_000_000));
+    assert_eq!(
+        leaf.record_charge_bytes(),
+        record,
+        "a leaf is only its block"
+    );
+    let backing = Tree::index().backing_charge_bytes();
+    assert!(
+        backing
+            >= Tree::index().capacity() * (std::mem::size_of::<(u64, super::Bucket<Tree>)>() + 1),
+        "the index's table is charged by capacity: {backing}"
+    );
+    drop(leaf);
+    drop(parent);
+    assert!(Tree::index().is_empty());
+    assert_eq!(
+        Tree::index().backing_charge_bytes(),
+        0,
+        "a drained index keeps no backing charge"
     );
 }

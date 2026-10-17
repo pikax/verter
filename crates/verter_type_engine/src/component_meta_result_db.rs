@@ -125,25 +125,6 @@ pub struct ComponentMetaResultEntry<P> {
     pub validated_at_generation: u64,
 }
 
-/// Per-record byte estimates for the component-meta footprint.
-///
-/// Each constant is the approximate resident cost of one record of that
-/// family — the struct plus the short owned strings and typed IR it
-/// keeps alive. These are ACCOUNTING estimates: they decide whether the
-/// process may RETAIN an entry, never whether a retained entry is valid.
-/// An imprecise constant therefore costs hit rate, never correctness.
-pub mod footprint {
-    /// A surface record with a resolved type descriptor: a prop, event,
-    /// slot, model, exposed member, or accepted-surface entry.
-    pub const SURFACE_RECORD_BYTES: usize = 512;
-    /// A lighter structural record: an import, binding, template ref,
-    /// component usage, API call, or style block.
-    pub const STRUCTURAL_RECORD_BYTES: usize = 192;
-    /// A resolved type-registry analysis, which carries an expanded
-    /// member list and is the heaviest per-record family.
-    pub const TYPE_RECORD_BYTES: usize = 1024;
-}
-
 impl<P> verter_session_query::retention::RetainedFootprint for ComponentMetaResultEntry<P>
 where
     P: verter_session_query::retention::RetainedFootprint,

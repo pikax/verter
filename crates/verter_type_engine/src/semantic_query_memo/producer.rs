@@ -290,11 +290,13 @@ impl SemanticGraphStore {
     ) -> ValueRead {
         CacheRead {
             lease: self
-                .lease_delivery(&QueryResult::Recursive(sentinel), &[])
+                .lease_delivery(super::delivery_lease::DeliveredAllocations::value(
+                    &QueryResult::Recursive(sentinel),
+                ))
                 .expect("recursion sentinel is live"),
             value: QueryResult::Recursive(sentinel),
             dep_signature: empty_signature(),
-            walker_diagnostics: Arc::from([]),
+            walker_diagnostics: super::empty_diagnostics(),
             // A cross-task wait-cycle carrier is an operational escape,
             // never a warm fact; a same-path carrier is a partial the warm
             // gates already refuse.
@@ -706,7 +708,7 @@ impl Subscription<'_> {
                     crate::semantic_query::ExecutionAbort::Superseded,
                 )),
                 dep_signature: empty_signature(),
-                walker_diagnostics: Arc::from([]),
+                walker_diagnostics: super::empty_diagnostics(),
                 cache_suppress: true,
                 fact_status: crate::semantic_query::FactStatus::unavailable(
                     PartialReasonSet::SUPERSEDED_GENERATION,
@@ -732,7 +734,7 @@ impl Subscription<'_> {
         let walker_diagnostics = state
             .walker_diagnostics
             .clone()
-            .unwrap_or_else(|| Arc::from([]));
+            .unwrap_or_else(super::empty_diagnostics);
         let cost_receipt = state.cost_receipt.clone();
         let delivery_lease = state.lease.clone();
         // Release the flight lock before any tracer fan-out.
@@ -1008,7 +1010,11 @@ impl<'s> ProducerLease<'s> {
         let admissible = admissible && fact_status.is_complete();
         Ok(SettledProducer {
             lease: store
-                .lease_delivery(&result, &walker_diagnostics)
+                .lease_delivery(super::delivery_lease::DeliveredAllocations::read(
+                    &result,
+                    &walker_diagnostics,
+                    &dep_signature,
+                ))
                 .expect("settled output owns live operands"),
             store,
             prepared,
@@ -1062,7 +1068,6 @@ impl SettledProducer<'_> {
                 &self.satisfied_projection,
                 &cost_receipt,
                 &self.inflight,
-                &self.lease,
             );
             let published = match outcome {
                 WarmPublishOutcome::Published(candidate) => {

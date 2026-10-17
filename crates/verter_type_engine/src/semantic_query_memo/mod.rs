@@ -53,6 +53,7 @@ pub mod construction_copy;
 pub mod delivery_lease;
 pub mod derivation;
 pub mod family;
+mod family_footprint;
 mod family_intern;
 mod family_retention;
 mod flow_return_memo;
@@ -197,7 +198,7 @@ pub(crate) fn cancelled_cache_read() -> CacheRead<QueryResult<SemanticQueryValue
         lease: Default::default(),
         value: QueryResult::Error(QueryError::Cancelled),
         dep_signature: empty_signature(),
-        walker_diagnostics: Arc::from([]),
+        walker_diagnostics: empty_diagnostics(),
         cache_suppress: true,
         fact_status: crate::semantic_query::FactStatus::unavailable(
             crate::semantic_query::PartialReasonSet::CANCELLED,
@@ -791,6 +792,8 @@ impl SemanticGraphStore {
         let signatures = crate::signature_kernel::SignatureStore::default();
         signatures.bind_graph(&arena.core);
         signatures.bind_retention_account(retention_account.get());
+        let canonical_to_entries = CanonicalToEntries::charged(retention_account.get());
+        let dep_signature_interner = DepSignatureInterner::charged(retention_account.get());
         Self {
             operand_identity: Default::default(),
             arena,
@@ -837,8 +840,8 @@ impl SemanticGraphStore {
             invalidate_canonical_inflight_abort_gate: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
             joiner_on_condvar_count: Default::default(),
-            canonical_to_entries: Default::default(),
-            dep_signature_interner: Default::default(),
+            canonical_to_entries,
+            dep_signature_interner,
             memo_budget: Default::default(),
             candidate_admission_seq: Default::default(),
             structural_domains: Default::default(),
@@ -978,8 +981,7 @@ pub enum WarmPublishOutcome {
 /// per-candidate identity (NOT by `(family, slot)` alone), so a
 /// cross-canonical cleanup for one evicted candidate does NOT strip a
 /// surviving sibling candidate's registrations in the same slot.
-type CanonicalToEntries =
-    DashMap<Arc<str>, Mutex<FxHashMap<(u64, ModeSlot), (Arc<FamilyKey>, RegisteredFacts)>>>;
+use reverse_index::CanonicalToEntries;
 
 /// The `ReadSetSignature.facts` rail an entry registered under a
 /// canonical in [`CanonicalToEntries`] — the diagnostic stamp + the
@@ -1319,7 +1321,7 @@ impl SemanticGraphStore {
             // rail` map for `canonical_id`, UNDER the held `entries`
             // lock.
             let drained: Vec<((FamilyKey, ModeSlot, u64), RegisteredFacts)> =
-                match self.canonical_to_entries.remove(canonical_id) {
+                match self.canonical_to_entries.remove_shard(canonical_id) {
                     Some((_, mutex)) => {
                         let lock_start = if timing_on {
                             Some(Instant::now())
@@ -1780,7 +1782,7 @@ impl SemanticGraphStore {
                     barrier.wait();
                 }
             }
-            self.canonical_to_entries.clear();
+            self.canonical_to_entries.clear_shards();
             count
         };
         // Test-only injection point: a barrier armed by
@@ -2415,7 +2417,6 @@ impl SemanticGraphStore {
         satisfied_projection: &MaterializedSet,
         cost_receipt: &Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
         inflight: &Arc<FlightCell>,
-        delivery: &delivery_lease::SemanticDeliveryLease,
     ) -> WarmPublishOutcome {
         let publishable = matches!(result, QueryResult::Value(_));
         if !publishable {
@@ -2449,14 +2450,20 @@ impl SemanticGraphStore {
         // the traced cross-file fact set. `warm_publish_one` records it
         // verbatim; it never reconstructs facts from the legacy fence.
         let read_set_signature = read_set_signature.clone();
-        let winner_dep_signature = retention::allocation_key(dispatch_dep_signature);
         let dispatch_dep_signature = self.dep_signature_interner.intern(dispatch_dep_signature);
         let reverse_index_inputs =
             reverse_index::ReverseIndexInputs::new(&read_set_signature, &dispatch_dep_signature);
         let validated_at_generation = flags.current_project_generation();
         let admission_seq = self.alloc_candidate_admission_seq();
         let mut entry = MemoEntry {
-            lease: match self.lease_candidate(family, result, walker_diagnostics) {
+            lease: match self.lease_candidate(
+                family,
+                delivery_lease::DeliveredAllocations::read(
+                    result,
+                    walker_diagnostics,
+                    &dispatch_dep_signature,
+                ),
+            ) {
                 Ok(lease) => lease,
                 Err(_) => return WarmPublishOutcome::Skipped,
             },
@@ -2480,14 +2487,14 @@ impl SemanticGraphStore {
             family::publication_slot_bound(slot, satisfied_projection, requested_path);
         let retention = match self.reserve_memo_candidate(
             &entry,
+            family,
             populated_slots,
             reverse_index_inputs.canonical_count(),
         ) {
             Ok(retention) => retention,
             Err(_) => return WarmPublishOutcome::Skipped,
         };
-        entry.lease.attach_retention(|| retention.callers());
-        entry.retention = Some(Arc::clone(&retention));
+        entry.retention = Some(retention);
         // Per-family bounded retention: plan the cap eviction against the
         // publishing caller's stable view BEFORE the publish lock (the
         // plan releases `entries` before validating fact rails; the
@@ -2597,16 +2604,6 @@ impl SemanticGraphStore {
             cost_receipt: Arc::clone(cost_receipt),
         };
         drop(entries);
-        // The winner's own delivery aliases the candidate's diagnostics and
-        // value (its dependency rail only when interning returned the same
-        // allocation): it carries their caller holds, so a winner's read that
-        // outlives the candidate keeps them charged.
-        let mut aliased = vec![
-            retention::allocation_key(walker_diagnostics),
-            winner_dep_signature,
-        ];
-        aliased.extend(retention::value_allocation_key(result));
-        delivery.attach_retention(|| retention.callers_for(&aliased));
         // Published cleanly under a non-aborted in-flight entry — the
         // winner's id epoch is consistent, so the caller may proceed to
         // publish its narrower prefix-backfills.
@@ -2731,14 +2728,21 @@ impl SemanticGraphStore {
             read_set_signature: read_set_signature.clone(),
             dispatch_dep_signature,
             self_root_canonicals,
-            walker_diagnostics: Arc::from([]),
+            walker_diagnostics: empty_diagnostics(),
             satisfied_projection,
             retention: None,
             validated_at_generation,
             admission_seq,
             cost_receipt,
         };
-        entry.lease = match self.lease_candidate(family, &entry.result, &entry.walker_diagnostics) {
+        entry.lease = match self.lease_candidate(
+            family,
+            delivery_lease::DeliveredAllocations::read(
+                &entry.result,
+                &entry.walker_diagnostics,
+                &entry.dispatch_dep_signature,
+            ),
+        ) {
             Ok(lease) => lease,
             Err(_) => return false,
         };
@@ -2752,13 +2756,11 @@ impl SemanticGraphStore {
             family::publication_slot_bound(slot, &entry.satisfied_projection, requested_path);
         match self.reserve_memo_candidate(
             &entry,
+            family,
             populated_slots,
             reverse_index_inputs.canonical_count(),
         ) {
-            Ok(retention) => {
-                entry.lease.attach_retention(|| retention.callers());
-                entry.retention = Some(retention);
-            }
+            Ok(retention) => entry.retention = Some(retention),
             Err(_) => return false,
         }
         // Per-family bounded retention: plan the cap eviction against the
@@ -3030,6 +3032,24 @@ pub fn semantic_graph_carrier(
 pub fn empty_signature() -> DepSignature {
     static EMPTY: std::sync::OnceLock<DepSignature> = std::sync::OnceLock::new();
     Arc::clone(EMPTY.get_or_init(|| Arc::from(Vec::new().into_boxed_slice())))
+}
+
+/// The one process-wide empty walker-diagnostic list. Like
+/// [`empty_signature`], it is process-static storage, never charged: a read
+/// with no diagnostics shares it instead of allocating its own.
+pub fn empty_diagnostics() -> Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]> {
+    static EMPTY: std::sync::OnceLock<
+        Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
+    > = std::sync::OnceLock::new();
+    Arc::clone(EMPTY.get_or_init(|| Arc::from(Vec::new().into_boxed_slice())))
+}
+
+/// Whether `allocation` is one of the process-static empty lists, which no
+/// owner charges.
+pub(crate) fn is_static_empty<T: ?Sized>(allocation: &Arc<T>) -> bool {
+    let address = Arc::as_ptr(allocation).cast::<()>();
+    std::ptr::eq(address, Arc::as_ptr(&empty_signature()).cast::<()>())
+        || std::ptr::eq(address, Arc::as_ptr(&empty_diagnostics()).cast::<()>())
 }
 
 // ──────────────────────────────────────────────────────────────────────────

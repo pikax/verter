@@ -323,6 +323,7 @@ mod test_worker_pools;
 mod artifact_root_retention_tests;
 pub(crate) mod compile_output_node;
 pub(crate) mod component_meta_cached_result;
+mod component_meta_footprint;
 pub mod input_basis;
 /// Asynchronous input acquisition to committed-snapshot handoff: one
 /// immutable committed `InputBasis` per acquisition wave, typed

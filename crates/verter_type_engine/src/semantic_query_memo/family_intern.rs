@@ -33,8 +33,22 @@ pub struct InternedResolveCallKey(
     super::node_roots::IdentityNodeRoots,
 );
 
-intern_domain!(RelateMemoKey);
-intern_domain!(ResolveCallKey);
+intern_domain!(RelateMemoKey {
+    fn value_heap_bytes(&self) -> usize {
+        super::family_footprint::relate_payload_heap_bytes(
+            self,
+            &mut verter_session_query::retention::allocation::AliasSet::new(),
+        )
+    }
+});
+intern_domain!(ResolveCallKey {
+    fn value_heap_bytes(&self) -> usize {
+        super::family_footprint::resolve_call_payload_heap_bytes(
+            self,
+            &mut verter_session_query::retention::allocation::AliasSet::new(),
+        )
+    }
+});
 
 impl InternedRelateKey {
     /// Intern `key`; its operands are owned in `arena`, the graph that
@@ -69,6 +83,32 @@ impl InternedResolveCallKey {
         handle
     }
 }
+
+/// The heap a handle owns: its root attachment, once per `aliases`. The
+/// interned record it names is a self-charged allocation.
+macro_rules! interned_key_heap_bytes {
+    ($handle:ty) => {
+        impl $handle {
+            pub(super) fn key_heap_bytes(
+                &self,
+                aliases: &mut verter_session_query::retention::allocation::AliasSet,
+            ) -> usize {
+                self.1 .0.owned_heap_bytes(aliases)
+            }
+        }
+    };
+}
+
+interned_key_heap_bytes!(InternedRelateKey);
+
+impl InternedRelateKey {
+    /// Bytes the interned record this handle names is charged.
+    #[cfg(test)]
+    pub(super) fn record_charge_bytes(&self) -> usize {
+        self.0.record_charge_bytes()
+    }
+}
+interned_key_heap_bytes!(InternedResolveCallKey);
 
 impl Deref for InternedRelateKey {
     type Target = RelateMemoKey;

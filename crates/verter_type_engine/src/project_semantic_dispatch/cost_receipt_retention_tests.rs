@@ -109,3 +109,47 @@ fn a_budget_profile_lives_as_long_as_its_holders() {
     assert!(BudgetProfile::is_interned(&spec));
     assert_eq!(again.spec(), &spec);
 }
+
+/// Profile churn: every interned profile is charged its block while it
+/// lives, the profile table is charged by its capacity, and once the
+/// churned profiles drain the table and its charge return to where they
+/// started.
+#[test]
+fn churned_budget_profiles_are_charged_while_live_and_return_to_baseline() {
+    use super::{BudgetProfile, BudgetProfileSpec, InternedProfile};
+    use verter_session_query::retention::allocation::arc_block_bytes;
+
+    const PROFILES: usize = 2_000;
+    let (capacity_before, backing_before) = BudgetProfile::interner_backing_for_tests();
+    let profiles: Vec<BudgetProfile> = (0..PROFILES)
+        .map(|index| {
+            BudgetProfile::intern(BudgetProfileSpec {
+                work: 9_000_000 + index,
+                ..BudgetProfileSpec::ignored()
+            })
+        })
+        .collect();
+    assert!(profiles
+        .iter()
+        .all(|profile| profile.charge_bytes_for_tests()
+            == arc_block_bytes(std::mem::size_of::<InternedProfile>())));
+    let (capacity, backing) = BudgetProfile::interner_backing_for_tests();
+    assert!(capacity >= PROFILES);
+    assert!(
+        backing
+            >= capacity
+                * (std::mem::size_of::<(BudgetProfileSpec, std::sync::Weak<InternedProfile>)>()
+                    + 1),
+        "the profile table is charged by its capacity: {backing}"
+    );
+    drop(profiles);
+    let (capacity_after, backing_after) = BudgetProfile::interner_backing_for_tests();
+    assert!(
+        capacity_after < PROFILES && capacity_after <= capacity_before.max(1) * 4,
+        "the drained table gives the churn's backing back: {capacity_after}"
+    );
+    assert!(
+        backing_after < backing && backing_after <= backing_before.max(1024),
+        "and its charge with it: {backing_after} (was {backing_before}, peak {backing})"
+    );
+}

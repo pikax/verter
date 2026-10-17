@@ -96,10 +96,10 @@ impl RefusalSummary {
     }
 
     /// The bytes of the summary's own bookkeeping: its block, its table
-    /// slot and eviction-order record, its read's delivery metadata, its
-    /// request prefix's paid lists and the counters of its empty shared
-    /// slices. Its carrier, self-roots and delivered allocations are shared
-    /// allocations, held once through the store's registry; a wide
+    /// slot and eviction-order record, and its request prefix's paid lists.
+    /// Its read's delivery metadata charges itself; its carrier, self-roots
+    /// and delivered allocations are shared allocations, held once through
+    /// the store's registry; a wide
     /// carrier's evidence pages are claimed into this reservation, a page
     /// being charged once however many summaries and candidates share it
     /// ([`verter_session_query::facts::receipt::reserve_retained_with_evidence`]).
@@ -108,13 +108,11 @@ impl RefusalSummary {
         let mut aliases = AliasSet::new();
         arc_block_bytes(std::mem::size_of::<Self>())
             + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
-            + self.read.lease.owned_heap_bytes(&mut aliases)
             + self
                 .prefix
                 .request
                 .as_ref()
                 .map_or(0, |spent| spent.owned_heap_bytes(&mut aliases))
-            + self.shared_parts().empty_slice_bytes()
     }
 
     fn shared_parts(&self) -> super::retention::SharedParts<'_> {
@@ -239,7 +237,6 @@ impl SemanticGraphStore {
         ) {
             RetentionAdmission::Admitted(own) => {
                 let retention = shared.with_own(own);
-                summary.read.lease.attach_retention(|| retention.callers());
                 summary.retention = Some(retention);
             }
             RetentionAdmission::Refused(refusal) => return refuse(refusal),

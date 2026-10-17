@@ -36,20 +36,42 @@ pub trait RecordHeap {
 /// The granule an epoch's storage is charged in.
 const EPOCH_STORAGE_GRANULE: usize = 64 * 1024;
 
-/// Boxcar skips its first buckets: index `i` lives at position `i + 32`,
-/// and a bucket starts at every power-of-two position.
+/// Where boxcar 0.2.14 (the `Cargo.lock` pin) places index `i`, from its
+/// `src/buckets.rs`: `SKIPPED_BUCKETS = 5` and
+/// `SKIPPED_ENTRIES = 2^SKIPPED_BUCKETS - 1`, so `Index::new(i)` stores
+/// `i + SKIPPED_ENTRIES + 1` — index `i` sits at position `i + 32` — and
+/// `Index::location` puts bucket `b` over the positions `[2^b, 2^(b+1))`,
+/// each bucket a boxed slice of `2^b` `vec::raw::Entry<T>` (the value
+/// beside its `AtomicBool` presence flag). A boxcar upgrade must re-check
+/// this model against that file.
 const BOXCAR_FIRST_POSITION: usize = 32;
+
+/// Boxcar 0.2.14's `Buckets::get_or_alloc` (`src/buckets.rs`) eagerly
+/// allocates the NEXT bucket when a write lands on entry
+/// `bucket_len - bucket_len / 8` of the current one (`alloc_bucket_after`):
+/// the next bucket exists from that write on.
+const fn boxcar_eager_entry(bucket_len: usize) -> usize {
+    bucket_len - (bucket_len >> 3)
+}
 
 /// One epoch's storage charge: every table's slot buckets, the records'
 /// own heap and the dedup indexes, pinned against the store's account from
 /// the moment they are allocated until the epoch's last holder drops — the
 /// epoch's retirement releases them. Append-only tables only grow; the
 /// epoch's side maps also shrink.
+///
+/// Growth that fits the published charge takes no lock; a settlement
+/// re-reads the live total after publishing its charge and settles again
+/// when growth landed meanwhile, so a shrink computed from an older total
+/// never leaves the charge below the live storage.
 pub struct EpochStorage {
     account: Arc<OnceLock<Arc<verter_session_query::retention::SemanticRetentionAccount>>>,
     used: AtomicUsize,
     charged: AtomicUsize,
     pin: Mutex<Option<verter_session_query::retention::granular::GranularPin>>,
+    /// Test hook run by a settlement right after it reads the live total.
+    #[cfg(test)]
+    settle_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl EpochStorage {
@@ -64,17 +86,24 @@ impl EpochStorage {
             used: AtomicUsize::new(0),
             charged: AtomicUsize::new(0),
             pin: Mutex::new(None),
+            #[cfg(test)]
+            settle_hook: Mutex::new(None),
         })
     }
 
     /// `bytes` more storage. The account's lock is taken only when the total
     /// crosses the charged granule.
+    ///
+    /// The total is raised before the published charge is read (both
+    /// sequentially consistent), so a growth that skips settlement because
+    /// it fits an older, larger charge is seen by the settlement replacing
+    /// that charge, which re-reads the total after publishing.
     pub fn add(&self, bytes: usize) {
         if bytes == 0 {
             return;
         }
-        let used = self.used.fetch_add(bytes, Ordering::AcqRel) + bytes;
-        if used <= self.charged.load(Ordering::Acquire) {
+        let used = self.used.fetch_add(bytes, Ordering::SeqCst) + bytes;
+        if used <= self.charged.load(Ordering::SeqCst) {
             return;
         }
         self.settle();
@@ -85,7 +114,7 @@ impl EpochStorage {
         if bytes == 0 {
             return;
         }
-        self.used.fetch_sub(bytes, Ordering::AcqRel);
+        self.used.fetch_sub(bytes, Ordering::SeqCst);
         self.settle();
     }
 
@@ -100,19 +129,45 @@ impl EpochStorage {
                 EPOCH_STORAGE_GRANULE,
             )
         });
-        let used = self.used.load(Ordering::Acquire);
-        if used > pin.used() {
-            pin.add(used - pin.used());
-        } else {
-            pin.sub(pin.used() - used);
+        loop {
+            let used = self.used.load(Ordering::SeqCst);
+            #[cfg(test)]
+            {
+                let hook = self.settle_hook.lock().clone();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            }
+            if used > pin.used() {
+                pin.add(used - pin.used());
+            } else {
+                pin.sub(pin.used() - used);
+            }
+            self.charged.store(pin.charged(), Ordering::SeqCst);
+            // Growth that read the previous, larger charge skipped its own
+            // settlement: cover it now.
+            if self.used.load(Ordering::SeqCst) <= pin.charged() {
+                return;
+            }
         }
-        self.charged.store(pin.charged(), Ordering::Release);
     }
 
     /// Bytes currently charged for the epoch's storage.
     #[must_use]
     pub fn charged(&self) -> usize {
-        self.charged.load(Ordering::Acquire)
+        self.charged.load(Ordering::SeqCst)
+    }
+
+    /// The live storage total.
+    #[cfg(test)]
+    pub(crate) fn used(&self) -> usize {
+        self.used.load(Ordering::SeqCst)
+    }
+
+    /// Run `hook` in every settlement right after it reads the live total.
+    #[cfg(test)]
+    pub(crate) fn set_settle_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
+        *self.settle_hook.lock() = hook;
     }
 
     /// Charge the growth of a side map from `before` to `after` buckets of
@@ -168,6 +223,9 @@ pub struct AppendInterner<T> {
     /// The epoch storage charge this table's growth is added to; `None`
     /// for a fixture table outside any store.
     storage: Option<Arc<EpochStorage>>,
+    /// Bit `b` is set once boxcar bucket `b` is charged, so a bucket opened
+    /// either eagerly or by its first write is charged exactly once.
+    charged_buckets: AtomicU64,
 }
 
 impl<T> AppendInterner<T> {
@@ -196,22 +254,35 @@ impl<T> AppendInterner<T> {
             max_index,
             claimed_slots: AtomicU64::new(0),
             storage: None,
+            charged_buckets: AtomicU64::new(0),
         }
     }
 
-    /// The bucket a push at `index` allocated, when it opened one: boxcar
-    /// allocates a bucket of `position` entries — each a record and its
-    /// presence flag — the first time a position that is a power of two
-    /// is written.
-    fn opened_bucket_bytes(index: usize) -> usize {
+    /// The buckets a write at `index` may have opened that this table has
+    /// not charged yet: the bucket holding it, and — at the eager point —
+    /// the next one (see [`BOXCAR_FIRST_POSITION`] and
+    /// [`boxcar_eager_entry`]). Each bucket is `2^b` entries, a record and
+    /// its presence flag each.
+    pub(super) fn opened_bucket_bytes(&self, index: usize) -> usize {
         let position = index + BOXCAR_FIRST_POSITION;
-        if position.is_power_of_two() {
-            verter_session_query::retention::allocation::heap_block_bytes(
-                position * std::mem::size_of::<(T, AtomicBool)>(),
-            )
-        } else {
-            0
+        let bucket = position.ilog2();
+        let bucket_len = 1_usize << bucket;
+        let mut bytes = self.charge_bucket(bucket);
+        if position - bucket_len == boxcar_eager_entry(bucket_len) {
+            bytes += self.charge_bucket(bucket + 1);
         }
+        bytes
+    }
+
+    /// The bytes of bucket `bucket` the first time it is charged, `0` after.
+    fn charge_bucket(&self, bucket: u32) -> usize {
+        let bit = 1_u64 << bucket;
+        if self.charged_buckets.fetch_or(bit, Ordering::AcqRel) & bit != 0 {
+            return 0;
+        }
+        verter_session_query::retention::allocation::heap_block_bytes(
+            (1_usize << bucket) * std::mem::size_of::<(T, AtomicBool)>(),
+        )
     }
 
     #[must_use]
@@ -290,7 +361,7 @@ impl<T> AppendInterner<T> {
         // The stored record — even one a racing duplicate makes redundant —
         // is retained storage from here on.
         if let Some(storage) = &self.storage {
-            storage.add(heap + Self::opened_bucket_bytes(index));
+            storage.add(heap + self.opened_bucket_bytes(index));
         }
         let index_u32 = match u32::try_from(index) {
             Ok(i) if i <= self.max_index => i,

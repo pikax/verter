@@ -203,7 +203,7 @@ impl SemanticGraphStore {
                     lease: entry.lease.clone(),
                     value: entry.result,
                     dep_signature: super::empty_signature(),
-                    walker_diagnostics: Arc::from([]),
+                    walker_diagnostics: super::empty_diagnostics(),
                     cache_suppress: false,
                     fact_status: crate::semantic_query::FactStatus::Complete,
                     receipt: crate::semantic_query::ReadReceipt::Priced(Arc::clone(&entry.receipt)),
@@ -238,7 +238,10 @@ impl SemanticGraphStore {
         let Ok(roots) = self.root_existing_nodes(vec![node, result]) else {
             return;
         };
-        let lease = super::delivery_lease::SemanticDeliveryLease::from_roots(roots);
+        let lease = super::delivery_lease::SemanticDeliveryLease::from_roots(
+            roots,
+            self.retention_account(),
+        );
         // The entry's block, slot and FIFO record, its delivery metadata, and
         // its proof: the fact slice with every fact's owned text and the
         // self-root list. A page of a wide proof is claimed into the same
@@ -250,7 +253,6 @@ impl SemanticGraphStore {
             let mut aliases = AliasSet::new();
             arc_block_bytes(std::mem::size_of::<DeferredEvaluationMemoEntry>())
                 + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
-                + lease.owned_heap_bytes(&mut aliases)
                 + fact_slice_bytes(&evidence.0, &mut aliases)
                 + arc_str_list_bytes(&evidence.1, &mut aliases)
         };

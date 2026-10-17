@@ -43,6 +43,20 @@ fn carrier_charge(carrier: &ReadSetSignature, roots: &Arc<[Arc<str>]>) -> usize 
         + registration_bytes()
 }
 
+/// A relation family keyed by `source`.
+fn relation_family(source: u64) -> FamilyKey {
+    FamilyKey::Relate {
+        key: super::family_intern::InternedRelateKey::intern(
+            None,
+            crate::semantic_query::RelateMemoKey::assignable(
+                crate::semantic_query::SemanticNodeId(source),
+                crate::semantic_query::SemanticNodeId(source + 1),
+                crate::semantic_query::RelationContext::default(),
+            ),
+        ),
+    }
+}
+
 fn stage_relation(
     store: &SemanticGraphStore,
     carrier: &ReadSetSignature,
@@ -73,8 +87,9 @@ fn an_scc_member_shares_the_carrier_charge_and_keeps_it_after_the_root_drains() 
     let root = stage_relation(&store, &carrier, &roots, &receipt);
     let member = stage_relation(&store, &carrier, &roots, &receipt);
 
+    let (root_family, member_family) = (relation_family(0x5C_0001), relation_family(0x5C_0011));
     let root_retention = store
-        .reserve_memo_candidate(&root, 1, 1)
+        .reserve_memo_candidate(&root, &root_family, 1, 1)
         .expect("the root is admitted");
     let carrier_bytes = carrier_charge(&carrier, &roots);
     assert!(
@@ -85,9 +100,9 @@ fn an_scc_member_shares_the_carrier_charge_and_keeps_it_after_the_root_drains() 
     assert!(after_root >= carrier_bytes + root_retention.own_bytes());
 
     let members = store
-        .reserve_scc_batch(&[&member], 1)
+        .reserve_scc_batch(&[(&member_family, &member)], 1)
         .expect("the member's incremental footprint is admitted");
-    let member_own = super::retention::own_reservation_bytes(&member, 1, 1);
+    let member_own = super::retention::own_reservation_bytes(&member, &member_family, 1, 1);
     // What the member newly retains, from its allocations alone: its own
     // bookkeeping and its own (empty) relation-binding value under one
     // registration. The carrier and self-root list are the root's already.
@@ -148,14 +163,95 @@ fn a_refused_candidate_keeps_no_charge_and_no_registration() {
     receipt
         .reserve_retention(&account)
         .expect("the receipt alone fits");
-    let before = account.snapshot().retained_bytes;
+    let before = account.snapshot();
+    // The staged entry's own delivery already holds its value as the
+    // caller's: that pin and registration predate the admission.
+    let registered = store.shared_allocation_registrations_for_tests();
     store
-        .reserve_memo_candidate(&root, 1, 1)
+        .reserve_memo_candidate(&root, &relation_family(0x5C_0021), 1, 1)
         .expect_err("the oversized carrier does not fit, whatever the entry's own size");
+    let after = account.snapshot();
     assert_eq!(
-        account.snapshot().retained_bytes,
-        before,
+        (after.retained_bytes, after.pinned_bytes),
+        (before.retained_bytes, before.pinned_bytes),
         "a refusal leaves nothing charged and nothing registered"
     );
-    assert_eq!(store.shared_allocation_registrations_for_tests(), 0);
+    assert_eq!(
+        store.shared_allocation_registrations_for_tests(),
+        registered
+    );
+}
+
+/// One oversized name shared by a diagnostic and a dependency rail — two
+/// different carriers — is charged once, and stays charged, once, while
+/// either carrier survives the other.
+#[test]
+fn a_name_a_diagnostic_and_a_dependency_rail_share_is_charged_once() {
+    use crate::project_semantic_dispatch::walk::ShallowDiagnostic;
+    use crate::semantic_query::DepVersion;
+    const NAME: usize = 30_000;
+    for diagnostics_first in [true, false] {
+        let account = unbounded_account();
+        let store = SemanticGraphStore::with_account(StoreAccount::new(Arc::clone(&account)));
+        let name: Arc<str> = Arc::from("n".repeat(NAME));
+        let diagnostics: Arc<[ShallowDiagnostic]> =
+            Arc::from(vec![ShallowDiagnostic::UnresolvedSurfaceArm {
+                name: Arc::clone(&name),
+                owner_canonical: Arc::from("/o.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            }]);
+        let dep_signature: crate::semantic_query::DepSignature =
+            Arc::from(vec![(Arc::clone(&name), DepVersion::ProjectGeneration(1))]);
+        let facts: Arc<[FactVersionRef]> = Arc::from(Vec::new());
+        let roots: Arc<[Arc<str>]> = Arc::from(Vec::new());
+        let result = QueryResult::Value(SemanticQueryValue::TypeNode(
+            crate::semantic_query::SemanticNodeId(0),
+        ));
+        let holds = store
+            .hold_shared_allocations(super::retention::SharedParts {
+                facts: &facts,
+                self_roots: &roots,
+                diagnostics: &diagnostics,
+                dep_signature: &dep_signature,
+                result: &result,
+            })
+            .expect("admitted");
+        let charged = account.snapshot().retained_bytes;
+        let name_charge = arc_block_bytes(NAME) + registration_bytes();
+        let without_name = charged - name_charge;
+        assert!(
+            without_name < NAME,
+            "the shared name is charged once, not once per rail: {charged}"
+        );
+        // Drop one rail's charge, keeping the other through a second holder.
+        let (no_diagnostics, no_dependencies) = (
+            crate::semantic_query_memo::empty_diagnostics(),
+            crate::semantic_query_memo::empty_signature(),
+        );
+        let survivor = store
+            .hold_shared_allocations(super::retention::SharedParts {
+                facts: &facts,
+                self_roots: &roots,
+                diagnostics: if diagnostics_first {
+                    &no_diagnostics
+                } else {
+                    &diagnostics
+                },
+                dep_signature: if diagnostics_first {
+                    &dep_signature
+                } else {
+                    &no_dependencies
+                },
+                result: &result,
+            })
+            .expect("shared");
+        drop(holds);
+        assert!(
+            account.snapshot().retained_bytes >= name_charge,
+            "the surviving rail keeps the shared name charged"
+        );
+        drop(survivor);
+        assert_eq!(account.snapshot().retained_bytes, 0);
+        assert_eq!(store.shared_allocation_registrations_for_tests(), 0);
+    }
 }

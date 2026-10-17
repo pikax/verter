@@ -1154,19 +1154,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let walker_diagnostics = carrier
             .map(|carrier| self.connected_limit_diagnostics(carrier, reasons))
-            .unwrap_or_else(|| Arc::from([]));
+            .unwrap_or_else(crate::semantic_query_memo::empty_diagnostics);
         let owned_value = match &value {
             QueryResult::Value(node) => QueryResult::Value(SemanticQueryValue::TypeNode(*node)),
             QueryResult::Error(error) => QueryResult::Error(error.clone()),
             QueryResult::Recursive(node) => QueryResult::Recursive(*node),
         };
+        let dep_signature = empty_signature();
         CacheRead {
             lease: self
                 .graph()
-                .lease_delivery(&owned_value, &walker_diagnostics)
+                .lease_delivery(
+                    crate::semantic_query_memo::delivery_lease::DeliveredAllocations::read(
+                        &owned_value,
+                        &walker_diagnostics,
+                        &dep_signature,
+                    ),
+                )
                 .expect("connected refusal operands are live"),
             value,
-            dep_signature: empty_signature(),
+            dep_signature,
             walker_diagnostics,
             cache_suppress: true,
             fact_status: if projection.is_some_and(|(_, interpretation)| interpretation.is_some()) {
@@ -2787,8 +2794,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 }
 
+/// The process-static empty dependency rail (never charged).
 pub(super) fn empty_signature() -> DepSignature {
-    Arc::from(Vec::new().into_boxed_slice())
+    crate::semantic_query_memo::empty_signature()
 }
 
 /// Test-only fact-injection slot for the dispatch's
@@ -2973,7 +2981,11 @@ fn counted_value_domain_conversion_preserves_delivery_ownership() {
             crate::semantic_query_memo::empty_signature(),
         );
         read.lease = graph
-            .lease_delivery(&QueryResult::Value(SemanticQueryValue::TypeNode(node)), &[])
+            .lease_delivery(
+                crate::semantic_query_memo::delivery_lease::DeliveredAllocations::value(
+                    &QueryResult::Value(SemanticQueryValue::TypeNode(node)),
+                ),
+            )
             .unwrap();
         narrow_value_cache_read(widen_node_cache_read(read))
     });
@@ -3761,7 +3773,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut read = self.execute_via_cold_build_helper_owned(key, publication, operand_evidence);
         read.lease = self
             .graph()
-            .lease_delivery(&read.value, &read.walker_diagnostics)
+            .lease_delivery(
+                crate::semantic_query_memo::delivery_lease::DeliveredAllocations::read(
+                    &read.value,
+                    &read.walker_diagnostics,
+                    &read.dep_signature,
+                ),
+            )
             .expect("dispatch delivery operands are live");
         read
     }
@@ -3797,7 +3815,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     lease: Default::default(),
                     value: QueryResult::Error(error),
                     dep_signature: empty_signature(),
-                    walker_diagnostics: Arc::from([]),
+                    walker_diagnostics: crate::semantic_query_memo::empty_diagnostics(),
                     cache_suppress: true,
                     fact_status,
                     receipt: crate::semantic_query::ReadReceipt::Unpriced,
