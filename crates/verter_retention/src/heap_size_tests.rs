@@ -92,3 +92,51 @@ fn an_owned_tree_charges_its_whole_tree_once_until_its_last_holder_drops() {
     drop(caller);
     assert_eq!(account.snapshot().total_bytes(), 0);
 }
+
+/// A recursive chain whose own drop is iterative, so a deep fixture costs
+/// heap on every side of the test.
+#[derive(HeapSize)]
+#[heap_size(iterative)]
+struct Chain {
+    text: String,
+    next: Option<Arc<Chain>>,
+}
+
+impl Drop for Chain {
+    fn drop(&mut self) {
+        let mut next = self.next.take();
+        while let Some(link) = next {
+            next = Arc::try_unwrap(link)
+                .ok()
+                .and_then(|mut chain| chain.next.take());
+        }
+    }
+}
+
+/// An iterative tree is measured from the meter's work-list: a chain far
+/// deeper than a small stack could recurse through measures exactly.
+#[test]
+fn an_iterative_tree_measures_a_deep_chain_on_a_small_stack() {
+    const DEPTH: usize = 50_000;
+    let mut chain = Chain {
+        text: String::with_capacity(8),
+        next: None,
+    };
+    for _ in 0..DEPTH {
+        chain = Chain {
+            text: String::with_capacity(8),
+            next: Some(Arc::new(chain)),
+        };
+    }
+    let expected =
+        (DEPTH + 1) * heap_block_bytes(8) + DEPTH * arc_block_bytes(std::mem::size_of::<Chain>());
+    let measured = std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024)
+            .spawn_scoped(scope, || footprint(&chain).bytes)
+            .expect("spawned")
+            .join()
+            .expect("measured without overflowing")
+    });
+    assert_eq!(measured, expected);
+}

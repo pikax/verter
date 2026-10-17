@@ -34,22 +34,36 @@ use super::owned::{Measured, Owned, OwnedSlice, OwnedStr};
 /// A value whose heap can be measured exhaustively.
 pub trait HeapSize {
     /// Heap this value keeps reachable beyond its inline bytes.
-    fn heap_size(&self, meter: &mut HeapMeter<'_>) -> usize;
+    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize;
 }
 
-/// One measurement: the raw `Arc` allocations already counted, and the
-/// handle set the owned allocations the tree reaches are offered to.
-pub struct HeapMeter<'a> {
-    handles: &'a mut AliasSet,
+/// One node of a recursive tree, measured from an explicit work-list rather
+/// than the call stack (`#[heap_size(iterative)]`): a deeply nested tree
+/// costs heap, never stack.
+pub trait IterativeNode {
+    /// This node's own heap; each nested node of the same tree is deferred
+    /// to the work-list as its `heap_size` is reached.
+    fn node_heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize;
+}
+
+/// One measurement over a tree borrowed for `'t`: the raw `Arc` allocations
+/// already counted, the handle set the owned allocations it reaches are
+/// offered to, and the iterative nodes still to measure.
+pub struct HeapMeter<'h, 't> {
+    handles: &'h mut AliasSet,
     raw: FxHashSet<usize>,
+    pending: Vec<&'t dyn IterativeNode>,
+    walking: bool,
 }
 
-impl<'a> HeapMeter<'a> {
+impl<'h, 't> HeapMeter<'h, 't> {
     /// A measurement offering owned handles to `handles`.
-    pub fn new(handles: &'a mut AliasSet) -> Self {
+    pub fn new(handles: &'h mut AliasSet) -> Self {
         Self {
             handles,
             raw: FxHashSet::default(),
+            pending: Vec::new(),
+            walking: false,
         }
     }
 
@@ -62,6 +76,22 @@ impl<'a> HeapMeter<'a> {
     pub fn handles(&mut self) -> &mut AliasSet {
         self.handles
     }
+
+    /// Measure `node` from the work-list: inside a walk it is queued and
+    /// counted when popped; otherwise it starts the walk and drains it.
+    pub fn iterate(&mut self, node: &'t dyn IterativeNode) -> usize {
+        if self.walking {
+            self.pending.push(node);
+            return 0;
+        }
+        self.walking = true;
+        let mut total = node.node_heap_size(self);
+        while let Some(next) = self.pending.pop() {
+            total += next.node_heap_size(self);
+        }
+        self.walking = false;
+        total
+    }
 }
 
 /// `value`'s heap measured on its own: the bytes and the owned allocations
@@ -73,6 +103,12 @@ pub fn footprint(value: &impl HeapSize) -> super::Footprint {
     super::Footprint {
         bytes,
         handles: handles.take_handles(),
+    }
+}
+
+impl<T: HeapSize + ?Sized> HeapSize for &T {
+    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
+        (**self).heap_size(meter)
     }
 }
 
@@ -104,7 +140,7 @@ macro_rules! inline_heap_size {
     ($($t:ty),* $(,)?) => {
         $(impl HeapSize for $t {
             #[inline]
-            fn heap_size(&self, _meter: &mut HeapMeter<'_>) -> usize {
+            fn heap_size<'t>(&'t self, _meter: &mut HeapMeter<'_, 't>) -> usize {
                 0
             }
         })*
@@ -135,57 +171,57 @@ inline_heap_size!(
 );
 
 impl<T: Copy, const N: usize> HeapSize for [T; N] {
-    fn heap_size(&self, _meter: &mut HeapMeter<'_>) -> usize {
+    fn heap_size<'t>(&'t self, _meter: &mut HeapMeter<'_, 't>) -> usize {
         0
     }
 }
 
 impl<T: ?Sized> HeapSize for std::marker::PhantomData<T> {
-    fn heap_size(&self, _meter: &mut HeapMeter<'_>) -> usize {
+    fn heap_size<'t>(&'t self, _meter: &mut HeapMeter<'_, 't>) -> usize {
         0
     }
 }
 
 impl HeapSize for String {
-    fn heap_size(&self, _meter: &mut HeapMeter<'_>) -> usize {
+    fn heap_size<'t>(&'t self, _meter: &mut HeapMeter<'_, 't>) -> usize {
         heap_block_bytes(self.capacity())
     }
 }
 
 impl HeapSize for Box<str> {
-    fn heap_size(&self, _meter: &mut HeapMeter<'_>) -> usize {
+    fn heap_size<'t>(&'t self, _meter: &mut HeapMeter<'_, 't>) -> usize {
         heap_block_bytes(self.len())
     }
 }
 
 impl<T: HeapSize> HeapSize for Box<T> {
-    fn heap_size(&self, meter: &mut HeapMeter<'_>) -> usize {
+    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
         heap_block_bytes(std::mem::size_of::<T>()) + (**self).heap_size(meter)
     }
 }
 
 impl<T: HeapSize> HeapSize for Box<[T]> {
-    fn heap_size(&self, meter: &mut HeapMeter<'_>) -> usize {
+    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
         heap_block_bytes(std::mem::size_of_val::<[T]>(self))
             + self.iter().map(|item| item.heap_size(meter)).sum::<usize>()
     }
 }
 
 impl<T: HeapSize> HeapSize for Vec<T> {
-    fn heap_size(&self, meter: &mut HeapMeter<'_>) -> usize {
+    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
         heap_block_bytes(self.capacity() * std::mem::size_of::<T>())
             + self.iter().map(|item| item.heap_size(meter)).sum::<usize>()
     }
 }
 
 impl<T: HeapSize> HeapSize for Option<T> {
-    fn heap_size(&self, meter: &mut HeapMeter<'_>) -> usize {
+    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
         self.as_ref().map_or(0, |value| value.heap_size(meter))
     }
 }
 
 impl<T: HeapSize, E: HeapSize> HeapSize for Result<T, E> {
-    fn heap_size(&self, meter: &mut HeapMeter<'_>) -> usize {
+    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
         match self {
             Ok(value) => value.heap_size(meter),
             Err(error) => error.heap_size(meter),
@@ -194,19 +230,19 @@ impl<T: HeapSize, E: HeapSize> HeapSize for Result<T, E> {
 }
 
 impl<A: HeapSize, B: HeapSize> HeapSize for (A, B) {
-    fn heap_size(&self, meter: &mut HeapMeter<'_>) -> usize {
+    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
         self.0.heap_size(meter) + self.1.heap_size(meter)
     }
 }
 
 impl<A: HeapSize, B: HeapSize, C: HeapSize> HeapSize for (A, B, C) {
-    fn heap_size(&self, meter: &mut HeapMeter<'_>) -> usize {
+    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
         self.0.heap_size(meter) + self.1.heap_size(meter) + self.2.heap_size(meter)
     }
 }
 
 impl HeapSize for Arc<str> {
-    fn heap_size(&self, meter: &mut HeapMeter<'_>) -> usize {
+    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
         if meter.first(self) {
             arc_block_bytes(self.len())
         } else {
@@ -216,7 +252,7 @@ impl HeapSize for Arc<str> {
 }
 
 impl<T: HeapSize> HeapSize for Arc<[T]> {
-    fn heap_size(&self, meter: &mut HeapMeter<'_>) -> usize {
+    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
         if !meter.first(self) {
             return 0;
         }
@@ -226,7 +262,7 @@ impl<T: HeapSize> HeapSize for Arc<[T]> {
 }
 
 impl<T: HeapSize> HeapSize for Arc<T> {
-    fn heap_size(&self, meter: &mut HeapMeter<'_>) -> usize {
+    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
         if !meter.first(self) {
             return 0;
         }
@@ -235,7 +271,7 @@ impl<T: HeapSize> HeapSize for Arc<T> {
 }
 
 impl<K: HeapSize, V: HeapSize, S> HeapSize for std::collections::HashMap<K, V, S> {
-    fn heap_size(&self, meter: &mut HeapMeter<'_>) -> usize {
+    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
         hash_table_bytes(self.capacity(), std::mem::size_of::<(K, V)>())
             + self
                 .iter()
@@ -245,7 +281,7 @@ impl<K: HeapSize, V: HeapSize, S> HeapSize for std::collections::HashMap<K, V, S
 }
 
 impl<T: HeapSize, S> HeapSize for std::collections::HashSet<T, S> {
-    fn heap_size(&self, meter: &mut HeapMeter<'_>) -> usize {
+    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
         hash_table_bytes(self.capacity(), std::mem::size_of::<T>())
             + self.iter().map(|item| item.heap_size(meter)).sum::<usize>()
     }
@@ -255,7 +291,7 @@ impl<A: smallvec::Array> HeapSize for smallvec::SmallVec<A>
 where
     A::Item: HeapSize,
 {
-    fn heap_size(&self, meter: &mut HeapMeter<'_>) -> usize {
+    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
         let spilled = if self.spilled() {
             heap_block_bytes(self.capacity() * std::mem::size_of::<A::Item>())
         } else {
@@ -267,21 +303,21 @@ where
 
 impl HeapSize for OwnedStr {
     /// Charged by its own cell.
-    fn heap_size(&self, meter: &mut HeapMeter<'_>) -> usize {
+    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
         self.offer(meter.handles())
     }
 }
 
 impl<T: Measured> HeapSize for OwnedSlice<T> {
     /// Charged by its own cell.
-    fn heap_size(&self, meter: &mut HeapMeter<'_>) -> usize {
+    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
         self.offer(meter.handles())
     }
 }
 
 impl<T: Measured> HeapSize for Owned<T> {
     /// Charged by its own cell.
-    fn heap_size(&self, meter: &mut HeapMeter<'_>) -> usize {
+    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
         self.offer(meter.handles())
     }
 }

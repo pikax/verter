@@ -141,17 +141,63 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             ))
         }
     };
+    if iterative(&input.attrs)? {
+        return Ok(quote! {
+            impl #impl_generics ::verter_retention::heap_size::IterativeNode for #ident #ty_generics
+                #where_clause
+            {
+                #[allow(unused_variables, clippy::let_and_return)]
+                fn node_heap_size<'t>(
+                    &'t self,
+                    meter: &mut ::verter_retention::heap_size::HeapMeter<'_, 't>,
+                ) -> usize {
+                    #body
+                }
+            }
+
+            impl #impl_generics ::verter_retention::heap_size::HeapSize for #ident #ty_generics
+                #where_clause
+            {
+                fn heap_size<'t>(
+                    &'t self,
+                    meter: &mut ::verter_retention::heap_size::HeapMeter<'_, 't>,
+                ) -> usize {
+                    meter.iterate(self)
+                }
+            }
+        });
+    }
     Ok(quote! {
         impl #impl_generics ::verter_retention::heap_size::HeapSize for #ident #ty_generics
             #where_clause
         {
             #[allow(unused_variables, clippy::let_and_return)]
-            fn heap_size(
-                &self,
-                meter: &mut ::verter_retention::heap_size::HeapMeter<'_>,
+            fn heap_size<'t>(
+                &'t self,
+                meter: &mut ::verter_retention::heap_size::HeapMeter<'_, 't>,
             ) -> usize {
                 #body
             }
         }
     })
+}
+
+/// Whether the container carries `#[heap_size(iterative)]`: a recursive
+/// tree measured from the meter's work-list, never the call stack.
+fn iterative(attrs: &[syn::Attribute]) -> syn::Result<bool> {
+    let mut iterative = false;
+    for attr in attrs {
+        if !attr.path().is_ident("heap_size") {
+            continue;
+        }
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("iterative") {
+                iterative = true;
+                Ok(())
+            } else {
+                Err(meta.error("expected `iterative`"))
+            }
+        })?;
+    }
+    Ok(iterative)
 }
