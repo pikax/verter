@@ -111,6 +111,13 @@ pub(super) struct MemoEntry {
     /// `warm_publish_one_if_absent` / the test publish helpers — the
     /// only paths that create a `MemoEntry`.
     pub(super) admission_seq: u64,
+    /// Whether this candidate's registrations are in the store's reverse
+    /// index. A published candidate is registered the first time the
+    /// reverse index is read
+    /// ([`SemanticGraphStore::index_unregistered_candidates_locked`]), so a
+    /// candidate displaced or evicted before then has no registration to
+    /// prune.
+    pub(super) reverse_indexed: bool,
     /// What computing this candidate cost: the receipt every read of it
     /// replays, so a warm read charges its consumer what the cold build
     /// charged. Shared by the backfills and SCC members the same build
@@ -1847,6 +1854,18 @@ impl FamilySlots {
     /// accounting). Used by `invalidate_canonical` to drop only those
     /// candidates whose fact rail genuinely references the touched
     /// canonical, leaving unrelated overlay candidates intact.
+    /// Visit every candidate in every slot, mutably, with its slot.
+    pub(super) fn for_each_candidate_mut(
+        &mut self,
+        mut visit: impl FnMut(ModeSlot, &mut MemoEntry),
+    ) {
+        for slot in ALL_MODE_SLOTS {
+            for entry in self.slot_list_mut(*slot).iter_mut() {
+                visit(*slot, entry);
+            }
+        }
+    }
+
     pub(super) fn retain_candidates_in_slot_mut<F>(&mut self, slot: ModeSlot, mut keep: F)
     where
         F: FnMut(&MemoEntry) -> bool,
