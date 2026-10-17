@@ -201,6 +201,61 @@ fn initializer_chains_500_deep_answer_cold_and_warm_on_a_one_mebibyte_stack() {
     });
 }
 
+/// A chain of 500 constants each initialized by a call over the one before
+/// evaluates on a 1 MiB thread, cold and warm alike: each constant's
+/// initializer evaluates as its `typeof`'s frame, which needs the `typeof`
+/// of the value its argument names from the runtime instead of evaluating
+/// it in place.
+///
+/// TypeScript 7.0.2, `--strict` and with `strictNullChecks` and
+/// `noImplicitAny` off: `typeof y500` is `"ok"`.
+#[test]
+fn call_initializer_chains_500_deep_answer_cold_and_warm_on_a_one_mebibyte_stack() {
+    in_a_fresh_process(test_path!(), || {
+        let mut source =
+            String::from("declare function id<T>(x: T): T;\nconst y0 = \"ok\" as const;\n");
+        for level in 1..=500 {
+            source.push_str(&format!("const y{level} = id(y{});\n", level - 1));
+        }
+        let displays = on_a_one_mebibyte_stack(move || {
+            assert_eq!(
+                evaluated_mismatches(&source, &[("typeof y500", "\"ok\"")]),
+                Vec::<String>::new()
+            );
+            cold_and_warm_displays(&source, "typeof y500")
+        });
+        assert_eq!(displays[0], displays[1], "cold and warm answer alike");
+    });
+}
+
+/// A chain of 500 functions each returning the type the one before returns
+/// evaluates on a 1 MiB thread, cold and warm alike: a function's `typeof`
+/// lowers its signatures one at a time as its frame's projections, which
+/// need the instantiations and `typeof`s they reach from the runtime.
+///
+/// TypeScript 7.0.2, `--strict` and with `strictNullChecks` and
+/// `noImplicitAny` off: `ReturnType<typeof h500>` is `"ok"`.
+#[test]
+fn signature_chains_500_deep_answer_cold_and_warm_on_a_one_mebibyte_stack() {
+    in_a_fresh_process(test_path!(), || {
+        let mut source = String::from("function h0(): \"ok\" { return \"ok\"; }\n");
+        for level in 1..=500 {
+            source.push_str(&format!(
+                "declare function h{level}(): ReturnType<typeof h{}>;\n",
+                level - 1
+            ));
+        }
+        let displays = on_a_one_mebibyte_stack(move || {
+            assert_eq!(
+                evaluated_mismatches(&source, &[("ReturnType<typeof h500>", "\"ok\"")]),
+                Vec::<String>::new()
+            );
+            cold_and_warm_displays(&source, "ReturnType<typeof h500>")
+        });
+        assert_eq!(displays[0], displays[1], "cold and warm answer alike");
+    });
+}
+
 /// A chain alternating a member projection, an instantiation, a flow return
 /// and a call at every level — `g<i>` returns `id(b["v"])` over
 /// `b: B<i-1>`, and `B<i>` projects `ReturnType<typeof g<i>>` — answers on
