@@ -400,25 +400,3 @@ impl super::CanonicalTypeSubstitution {
         self.0.offer(aliases) + self.1 .0.owned_heap_bytes(aliases)
     }
 }
-
-impl super::PendingSubstitutionFrame {
-    /// The frame's pair list.
-    pub(crate) fn key_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
-        let Self { pairs } = self;
-        arc_slice_block_bytes(pairs, aliases).unwrap_or(0)
-    }
-}
-
-impl super::ConditionalPendingSubstitution {
-    /// Both branch frames; the distribution parameter is a node id.
-    pub(crate) fn key_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
-        let Self {
-            true_branch,
-            false_branch,
-            distribution,
-        } = self;
-        true_branch.key_heap_bytes(aliases)
-            + false_branch.key_heap_bytes(aliases)
-            + copy_inline(distribution)
-    }
-}

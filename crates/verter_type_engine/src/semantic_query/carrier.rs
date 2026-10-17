@@ -66,11 +66,11 @@ pub(crate) type TypeOfHead<'a> = (&'a ValueRootKey, &'a OwnedSlice<OwnedStr>);
 
 /// Borrowed head view of a [`SemanticNodeData::BareRef`] carrier —
 /// `(name, scope)`, NEVER its `type_args`.
-pub(crate) type BareRefHead<'a> = (&'a Arc<str>, &'a NodeScopeId);
+pub(crate) type BareRefHead<'a> = (&'a str, &'a NodeScopeId);
 
 /// Borrowed head view of a [`SemanticNodeData::ImportType`] carrier —
 /// `(specifier, qualifier, typeof_query)`, NEVER its `type_args`.
-pub(crate) type ImportTypeHead<'a> = (&'a Arc<str>, &'a OwnedSlice<OwnedStr>, bool);
+pub(crate) type ImportTypeHead<'a> = (&'a str, &'a OwnedSlice<OwnedStr>, bool);
 
 /// Deferred `typeof value.path<args>` carrier payload.
 ///
@@ -80,7 +80,8 @@ pub(crate) type ImportTypeHead<'a> = (&'a Arc<str>, &'a OwnedSlice<OwnedStr>, bo
 /// each already structurally lowered. Empty `type_args` is a bare `typeof`.
 /// Mirrors [`verter_type_expr::ValueRef::type_args`]; carried unresolved so
 /// the structural lowerer applies no instantiation at lowering time.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+/// No public copy: its argument list is lent only by borrow.
+#[derive(PartialEq, Eq, Hash, Debug)]
 pub struct TypeOfCarrier {
     value_root: ValueRootKey,
     path: OwnedSlice<OwnedStr>,
@@ -187,7 +188,8 @@ impl TypeOfNominalCarrier {
 /// structurally lowered (empty for a bare `Foo`). Carried unresolved so the
 /// query-free structural lowerer can represent `Foo<Arg>` without performing
 /// the eager `InstantiationRef` resolution.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+/// No public copy: its name and argument list are lent only by borrow.
+#[derive(PartialEq, Eq, Hash, Debug)]
 pub struct BareRefCarrier {
     name: Arc<str>,
     scope: NodeScopeId,
@@ -203,7 +205,7 @@ impl BareRefCarrier {
         }
     }
 
-    fn name(&self) -> &Arc<str> {
+    fn name(&self) -> &str {
         &self.name
     }
 
@@ -235,7 +237,8 @@ impl BareRefCarrier {
 /// value-export namespace), `false` for `import("…")` in type position.
 /// Carried unresolved so the structural graph never performs module
 /// resolution at lowering time.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+/// No public copy: its specifier and argument list are lent only by borrow.
+#[derive(PartialEq, Eq, Hash, Debug)]
 pub struct ImportTypeCarrier {
     specifier: Arc<str>,
     qualifier: OwnedSlice<OwnedStr>,
@@ -258,7 +261,7 @@ impl ImportTypeCarrier {
         }
     }
 
-    fn specifier(&self) -> &Arc<str> {
+    fn specifier(&self) -> &str {
         &self.specifier
     }
 

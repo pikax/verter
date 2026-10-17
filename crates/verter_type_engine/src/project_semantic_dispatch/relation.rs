@@ -74,6 +74,7 @@
 
 use std::sync::Arc;
 use verter_session_query::source::demand::ExpressionSourceDemand as _;
+use verter_type_expr::OwnedStr;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -820,7 +821,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let infer = graph.intern_node(SemanticNodeData::Infer {
-            name: Arc::from("CyclicBinding"),
+            name: verter_type_expr::OwnedStr::from("CyclicBinding"),
             binder: graph.alloc_infer_binder_id(),
             constraint: None,
         });
@@ -891,7 +892,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let infer = graph.intern_node(SemanticNodeData::Infer {
-            name: Arc::from("MixedCyclicBinding"),
+            name: verter_type_expr::OwnedStr::from("MixedCyclicBinding"),
             binder: graph.alloc_infer_binder_id(),
             constraint: None,
         });
@@ -943,7 +944,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let unknown = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
         let infer = graph.intern_node(SemanticNodeData::Infer {
-            name: Arc::from("SubstitutionEdgeBinding"),
+            name: verter_type_expr::OwnedStr::from("SubstitutionEdgeBinding"),
             binder: graph.alloc_infer_binder_id(),
             constraint: None,
         });
@@ -4451,7 +4452,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let graph = self.graph();
         if let Some(spec) = self.reverse_homomorphic_spec(target) {
             let name = match graph.node_data(spec.base_infer).as_deref() {
-                Some(SemanticNodeData::Infer { name, .. }) => Arc::clone(name),
+                Some(SemanticNodeData::Infer { name, .. }) => Arc::<str>::from(name),
                 _ => return None,
             };
             return Some(InferPatternInfo::new(
@@ -4469,7 +4470,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 graph,
                 vec![InferParamSite {
                     node: target,
-                    name: Arc::clone(name),
+                    name: Arc::<str>::from(name),
                     priority: InferenceCandidatePriority::NakedTypeParameter,
                 }],
                 None,
@@ -4483,7 +4484,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .filter_map(|node| match graph.node_data(node).as_deref() {
                 Some(SemanticNodeData::Infer { name, .. }) => Some(InferParamSite {
                     node,
-                    name: Arc::clone(name),
+                    name: Arc::<str>::from(name),
                     priority: InferenceCandidatePriority::Argument,
                 }),
                 _ => None,
@@ -9723,7 +9724,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         target_data: &SemanticNodeData,
         bindings: &[InferBinding],
     ) -> Option<RelationResult> {
-        fn skeleton_comparable(quasis: &[Arc<str>], expressions: &[SemanticNodeId]) -> bool {
+        fn skeleton_comparable(quasis: &[OwnedStr], expressions: &[SemanticNodeId]) -> bool {
             quasis.len() == expressions.len() + 1
         }
         /// Whether `text` is producible from the quasi skeleton with
@@ -9731,7 +9732,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         /// string. Leftmost placement of each middle quasi is complete:
         /// both candidate remainders are suffixes of the same text, so
         /// the final `ends_with` verdict is placement-independent.
-        fn skeleton_matches(text: &str, quasis: &[Arc<str>]) -> bool {
+        fn skeleton_matches(text: &str, quasis: &[OwnedStr]) -> bool {
             let first = quasis.first().map(|q| q.as_ref()).unwrap_or("");
             let last = quasis.last().map(|q| q.as_ref()).unwrap_or("");
             if quasis.len() == 1 {
@@ -12924,7 +12925,7 @@ trait RelationDemandDriver {
     ) -> Option<Vec<SemanticNodeId>>;
     fn reduce_template_literal_nodes(
         &self,
-        quasis: &[Arc<str>],
+        quasis: &[OwnedStr],
         args: &[SemanticNodeId],
         eval_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Result<SemanticNodeId, crate::semantic_query::PartialReasonSet>;
@@ -13175,7 +13176,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> RelationDemandDriver
     }
     fn reduce_template_literal_nodes(
         &self,
-        quasis: &[Arc<str>],
+        quasis: &[OwnedStr],
         args: &[SemanticNodeId],
         eval_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Result<SemanticNodeId, crate::semantic_query::PartialReasonSet> {
@@ -13582,7 +13583,7 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
     }
     fn reduce_template_literal_nodes(
         &self,
-        quasis: &[Arc<str>],
+        quasis: &[OwnedStr],
         args: &[SemanticNodeId],
         eval_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Result<SemanticNodeId, crate::semantic_query::PartialReasonSet> {

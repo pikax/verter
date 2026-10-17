@@ -931,7 +931,7 @@ fn ntuple(
         .into_iter()
         .map(
             |(label, value)| verter_type_engine::semantic_query::TupleElement {
-                label: label.map(Arc::from),
+                label: label.map(verter_type_expr::OwnedStr::from),
                 value,
                 optional: false,
                 rest: false,
@@ -1138,7 +1138,7 @@ fn snippet_carrier_open_generic_params_is_present_bindingless() {
             param_index: 0,
             constraint: None,
             default: None,
-            display_name: Arc::from("Params"),
+            display_name: verter_type_expr::OwnedStr::from("Params"),
         },
     );
     let snippet = nsnippet(&graph, vec![open]);

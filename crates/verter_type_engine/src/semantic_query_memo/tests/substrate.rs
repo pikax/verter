@@ -85,7 +85,7 @@ fn release_type_param(canonical: &str, hash: u8, name: &str) -> SemanticNodeData
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from(name),
+        display_name: verter_type_expr::OwnedStr::from(name),
     }
 }
 
@@ -513,7 +513,7 @@ fn intern_typeparam_display_name_excluded_from_identity() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from(display),
+        display_name: verter_type_expr::OwnedStr::from(display),
     };
     let id1 = store.intern_node(mk("T"));
     let id2 = store.intern_node(mk("TRenamed"));
@@ -718,7 +718,7 @@ fn node_arena_invalidation_preserves_global_scope() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("Param_A"),
+        display_name: verter_type_expr::OwnedStr::from("Param_A"),
     };
     let file_b_payload = SemanticNodeData::TypeParam {
         decl: DeclIdentity {
@@ -730,7 +730,7 @@ fn node_arena_invalidation_preserves_global_scope() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("Param_B"),
+        display_name: verter_type_expr::OwnedStr::from("Param_B"),
     };
 
     let global_id_first = store.intern_node_with_scope(global_payload(), NodeScopeId::Global);
@@ -904,7 +904,7 @@ fn many_distinct_relations_under_tiny_retention_keep_operand_only_residency() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from(name.as_str()),
+        display_name: verter_type_expr::OwnedStr::from(name.as_str()),
     };
     let pairs: Vec<(SemanticNodeId, SemanticNodeId)> = (0..RELATIONS)
         .map(|i| {

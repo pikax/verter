@@ -1157,7 +1157,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             )),
             SemanticQueryKey::TemplateLiteralReduce { pattern, args, .. } => {
                 graph.intern_node(SemanticNodeData::TemplateLiteral {
-                    quasis: Arc::clone(pattern),
+                    quasis: (*pattern).clone(),
                     expressions: crate::semantic_query::PayloadArray::from(Arc::clone(args)),
                 })
             }
@@ -5337,7 +5337,7 @@ pub fn resolve_decl_key(
 pub fn node_data_for(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     node: SemanticNodeId,
-) -> Option<Arc<SemanticNodeData>> {
+) -> Option<crate::semantic_query_memo::NodeData> {
     graph.node_data(node)
 }
 
@@ -5347,7 +5347,7 @@ pub fn node_data_for(
 pub(crate) fn node_data_for(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     node: SemanticNodeId,
-) -> Option<Arc<SemanticNodeData>> {
+) -> Option<crate::semantic_query_memo::NodeData> {
     graph.node_data(node)
 }
 

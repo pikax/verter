@@ -1709,7 +1709,7 @@ impl VerterHost {
                 // node's output + diagnostics, which are identical in shape
                 // across modes.
                 struct WarmHit {
-                    products: crate::types::CompileProducts,
+                    products: verter_retention::heap_size::OwnedTree<crate::types::CompileProducts>,
                     diagnostics: DiagnosticsSnapshot,
                 }
                 let warm_hit: Option<WarmHit> = match actual_mode {
@@ -1799,7 +1799,9 @@ impl VerterHost {
                     // falls through to a cold recompute that produces the
                     // missing surface.
                     let serve = CompileServe {
-                        products: served_products_from_cached(hit.products),
+                        products: served_products_from_cached(
+                            crate::types::CompileProducts::clone(&hit.products),
+                        ),
                         meta: hit_meta,
                         diagnostics: hit.diagnostics,
                         stale: false,

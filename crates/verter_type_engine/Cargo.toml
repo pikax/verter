@@ -40,6 +40,7 @@ verter_identity = { path = "../verter_identity" }
 verter_language = { path = "../verter_language" }
 verter_no_typeexpr = { workspace = true }
 verter_session_query = { workspace = true }
+verter_retention = { workspace = true }
 verter_span = { path = "../verter_span" }
 verter_type_expr = { workspace = true }
 arc-swap = "1.9"

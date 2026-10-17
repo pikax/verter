@@ -595,14 +595,14 @@ impl CallValue {
         let mut clause_params = Vec::with_capacity(type_parameters.len());
         for decl in type_parameters.iter() {
             let param = match decl.default {
-                None => CalleeClauseParam::bare(Arc::clone(&decl.name)),
+                None => CalleeClauseParam::bare(Arc::<str>::from(&decl.name)),
                 Some(default) => {
                     let inference = ClauseParamInference::at_call(
                         site,
                         dispatch.first_signature_param_occurrence(&params, decl.name.as_ref()),
                     );
                     match CalleeClauseParam::with_default(
-                        Arc::clone(&decl.name),
+                        Arc::<str>::from(&decl.name),
                         site,
                         inference,
                         || Some(default),

@@ -6,7 +6,15 @@ use verter_span::Span;
 
 /// Complete template analysis for an SFC.
 /// Populated after compilation by converting raw template data from `verter_compiler`.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct TemplateAnalysisSnapshot {
     /// Components used in the template.
@@ -123,7 +131,16 @@ pub struct TemplateAnalysisSnapshot {
 }
 
 /// Severity of a [`TemplateExpressionDiagnostic`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum TemplateDiagnosticSeverity {
     /// A hard error.
@@ -141,7 +158,7 @@ pub enum TemplateDiagnosticSeverity {
 /// Serialized with the module's flat-span wire convention
 /// (`spanStart`/`spanEnd`, no nested `span` object) via the manual impls
 /// below.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, verter_retention::heap_size::HeapSize)]
 pub struct TemplateExpressionDiagnostic {
     /// Severity.
     pub severity: TemplateDiagnosticSeverity,
@@ -154,11 +171,21 @@ pub struct TemplateExpressionDiagnostic {
 }
 
 /// Index into [`TemplateAnalysisSnapshot::expression_records`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub struct TemplateExpressionLocator(pub u32);
 
 /// One parsed typed template-expression record.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, verter_retention::heap_size::HeapSize)]
 pub struct TemplateExpressionRecord {
     pub span: Span,
     pub expression: verter_type_expr::IndexedValueExpression,
@@ -188,7 +215,15 @@ impl TemplateAnalysisSnapshot {
 }
 
 /// A Svelte `{#snippet name(params)}` declaration (typed template IR).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub struct SnippetDefinition {
     /// Snippet name (`"row"`, `"header"`).
     pub name: String,
@@ -202,7 +237,15 @@ pub struct SnippetDefinition {
 /// A Svelte element directive attribute (`use:action`, `transition:fn`,
 /// `bind:prop`, `class:name`, `style:prop`, `on:event`, `let:item`, …) as
 /// typed template IR. Powers the D6 directive-keyword doc hovers.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub struct SvelteDirectiveInfo {
     /// The keyword (`use`, `transition`, `in`, `out`, `animate`, `bind`,
     /// `class`, `style`, `on`, `let`, or an unrecognised prefix verbatim).
@@ -221,7 +264,7 @@ pub struct SvelteDirectiveInfo {
 }
 
 /// A component usage in a template with prop details.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, verter_retention::heap_size::HeapSize)]
 pub struct TemplateComponentUsage {
     /// Component tag name (PascalCase normalized).
     pub name: String,
@@ -257,7 +300,14 @@ pub struct TemplateComponentUsage {
 }
 
 /// A two-way binding passed to a child component (the Svelte `bind:` family).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct TemplateComponentBinding {
     /// The bound local member name (`value` in `bind:value`).
@@ -274,7 +324,14 @@ pub struct TemplateComponentBinding {
 /// directive. A plain `on*` attribute is a prop, never an event (the
 /// props/events split is syntactic — the child component-meta, not a name
 /// guess, decides which passed props are callback events).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct TemplateComponentEvent {
     /// The event name — the legacy directive local (`click` from `on:click`).
@@ -293,7 +350,7 @@ pub struct TemplateComponentEvent {
 }
 
 /// A v-model directive used on a component in a template.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, verter_retention::heap_size::HeapSize)]
 pub struct TemplateComponentVModel {
     /// The model property name (e.g., `"title"` for `v-model:title`, `"modelValue"` for `v-model`).
     pub binding_name: String,
@@ -302,7 +359,7 @@ pub struct TemplateComponentVModel {
 }
 
 /// A single prop passed to a component in a template.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, verter_retention::heap_size::HeapSize)]
 pub struct TemplatePropUsage {
     /// Prop name (camelCase normalized from kebab-case).
     pub name: String,
@@ -328,7 +385,16 @@ pub struct TemplatePropUsage {
 
 /// How a prop value expression is classified at a call site.
 #[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
 )]
 #[serde(rename_all = "camelCase")]
 pub enum PropValueConstness {
@@ -343,7 +409,7 @@ pub enum PropValueConstness {
 
 /// A script binding referenced at a specific position in the template.
 /// Used for references, rename, and document highlights.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct TemplateBindingOccurrence {
     /// The binding name (matches a script `AnalyzedBinding.name`).
     pub name: String,
@@ -354,7 +420,17 @@ pub struct TemplateBindingOccurrence {
 }
 
 /// Classification of how a binding is used in a template.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum BindingUsageKind {
     /// `{{ binding }}` -- text interpolation.
@@ -372,7 +448,7 @@ pub enum BindingUsageKind {
 }
 
 /// An unresolved binding with its position.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct UnresolvedBinding {
     /// The binding name that couldn't be resolved.
     pub name: String,
@@ -381,7 +457,7 @@ pub struct UnresolvedBinding {
 }
 
 /// A slot defined in this component's template.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct DefinedSlot {
     /// Slot name (`"default"`, `"header"`, etc.).
     pub name: String,
@@ -401,7 +477,15 @@ pub struct DefinedSlot {
 }
 
 /// A template ref attribute.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct TemplateRef {
     /// Ref name: `ref="foo"` -> `"foo"`.
@@ -413,7 +497,7 @@ pub struct TemplateRef {
 }
 
 /// An event handler in the template.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct TemplateEventHandler {
     /// Event name (`"click"`, `"input"`, etc.).
     pub event_name: String,
@@ -428,7 +512,7 @@ pub struct TemplateEventHandler {
 }
 
 /// Full directive analysis for linter rules.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct TemplateDirective {
     /// Directive name (`"if"`, `"for"`, `"bind"`, `"on"`, `"model"`, `"show"`, `"html"`, `"slot"`).
     pub name: String,
@@ -453,7 +537,7 @@ pub struct TemplateDirective {
 }
 
 /// v-for analysis.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct VForDirective {
     /// Iterator variable: `"item"` from `v-for="item in items"`.
     pub variable: String,
@@ -472,7 +556,7 @@ pub struct VForDirective {
 }
 
 /// v-model analysis.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct VModelDirective {
     /// Binding name (`"modelValue"` or custom argument).
     pub binding_name: String,
@@ -487,7 +571,7 @@ pub struct VModelDirective {
 }
 
 /// A text or interpolation segment within an element's content.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub enum TemplateTextSegment {
     /// Literal text (e.g., `"Count: "`).
     Text { span: Span, is_entity: bool },
@@ -501,7 +585,7 @@ pub enum TemplateTextSegment {
 }
 
 /// Element-level analysis for accessibility and HTML conformance.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, verter_retention::heap_size::HeapSize)]
 pub struct TemplateElement {
     /// Tag name.
     pub tag: String,
@@ -603,7 +687,14 @@ pub struct DynamicClassName {
 }
 
 /// A CSS variable set via a dynamic `:style` binding.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct DynamicStyleVar {
     /// CSS variable name (e.g. `"--color"`) or partial prefix for template literals.
@@ -619,7 +710,14 @@ pub struct DynamicStyleVar {
 }
 
 /// A CSS variable set via a static `style` attribute.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct StaticStyleVar {
     /// CSS variable name (e.g. `"--color"`).
@@ -632,7 +730,16 @@ pub struct StaticStyleVar {
 
 /// Element namespace.
 #[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
 )]
 #[serde(rename_all = "camelCase")]
 pub enum ElementNamespace {
@@ -643,7 +750,7 @@ pub enum ElementNamespace {
 }
 
 /// A template attribute (static or dynamic).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct TemplateAttribute {
     /// Attribute name.
     pub name: String,
@@ -675,7 +782,15 @@ pub struct MarkupClassToken {
 }
 
 /// A v-if/v-else-if chain for duplicate condition detection.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct IfChain {
     /// Condition expressions with their spans: `(expression, span_start, span_end)`.
@@ -683,7 +798,15 @@ pub struct IfChain {
 }
 
 /// A static member read on an identifier root inside a template expression.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct TemplateMemberRead {
     /// The root identifier (`props` in `props.title`).
@@ -696,7 +819,15 @@ pub struct TemplateMemberRead {
 }
 
 /// A declared `defineSlots` member with resolved usage for the linter.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyzedSlotDeclaration {
     /// Slot name (`"default"`, `"header"`, …).
@@ -709,7 +840,7 @@ pub struct AnalyzedSlotDeclaration {
 }
 
 /// Props analysis enriched for linter.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct AnalyzedPropDefinition {
     /// Prop name.
     pub name: String,
@@ -732,7 +863,7 @@ pub struct AnalyzedPropDefinition {
 }
 
 /// Emit analysis.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct AnalyzedEmitDefinition {
     /// Event name.
     pub event_name: String,
@@ -747,7 +878,7 @@ pub struct AnalyzedEmitDefinition {
 }
 
 /// A comment directive for linter control.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct CommentDirective {
     /// Directive kind.
     pub kind: CommentDirectiveKind,
@@ -760,7 +891,17 @@ pub struct CommentDirective {
 }
 
 /// Comment directive kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum CommentDirectiveKind {
     /// `@verter:disable rule-name`
@@ -788,7 +929,14 @@ pub enum CommentDirectiveKind {
 /// Can be populated by: TypeScript language service, TSGO, or any type checker that can
 /// resolve Vue template expressions. Enables type-aware linting and LSP features
 /// (typed completions, hover with full signatures, generic inference, etc.).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct TemplateTypeEnhancements {
     /// Resolved types for each binding occurrence (keyed by span_start).
@@ -803,7 +951,7 @@ pub struct TemplateTypeEnhancements {
 }
 
 /// A type mismatch detected by the type checker.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct TypeMismatch {
     /// Byte span in SFC source.
     pub span: Span,

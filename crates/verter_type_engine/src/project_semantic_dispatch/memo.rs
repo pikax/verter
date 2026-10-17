@@ -70,6 +70,8 @@ pub(crate) struct SingleEntryAttachment<'a, K: Eq + std::hash::Hash + Clone, V> 
     inflight: &'a InflightTable<QueryFlightKey<K>>,
     live_counter: &'a AtomicU64,
     schema_version: u32,
+    /// The account an entry of this cache is charged to.
+    account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
 }
 impl<'a, K: Eq + std::hash::Hash + Clone, V> SingleEntryAttachment<'a, K, V> {
     pub(crate) fn new(
@@ -77,12 +79,14 @@ impl<'a, K: Eq + std::hash::Hash + Clone, V> SingleEntryAttachment<'a, K, V> {
         inflight: &'a InflightTable<QueryFlightKey<K>>,
         live_counter: &'a AtomicU64,
         schema_version: u32,
+        account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) -> Self {
         Self {
             entries,
             inflight,
             live_counter,
             schema_version,
+            account,
         }
     }
 }
@@ -196,6 +200,8 @@ where
     entries: &'a DashMap<K, Arc<CacheEntry<V>>>,
     inflight: &'a InflightTable<QueryFlightKey<K>>,
     live_counter: &'a AtomicU64,
+    /// The account the cache's entries are charged to.
+    account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
     /// The canonicals the warm-read validator checks STRICTLY. Owned by
     /// the funnel (it derives them from the key), not by the per-call
     /// closure.
@@ -208,8 +214,14 @@ where
 
 impl<'a, K, V, F> ArtifactNode for SingleEntryArtifactNode<'a, K, V, F>
 where
-    K: Eq + std::hash::Hash + Clone + Send + Sync + 'static,
-    V: Clone + Send + Sync + 'static,
+    K: Eq
+        + std::hash::Hash
+        + Clone
+        + Send
+        + Sync
+        + 'static
+        + verter_session_query::retention::heap_size::HeapSize,
+    V: Clone + Send + Sync + 'static + verter_session_query::retention::heap_size::HeapSize,
     F: FnOnce() -> SingleEntryOutcome<V>,
 {
     type Key = K;
@@ -243,6 +255,18 @@ where
                 reason: NonAdmissionReason::ComputeFailed,
             },
         }
+    }
+
+    fn entry_footprint(
+        &self,
+        key: &Self::Key,
+        value: &Self::Value,
+    ) -> verter_session_query::retention::Footprint {
+        verter_session_query::retention::heap_size::footprint(&(key, value))
+    }
+
+    fn retention_account(&self) -> Arc<verter_session_query::retention::SemanticRetentionAccount> {
+        Arc::clone(&self.account)
     }
 
     fn validate(
@@ -831,7 +855,7 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
         key: &DeclarationLookupKey,
         prepare: Prepare,
         compute: F,
-    ) -> Option<Arc<ResolvedTypeDeclaration>>
+    ) -> Option<verter_session_query::retention::heap_size::OwnedTree<ResolvedTypeDeclaration>>
     where
         Prepare: FnOnce() -> P,
         F: FnOnce(P) -> ComputedEntry<ResolvedTypeDeclaration>,
@@ -853,7 +877,7 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
         ctx: &dyn FactValidation,
         probe: &crate::fact_signature_helpers::CacheabilityProbe<'_, W>,
         compute: F,
-    ) -> Option<Arc<ResolvedTypeDeclaration>>
+    ) -> Option<verter_session_query::retention::heap_size::OwnedTree<ResolvedTypeDeclaration>>
     where
         F: FnOnce() -> ComputedEntry<ResolvedTypeDeclaration>,
     {
@@ -869,15 +893,18 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
             entries: storage.entries,
             inflight: storage.inflight,
             live_counter: storage.live_counter,
+            account: Arc::clone(&storage.account),
             self_root_canonicals: self_roots,
             compute: std::cell::RefCell::new(Some(move || {
                 let computed = match compute() {
-                    ComputedEntry::Rooted(value, facts) => {
-                        ComputedEntry::Rooted(Arc::new(value), facts)
-                    }
-                    ComputedEntry::Unrooted(value, reason) => {
-                        ComputedEntry::Unrooted(Arc::new(value), reason)
-                    }
+                    ComputedEntry::Rooted(value, facts) => ComputedEntry::Rooted(
+                        verter_session_query::retention::heap_size::owned_tree(value),
+                        facts,
+                    ),
+                    ComputedEntry::Unrooted(value, reason) => ComputedEntry::Unrooted(
+                        verter_session_query::retention::heap_size::owned_tree(value),
+                        reason,
+                    ),
                     ComputedEntry::Failed => ComputedEntry::Failed,
                 };
                 single_entry_admission(probe, computed)
@@ -899,7 +926,7 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
         &self,
         key: &DeclarationLookupKey,
         compute: F,
-    ) -> Option<Arc<ResolvedTypeDeclaration>>
+    ) -> Option<verter_session_query::retention::heap_size::OwnedTree<ResolvedTypeDeclaration>>
     where
         F: FnOnce() -> ComputedEntry<ResolvedTypeDeclaration>,
     {
@@ -962,6 +989,7 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
             entries: storage.entries,
             inflight: storage.inflight,
             live_counter: storage.live_counter,
+            account: Arc::clone(&storage.account),
             self_root_canonicals: self_roots,
             compute: std::cell::RefCell::new(Some(move || {
                 single_entry_admission(probe, compute())
@@ -1056,6 +1084,7 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
             entries: storage.entries,
             inflight: storage.inflight,
             live_counter: storage.live_counter,
+            account: Arc::clone(&storage.account),
             self_root_canonicals: self_roots,
             compute: std::cell::RefCell::new(Some(move || {
                 single_entry_admission(probe, compute())
@@ -1160,6 +1189,7 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
             entries: storage.entries,
             inflight: storage.inflight,
             live_counter: storage.live_counter,
+            account: Arc::clone(&storage.account),
             self_root_canonicals: self_roots,
             compute: std::cell::RefCell::new(Some(move || {
                 // Central partial gate, folded through the SAME `ReturnOnly`

@@ -72,7 +72,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let Some((name, _)) = data.bare_ref_head() else {
             return true;
         };
-        let name = std::sync::Arc::clone(name);
+        let name = std::sync::Arc::<str>::from(name);
         let Some(root_identity) =
             self.root_identity_in_scope(scope_canonical_id, scope_owner, name.as_ref())
         else {
@@ -187,7 +187,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 && self.bare_ref_origin_in_scope(scope_canonical_id, scope_owner, name.as_ref())
                     == BareRefOrigin::Imported
             {
-                let name = std::sync::Arc::clone(name);
+                let name = std::sync::Arc::<str>::from(name);
                 let _ =
                     self.root_identity_in_scope(scope_canonical_id, scope_owner, name.as_ref())?;
                 return symbolic_preserve(field_value);
@@ -220,7 +220,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 data.bare_ref_head().and_then(|(name, _)| {
                     data.carrier_type_args()
                         .is_empty()
-                        .then(|| std::sync::Arc::clone(name))
+                        .then(|| std::sync::Arc::<str>::from(name))
                 })
             });
             if let Some(root_name) = root_name {
@@ -300,7 +300,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     BareRefOrigin::Imported | BareRefOrigin::Local
                 )
             {
-                let name = std::sync::Arc::clone(name);
+                let name = std::sync::Arc::<str>::from(name);
                 if let Some(root_identity) =
                     self.root_identity_in_scope(scope_canonical_id, scope_owner, name.as_ref())
                 {
@@ -403,7 +403,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         if !data.carrier_type_args().is_empty() {
             return None;
         }
-        let name = std::sync::Arc::clone(name);
+        let name = std::sync::Arc::<str>::from(name);
         let root_identity =
             self.root_identity_in_scope(scope_canonical_id, scope_owner, name.as_ref())?;
         if is_package_canonical(self.ctx, &root_identity.canonical_id) {
@@ -513,7 +513,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         return Reach::Parts(Vec::new());
                     };
                     if let Some((name, _)) = data.bare_ref_head() {
-                        let name = std::sync::Arc::clone(name);
+                        let name = std::sync::Arc::<str>::from(name);
                         if data.carrier_type_args().is_empty()
                             && self.bare_ref_origin_in_scope(
                                 scope_canonical_id,
@@ -596,7 +596,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 return Reach::Parts(Vec::new());
             };
             if let Some((name, _)) = data.bare_ref_head() {
-                let name = std::sync::Arc::clone(name);
+                let name = std::sync::Arc::<str>::from(name);
                 let args_empty = data.carrier_type_args().is_empty();
                 drop(data);
                 return match self.bare_ref_origin_in_scope(

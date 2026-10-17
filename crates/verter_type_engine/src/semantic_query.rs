@@ -210,7 +210,9 @@ pub type HashValue = Hash16;
 /// graph. The ID is handed out by the graph interner and is only meaningful
 /// inside one [`ProjectTypeStore`](crate::project_type_store::ProjectTypeStore)
 /// for one project generation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, verter_retention::heap_size::HeapSize,
+)]
 pub struct SemanticNodeId(pub u64);
 
 /// Canonical lexical identity of one conditional-`infer` declaration.
@@ -1351,7 +1353,7 @@ impl ClassExpressionIdentity {
 /// [`SemanticNodeId`], a `value_node` ordinal, or any other content/version
 /// hash. The architecture guard `synthetic_binding_identity_is_content_free`
 /// pins it.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct SyntheticBindingId {
     /// Canonical id of the component scope the binding lives in.
     pub scope_canonical_id: OwnedStr,
@@ -2864,7 +2866,7 @@ pub type IndexKey = AuthoredPropertyKey;
 ///   parameters". Used by the materialization cycle gate's per-hop
 ///   `Instantiate` (`ClassifyMaterializationCycleGate`).
 ///   Existing Navigate/Expanded callers see no change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum ProjectionMode {
     Identity,
     Navigate,
@@ -2902,7 +2904,7 @@ impl From<ProjectionMode> for verter_audit::ProjectionModeTag {
 /// caller can substitute / inspect the operator structurally without
 /// paying for member materialisation that no published demand selects
 /// through.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum ReductionDemand {
     /// The caller will publish the result on a consumer-visible
     /// surface. Operators reduce when `mode` admits.
@@ -2959,7 +2961,17 @@ pub enum ReductionDemand {
 /// family and mapped-member context encoding. It contains no content/version
 /// state; prepared-declaration facts and file self-roots remain the sole value
 /// versioning rail (R6).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, verter_no_typeexpr::NoTypeExpr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum VueHeritagePolicy {
     /// Retain the complete TypeScript heritage surface. This is the default
     /// for TSC, component-meta, slots, and every non-runtime query.
@@ -2992,7 +3004,17 @@ pub enum VueHeritagePolicy {
 /// macro-root surface and a plain structural surface of the SAME node
 /// never collide on one memo slot. It is NOT an env-hash dimension (R21)
 /// — it is a query-identity dimension, like the projection mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, verter_no_typeexpr::NoTypeExpr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Default,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum SurfaceProvenanceContext {
     /// Plain structural lowering. Object members reached here carry
     /// `declared_in_macro_type_arg = false`. This is the default for
@@ -3032,7 +3054,17 @@ pub enum SurfaceProvenanceContext {
 /// `interface Props extends Base` arm is `Heritage` even though it is
 /// `Base`'s own-body member, because the consuming declaration's heritage-arm
 /// context flows into the carrier resolution.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, verter_no_typeexpr::NoTypeExpr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum MemberMergeRole {
     /// Reached via an authored reference / synthesized construction — an
     /// authored intersection's reference arm (`type Props = Base & { … }`'s
@@ -3163,7 +3195,7 @@ impl PartialEq<MemberMergeRole> for MergeRoleStamp {
 /// folded into `FamilyKey` for every context-bearing projection-reduction
 /// family so a macro-root surface and a structural surface of
 /// the same node cache in distinct slots.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct ProjectionReductionContext {
     pub mode: ProjectionMode,
     pub demand: ReductionDemand,
@@ -5211,6 +5243,17 @@ impl DepSignature {
     }
 }
 
+impl verter_session_query::retention::heap_size::HeapSize for DepSignature {
+    /// A nonempty rail is an owned allocation, charged by its own cell; the
+    /// static empty rail is never charged.
+    fn heap_size<'t>(
+        &'t self,
+        meter: &mut verter_session_query::retention::heap_size::HeapMeter<'_, 't>,
+    ) -> usize {
+        self.owned().map_or(0, |rail| rail.offer(meter.handles()))
+    }
+}
+
 impl std::ops::Deref for DepSignature {
     type Target = [DepEntry];
     fn deref(&self) -> &[DepEntry] {
@@ -5251,7 +5294,9 @@ impl Default for DepSignature {
 /// finite-large terminating resolution is COMPLETE regardless of op count.
 /// Only a real budget *exhaustion early-exit* (`BUDGET_EXCEEDED`) — which
 /// arises only on a genuine armed-fuse runaway trip — counts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Hash, verter_retention::heap_size::HeapSize,
+)]
 pub struct PartialReasonSet(u32);
 
 impl PartialReasonSet {
@@ -6097,7 +6142,7 @@ pub struct SemanticGraphStats {
 /// error carries them, but no public accessor hands the operands out: the
 /// node that carries the error owns them, and a reader reaches them only
 /// through that node's lease.
-#[derive(Clone, PartialEq, Eq, Hash, Default)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, verter_retention::heap_size::HeapSize)]
 pub struct RecursiveRefArgs(OwnedSlice<SemanticNodeId>);
 
 impl RecursiveRefArgs {
@@ -6167,7 +6212,7 @@ impl<const N: usize> From<[SemanticNodeId; N]> for RecursiveRefArgs {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub enum QueryError {
     /// Execution validity refused delivery, independently of semantic quality.
     ExecutionAborted(ExecutionAbort),
@@ -6751,7 +6796,7 @@ pub enum SemanticQueryValue {
 /// Content-free discriminant for [`SemanticQueryValue`]. Used by
 /// [`QueryError::ValueDomainMismatch`] to name a value's domain without a
 /// payload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum SemanticQueryValueTag {
     TypeNode,
     ObjectProjection,
@@ -8655,14 +8700,14 @@ impl RelateMemoKey {
 /// hash, span, or display text participates.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PendingSubstitutionFrame {
-    pairs: Arc<[(SemanticNodeId, SemanticNodeId)]>,
+    pairs: OwnedSlice<(SemanticNodeId, SemanticNodeId)>,
 }
 
 impl PendingSubstitutionFrame {
     #[must_use]
     pub fn empty() -> Self {
         Self {
-            pairs: Arc::from(Vec::<(SemanticNodeId, SemanticNodeId)>::new().into_boxed_slice()),
+            pairs: OwnedSlice::default(),
         }
     }
 
@@ -8684,7 +8729,7 @@ impl PendingSubstitutionFrame {
             pair.1 = arg;
         }
         Self {
-            pairs: Arc::from(pairs.into_boxed_slice()),
+            pairs: OwnedSlice::from(pairs),
         }
     }
 
@@ -8697,7 +8742,7 @@ impl PendingSubstitutionFrame {
         pairs.extend_from_slice(&self.pairs);
         pairs.push((param, arg));
         Self {
-            pairs: Arc::from(pairs.into_boxed_slice()),
+            pairs: OwnedSlice::from(pairs),
         }
     }
 }
@@ -8715,6 +8760,26 @@ pub struct ConditionalPendingSubstitution {
     /// `getConditionalTypeInstantiation` maps the check parameter to each
     /// member).
     distribution: Option<SemanticNodeId>,
+}
+
+impl verter_session_query::retention::owned::Measured for PendingSubstitutionFrame {
+    /// The pair list: an owned allocation charged by itself.
+    fn heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        self.pairs.offer(aliases)
+    }
+}
+
+impl verter_session_query::retention::owned::Measured for ConditionalPendingSubstitution {
+    /// Both branch frames' pair lists; the distribution parameter is inline.
+    fn heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        self.true_branch.heap_bytes(aliases) + self.false_branch.heap_bytes(aliases)
+    }
 }
 
 impl ConditionalPendingSubstitution {
@@ -8895,7 +8960,8 @@ pub enum SemanticQueryKey {
         /// Content-free pairing of each materialized branch handle with a
         /// pending positional substitution frame. `None` means both
         /// branches are already substituted (or never instantiated).
-        pending: Option<Arc<ConditionalPendingSubstitution>>,
+        pending:
+            Option<verter_session_query::retention::owned::Owned<ConditionalPendingSubstitution>>,
     },
     /// `typeof value_root` — resolves the TYPE of a value declaration.
     ///
@@ -9260,7 +9326,7 @@ pub enum SemanticQueryKey {
     ///
     /// [`AdmissionSpec::Singleflight`]: crate::semantic_query::query_key_spec::AdmissionSpec::Singleflight
     TemplateLiteralReduce {
-        pattern: Arc<[Arc<str>]>,
+        pattern: OwnedSlice<OwnedStr>,
         args: Arc<[SemanticNodeId]>,
         context: TemplateLiteralReduceContext,
     },
@@ -10118,7 +10184,7 @@ impl<T> FromIterator<T> for PayloadArray<T> {
 /// is interned.
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct TupleElement {
-    pub label: Option<Arc<str>>,
+    pub label: Option<OwnedStr>,
     pub value: SemanticNodeId,
     pub optional: bool,
     pub rest: bool,
@@ -10536,7 +10602,7 @@ pub enum SemanticNodeData {
     /// separate follow-up — the shell carrier itself is not
     /// deferred.
     TemplateLiteral {
-        quasis: Arc<[Arc<str>]>,
+        quasis: OwnedSlice<OwnedStr>,
         expressions: PayloadArray<SemanticNodeId>,
     },
     /// Deferred `keyof` shell used when the operand still carries open
@@ -10624,7 +10690,7 @@ pub enum SemanticNodeData {
         /// names intern to the same slot. In practice `display_name`
         /// is consistent with `decl + param_index`; the exclusion
         /// is defensive.
-        display_name: Arc<str>,
+        display_name: OwnedStr,
     },
     /// `infer X` placeholder inside a conditional's `extends` clause
     /// Modelled as an explicit variant rather than
@@ -10633,7 +10699,7 @@ pub enum SemanticNodeData {
     /// `true` branch will substitute the bound type into; `constraint` is
     /// the declared `infer X extends C` constraint.
     Infer {
-        name: Arc<str>,
+        name: OwnedStr,
         binder: InferBinderId,
         constraint: Option<SemanticNodeId>,
     },
@@ -10649,7 +10715,7 @@ pub enum SemanticNodeData {
     /// same `TypeExpr::Infer { name }` as a declaration, so
     /// TypeExpr-level consumers are unaffected.
     InferRef {
-        name: Arc<str>,
+        name: OwnedStr,
         binder: InferBinderId,
     },
     // Declaration identity is carried as the env-bearing, content-free
@@ -10686,7 +10752,8 @@ pub enum SemanticNodeData {
         true_branch_ref: SemanticNodeId,
         false_branch_ref: SemanticNodeId,
         distributive: bool,
-        pending: Option<Arc<ConditionalPendingSubstitution>>,
+        pending:
+            Option<verter_session_query::retention::owned::Owned<ConditionalPendingSubstitution>>,
     },
     // §5.6 Signature shape — ONE variant for call AND construct signatures.
     ///
@@ -10953,7 +11020,11 @@ impl SemanticNodeData {
                 source: source.clone(),
                 mapper: mapper.clone(),
             },
-            Self::TypeOf(v0) => Self::TypeOf(v0.clone()),
+            // A carrier lends its arguments only by borrow, so its copy is
+            // rebuilt through the one carrier reconstruction channel.
+            Self::TypeOf(_) => self
+                .map_carrier_type_args(Arc::from(self.carrier_type_args()))
+                .expect("a carrier rebuilds with its own arguments"),
             Self::TypeOfNominal(v0) => Self::TypeOfNominal(v0.clone()),
             Self::TypeParam {
                 decl,
@@ -11039,8 +11110,9 @@ impl SemanticNodeData {
             Self::MergedDecl { contributors } => Self::MergedDecl {
                 contributors: contributors.share(),
             },
-            Self::BareRef(v0) => Self::BareRef(v0.clone()),
-            Self::ImportType(v0) => Self::ImportType(v0.clone()),
+            Self::BareRef(_) | Self::ImportType(_) => self
+                .map_carrier_type_args(Arc::from(self.carrier_type_args()))
+                .expect("a carrier rebuilds with its own arguments"),
             Self::RawFallback { value } => Self::RawFallback {
                 value: value.clone(),
             },
@@ -11581,7 +11653,7 @@ pub enum SignatureKind {
 /// Parameter of a [`SemanticNodeData::Signature`].
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct FunctionParam {
-    pub name: Option<Arc<str>>,
+    pub name: Option<OwnedStr>,
     pub ty: SemanticNodeId,
     pub optional: bool,
     pub rest: bool,
@@ -11643,7 +11715,7 @@ impl FunctionParam {
         rest: bool,
     ) -> Self {
         Self {
-            name,
+            name: name.as_deref().map(OwnedStr::from),
             ty,
             optional,
             rest,
@@ -11720,7 +11792,7 @@ pub fn split_this_receiver(params: &[FunctionParam]) -> (Option<&FunctionParam>,
 /// Type-parameter declaration on a [`SemanticNodeData::Signature`].
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct TypeParamDecl {
-    pub name: Arc<str>,
+    pub name: OwnedStr,
     /// The exact interned [`SemanticNodeData::TypeParam`] node for this
     /// parameter — the identity inference binds. Per-parameter policy
     /// (const-ness, binding) keys off THIS node, never the display name.
@@ -11780,7 +11852,7 @@ pub trait TypeNavigator {
 /// missing-id fabrication fixture reads through it.
 #[cfg(test)]
 pub(crate) trait SemanticGraphRead {
-    fn node_data(&self, node: SemanticNodeId) -> Arc<SemanticNodeData>;
+    fn node_data(&self, node: SemanticNodeId) -> crate::semantic_query_memo::NodeData;
 }
 
 /// Authoritative dispatch for every reusable semantic operation.
@@ -12567,16 +12639,16 @@ mod tests {
 /// A static node reader for pure consumers. Missing IDs retain their typed
 /// absence; the capability carries no query acquisition or publication API.
 pub(crate) trait NodeRead {
-    fn node_data(&self, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>>;
+    fn node_data(&self, node: SemanticNodeId) -> Option<crate::semantic_query_memo::NodeData>;
 }
 impl<T: NodeRead + ?Sized> NodeRead for Arc<T> {
-    fn node_data(&self, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
+    fn node_data(&self, node: SemanticNodeId) -> Option<crate::semantic_query_memo::NodeData> {
         self.as_ref().node_data(node)
     }
 }
 
 impl<T: NodeRead + ?Sized> NodeRead for &T {
-    fn node_data(&self, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
+    fn node_data(&self, node: SemanticNodeId) -> Option<crate::semantic_query_memo::NodeData> {
         (**self).node_data(node)
     }
 }

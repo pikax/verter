@@ -20,6 +20,7 @@ use crate::locators::{AuthoredBodyLocator, MacroPayloadLocator};
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 #[serde(rename_all = "camelCase")]
 pub enum ResolutionExactness {
@@ -59,6 +60,7 @@ pub enum TypedResolutionFailure {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 #[serde(rename_all = "camelCase")]
 pub enum ResolutionProvenance {

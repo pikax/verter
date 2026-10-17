@@ -401,7 +401,7 @@ enum DeferredEvaluationStage {
         object: SemanticNodeId,
     },
     AwaitValueChildren {
-        data: Arc<SemanticNodeData>,
+        data: crate::semantic_query_memo::NodeData,
         children: Vec<SemanticNodeId>,
         values: Vec<SemanticNodeId>,
     },
@@ -2768,7 +2768,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 if let Some(&first) = children.first() {
                                     let frame = frames.last_mut().expect("active evaluator frame");
                                     frame.stage = DeferredEvaluationStage::AwaitValueChildren {
-                                        data: Arc::clone(&data),
+                                        data: data.clone(),
                                         children,
                                         values: Vec::new(),
                                     };
@@ -2886,7 +2886,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             } => {
                                 let read =
                                     self.execute_read(SemanticQueryKey::TemplateLiteralReduce {
-                                        pattern: Arc::clone(quasis),
+                                        pattern: (*quasis).clone(),
                                         args: Arc::clone(expressions.as_arc()),
                                         context: self.template_literal_reduce_context(),
                                     });
@@ -3719,7 +3719,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     expressions,
                 }) => {
                     let read = self.execute_read(SemanticQueryKey::TemplateLiteralReduce {
-                        pattern: Arc::clone(quasis),
+                        pattern: (*quasis).clone(),
                         args: Arc::clone(expressions.as_arc()),
                         context: self.template_literal_reduce_context(),
                     });

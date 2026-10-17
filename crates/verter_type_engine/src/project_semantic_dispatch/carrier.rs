@@ -1622,7 +1622,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let (name, scope) = {
                 let data = graph.node_data(node).expect("BareRef carrier data");
                 let (name, scope) = data.bare_ref_head().expect("BareRef head");
-                (Arc::clone(name), scope.clone())
+                (Arc::<str>::from(name), scope.clone())
             };
             // The scope payload is rehydrated from the carrier's PAYLOAD-scope
             // canonical — the exact scope handed to the resolver context — so the
@@ -1656,7 +1656,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let data = graph.node_data(node).expect("ImportType carrier data");
                 let (specifier, qualifier, typeof_query) =
                     data.import_type_head().expect("ImportType head");
-                (Arc::clone(specifier), qualifier.clone(), typeof_query)
+                (Arc::<str>::from(specifier), qualifier.clone(), typeof_query)
             };
             let scope = graph.node_scope(node).unwrap_or(NodeScopeId::Global);
             let scope_payload = owner_canonical.as_ref().and_then(|c| {
