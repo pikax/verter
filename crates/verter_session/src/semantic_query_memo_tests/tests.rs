@@ -10379,3 +10379,71 @@ fn a_re_rooted_token_is_stranded_once_per_close() {
     assert_eq!(kernel.epoch(), epoch);
     drop(held);
 }
+
+/// While an unrelated holder keeps the epoch alive, closing a document and
+/// re-interning its token again and again keeps one root on the token: the
+/// intern takes back the root the close deferred for the holder. Graph roots
+/// stay flat across cycles, and the closed node is destroyed once the
+/// holder drops.
+///
+/// Discriminating against a deferral that appends each close's root and an
+/// intern that acquires a fresh one: every cycle then leaves another root
+/// behind, while neither the stranded-majority trigger nor the record cap
+/// advances, so roots grow without bound until the holder drops.
+#[test]
+fn repeated_close_and_re_intern_under_a_held_epoch_keeps_one_root_per_token() {
+    let store = SemanticGraphStore::new();
+    let kernel = store.signature_store();
+    let shared = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let (a_param, b_param) = {
+        let _build = store.enter_node_root_scope();
+        let (a_param, a_obj, _, _) = release_intern_document(&store, "/w/a.ts", 1, shared);
+        let (b_param, _, _, _) = release_intern_document(&store, "/w/b.ts", 2, shared);
+        for token in [a_param, a_obj, b_param] {
+            kernel.intern_type_token(token, None).unwrap();
+        }
+        (a_param, b_param)
+    };
+    let epoch = kernel.epoch();
+    let records = kernel.interned_len();
+    let unrelated_holder = kernel.lease_epoch(epoch).unwrap();
+
+    store.close_canonical("/w/b.ts");
+    let roots_after_close = store.node_ownership_counts().roots;
+    kernel.intern_type_token(b_param, None).unwrap();
+    let roots_after_re_intern = store.node_ownership_counts().roots;
+    for cycle in 0..32 {
+        let report = store.close_canonical("/w/b.ts");
+        assert!(
+            !report.signature_epoch_replaced,
+            "cycle {cycle}: {report:?}"
+        );
+        assert_eq!(kernel.stranded_token_count(), 1, "cycle {cycle}");
+        assert!(
+            store.node_is_live(b_param),
+            "cycle {cycle}: the holder reads it"
+        );
+        assert_eq!(
+            store.node_ownership_counts().roots,
+            roots_after_close,
+            "cycle {cycle}: a close leaves no extra root behind"
+        );
+        kernel.intern_type_token(b_param, None).unwrap();
+        assert_eq!(kernel.stranded_token_count(), 0, "cycle {cycle}");
+        assert_eq!(
+            store.node_ownership_counts().roots,
+            roots_after_re_intern,
+            "cycle {cycle}: a re-intern takes the deferred root back"
+        );
+    }
+    assert_eq!(kernel.epoch(), epoch);
+    assert_eq!(kernel.interned_len(), records, "premise: no record grows");
+
+    store.close_canonical("/w/b.ts");
+    drop(unrelated_holder);
+    assert!(
+        !store.node_is_live(b_param),
+        "the last holder's drop destroys the closed node"
+    );
+    assert!(store.node_is_live(a_param), "A is still open");
+}
