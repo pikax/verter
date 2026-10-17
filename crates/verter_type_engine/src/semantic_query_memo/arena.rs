@@ -948,6 +948,30 @@ impl NodeArenaCore {
     }
 
     pub(super) fn release_roots(&self, ids: &[SemanticNodeId]) {
+        if !self.counted() {
+            // Without counted release a node outlives its last owner, so a
+            // release only returns each id's count.
+            #[cfg(test)]
+            self.race_event(ArenaRaceEvent::BeforeRootRelease {
+                blocked: self.inner.try_write().is_none(),
+            });
+            let mut inner = self.inner.write();
+            for id in ids {
+                let Some(chunk) = inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)) else {
+                    continue;
+                };
+                let index = (id.0 & CHUNK_MASK) as usize;
+                if chunk.nodes[index].is_none() {
+                    continue;
+                }
+                assert!(chunk.owners[index] > 0, "live root released twice");
+                chunk.owners[index] -= 1;
+            }
+            drop(inner);
+            #[cfg(test)]
+            self.race_event(ArenaRaceEvent::AfterRootRelease);
+            return;
+        }
         let mut pending = SmallVec::<[SemanticNodeId; 16]>::from_slice(ids);
         let mut retired = SmallVec::<[(SemanticNodeId, u64); 4]>::new();
         #[cfg(test)]
