@@ -1723,10 +1723,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     /// `step`, a relation over a permissive instantiation, except that its
     /// failure is undecided where an operand holds an operation over the
-    /// wildcard (`Uppercase<W>` and every other builtin utility, `W["k"]`, a
-    /// template hole, a conditional over it): the checker's instantiation turns such an operation into
-    /// the wildcard itself, which relates to everything, and the lane reads
-    /// the operation as written.
+    /// wildcard (`Uppercase<W>` and every other builtin utility, `keyof W`, a
+    /// template hole, a conditional over it): the checker's instantiation
+    /// turns such an operation into the wildcard itself, which relates to
+    /// everything, and the lane reads the operation as written. An access of
+    /// the wildcard is already the wildcard (substitution folds it).
     fn wildcard_failure_undecided(
         &self,
         operands: [SemanticNodeId; 2],

@@ -14,7 +14,7 @@
 //! --skipLibCheck`, in a directory whose `node_modules` is the one the
 //! matrix links.
 
-use super::differential_harness_tests::{Matrix, Read, Setting, ALL, LOOSE_IMPLICIT, STRICT};
+use super::differential_harness_tests::{Matrix, Read, Setting, ALL};
 
 /// Generic functions holding each conditional; overloads choosing between a
 /// parameter a deferred conditional argument may relate to and `unknown`;
@@ -38,6 +38,17 @@ export function b7<T>() { return null! as ({ v: T } extends {} ? 1 : 2); }
 export function b9<T>() { return null! as ({ v: T[] } extends { v: string[] } ? 1 : 2); }
 export function b10<T>() { return null! as ({ v: [T] } extends { v: [] } ? 1 : 2); }
 export function b12<T>() { return null! as ({ v: T } extends { v: never } ? 1 : 2); }
+export function i1<T extends { a: 1 }>() { return null! as ({ a: T["a"] } extends { a: number } ? 1 : 2); }
+export function i2<T extends { a: string }>() { return null! as ({ a: T["a"] } extends { a: string } ? 1 : 2); }
+export function i3<T extends { a: 1 }>() { return null! as (T["a"] extends number ? 1 : 2); }
+export function i4<T extends { a: 1 }>() { return null! as ({ a: T["a"] } extends { a: unknown } ? 1 : 2); }
+export function i5<T extends { a: 1 }>() { return null! as ({ a: T["a"] } extends { a: T["a"] } ? 1 : 2); }
+export function i6<T extends { a: 1 }>() { return null! as ({ a: T["a"] } extends { a: never } ? 1 : 2); }
+export function i7<T extends { a: 1 }>() { return null! as ({ a: [T["a"]] } extends { a: [] } ? 1 : 2); }
+export function i8<T>() { return null! as ({ a: T[keyof T] } extends { a: string } ? 1 : 2); }
+export function k1<T extends { a: 1 }>() { return null! as ({ a: T["a"] } extends { a: {} } ? 1 : 2); }
+export function k2<T extends { a: { b: 1 } }>() { return null! as ({ a: T["a"]["b"] } extends { a: {} } ? 1 : 2); }
+export function k3<T extends { a: 1 | 2 }>() { return null! as ({ a: T["a"] } extends { a: {} } ? 1 : 2); }
 export function n1<T>() { return null! as ({ v: T; f: <U>(x: U) => T } extends { v: string; f: unknown } ? 1 : 2); }
 export function n2<T>() { return null! as ({ v: 1; f: <U>(x: U) => U } extends { v: number; f: unknown } ? 1 : 2); }
 export function n3<T>() { return null! as ({ v: T; f: <T>(x: T) => T } extends { v: string; f: unknown } ? 1 : 2); }
@@ -92,6 +103,14 @@ const RETURNS: &[(&str, &str)] = &[
     ("b9", "{ v: T[]; } extends { v: string[]; } ? 1 : 2"),
     ("b10", "2"),
     ("b12", "{ v: T; } extends { v: never; } ? 1 : 2"),
+    ("i1", "{ a: T[\"a\"]; } extends { a: number; } ? 1 : 2"),
+    ("i2", "{ a: T[\"a\"]; } extends { a: string; } ? 1 : 2"),
+    ("i3", "T[\"a\"] extends number ? 1 : 2"),
+    ("i4", "1"),
+    ("i5", "1"),
+    ("i6", "{ a: T[\"a\"]; } extends { a: never; } ? 1 : 2"),
+    ("i7", "2"),
+    ("i8", "{ a: T[keyof T]; } extends { a: string; } ? 1 : 2"),
     (
         "n1",
         "{ v: T; f: <U>(x: U) => T; } extends { v: string; f: unknown; } ? 1 : 2",
@@ -177,6 +196,36 @@ const CALLS: &[(&str, &str)] = &[
 #[test]
 fn deferred_conditionals_relate_as_the_checker_relates_them() {
     let failures = Matrix::new(SOURCE).settings(&ALL).returns(CALLS);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// An indexed access of a type parameter is generic, and relates as its
+/// constraint: the same access of the parameter's constraint, and `unknown`
+/// for the unconstrained parameter the restrictive test reads. Without
+/// `strictNullChecks` `unknown` relates to `{}`, so the restrictive test
+/// holds and the access's constraint (`1` for `T["a"]` under `T extends {
+/// a: 1 }`, each member of a union constraint, and through an access of an
+/// access too) decides the true branch; with it the conditional stays
+/// deferred.
+#[test]
+fn indexed_accesses_of_a_type_parameter_relate_through_its_constraint() {
+    let failures = Matrix::new(SOURCE).settings(&ALL).nullness(&[
+        (
+            Read::Return("k1"),
+            "{ a: T[\"a\"]; } extends { a: {}; } ? 1 : 2",
+            "1",
+        ),
+        (
+            Read::Return("k2"),
+            "{ a: T[\"a\"][\"b\"]; } extends { a: {}; } ? 1 : 2",
+            "1",
+        ),
+        (
+            Read::Return("k3"),
+            "{ a: T[\"a\"]; } extends { a: {}; } ? 1 : 2",
+            "1",
+        ),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -319,20 +368,14 @@ export function returnedRefs() { return null! as ShallowUnwrapRef<{ a: Ref<numbe
 export function proxied() { return proxyRefs({ count }); }
 "#;
 
-/// The two outermost settings of the four, for the installed-package rows:
-/// each project loads the real packages, and their answers are alike in all
-/// four settings.
-const EXTREMES: [Setting; 2] = [STRICT, LOOSE_IMPLICIT];
-
 /// Each answer is the checker's, alike in all four settings: a primitive
 /// and a ref decide their unwrapping, `ref(0)` is a `Ref<number, number>`,
 /// and the refs a component exposes or returns unwrap to their values — a
 /// `Ref` relates to `ShallowRef<infer V>` and `Ref<infer V>` through its
 /// accessor's read type.
-#[test]
-fn vue_ref_unwrapping_decides_through_the_real_re_export_chain() {
-    let failures = Matrix::new(VUE_SOURCE)
-        .settings(&EXTREMES)
+fn vue_ref_unwrapping_in(settings: &[Setting]) -> Vec<String> {
+    Matrix::new(VUE_SOURCE)
+        .settings(settings)
         .installed_packages()
         .returns(&[
             ("unwrapNumber", "number"),
@@ -344,7 +387,22 @@ fn vue_ref_unwrapping_decides_through_the_real_re_export_chain() {
             ("exposedRefs", "{ count: number; }"),
             ("returnedRefs", "{ a: number; b: string; }"),
             ("proxied", "{ count: number; }"),
-        ]);
+        ])
+}
+
+/// [`vue_ref_unwrapping_in`] the two settings with `noImplicitAny`; each
+/// project loads the real packages, so the other two are a test of their
+/// own.
+#[test]
+fn vue_ref_unwrapping_decides_through_the_real_re_export_chain() {
+    let failures = vue_ref_unwrapping_in(&ALL[..2]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// [`vue_ref_unwrapping_in`] the two settings without `noImplicitAny`.
+#[test]
+fn vue_ref_unwrapping_decides_without_no_implicit_any() {
+    let failures = vue_ref_unwrapping_in(&ALL[2..]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -374,7 +432,7 @@ export function unwrapVNode() { return null! as (UnwrapRef<VNode> extends VNode 
 #[test]
 fn package_augmentations_merge_into_the_module_they_resolve_to() {
     let failures = Matrix::new(BAIL_SOURCE)
-        .settings(&EXTREMES)
+        .settings(&ALL)
         .installed_packages_of(&["vue", "@vue/runtime-dom"])
         .returns(&[
             ("coreKey", "1"),
@@ -400,7 +458,7 @@ fn a_bail_union_with_an_unreadable_member_is_not_answered() {
         .map(|function| (Read::Return(function), vec!["1"]))
         .collect();
     let verdicts = Matrix::new(BAIL_SOURCE)
-        .settings(&ALL[..1])
+        .settings(&ALL)
         .installed_packages_of(&["vue", "@vue/runtime-dom"])
         .verdicts(&reads);
     for ((read, _), row) in reads.iter().zip(&verdicts) {

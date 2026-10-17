@@ -1233,7 +1233,33 @@ fn print(
             None => format!("infer {name}"),
         },
         SemanticNodeData::InferRef { name, .. } => name.to_string(),
-        SemanticNodeData::IndexedAccess { .. } => "<unreduced indexed access>".to_owned(),
+        // An access of a type parameter is generic and prints as written; any
+        // other access the lane kept is a gap.
+        SemanticNodeData::IndexedAccess { object, index } => {
+            let mut root = *object;
+            while let Some(SemanticNodeData::IndexedAccess { object, .. }) =
+                graph.node_data(root).as_deref()
+            {
+                root = *object;
+            }
+            if !matches!(
+                graph.node_data(root).as_deref(),
+                Some(SemanticNodeData::TypeParam { .. })
+            ) {
+                return "<unreduced indexed access>".to_owned();
+            }
+            let index = match index {
+                verter_type_engine::semantic_query::IndexKey::String(name) => {
+                    checker_string_literal(name)
+                }
+                verter_type_engine::semantic_query::IndexKey::Number(number) => number.to_string(),
+                verter_type_engine::semantic_query::IndexKey::Computed(index) => at(*index),
+                verter_type_engine::semantic_query::IndexKey::UniqueSymbol(_) => {
+                    return "<unreduced indexed access>".to_owned();
+                }
+            };
+            format!("{}[{index}]", operand(dispatch, *object, depth, false))
+        }
         SemanticNodeData::Mapped { .. } => "<unreduced mapped>".to_owned(),
         other => {
             let text: String = format!("{other:?}").chars().take(60).collect();
