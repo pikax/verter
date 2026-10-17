@@ -609,7 +609,7 @@ pub enum OpenSafeKeyEvidence<'a> {
     },
 }
 
-//// Opaque correlated finite-union formula.
+/// Opaque correlated finite-union formula.
 ///
 /// The alternatives are kept FACTORED (see
 /// `project_semantic_dispatch::object_spread_product`): the formula owns the
