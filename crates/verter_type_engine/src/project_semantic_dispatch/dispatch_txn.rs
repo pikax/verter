@@ -2413,6 +2413,12 @@ struct CallArgumentLiteralPolicy {
     /// The argument's own type: a deposit of it whole is the argument
     /// expression's literal, never a literal nested inside it.
     argument: Option<SemanticNodeId>,
+    /// The literals the argument nests in an authored position whose
+    /// contextual type in the candidate's parameter is a literal context
+    /// for them (`isLiteralOfContextualType`, decided per authored
+    /// expression): a nested deposit keeps these as written and widens
+    /// every other literal.
+    context_keeps: Vec<SemanticNodeId>,
 }
 
 /// Saved transient state for a nested SCC re-discharge. Persistent relation
@@ -3022,6 +3028,7 @@ impl CheckerDispatchTransaction {
         literal_mode: Option<crate::semantic_query::ArgumentLiteralMode>,
         top_level_infer_targets: Vec<SemanticNodeId>,
         argument: Option<SemanticNodeId>,
+        context_keeps: Vec<SemanticNodeId>,
     ) {
         self.relation
             .call_argument_literal_modes
@@ -3029,6 +3036,7 @@ impl CheckerDispatchTransaction {
                 literal_mode,
                 top_level_infer_targets,
                 argument,
+                context_keeps,
             });
     }
 
@@ -3069,6 +3077,15 @@ impl CheckerDispatchTransaction {
             .call_argument_literal_modes
             .last()
             .is_some_and(|policy| policy.argument == Some(bound))
+    }
+
+    /// The literals the CURRENT call argument nests at a position its
+    /// contextual type keeps them in; empty outside a call argument.
+    pub(crate) fn call_argument_context_keeps(&self) -> &[SemanticNodeId] {
+        self.relation
+            .call_argument_literal_modes
+            .last()
+            .map_or(&[], |policy| policy.context_keeps.as_slice())
     }
 
     /// Mark the frame at `idx` as having opened session `session`.

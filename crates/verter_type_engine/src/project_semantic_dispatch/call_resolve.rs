@@ -2277,6 +2277,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         argument.freshness_origin,
                         budget,
                         argument.literal_mode,
+                        &visible_type_params,
                     );
                     if !budget.charge_accepted_deposits(
                         self.accepted_inference_deposits() - deposits_before,
@@ -2296,8 +2297,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // assignability source.
             let (source, freshness_origin, literal_mode) = argument_source(argument, target);
             let deposits_before = self.accepted_inference_deposits();
-            let step =
-                self.call_argument_relation(source, target, freshness_origin, budget, literal_mode);
+            let step = self.call_argument_relation(
+                source,
+                target,
+                freshness_origin,
+                budget,
+                literal_mode,
+                &visible_type_params,
+            );
             if !budget
                 .charge_accepted_deposits(self.accepted_inference_deposits() - deposits_before)
             {
@@ -2384,6 +2391,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 argument.freshness_origin,
                 budget,
                 argument.literal_mode,
+                &visible_type_params,
             );
             if !budget
                 .charge_accepted_deposits(self.accepted_inference_deposits() - deposits_before)
@@ -3415,19 +3423,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Ok(self.instantiate_signature_in_context_of(signature, contextual, SignatureKind::Call))
     }
 
-    fn call_argument_relation(
+    /// Relate one call argument to its parameter type `target` under the
+    /// candidate whose type parameters are `declared`. A bare literal
+    /// argument's nested literals are first read against their contextual
+    /// types in `target`, one authored expression at a time
+    /// ([`Self::nested_literal_context_keeps`]), before its deposits
+    /// compose them.
+    pub(super) fn call_argument_relation(
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
         freshness_origin: SemanticNodeId,
         budget: &mut CallResolutionBudget<'_>,
         literal_mode: ArgumentLiteralMode,
+        declared: &[crate::semantic_query::TypeParamDecl],
     ) -> RelationStep {
         let top_level = self.top_level_type_param_targets(target);
+        let context_keeps = if literal_mode == ArgumentLiteralMode::Widened {
+            self.nested_literal_context_keeps(source, target, declared)
+        } else {
+            Vec::new()
+        };
         self.dispatch_txn.borrow_mut().begin_call_argument(
             Some(literal_mode),
             top_level,
             Some(source),
+            context_keeps,
         );
         let step = self.call_relation(source, target, freshness_origin, budget, true, true);
         self.dispatch_txn.borrow_mut().end_call_argument();
@@ -3523,6 +3544,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(ArgumentLiteralMode::Literal),
             Vec::new(),
             None,
+            Vec::new(),
         );
         let step = self.call_relation(source, target, source, budget, true, false);
         self.dispatch_txn.borrow_mut().end_call_argument();
@@ -3575,7 +3597,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> RelationStep {
         self.dispatch_txn
             .borrow_mut()
-            .begin_call_argument(None, Vec::new(), None);
+            .begin_call_argument(None, Vec::new(), None, Vec::new());
         let step = self.call_relation(source, target, freshness_origin, budget, true, false);
         self.dispatch_txn.borrow_mut().end_call_argument();
         step

@@ -10134,6 +10134,11 @@ pub(super) trait FlowDemandDriver {
     fn unresolved_head_is_authored_import(&self, scope: &NodeScopeId, name: &str) -> bool;
     fn top_level_literals(&self, node: SemanticNodeId) -> Vec<SemanticNodeId>;
     fn widened_literal(&self, node: SemanticNodeId) -> SemanticNodeId;
+    fn literal_of_contextual_type(
+        &self,
+        candidate: SemanticNodeId,
+        contextual: SemanticNodeId,
+    ) -> bool;
     fn subtype_reduced_union(
         &self,
         members: &[SemanticNodeId],
@@ -10551,6 +10556,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     }
     fn widened_literal(&self, node: SemanticNodeId) -> SemanticNodeId {
         ProjectSemanticDispatch::widened_literal(self, node)
+    }
+    fn literal_of_contextual_type(
+        &self,
+        candidate: SemanticNodeId,
+        contextual: SemanticNodeId,
+    ) -> bool {
+        ProjectSemanticDispatch::literal_of_contextual_type(self, candidate, contextual, &[])
     }
     fn subtype_reduced_union(
         &self,
@@ -11238,6 +11250,14 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     }
     fn widened_literal(&self, node: SemanticNodeId) -> SemanticNodeId {
         self.driver.widened_literal(node)
+    }
+    fn literal_of_contextual_type(
+        &self,
+        candidate: SemanticNodeId,
+        contextual: SemanticNodeId,
+    ) -> bool {
+        self.driver
+            .literal_of_contextual_type(candidate, contextual)
     }
     fn subtype_reduced_union(
         &self,
@@ -14797,106 +14817,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
     }
 
-    /// The checker's `isLiteralOfContextualType`: whether `contextual`
-    /// keeps a literal `candidate` — some constituent of `contextual` is a
-    /// literal (or a `boolean`, a template literal, a `keyof`) of the
-    /// candidate's own primitive kind, or a type parameter constrained to
-    /// that kind.
+    /// The checker's `isLiteralOfContextualType`, decided by the one
+    /// literal-context classifier the call executor also reads.
     fn literal_of_contextual_type(
         &self,
         candidate: SemanticNodeId,
         contextual: SemanticNodeId,
     ) -> bool {
-        #[derive(Clone, Copy, PartialEq)]
-        enum Kind {
-            String,
-            Number,
-            BigInt,
-            Boolean,
-        }
-        let graph = self.dispatch.graph();
-        let has_literal_of = |kind: Kind| -> bool {
-            let literal_kind = |node: SemanticNodeId| match graph.node_data(node).as_deref() {
-                Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(_))) => {
-                    Some(Kind::String)
-                }
-                Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Number(_))) => {
-                    Some(Kind::Number)
-                }
-                Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::BigInt(_))) => {
-                    Some(Kind::BigInt)
-                }
-                Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Boolean(
-                    _,
-                ))) => Some(Kind::Boolean),
-                _ => None,
-            };
-            match graph.node_data(candidate).as_deref() {
-                Some(SemanticNodeData::Union(members)) => members
-                    .iter()
-                    .any(|member| literal_kind(*member) == Some(kind)),
-                _ => literal_kind(candidate) == Some(kind),
-            }
-        };
-        let contextual = self.dispatch.resolved_reduction_view(contextual);
-        let data = graph.node_data(contextual);
-        let composite_members = match data.as_deref() {
-            Some(SemanticNodeData::Union(members)) => Some(members.to_vec()),
-            Some(SemanticNodeData::Intersection(members)) => Some(members.to_vec()),
-            _ => None,
-        };
-        if let Some(members) = composite_members {
-            drop(data);
-            return members
-                .iter()
-                .any(|member| self.literal_of_contextual_type(candidate, *member));
-        }
-        match data.as_deref() {
-            Some(SemanticNodeData::TypeParam { constraint, .. }) => {
-                let constraint = *constraint;
-                drop(data);
-                let Some(constraint) = constraint else {
-                    return false;
-                };
-                // Read by data: a constraint lowered in its declaration's scope
-                // is another node than the scope-free primitive.
-                let is_kind = |node: SemanticNodeId, kind: PrimitiveKind| {
-                    matches!(
-                        graph.node_data(node).as_deref(),
-                        Some(SemanticNodeData::Primitive(primitive)) if *primitive == kind
-                    )
-                };
-                let of_kind = |kind: PrimitiveKind| {
-                    is_kind(constraint, kind)
-                        || matches!(
-                            graph.node_data(constraint).as_deref(),
-                            Some(SemanticNodeData::Union(members))
-                                if members.iter().any(|member| is_kind(*member, kind))
-                        )
-                };
-                (of_kind(PrimitiveKind::String) && has_literal_of(Kind::String))
-                    || (of_kind(PrimitiveKind::Number) && has_literal_of(Kind::Number))
-                    || (of_kind(PrimitiveKind::BigInt) && has_literal_of(Kind::BigInt))
-                    || self.literal_of_contextual_type(candidate, constraint)
-            }
-            Some(
-                SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(_))
-                | SemanticNodeData::TemplateLiteral { .. }
-                | SemanticNodeData::KeyOf { .. },
-            ) => has_literal_of(Kind::String),
-            Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Number(_))) => {
-                has_literal_of(Kind::Number)
-            }
-            Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::BigInt(_))) => {
-                has_literal_of(Kind::BigInt)
-            }
-            // `boolean` is the union `true | false` to the checker.
-            Some(
-                SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Boolean(_))
-                | SemanticNodeData::Primitive(PrimitiveKind::Boolean),
-            ) => has_literal_of(Kind::Boolean),
-            _ => false,
-        }
+        self.dispatch
+            .literal_of_contextual_type(candidate, contextual)
     }
 
     /// The checker's contextual type of the property `name` of an object

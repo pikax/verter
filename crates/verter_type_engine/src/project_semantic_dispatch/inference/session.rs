@@ -12,55 +12,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::super::dispatch_txn::SessionId;
 use crate::semantic_query::{
     ConstParamPolicy, ContextualInferenceMode, IndexSignature, InferBinding, InferableParamSetId,
-    InferenceCandidatePriority, InferenceContextKey, InferencePassKind, LiteralValue, NoInferMask,
+    InferenceCandidatePriority, InferenceContextKey, InferencePassKind, NoInferMask,
     SemanticNodeId, SurfaceMember, TupleElement, VariancePhase,
 };
-
-/// The literal kinds a type parameter's constraint makes a literal context
-/// for (`isLiteralOfContextualType` over a type variable): a literal
-/// expression whose contextual type is the parameter keeps its literal type
-/// when its kind is one of these — `T extends string` keeps `"x"` in
-/// `{ v: "x" }` passed to `{ v: T }`, where an unconstrained `T` reads the
-/// member widened. Empty for an unconstrained parameter and for a
-/// constraint that admits no primitive.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub struct LiteralContext(u8);
-
-impl LiteralContext {
-    /// String literals: a `string`, string literal, template literal or
-    /// `keyof` constraint member.
-    pub(crate) const STRING: Self = Self(1);
-    /// Number literals: a `number`, number literal or `keyof` member.
-    pub(crate) const NUMBER: Self = Self(1 << 1);
-    /// Bigint literals: a `bigint` or bigint literal member.
-    pub(crate) const BIGINT: Self = Self(1 << 2);
-    /// Boolean literals: a `boolean` or boolean literal member.
-    pub(crate) const BOOLEAN: Self = Self(1 << 3);
-
-    /// No literal kind: every literal widens.
-    pub(crate) const fn empty() -> Self {
-        Self(0)
-    }
-
-    pub(crate) const fn is_empty(self) -> bool {
-        self.0 == 0
-    }
-
-    pub(crate) const fn union(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-
-    /// Whether a literal of `value`'s kind keeps its literal type here.
-    pub(crate) fn admits(self, value: &LiteralValue) -> bool {
-        let kind = match value {
-            LiteralValue::String(_) => Self::STRING,
-            LiteralValue::Number(_) => Self::NUMBER,
-            LiteralValue::BigInt(_) => Self::BIGINT,
-            LiteralValue::Boolean(_) => Self::BOOLEAN,
-        };
-        self.0 & kind.0 != 0
-    }
-}
 
 /// Lifecycle of an in-flight inference session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,10 +144,6 @@ pub struct InferenceInfoSetup {
     /// parameter (a constrained parameter's preserved literal is regular
     /// — the upper-bound check regularizes it).
     pub(in crate::project_semantic_dispatch) has_constraint: bool,
-    /// The literal kinds the declared constraint makes a literal context
-    /// for: a literal a call argument nests at one of this parameter's
-    /// positions deposits as written when its kind is among them.
-    pub(in crate::project_semantic_dispatch) literal_context: LiteralContext,
 }
 
 impl InferenceInfoSetup {
@@ -203,7 +153,6 @@ impl InferenceInfoSetup {
             param_name,
             const_policy: ConstParamPolicy::NonConst,
             has_constraint: false,
-            literal_context: LiteralContext::empty(),
         }
     }
 
@@ -212,14 +161,12 @@ impl InferenceInfoSetup {
         param_name: Arc<str>,
         const_policy: ConstParamPolicy,
         has_constraint: bool,
-        literal_context: LiteralContext,
     ) -> Self {
         Self {
             param_node,
             param_name,
             const_policy,
             has_constraint,
-            literal_context,
         }
     }
 }
@@ -294,7 +241,6 @@ struct InferenceInfo {
     param_name: Arc<str>,
     const_policy: ConstParamPolicy,
     has_constraint: bool,
-    literal_context: LiteralContext,
     /// Deposited candidates (session-local deltas — ReturnOnly, never
     /// published as-is).
     candidates: Vec<InferenceCandidate>,
@@ -358,7 +304,6 @@ impl InferenceSession {
                 param_name: Arc::clone(&info.param_name),
                 const_policy: info.const_policy,
                 has_constraint: info.has_constraint,
-                literal_context: info.literal_context,
                 candidates: Vec::new(),
                 implied_arity: None,
             })
@@ -720,18 +665,6 @@ impl InferenceSession {
             .iter()
             .find(|info| info.param_node == param_node)
             .and_then(|info| info.implied_arity)
-    }
-
-    /// The literal context a call's `param_node` constraint makes; empty
-    /// outside call applicability.
-    pub(crate) fn call_literal_context(&self, param_node: SemanticNodeId) -> LiteralContext {
-        if self.context_key().pass_kind != InferencePassKind::CallApplicability {
-            return LiteralContext::empty();
-        }
-        self.info_positions
-            .get(&param_node)
-            .and_then(|position| self.infos.get(*position))
-            .map_or(LiteralContext::empty(), |info| info.literal_context)
     }
 
     pub(crate) fn call_const_policy(&self, param_node: SemanticNodeId) -> Option<ConstParamPolicy> {

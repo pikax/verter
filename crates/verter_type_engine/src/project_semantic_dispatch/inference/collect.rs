@@ -36,33 +36,20 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         &self,
         param_node: SemanticNodeId,
         mut bound: SemanticNodeId,
-        mut occurrence: InferenceOccurrence,
+        occurrence: InferenceOccurrence,
     ) -> bool {
-        let (call_policy, deposit_is_top_level, literal_context) = {
+        let (call_policy, deposit_is_top_level, context_keeps) = {
             let txn = self.dispatch_txn.borrow();
-            let session = txn.active_session();
             (
-                session
+                txn.active_session()
                     .and_then(|session| session.call_const_policy(param_node))
                     .zip(txn.call_argument_literal_mode()),
                 txn.call_argument_target_is_top_level(param_node)
                     || txn.call_argument_is_whole(bound),
-                session.map_or(super::session::LiteralContext::empty(), |session| {
-                    session.call_literal_context(param_node)
-                }),
+                txn.call_argument_context_keeps().to_vec(),
             )
         };
         if let Some((policy, literal_mode)) = call_policy {
-            // A call argument infers through a function value's return under
-            // the argument's own priority, as through any other position
-            // (`inferFromSignature` applies the returns with no priority of
-            // their own): `sib(() => "q", "x")` over `sib<T extends
-            // string>(f: () => T, o: T)` infers `"q" | "x"`, never the
-            // callback's return alone.
-            if occurrence.priority == crate::semantic_query::InferenceCandidatePriority::ReturnType
-            {
-                occurrence.priority = crate::semantic_query::InferenceCandidatePriority::Argument;
-            }
             // A bare literal argument's candidate widens under the
             // inferring parameter's own const policy; an argument whose
             // authored form already pins its type deposits as authored.
@@ -70,10 +57,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             // literal (the constraint is an upper-bound check, not a
             // widening target: `cstr<T extends string>("a")` is `"a"`);
             // nested positions — an array element, an object member —
-            // widen unless the parameter's constraint makes the literal's
-            // contextual type a literal context (`isLiteralOfContextualType`:
-            // `{ v: "x" }` against `{ v: T }` keeps `"x"` for `T extends
-            // string`).
+            // widen unless the argument's contextual typing kept them — the
+            // authored expression holding the literal has a literal context
+            // for its contextual type (`isLiteralOfContextualType`: `{ v: "x" }`
+            // against `{ v: T }` keeps `"x"` for `T extends string`).
             if literal_mode == crate::semantic_query::ArgumentLiteralMode::Widened {
                 // A fresh union (a call's result whose literal members are
                 // fresh, `h(1)` over `h<T>(x: T): T | undefined`) is kept
@@ -99,9 +86,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 if !preserve_top_literal {
                     bound = if !deposit_is_top_level
                         && policy == crate::semantic_query::ConstParamPolicy::NonConst
-                        && !literal_context.is_empty()
+                        && !context_keeps.is_empty()
                     {
-                        self.contextual_literal_candidate(bound, literal_context, policy)
+                        self.contextual_literal_candidate(bound, &context_keeps, policy)
                     } else {
                         self.call_inference_candidate(bound, policy)
                     };

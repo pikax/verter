@@ -1,20 +1,52 @@
 //! The contextual reads of a call's arguments: whether a context-sensitive
 //! argument's contextual result reads an inference, the const context of
 //! a literal member whose contextual type is a `const` type parameter nested
-//! in the parameter's type, and the literal context a type parameter's
-//! constraint makes for the literals an argument nests at its positions.
+//! in the parameter's type, and the literals an argument nests where their
+//! contextual type in the parameter is a literal context for them.
 
 use std::sync::Arc;
 
-use super::super::inference::session::{InferenceInfoSetup, LiteralContext};
+use rustc_hash::FxHashSet;
+
+use super::super::inference::session::InferenceInfoSetup;
 use super::super::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    ConstParamPolicy, PrimitiveKind, SemanticNodeData, SemanticNodeId, SignatureKind, TypeParamDecl,
+    AuthoredPropertyKey, ConstParamPolicy, LiteralValue, PrimitiveKind, SemanticNodeData,
+    SemanticNodeId, SignatureKind, TypeParamDecl,
 };
+
+/// How many type-parameter constraints a literal-context read follows
+/// (`T extends U`, `U extends string`); a longer chain (only an erroneous
+/// circular one in practice) reads as no literal context.
+const CONSTRAINT_CHAIN_LIMIT: usize = 16;
+
+/// A primitive kind a literal context is decided by.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LiteralKind {
+    String,
+    Number,
+    BigInt,
+    Boolean,
+}
+
+impl LiteralKind {
+    fn of(value: &LiteralValue) -> Self {
+        match value {
+            LiteralValue::String(_) => Self::String,
+            LiteralValue::Number(_) => Self::Number,
+            LiteralValue::BigInt(_) => Self::BigInt,
+            LiteralValue::Boolean(_) => Self::Boolean,
+        }
+    }
+
+    const fn bit(self) -> u8 {
+        1 << self as u8
+    }
+}
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// The inference setup of a call candidate's type parameters, each with
-    /// its const policy and the literal context its constraint makes.
+    /// its const policy.
     pub(super) fn call_inference_infos(
         &self,
         type_parameters: &[TypeParamDecl],
@@ -31,106 +63,339 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         ConstParamPolicy::NonConst
                     },
                     decl.constraint.is_some(),
-                    self.constraint_literal_context(decl.constraint, type_parameters),
                 )
             })
             .collect()
     }
 
-    /// The literal kinds `constraint` makes a literal context for
-    /// (`isLiteralOfContextualType` over a type variable): a primitive, a
-    /// literal, a template literal or `keyof` member admits its kind, a
-    /// union or intersection the kinds of its members, and a type parameter
-    /// the kinds of its own constraint — read off the node, else off the
-    /// clause's declaration (`T extends U`, `U extends string`). Any other
-    /// member (an object, an unresolved carrier) admits none, so its
-    /// literals widen as before.
-    fn constraint_literal_context(
+    /// The literals the bare literal argument `source` nests at authored
+    /// positions whose contextual type in the parameter type `target` is a
+    /// literal context for them (`checkExpressionForMutableLocation`
+    /// through `getWidenedLiteralLikeTypeForContextualType`). The
+    /// argument's object members and array elements are its authored
+    /// expressions, and each is decided WHOLE against its own contextual
+    /// type before any deposit composes it: `{ v: c ? "a" : 1 }` against
+    /// `{ v: T }` with `T extends string | {}` keeps `"a" | 1`, while
+    /// `["a", 1]` against `T[]` keeps `"a"` alone. `declared` supplies the
+    /// constraint of a candidate type parameter whose node carries none.
+    /// The argument itself is no nested position: a naked top-level
+    /// deposit keeps its literal regardless.
+    pub(in crate::project_semantic_dispatch) fn nested_literal_context_keeps(
         &self,
-        constraint: Option<SemanticNodeId>,
-        type_parameters: &[TypeParamDecl],
-    ) -> LiteralContext {
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        declared: &[TypeParamDecl],
+    ) -> Vec<SemanticNodeId> {
         let graph = self.graph();
-        let mut context = LiteralContext::empty();
-        let mut pending: Vec<SemanticNodeId> = constraint.into_iter().collect();
-        let mut seen = rustc_hash::FxHashSet::default();
+        let mut keeps = Vec::new();
+        let mut pending = vec![(source, target, true)];
+        let mut seen = FxHashSet::default();
+        while let Some((source, target, root)) = pending.pop() {
+            if !seen.insert((source, target)) {
+                continue;
+            }
+            let data = graph.node_data(source);
+            match data.as_deref() {
+                Some(SemanticNodeData::Object(surface)) => {
+                    let members: Vec<(AuthoredPropertyKey, SemanticNodeId)> = surface
+                        .positive_members()
+                        .iter()
+                        .map(|member| (member.key.clone(), member.value))
+                        .collect();
+                    drop(data);
+                    for (key, value) in members {
+                        for contextual in self.contextual_member_types(target, &key) {
+                            pending.push((value, contextual, false));
+                        }
+                    }
+                }
+                Some(SemanticNodeData::Tuple { elements, .. }) => {
+                    // A position past a spread is no longer the element's own.
+                    let values: Vec<SemanticNodeId> = elements
+                        .iter()
+                        .take_while(|element| !element.rest)
+                        .map(|element| element.value)
+                        .collect();
+                    drop(data);
+                    for (index, value) in values.into_iter().enumerate() {
+                        for contextual in self.contextual_element_types(target, index) {
+                            pending.push((value, contextual, false));
+                        }
+                    }
+                }
+                Some(SemanticNodeData::Literal(_) | SemanticNodeData::Union(_)) if !root => {
+                    drop(data);
+                    if self.literal_of_contextual_type(source, target, declared) {
+                        keeps.extend(literal_members(graph, source));
+                    }
+                }
+                _ => {}
+            }
+        }
+        keeps
+    }
+
+    /// The contextual types an object literal member named `key` takes
+    /// from `contextual` (`getTypeOfPropertyOfContextualType`): the
+    /// declared member of each constituent that lists it.
+    fn contextual_member_types(
+        &self,
+        contextual: SemanticNodeId,
+        key: &AuthoredPropertyKey,
+    ) -> Vec<SemanticNodeId> {
+        let graph = self.graph();
+        let contextual = self.resolved_reduction_view(contextual);
+        let data = graph.node_data(contextual);
+        let surface = match data.as_deref() {
+            Some(composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_))) => {
+                let members: Vec<SemanticNodeId> = composite
+                    .composite_members()
+                    .expect("composite arm")
+                    .iter()
+                    .copied()
+                    .collect();
+                drop(data);
+                return members
+                    .into_iter()
+                    .flat_map(|member| self.contextual_member_types(member, key))
+                    .collect();
+            }
+            Some(SemanticNodeData::Object(surface)) => surface.clone(),
+            None
+            | Some(
+                SemanticNodeData::Primitive(_)
+                | SemanticNodeData::Literal(_)
+                | SemanticNodeData::TypeParam { .. }
+                | SemanticNodeData::Tuple { .. }
+                | SemanticNodeData::Array { .. },
+            ) => return Vec::new(),
+            Some(_) => {
+                drop(data);
+                match self.resolve_typeinfo_surface_view(
+                    contextual,
+                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                ) {
+                    Some(surface) => surface,
+                    None => return Vec::new(),
+                }
+            }
+        };
+        surface
+            .positive_members()
+            .iter()
+            .filter(|member| member.key == *key)
+            .map(|member| member.value)
+            .collect()
+    }
+
+    /// The contextual types the array literal element at `index` takes
+    /// from `contextual` (`getContextualTypeForElementExpression`): an
+    /// array's element type, or a tuple's element at the position (its
+    /// rest element's type past its fixed elements), per constituent.
+    fn contextual_element_types(
+        &self,
+        contextual: SemanticNodeId,
+        index: usize,
+    ) -> Vec<SemanticNodeId> {
+        let graph = self.graph();
+        let contextual = self.resolved_reduction_view(contextual);
+        let data = graph.node_data(contextual);
+        match data.as_deref() {
+            Some(composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_))) => {
+                let members: Vec<SemanticNodeId> = composite
+                    .composite_members()
+                    .expect("composite arm")
+                    .iter()
+                    .copied()
+                    .collect();
+                drop(data);
+                members
+                    .into_iter()
+                    .flat_map(|member| self.contextual_element_types(member, index))
+                    .collect()
+            }
+            Some(SemanticNodeData::Array { element, .. }) => vec![*element],
+            Some(SemanticNodeData::Tuple { elements, .. }) => {
+                let fixed = elements.iter().take_while(|element| !element.rest).count();
+                if index < fixed {
+                    return vec![elements[index].value];
+                }
+                let Some(rest) = elements.iter().find(|element| element.rest) else {
+                    return Vec::new();
+                };
+                match graph.node_data(rest.value).as_deref() {
+                    Some(SemanticNodeData::Array { element, .. }) => vec![*element],
+                    _ => Vec::new(),
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The checker's `isLiteralOfContextualType`: whether `contextual`
+    /// keeps a literal `candidate` (a literal, or a union holding literals)
+    /// — some constituent of `contextual` is a literal (or a `boolean`, a
+    /// template literal, a `keyof`) of a kind the candidate holds, or a
+    /// type parameter whose base constraint is that primitive kind or is
+    /// itself such a literal context. A constraint is read through its
+    /// named carriers (`T extends Text`, `type Text = string`) and through
+    /// the constraints of the type parameters it names; `declared`
+    /// supplies the constraint of a type parameter whose node carries none.
+    pub(in crate::project_semantic_dispatch) fn literal_of_contextual_type(
+        &self,
+        candidate: SemanticNodeId,
+        contextual: SemanticNodeId,
+        declared: &[TypeParamDecl],
+    ) -> bool {
+        let graph = self.graph();
+        let held = literal_members(graph, candidate)
+            .into_iter()
+            .fold(0u8, |held, literal| {
+                match graph.node_data(literal).as_deref() {
+                    Some(SemanticNodeData::Literal(value)) => held | LiteralKind::of(value).bit(),
+                    _ => held,
+                }
+            });
+        held != 0 && self.literal_context_admits(held, contextual, declared, CONSTRAINT_CHAIN_LIMIT)
+    }
+
+    /// Whether `contextual` is a literal context for a literal of one of
+    /// the kinds `held` (a [`LiteralKind`] bit set).
+    fn literal_context_admits(
+        &self,
+        held: u8,
+        contextual: SemanticNodeId,
+        declared: &[TypeParamDecl],
+        depth: usize,
+    ) -> bool {
+        let graph = self.graph();
+        let contextual = self.resolved_reduction_view(contextual);
+        let data = graph.node_data(contextual);
+        let kinds = match data.as_deref() {
+            Some(composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_))) => {
+                let members: Vec<SemanticNodeId> = composite
+                    .composite_members()
+                    .expect("composite arm")
+                    .iter()
+                    .copied()
+                    .collect();
+                drop(data);
+                return members
+                    .into_iter()
+                    .any(|member| self.literal_context_admits(held, member, declared, depth));
+            }
+            Some(SemanticNodeData::TypeParam { constraint, .. }) => {
+                let constraint = constraint.or_else(|| {
+                    declared
+                        .iter()
+                        .find(|decl| decl.param == contextual)
+                        .and_then(|decl| decl.constraint)
+                });
+                drop(data);
+                let Some(constraint) = constraint.filter(|_| depth > 0) else {
+                    return false;
+                };
+                return held & self.base_constraint_primitive_kinds(constraint, declared) != 0
+                    || self.literal_context_admits(held, constraint, declared, depth - 1);
+            }
+            Some(SemanticNodeData::Literal(value)) => LiteralKind::of(value).bit(),
+            Some(SemanticNodeData::TemplateLiteral { .. } | SemanticNodeData::KeyOf { .. }) => {
+                LiteralKind::String.bit()
+            }
+            // `boolean` is the union `true | false` to the checker.
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => LiteralKind::Boolean.bit(),
+            _ => 0,
+        };
+        held & kinds != 0
+    }
+
+    /// The primitive kinds `constraint`'s base constraint may be
+    /// (`maybeTypeOfKind` over `getBaseConstraintOfType`): its `string`,
+    /// `number` and `bigint` constituents, read through named carriers and
+    /// the constraints of the type parameters it names; a generic `keyof`
+    /// may be a `string` or a `number`.
+    fn base_constraint_primitive_kinds(
+        &self,
+        constraint: SemanticNodeId,
+        declared: &[TypeParamDecl],
+    ) -> u8 {
+        let graph = self.graph();
+        let mut kinds = 0u8;
+        let mut pending = vec![constraint];
+        let mut seen = FxHashSet::default();
         while let Some(node) = pending.pop() {
+            let node = self.resolved_reduction_view(node);
             if !seen.insert(node) {
                 continue;
             }
-            let kinds = match graph.node_data(node).as_deref() {
-                Some(SemanticNodeData::Primitive(primitive)) => match primitive {
-                    PrimitiveKind::String => LiteralContext::STRING,
-                    PrimitiveKind::Number => LiteralContext::NUMBER,
-                    PrimitiveKind::BigInt => LiteralContext::BIGINT,
-                    PrimitiveKind::Boolean => LiteralContext::BOOLEAN,
-                    _ => LiteralContext::empty(),
-                },
-                Some(SemanticNodeData::Literal(value)) => match value {
-                    crate::semantic_query::LiteralValue::String(_) => LiteralContext::STRING,
-                    crate::semantic_query::LiteralValue::Number(_) => LiteralContext::NUMBER,
-                    crate::semantic_query::LiteralValue::BigInt(_) => LiteralContext::BIGINT,
-                    crate::semantic_query::LiteralValue::Boolean(_) => LiteralContext::BOOLEAN,
-                },
-                Some(SemanticNodeData::TemplateLiteral { .. }) => LiteralContext::STRING,
-                Some(SemanticNodeData::KeyOf { .. }) => {
-                    LiteralContext::STRING.union(LiteralContext::NUMBER)
+            let data = graph.node_data(node);
+            match data.as_deref() {
+                Some(SemanticNodeData::Primitive(PrimitiveKind::String)) => {
+                    kinds |= LiteralKind::String.bit();
                 }
-                Some(SemanticNodeData::Alias(inner)) => {
-                    pending.push(*inner);
-                    continue;
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Number)) => {
+                    kinds |= LiteralKind::Number.bit();
+                }
+                Some(SemanticNodeData::Primitive(PrimitiveKind::BigInt)) => {
+                    kinds |= LiteralKind::BigInt.bit();
                 }
                 Some(
                     composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)),
-                ) => {
-                    pending.extend(
-                        composite
-                            .composite_members()
-                            .expect("composite arm")
-                            .iter()
-                            .copied(),
-                    );
-                    continue;
-                }
-                Some(SemanticNodeData::TypeParam {
-                    constraint: own, ..
-                }) => {
-                    let declared = type_parameters
+                ) => pending.extend(
+                    composite
+                        .composite_members()
+                        .expect("composite arm")
                         .iter()
-                        .find(|decl| decl.param == node)
-                        .and_then(|decl| decl.constraint);
-                    pending.extend(own.or(declared));
-                    continue;
+                        .copied(),
+                ),
+                Some(SemanticNodeData::TypeParam { constraint, .. }) => {
+                    pending.extend(constraint.or_else(|| {
+                        declared
+                            .iter()
+                            .find(|decl| decl.param == node)
+                            .and_then(|decl| decl.constraint)
+                    }));
                 }
-                _ => LiteralContext::empty(),
-            };
-            context = context.union(kinds);
+                Some(SemanticNodeData::KeyOf { base, .. }) => {
+                    let base = *base;
+                    drop(data);
+                    if matches!(
+                        graph
+                            .node_data(self.resolved_reduction_view(base))
+                            .as_deref(),
+                        Some(SemanticNodeData::TypeParam { .. })
+                    ) {
+                        kinds |= LiteralKind::String.bit() | LiteralKind::Number.bit();
+                    }
+                }
+                _ => {}
+            }
         }
-        context
+        kinds
     }
 
-    /// The candidate a NESTED call-argument deposit into a parameter whose
-    /// constraint makes `context` takes: a literal of an admitted kind as
-    /// written (its contextual type is the parameter), every other literal
-    /// widened under `policy`, a union member by member.
+    /// The candidate a NESTED call-argument deposit takes: each literal
+    /// the argument's contextual typing kept (`keeps`) as written, every
+    /// other literal widened under `policy`, a union member by member.
     pub(in crate::project_semantic_dispatch) fn contextual_literal_candidate(
         &self,
         bound: SemanticNodeId,
-        context: LiteralContext,
+        keeps: &[SemanticNodeId],
         policy: ConstParamPolicy,
     ) -> SemanticNodeId {
         let graph = self.graph();
-        let admitted = |node: SemanticNodeId| {
-            matches!(
-                graph.node_data(node).as_deref(),
-                Some(SemanticNodeData::Literal(value)) if context.admits(value)
-            )
+        let kept = |node: SemanticNodeId| {
+            let data = graph.node_data(node);
+            matches!(data.as_deref(), Some(SemanticNodeData::Literal(_)))
+                && keeps
+                    .iter()
+                    .any(|keep| *keep == node || graph.node_data(*keep) == data)
         };
-        if admitted(bound) {
+        if kept(bound) {
             return bound;
         }
         let members = match graph.node_data(bound).as_deref() {
-            Some(SemanticNodeData::Union(members)) if members.iter().any(|m| admitted(*m)) => {
+            Some(SemanticNodeData::Union(members)) if members.iter().any(|m| kept(*m)) => {
                 members.iter().copied().collect::<Vec<_>>()
             }
             _ => return self.call_inference_candidate(bound, policy),
@@ -138,7 +403,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let members: Vec<SemanticNodeId> = members
             .into_iter()
             .map(|member| {
-                if admitted(member) {
+                if kept(member) {
                     member
                 } else {
                     self.call_inference_candidate(member, policy)
@@ -296,5 +561,28 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
             super::super::signature_discovery::SharedSignatureNodes::Incomplete(_) => true,
         }
+    }
+}
+
+/// The literal constituents of `node`: itself when a literal, its literal
+/// members when a union.
+fn literal_members(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    node: SemanticNodeId,
+) -> Vec<SemanticNodeId> {
+    let is_literal = |node: SemanticNodeId| {
+        matches!(
+            graph.node_data(node).as_deref(),
+            Some(SemanticNodeData::Literal(_))
+        )
+    };
+    match graph.node_data(node).as_deref() {
+        Some(SemanticNodeData::Literal(_)) => vec![node],
+        Some(SemanticNodeData::Union(members)) => members
+            .iter()
+            .copied()
+            .filter(|member| is_literal(*member))
+            .collect(),
+        _ => Vec::new(),
     }
 }

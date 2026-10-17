@@ -1545,6 +1545,21 @@ export function l14() { return sib(() => "q", { v: "x" }); }
 export function l15() { return sib3((): "q" => "q", "x"); }
 export function l16() { return sib6(() => "q", "x"); }
 export function l17() { return sib7("x", () => "q"); }
+declare function sx<T extends string | {}>(x: { v: T }): T;
+declare function ar<T extends string | {}>(x: T[]): T;
+type Text = string;
+type TextOrCount = string | number;
+declare function al<T extends Text>(x: { v: T }): T;
+declare function alu<T extends TextOrCount>(x: { v: T }): T;
+export function l18() { return sx({ v: c ? "a" : 1 }); }
+export function l19() { return sx({ v: c ? "a" : true }); }
+export function l20() { return ar([c ? "a" : 1]); }
+export function l21() { return ar(["a", 1]); }
+export function l22() { return al({ v: "x" }); }
+export function l23() { return alu({ v: "x" }); }
+declare function rv<T extends string>(this: { f: () => T }, x: T): T;
+const ru = { f: (): "a" => "a", rv };
+export function l24() { return ru.rv("b"); }
 "##;
 
 /// Each candidate evaluates a nested argument literal under its own type
@@ -1553,7 +1568,11 @@ export function l17() { return sib7("x", () => "q"); }
 /// arms and context-sensitive object literals; a rejected overload's
 /// context does not reach the candidate after it; a nested `NoInfer`
 /// position deposits nothing; and a callback's return infers beside its
-/// sibling arguments at their priority.
+/// sibling arguments — and a receiver's function member beside the
+/// arguments — at their priority. Each authored member or element is
+/// decided whole against its own contextual type: a conditional of a kept
+/// and an unkept kind stays whole, where the same literals as separate
+/// elements widen apart; a constraint is read through its named aliases.
 #[test]
 fn candidate_literal_contexts() {
     let failures = Matrix::new(CANDIDATE_LITERAL_CONTEXTS).four(&[
@@ -1675,6 +1694,55 @@ fn candidate_literal_contexts() {
             r#""q" | "x""#,
             r#""q" | "x""#,
             r#""q" | "x""#,
+        ),
+        (
+            Read::Return(r#"l18"#),
+            r#""a" | 1"#,
+            r#""a" | 1"#,
+            r#""a" | 1"#,
+            r#""a" | 1"#,
+        ),
+        (
+            Read::Return(r#"l19"#),
+            r#""a" | true"#,
+            r#""a" | true"#,
+            r#""a" | true"#,
+            r#""a" | true"#,
+        ),
+        (
+            Read::Return(r#"l20"#),
+            r#""a" | 1"#,
+            r#""a" | 1"#,
+            r#""a" | 1"#,
+            r#""a" | 1"#,
+        ),
+        (
+            Read::Return(r#"l21"#),
+            r#"number | "a""#,
+            r#"number | "a""#,
+            r#"number | "a""#,
+            r#"number | "a""#,
+        ),
+        (
+            Read::Return(r#"l22"#),
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+        ),
+        (
+            Read::Return(r#"l23"#),
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+        ),
+        (
+            Read::Return(r#"l24"#),
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+            r#""a" | "b""#,
         ),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
