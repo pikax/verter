@@ -15,7 +15,7 @@ use crate::analysis::types::Hash16;
 ///
 /// `Default` is the unstamped sentinel — equals no realistic identity,
 /// so an unstamped analysis fails closed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, verter_retention::heap_size::HeapSize)]
 #[serde(transparent)]
 pub struct AnalysisSourceRevision(Hash16);
 
@@ -50,7 +50,7 @@ impl AnalysisSourceRevision {
 /// shared between all snapshots of the same file version. Only `imports` and
 /// `bindings` are owned `Vec`s because `VerterHost::get_analysis` mutates
 /// them (import resolution and destructured binding enrichment).
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, verter_retention::heap_size::HeapSize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileAnalysisSnapshot {
     /// Import statements found in script blocks.

@@ -30,3 +30,12 @@ pub fn file_language<'t>(
         }
     }
 }
+
+/// A sealed carrier block ref: an artifact identity digest and a block id,
+/// both inline.
+pub fn artifact_block_ref<'t>(
+    _block: &'t Option<verter_language::parse_artifact::carrier_inventory::ArtifactBlockRef>,
+    _meter: &mut HeapMeter<'_, 't>,
+) -> usize {
+    0
+}

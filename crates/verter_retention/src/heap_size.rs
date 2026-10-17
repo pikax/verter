@@ -338,6 +338,61 @@ impl<T: Measured> HeapSize for Owned<T> {
     }
 }
 
+impl HeapSize for verter_audit::RequestTimingAudit {
+    /// Wall-clock figures only: no heap.
+    fn heap_size<'t>(&'t self, _meter: &mut HeapMeter<'_, 't>) -> usize {
+        let Self {
+            total_ms: _,
+            capture_inputs_ms: _,
+            store_read_ms: _,
+            store_merge_ms: _,
+            direct_import_proof_ms: _,
+            imported_root_proof_ms: _,
+            solver_ms: _,
+            materialize_ms: _,
+            serialize_ms: _,
+            request_critical_path_ms: _,
+        } = self;
+        0
+    }
+}
+
+impl HeapSize for verter_audit::ComponentMetaPayload {
+    /// Its counters are inline; its diagnostic list and their messages are
+    /// its heap.
+    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
+        let Self {
+            total_resolve_steps: _,
+            solve_count: _,
+            materialize_structure_calls: _,
+            materialize_structure_cache_hits: _,
+            node_arena_lock_acquisitions: _,
+            family_map_lock_acquisitions: _,
+            dep_signature_merges: _,
+            dep_signature_intern_hits: _,
+            diagnostics,
+            should_suppress: _,
+            expanded_instantiate_calls: _,
+            synthesis_expanded_instantiate_calls: _,
+            memo_insertions: _,
+            memo_publish_suppressed: _,
+        } = self;
+        diagnostics.heap_size(meter)
+    }
+}
+
+impl HeapSize for verter_audit::AuditDiagnosticEntry {
+    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
+        let Self {
+            kind: _,
+            message,
+            span: _,
+            macro_index: _,
+        } = self;
+        message.heap_size(meter)
+    }
+}
+
 /// A data tree held as an owned cell's value (see the module docs).
 #[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub struct Tree<T>(T);
@@ -373,6 +428,147 @@ impl<T: std::fmt::Debug> std::fmt::Debug for Tree<T> {
 impl<T: HeapSize + Send + Sync + 'static> Measured for Tree<T> {
     fn heap_bytes(&self, aliases: &mut AliasSet) -> usize {
         self.0.heap_size(&mut HeapMeter::new(aliases))
+    }
+}
+
+/// A cached value a cache hands its readers: a self-charged allocation
+/// holding a data tree ([`OwnedTree`]) that derefs straight to the value.
+///
+/// Every reader's clone shares the one cell and its one charge, so a value
+/// a reader keeps after the cache let go stays charged — pinned — until the
+/// reader's own last clone drops, and no accessor exposes the raw `Arc`.
+pub struct OwnedValue<T: HeapSize + Send + Sync + 'static>(OwnedTree<T>);
+
+impl<T: HeapSize + Send + Sync + 'static> OwnedValue<T> {
+    /// A new allocation of `value`, charged by the first owner that keeps
+    /// it.
+    #[must_use]
+    pub fn new(value: T) -> Self {
+        Self(owned_tree(value))
+    }
+
+    /// Offer this nested handle to a measurement (see [`Owned::offer`]).
+    pub fn offer(&self, aliases: &mut AliasSet) -> usize {
+        self.0.offer(aliases)
+    }
+
+    /// Charge it to its callers if no owner has yet (see [`Owned::pin`]).
+    pub fn pin(&self, ctx: super::owned::ChargeCtx<'_>) {
+        self.0.pin(ctx);
+    }
+
+    /// A cache's hold on it (see [`Owned::hold`]).
+    ///
+    /// # Errors
+    ///
+    /// The account's refusal: nothing is retained.
+    pub fn hold(
+        &self,
+        ctx: super::owned::ChargeCtx<'_>,
+    ) -> Result<super::owned::OwnedHold, super::RetentionRefusal> {
+        self.0.hold(ctx)
+    }
+
+    /// Bytes its charge holds; `None` while no owner has charged it.
+    #[must_use]
+    pub fn charge_bytes(&self) -> Option<usize> {
+        self.0.charge_bytes()
+    }
+
+    /// Its charge's class; `None` while no owner has charged it.
+    #[must_use]
+    pub fn charge_class(&self) -> Option<super::ChargeClass> {
+        self.0.charge_class()
+    }
+
+    /// Whether two handles share one allocation.
+    #[must_use]
+    pub fn ptr_eq(this: &Self, other: &Self) -> bool {
+        Owned::ptr_eq(&this.0, &other.0)
+    }
+
+    /// Owning handles of this allocation.
+    #[must_use]
+    pub fn strong_count(this: &Self) -> usize {
+        Owned::strong_count(&this.0)
+    }
+
+    /// Bytes the cell's block holds beside the value's heap.
+    #[must_use]
+    pub fn cell_block_bytes() -> usize {
+        OwnedTree::<T>::cell_block_bytes()
+    }
+}
+
+impl<T: HeapSize + Send + Sync + 'static> Clone for OwnedValue<T> {
+    /// Another owner of the same allocation: shares its one charge.
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<T: HeapSize + Send + Sync + 'static> std::ops::Deref for OwnedValue<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T: HeapSize + Send + Sync + 'static> AsRef<T> for OwnedValue<T> {
+    fn as_ref(&self) -> &T {
+        self
+    }
+}
+
+impl<T: HeapSize + Send + Sync + 'static> std::borrow::Borrow<T> for OwnedValue<T> {
+    fn borrow(&self) -> &T {
+        self
+    }
+}
+
+impl<T: HeapSize + Send + Sync + 'static> From<T> for OwnedValue<T> {
+    fn from(value: T) -> Self {
+        Self::new(value)
+    }
+}
+
+impl<T: HeapSize + Send + Sync + 'static + PartialEq> PartialEq for OwnedValue<T> {
+    fn eq(&self, other: &Self) -> bool {
+        Self::ptr_eq(self, other) || **self == **other
+    }
+}
+
+impl<T: HeapSize + Send + Sync + 'static + Eq> Eq for OwnedValue<T> {}
+
+impl<T: HeapSize + Send + Sync + 'static + std::hash::Hash> std::hash::Hash for OwnedValue<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (**self).hash(state);
+    }
+}
+
+impl<T: HeapSize + Send + Sync + 'static + std::fmt::Debug> std::fmt::Debug for OwnedValue<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        (**self).fmt(f)
+    }
+}
+
+impl<T: HeapSize + Send + Sync + 'static + Default> Default for OwnedValue<T> {
+    fn default() -> Self {
+        Self::new(T::default())
+    }
+}
+
+impl<T: HeapSize + Send + Sync + 'static> HeapSize for OwnedValue<T> {
+    /// Charged by its own cell.
+    fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
+        self.offer(meter.handles())
+    }
+}
+
+impl<T: HeapSize + Send + Sync + 'static> Measured for OwnedValue<T> {
+    /// A nested owned value: charged by its own cell.
+    fn heap_bytes(&self, aliases: &mut AliasSet) -> usize {
+        self.offer(aliases)
     }
 }
 
