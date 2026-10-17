@@ -191,15 +191,21 @@ const _: () = assert!(std::mem::size_of::<ProjectionFrame>() <= 32);
 
 /// How a projection run treats the instantiations it reaches.
 ///
-/// Run inline, a projection evaluates each instantiation where it reaches
-/// it. Run as a continuation, it parks the node instead, records the
-/// instantiation as the run's need, and stops: the caller delivers the
-/// instantiated node to [`ProjectSemanticDispatch::drain_projection`],
-/// which resumes the run exactly where it stopped.
+/// Run inline, a projection evaluates each instantiation, and decides each
+/// conditional type, where it reaches it. Run as a continuation, it parks
+/// the node instead, records the instantiation (or the conditional's
+/// decision) as the run's need, and stops: the caller delivers the
+/// instantiated node (or the decided one) to
+/// [`ProjectSemanticDispatch::drain_projection`], which resumes the run
+/// exactly where it stopped.
 #[derive(Debug, Default)]
 pub(super) struct ProjectionSeam {
     suspend: bool,
     need: Option<SemanticQueryKey>,
+    /// The conditional decision the run stopped at, until it is delivered.
+    awaiting_decision: Option<SemanticQueryKey>,
+    /// A delivered decision, until the frame that needed it takes it.
+    decided: Option<(SemanticQueryKey, SemanticNodeId)>,
 }
 
 impl ProjectionSeam {
@@ -212,7 +218,7 @@ impl ProjectionSeam {
     pub(super) fn suspending() -> Self {
         Self {
             suspend: true,
-            need: None,
+            ..Self::default()
         }
     }
 }
@@ -762,11 +768,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         };
         let frames = &mut run.frames;
-        if let Some(instantiated) = delivery {
-            let Some(ProjectionFrame::AwaitInstantiation { node, context }) = frames.pop() else {
-                unreachable!("a delivery resumes the node that awaited it")
-            };
-            self.memoize_projected(memo, node, context, instantiated);
+        if let Some(delivered) = delivery {
+            match seam.awaiting_decision.take() {
+                // The decision the conditional on top of the stack needed:
+                // the conditional takes it when it runs again.
+                Some(decision) => seam.decided = Some((decision, delivered)),
+                None => {
+                    let Some(ProjectionFrame::AwaitInstantiation { node, context }) = frames.pop()
+                    else {
+                        unreachable!("a delivery resumes the node that awaited it")
+                    };
+                    self.memoize_projected(memo, node, context, delivered);
+                }
+            }
         }
         let mut trip: Option<ProjectionFailure> = None;
         // A step that stops at an instantiation leaves the run at once: the
@@ -993,16 +1007,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         pending: pending.clone(),
                     };
                     work_credit.settle();
-                    let selected = match self.execute_type_node(SemanticQueryKey::Conditional {
-                        check: projected(memo, *check, Self::conditional_check_context(context)),
-                        extends: projected(memo, *extends, extends_context),
-                        true_branch: *true_branch_ref,
-                        false_branch: *false_branch_ref,
-                        distributive: *distributive,
-                        pending: pending.clone(),
-                    }) {
-                        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
-                        _ => self.opaque(QueryError::Miss),
+                    let Some(selected) = self.decided_conditional(
+                        SemanticQueryKey::Conditional {
+                            check: projected(
+                                memo,
+                                *check,
+                                Self::conditional_check_context(context),
+                            ),
+                            extends: projected(memo, *extends, extends_context),
+                            true_branch: *true_branch_ref,
+                            false_branch: *false_branch_ref,
+                            distributive: *distributive,
+                            pending: pending.clone(),
+                        },
+                        seam,
+                    ) else {
+                        frames.push(ProjectionFrame::ConditionalAfterExtends {
+                            node,
+                            context,
+                            data: Arc::clone(&data),
+                            extends_context,
+                        });
+                        break;
                     };
                     if let Err(reasons) = work_credit.refresh() {
                         trip = Some(reasons.into());
@@ -1100,16 +1126,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         unreachable!("conditional finish frame must carry a conditional")
                     };
                     work_credit.settle();
-                    let result = match self.execute_type_node(SemanticQueryKey::Conditional {
-                        check: projected(memo, *check, Self::conditional_check_context(context)),
-                        extends: projected(memo, *extends, extends_context),
-                        true_branch: projected(memo, *true_branch_ref, context),
-                        false_branch: projected(memo, *false_branch_ref, context),
-                        distributive: *distributive,
-                        pending: pending.clone(),
-                    }) {
-                        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
-                        _ => self.opaque(QueryError::Miss),
+                    let Some(result) = self.decided_conditional(
+                        SemanticQueryKey::Conditional {
+                            check: projected(
+                                memo,
+                                *check,
+                                Self::conditional_check_context(context),
+                            ),
+                            extends: projected(memo, *extends, extends_context),
+                            true_branch: projected(memo, *true_branch_ref, context),
+                            false_branch: projected(memo, *false_branch_ref, context),
+                            distributive: *distributive,
+                            pending: pending.clone(),
+                        },
+                        seam,
+                    ) else {
+                        frames.push(ProjectionFrame::ConditionalFinish {
+                            node,
+                            context,
+                            data: Arc::clone(&data),
+                            extends_context,
+                        });
+                        break;
                     };
                     if let Err(reasons) = work_credit.refresh() {
                         trip = Some(reasons.into());
@@ -1275,6 +1313,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 ProjectedViewOutcome::complete(projected(memo, root, root_context))
             },
         )
+    }
+
+    /// The node the conditional decision `key` a projection reached
+    /// selects: decided in place by an inline run; by a continuation, the
+    /// decision delivered for it, or `None` once the run needs it.
+    fn decided_conditional(
+        &self,
+        key: SemanticQueryKey,
+        seam: &mut ProjectionSeam,
+    ) -> Option<SemanticNodeId> {
+        if !seam.suspend {
+            return Some(self.instantiated_node(key));
+        }
+        if let Some((decision, decided)) = seam.decided.take() {
+            verter_debug_assert!(
+                decision == key,
+                "a delivered decision resumes the conditional that needed it"
+            );
+            return Some(decided);
+        }
+        seam.awaiting_decision = Some(key.clone());
+        seam.need = Some(key);
+        None
     }
 
     /// The node an instantiation a projection reached evaluates to.
