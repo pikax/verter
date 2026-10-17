@@ -1183,14 +1183,7 @@ fn call_diagnostics_carry_the_checkers_code_message_position_and_order() {
             }
         }
     }
-    assert!(
-        mismatches.is_empty(),
-        "{}",
-        mismatches.join(
-            "
-"
-        )
-    );
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
 
 const LIB_VALUE_READS: &str = r#"
