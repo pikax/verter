@@ -130,6 +130,24 @@ fn record_composition_work(root_steps: usize, fact_entries: usize) {
     let _ = (root_steps, fact_entries);
 }
 
+/// Record the links `chain` physically allocated on top of `shared`: every
+/// link walked before reaching `shared`'s head allocation. One when the hop
+/// shares its child's chain; the whole chain when it copied it.
+#[inline]
+fn record_root_links_written(chain: &RootChain, shared: &RootChain) {
+    #[cfg(any(test, feature = "semantic-observe"))]
+    {
+        let shared_head = shared.links().next().map(|(link, _)| link);
+        let written = chain
+            .links()
+            .take_while(|(link, _)| Some(*link) != shared_head)
+            .count();
+        record_composition_work(written, 0);
+    }
+    #[cfg(not(any(test, feature = "semantic-observe")))]
+    let _ = (chain, shared);
+}
+
 fn type_publication_from_position(
     position: &SourcePosition,
     provenance: ResolutionProvenance,
@@ -329,33 +347,6 @@ where
     }
 }
 
-/// The cross-file part of a fallthrough evidence list: every entry that does
-/// not name `owner`.
-///
-/// A shared child receipt stays one entry unless a fact it reaches names the
-/// owner (a root chain leading back through the owner's own file); only then
-/// is it expanded, so the owner's own facts stay out exactly as they do for
-/// a directly listed fact.
-pub fn cross_file_fallthrough_facts(facts: &[FactVersionRef], owner: &str) -> Vec<FactVersionRef> {
-    let mut cross_file = Vec::with_capacity(facts.len());
-    let mut walk = verter_session_query::facts::receipt::ReceiptWalk::default();
-    for fact in facts {
-        match fact {
-            FactVersionRef::Receipt(receipt) if receipt.references_canonical(owner) => {
-                walk.leaves(receipt, |leaf| {
-                    if leaf.canonical_id() != Some(owner) {
-                        cross_file.push(leaf.clone());
-                    }
-                    true
-                });
-            }
-            fact if fact.canonical_id() == Some(owner) => {}
-            fact => cross_file.push(fact.clone()),
-        }
-    }
-    cross_file
-}
-
 pub fn fallthrough_cache_key(
     canonical_id: &str,
     generic_root_propagation: bool,
@@ -543,16 +534,28 @@ pub fn append_component_candidate_branches<H: FallthroughResolverHost>(
     // copy of every fact the child reached. A chain's evidence is therefore
     // each hop's facts plus one edge per hop, shared, and still validates
     // exactly when every fact it reaches validates.
+    //
+    // A receipt reaching the parent's own facts (a root chain cycling back
+    // through the parent's file) is the one exception: it enters as its flat
+    // leaves, so every consumer that keeps the owner's own facts out of an
+    // outer signature by `canonical_id()` still sees them. Only a cycle pays
+    // this copy, and only at the owner it cycles back to.
     if !child_resolution.fact_versions().is_empty() {
-        record_composition_work(0, child_resolution.fact_versions().len() + 1);
-        extend_unique_fact_versions(
-            fact_versions,
-            [FactVersionRef::Receipt(
-                verter_session_query::facts::receipt::ResultReceipt::new(
-                    child_resolution.fact_versions().to_vec(),
-                ),
-            )],
+        let receipt = verter_session_query::facts::receipt::ResultReceipt::new(
+            child_resolution.fact_versions().to_vec(),
         );
+        if receipt.references_canonical(parent_canonical_id) {
+            let mut leaves = Vec::new();
+            receipt.all_leaves(|leaf| {
+                leaves.push(leaf.clone());
+                true
+            });
+            record_composition_work(0, leaves.len());
+            extend_unique_fact_versions(fact_versions, leaves);
+        } else {
+            record_composition_work(0, child_resolution.fact_versions().len() + 1);
+            extend_unique_fact_versions(fact_versions, [FactVersionRef::Receipt(receipt)]);
+        }
     }
 
     match child_resolution.fallthrough_surface() {
@@ -658,7 +661,7 @@ pub fn append_component_candidate_branches<H: FallthroughResolverHost>(
                     },
                     &child_branch.root_chain,
                 );
-                record_composition_work(1, 0);
+                record_root_links_written(&root_chain, &child_branch.root_chain);
 
                 let status = match &child_branch.status {
                     BranchStatus::Resolved => {
@@ -2406,6 +2409,115 @@ mod tests {
         assert_eq!(branches.len(), 1);
         assert_eq!(branches[0].branch_key, "0.0");
         assert_eq!(facts.len(), 2);
+    }
+
+    /// A child's evidence enters its parent as one shared receipt, unless it
+    /// reaches the parent's own facts (a root chain cycling back through the
+    /// parent's file): then it enters flat, so the owner-excluding filter
+    /// every outer signature applies (`canonical_id() != owner`) still keeps
+    /// the parent's own facts out.
+    #[test]
+    fn child_evidence_reaching_the_owner_enters_flat_and_other_children_stay_shared() {
+        use verter_session_query::facts::fact_cache::FactVersionRef;
+        use verter_session_query::facts::receipt::ResultReceipt;
+
+        let compose = |child_facts: Vec<FactVersionRef>| {
+            let mut host = TestHost::default();
+            host.canonical_routes.insert(
+                ("/App.vue".to_string(), "./Child.vue".to_string()),
+                "/Child.vue".to_string(),
+            );
+            host.child_resolutions.insert(
+                "/Child.vue".to_string(),
+                TestResolution {
+                    accepted_props: vec![],
+                    accepted_events: vec![],
+                    fallthrough_surface: FallthroughSurface::Branches {
+                        branches: vec![FallthroughBranch {
+                            branch_key: "0".to_string(),
+                            condition_text: None,
+                            props: vec![],
+                            events: vec![],
+                            root_chain: super::RootChain::single(ResolvedRootStep::NativeTag {
+                                tag: "div".to_string(),
+                            }),
+                            status: BranchStatus::Resolved,
+                        }],
+                    },
+                    fact_versions: child_facts,
+                },
+            );
+            let mut facts = vec![own_fact("/App.vue")];
+            append_component_candidate_branches(
+                &host,
+                "/App.vue",
+                "Child",
+                "./Child.vue",
+                None,
+                None,
+                "0".to_string(),
+                None,
+                &[],
+                &[],
+                &[],
+                None,
+                &FxHashSet::default(),
+                &FxHashSet::default(),
+                &FxHashSet::default(),
+                &mut Vec::new(),
+                &mut false,
+                &mut false,
+                &mut facts,
+                &mut FxHashSet::default(),
+            );
+            facts
+        };
+        let cross_file = |facts: &[FactVersionRef]| -> Vec<FactVersionRef> {
+            facts
+                .iter()
+                .filter(|fact| fact.canonical_id() != Some("/App.vue"))
+                .cloned()
+                .collect()
+        };
+
+        let shared = compose(vec![
+            own_fact("/Child.vue"),
+            FactVersionRef::Receipt(ResultReceipt::new(vec![own_fact("/Leaf.vue")])),
+        ]);
+        let receipts: Vec<&ResultReceipt> = shared
+            .iter()
+            .filter_map(|fact| match fact {
+                FactVersionRef::Receipt(receipt) => Some(receipt),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(receipts.len(), 1, "a non-cycling child stays one receipt");
+        assert!(!receipts[0].references_canonical("/App.vue"));
+        let leaves = evidence_leaves(&cross_file(&shared));
+        assert!(leaves.contains(&own_fact("/Child.vue")));
+        assert!(leaves.contains(&own_fact("/Leaf.vue")));
+
+        let cycling = compose(vec![
+            own_fact("/Child.vue"),
+            FactVersionRef::Receipt(ResultReceipt::new(vec![
+                own_fact("/Leaf.vue"),
+                own_fact("/App.vue"),
+            ])),
+        ]);
+        assert!(
+            cycling.iter().all(|fact| !matches!(
+                fact,
+                FactVersionRef::Receipt(receipt) if receipt.references_canonical("/App.vue")
+            )),
+            "no receipt carries the owner's own facts past the owner filter"
+        );
+        let leaves = evidence_leaves(&cross_file(&cycling));
+        assert!(leaves.contains(&own_fact("/Child.vue")));
+        assert!(leaves.contains(&own_fact("/Leaf.vue")));
+        assert!(
+            !leaves.contains(&own_fact("/App.vue")),
+            "the owner's own facts stay out of its cross-file evidence"
+        );
     }
 
     #[test]

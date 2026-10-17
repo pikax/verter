@@ -107,12 +107,12 @@ pub use external_type_frontier::{
 pub use fallthrough::{
     append_component_candidate_branches, append_native_candidate_branch,
     collect_dynamic_root_candidates_from_type, component_import_candidate_for_binding,
-    cross_file_fallthrough_facts, extend_unique_fact_versions, fallthrough_cache_key,
-    known_spread_keys_from_type_expr, merge_fallthrough_branches, push_partial_reason,
-    resolve_fallthrough_surface, structural_substitute_typeof_refs, DynamicRootCandidate,
-    FallthroughComputeHost, FallthroughPropOverride, FallthroughPropOverrideSet,
-    FallthroughResolutionView, FallthroughResolverHost, IntrinsicMemberTypeSource,
-    IntrinsicSurfaceMember, KnownSpreadKeys, ResolvedConsumedBindings, ResolvedFallthroughSurface,
+    extend_unique_fact_versions, fallthrough_cache_key, known_spread_keys_from_type_expr,
+    merge_fallthrough_branches, push_partial_reason, resolve_fallthrough_surface,
+    structural_substitute_typeof_refs, DynamicRootCandidate, FallthroughComputeHost,
+    FallthroughPropOverride, FallthroughPropOverrideSet, FallthroughResolutionView,
+    FallthroughResolverHost, IntrinsicMemberTypeSource, IntrinsicSurfaceMember, KnownSpreadKeys,
+    ResolvedConsumedBindings, ResolvedFallthroughSurface,
 };
 #[cfg(any(test, feature = "semantic-observe"))]
 pub use fallthrough::{

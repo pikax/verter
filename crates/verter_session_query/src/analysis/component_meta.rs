@@ -828,6 +828,8 @@ struct RootChainLink {
     step: ResolvedRootStep,
     len: usize,
     rest: RootChain,
+    /// The chain's innermost link, shared, when it is not this one.
+    terminal: Option<std::sync::Arc<RootChainLink>>,
 }
 
 impl RootChain {
@@ -840,11 +842,16 @@ impl RootChain {
     /// `step` followed by `rest`, sharing `rest`.
     #[must_use]
     pub fn prepend(step: ResolvedRootStep, rest: &Self) -> Self {
+        let terminal = rest
+            .head
+            .as_ref()
+            .map(|link| link.terminal.as_ref().unwrap_or(link).clone());
         Self {
             head: Some(std::sync::Arc::new(RootChainLink {
                 step,
                 len: rest.len() + 1,
                 rest: rest.clone(),
+                terminal,
             })),
         }
     }
@@ -877,7 +884,9 @@ impl RootChain {
     /// The innermost step: the target the chain ends at.
     #[must_use]
     pub fn last(&self) -> Option<&ResolvedRootStep> {
-        self.iter().last()
+        self.head
+            .as_deref()
+            .map(|link| &link.terminal.as_deref().unwrap_or(link).step)
     }
 
     /// Each link's shared allocation address with its step, outermost
@@ -1021,6 +1030,9 @@ mod root_chain_tests {
         );
         assert_eq!(parent.first(), Some(&tag("a")));
         assert_eq!(parent.last(), Some(&tag("c")));
+        assert_eq!(child.last(), Some(&tag("c")));
+        assert_eq!(RootChain::single(tag("x")).last(), Some(&tag("x")));
+        assert_eq!(RootChain::default().last(), None);
         let parent_links: Vec<_> = parent.links().map(|(link, _)| link).collect();
         let child_links: Vec<_> = child.links().map(|(link, _)| link).collect();
         assert_eq!(&parent_links[1..], &child_links[..], "the tail is shared");
