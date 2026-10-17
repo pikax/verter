@@ -41,6 +41,7 @@ pub enum ResolutionExactness {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 #[serde(rename_all = "camelCase")]
 pub enum TypedResolutionFailure {
@@ -83,6 +84,7 @@ pub enum ResolutionProvenance {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 #[serde(rename_all = "camelCase")]
 pub enum ResolutionDiagnosticKind {
@@ -114,6 +116,7 @@ pub enum ResolutionDiagnosticKind {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 #[serde(rename_all = "camelCase")]
 pub struct ResolutionDiagnostic {
@@ -133,6 +136,7 @@ pub struct ResolutionDiagnostic {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum ResolvedTypeOutcome {
@@ -159,6 +163,7 @@ pub enum ResolvedTypeOutcome {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedTypeAuthority {
@@ -280,7 +285,17 @@ impl ResolvedTypeAuthority {
 
 /// Locator-backed authored source capability. It cannot be constructed from
 /// text or an arbitrary semantic source.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, NoTypeExpr, NoStoredSpan)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    NoTypeExpr,
+    NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(transparent)]
 pub struct AuthoredTypeSource(AuthoredBodyLocator);
 
@@ -336,6 +351,7 @@ impl AuthoredTypeSource {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 #[serde(rename_all = "camelCase")]
 pub enum AuthoredProvenance {
@@ -346,7 +362,17 @@ pub enum AuthoredProvenance {
 }
 
 /// Inseparable authored locator, exact spelling, and provenance row.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, NoTypeExpr, NoStoredSpan)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    NoTypeExpr,
+    NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthoredTypeEvidence {
     source: AuthoredTypeSource,
@@ -427,6 +453,7 @@ impl AuthoredTypeEvidence {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 #[serde(rename_all = "camelCase")]
 pub enum PublicationPolicyReason {
@@ -446,6 +473,7 @@ pub enum PublicationPolicyReason {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 #[serde(rename_all = "camelCase")]
 pub enum SymbolicEquivalenceKind {
@@ -454,7 +482,17 @@ pub enum SymbolicEquivalenceKind {
 }
 
 /// Typed proof binding a resolved source to one authored representation.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, NoTypeExpr, NoStoredSpan)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    NoTypeExpr,
+    NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct SymbolicEquivalenceProof {
     kind: SymbolicEquivalenceKind,
@@ -538,7 +576,17 @@ impl SymbolicEquivalenceProof {
 
 /// Pure selector policy. `ExactOnly` is represented by no incomplete permit
 /// and no symbolic proof.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, NoTypeExpr, NoStoredSpan)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    NoTypeExpr,
+    NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicationPolicy {
     incomplete_reason: Option<PublicationPolicyReason>,
@@ -599,6 +647,7 @@ impl Default for PublicationPolicy {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 #[serde(rename_all = "camelCase")]
 pub enum SemanticAuthority {
@@ -607,7 +656,17 @@ pub enum SemanticAuthority {
 }
 
 /// Why one source was selected for publication.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, NoTypeExpr, NoStoredSpan)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    NoTypeExpr,
+    NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum PublicationReason {
     ResolvedExactConcrete,
@@ -629,6 +688,7 @@ pub enum PublicationReason {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum PublicationProvenance {
@@ -638,7 +698,17 @@ pub enum PublicationProvenance {
 
 /// Pure publication outcome. Failure and absence remain structured and never
 /// acquire a selected source.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, NoTypeExpr, NoStoredSpan)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    NoTypeExpr,
+    NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum PublicationResult {
     Failed {
@@ -781,7 +851,17 @@ fn resolved_publication(
 }
 
 /// One row-owned authority/evidence/publication bundle.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, NoTypeExpr, NoStoredSpan)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    NoTypeExpr,
+    NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct TypePublication {
     authority: ResolvedTypeAuthority,

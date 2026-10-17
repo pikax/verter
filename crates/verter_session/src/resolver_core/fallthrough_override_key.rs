@@ -16,7 +16,7 @@
 /// Override-identity cache-key dimension: either the request carries no
 /// overrides (cacheable) or it carries a non-empty override set, which is
 /// wholesale [`Self::Uncacheable`].
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum FallthroughOverrideIdentity {
     /// No overrides — a `None` set or an empty set. The request is cacheable.
     #[default]

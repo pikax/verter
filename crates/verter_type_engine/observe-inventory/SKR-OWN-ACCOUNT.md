@@ -46,10 +46,12 @@ admission returns its complete value uncached.
 | Delivery owner (`DeliveryOwner::_own`) | owner block, both root owners and operand lists | `DeliveryOwner::charged`; the delivered allocations are pinned to the caller at mint (`pin_delivered_allocations`) and carry their own charges | the owner is shared by clones of its reads; a cache retaining the owner (a memo candidate, a refusal summary, a deferred-evaluation entry) adopts its metadata charge refusably | metadata pinned to the owner's readers, retained while a cache holds it, released with the owner's last clone | `a_refused_admission_returns_the_complete_value_charged_to_its_caller`, `a_read_outliving_…` |
 | Refusal summary (`RefusalSummary::retention`) | summary block and table / order slot, request prefix paid lists and identities; carrier and delivered allocations as above | `own_retained_bytes` + shared holds | delivered allocations shared with the read and any memo candidate aliasing them | summary drop releases its own part; the read keeps its rail pinned | `a_sealed_refusal_hands_its_delivered_rail_to_a_surviving_read`, `retained_request_identities_grow_the_reservation` |
 | Component-meta result entry and retained refusal | payload by its allocations (`component_meta_footprint`, a JSDoc tag's type-graph tables and a publication's symbolic-equivalence proof included), fact rail with owned text, slot convention, request prefix | `CachedComponentMetaResult::retained_footprint_bytes`, `RequestSpent::owned_heap_bytes` | the entry's charge rides the shared entry | released with the last entry holder | component-meta retention suite |
+| Fact-validated cache candidate (`ValidatedFactCache` `Candidate::_retention`: routes, barrel surfaces, module exports, resolved import facts, fallthrough nodes, imported roots) | key slot and entry with its candidate list, candidate block, value block, fact slice with owned text, the key's and value's heap, newly claimed evidence pages | `ENTRY_OVERHEAD_BYTES` + block sizes + `fact_slice_bytes` + the cache's `CandidateFootprint` (`MeasuredCandidate`: `HeapSize` over key and value) | one refusable reservation per candidate; a key and entry shared by a slot's candidates are counted with each (an over-estimate) | released with the candidate (FIFO displacement, removal, clear); a refused reservation admits nothing and returns the value uncached | `a_candidate_is_charged_its_key_and_value_heap_until_it_is_evicted`, `a_wide_candidate_claims_its_pages_and_is_refused_for_them` |
 | Deferred-evaluation memo entry | entry block, slot and FIFO record, proof facts with owned text, self-root list; its delivery owner charges itself | `fact_slice_bytes` + `arc_str_list_bytes` | one per entry | released with the entry | `evaluate_deferred_memo` suite |
 | Substitution memo entry (`SubstituteMemoEntry`) | key / value slot, root owner and operand list | `hash_cons_entry_bytes` | one per entry | released with the entry; refused → recomputed on demand | `a_substitution_answer_is_charged_while_its_memo_keeps_it` |
 | Memo family container (`FamilySlots::_retention`) | family key and slot lists in the map, control byte, budget-ledger record, the map key's heap and the ledger clone's boxes | `family_container_bytes(family)` over `family_footprint::family_key_heap_bytes` | one per keyed family | released when the family leaves the map; an SCC batch prepays every member's family before its lock, so keying under the lock never refuses | `family_footprint` suite, `an_scc_batch_never_publishes_without_a_member_whose_family_was_evicted_meanwhile` |
 | Reverse index (`CanonicalToEntries::storage`) | each shard's copy of its canonical's text, each shard table's unused buckets, the outer table's buckets | settled per insert / prune / shard removal | per index | given back as shards drain; record buckets are the candidates' | `a_reverse_index_shard_charges_its_canonical_text_until_it_drains` |
+| Pending reverse-index registrations (`PendingRegistrations::storage`) | the waiting list's backing by capacity and the boxes each entry's family-key clone copies | settled per publish | per store | given back by the read that registers the waiting publishes, on overflow and on `invalidate_all` | `pending_reverse_index_registrations_are_charged_until_the_next_read` |
 | Origin-edge fences (`EdgeFence::_hold`, `DerivationStore::signature_pool`) | the edge store's hold on each interned fence's rail; the pool keeps `Weak`s only, keyed by content hash | the rail's own charge, retained while any edge shares the fence | one hold per pooled fence, shared by every edge naming it | released with the fence's last edge (eviction, close or clear); a refused hold records no edge | `an_origin_edge_retains_its_fence_until_its_store_lets_go` |
 | Shared-charge registry table (`RegistryTable::backing`) | table buckets by capacity | settled per registration | per registry | given back as registrations drain | `a_drained_registry_gives_back_its_table_and_its_charge` |
 | Dependency-rail interner (`DepSignatureInterner::storage`) | shard tables, entry lists, every entry's weakly held block | settled per intern / prune / sweep | per store | released when an entry is pruned | `dep_signature_interner_charges_the_rail_blocks_it_keeps_until_swept` |
@@ -97,6 +99,7 @@ admission returns its complete value uncached.
 | `NodePayload`, `NodeData`, `HeldRelease`, `ArenaCharges`, `Drop for ArenaInner` | Graph payload cell, its shared read and its charge on release | REQUIRED | Payload lifetime (`arena.rs`) | always |
 | `heap_size::{HeapSize, HeapMeter, IterativeNode, Tree, OwnedTree, owned_tree, footprint, hash_table_bytes, inline_copy}`, `verter_retention_derive::HeapSize`, `retention::heap_size_foreign`, session `heap_size_foreign` | Exhaustive data-tree measurement | REQUIRED | Computed on demand (`verter_retention/src/heap_size.rs`, `verter_retention_derive`, `verter_session_query/src/retention/heap_size_foreign.rs`, `verter_session/src/heap_size_foreign.rs`) | always |
 | `ArtifactNode::entry_footprint`, `CacheEntry::{admit, _retention}`, `RefusedEntry`, `OwnedHandles::hold_or_pin`, cache `charged_to` / `retention` accounts, `GraphEntry`, `CompileSlot::_retention`, `compile_slot_retention` | Artifact, compile-slot and graph-bundle entry charges | REQUIRED | Entry lifetime (`cache_runtime/{admission,node,flow_slice_node}.rs`, `component_meta_caches.rs`, `project_semantic_dispatch/memo.rs`, session `compile_output_node.rs`, `types.rs`) | always |
+| `CandidateFootprint`, `MeasuredCandidate`, `UnmeasuredValue`, `Candidate::_retention`, `ValidatedFactCache::reserve_candidate` | Fact-validated cache candidate charges | REQUIRED | Candidate lifetime (session `resolver_core/mod.rs`, `resolver_runtime.rs`) | always |
 | `ConstructionCopy::unowned_heap_bytes` | Debug check that a construction copy shares only owned handles | REQUIRED | Call duration (`construction_copy.rs`) | always |
 | `DerivationStore::{storage, storage_charge_bytes}` | Origin-edge store storage charge, counted in the store's bookkeeping pins | REQUIRED | Store lifetime (`derivation.rs`, `retention.rs`) | always |
 | `SemanticDeliveryLease::hold_metadata_handles` | A retaining cache's hold on the root owners a delivery's metadata names | REQUIRED | Candidate / deferred-entry lifetime (`delivery_lease.rs`, `retention.rs`, `hash_cons_memos.rs`) | always |
@@ -104,6 +107,7 @@ admission returns its complete value uncached.
 | `ResolvedTypeGraphSnapshot::owned_heap_bytes`, `SymbolicEquivalenceProof::{resolved_source, authored_source}`, `PublicationPolicy::symbolic_equivalence` | Component-meta payload footprint | REQUIRED | Computed on demand (`verter_protocol/src/graph/snapshot.rs`, `verter_type_expr/src/publication.rs`) | always |
 | `ArenaInner::shared_heap`, `PayloadHeap` / `PayloadHeapVisitor` | Arena payload heap charge | REQUIRED | Live-slot lifetime (`arena.rs`, `semantic_query/node_payload_footprint.rs`) | always |
 | `CanonicalToEntries::{storage, remove_shard, clear_shards}` | Reverse-index storage charge | REQUIRED | Index lifetime (`reverse_index.rs`) | always |
+| `PendingRegistrations::{charged, storage, storage_charge_bytes}` | Pending reverse-index registration charge, counted in the store's bookkeeping pins | REQUIRED | Between a publish and the next index read (`reverse_index.rs`, `retention.rs`) | always |
 | `DepSignatureInterner::{storage, charged}`, `is_interned_rail`, `interned_rail_heap_bytes` | Interner storage charge | REQUIRED | Store lifetime (`interner.rs`) | always |
 | `InternDomain::value_heap_bytes`, `InternRecord::_charge`, `IndexTable::backing`, `InternedProfile` charge, `ProfileInterner::backing` | Interned identity / profile charges | REQUIRED | Record and process-wide index lifetime (`intern_table.rs`, `cost_receipt.rs`) | always |
 | `family_footprint::{family_key_heap_bytes, family_key_clone_heap_bytes, query_key_heap_bytes}`, `PreparedKeyHandle::producer_heap_bytes`, `result_footprint`, `flow_return_footprint`, `component_meta_footprint` | Key, result and payload footprints | REQUIRED | Computed on demand | always |
@@ -119,17 +123,20 @@ admission returns its complete value uncached.
 These owners are not yet charged exactly; each is an unaddressed item of
 this task, not optimization debt:
 
-- the fact-validated and query-identity caches that keep their values as
-  raw `Arc` candidates — `ValidatedFactCache` (routes, module exports,
-  resolved import facts, fallthrough, imported roots) and the
-  reverse-indexed candidate stores (the imported registry and its peers) —
-  charge the evidence pages their signatures reach, but a candidate's own
-  allocations and its value carry no charge of their own. Their values
-  reach fact signatures and receipts that already charge themselves, so
-  measuring them needs a fact-aware measurement rather than a derived one;
+- the values a `ValidatedFactCache` hands to its readers: a candidate charges
+  its value's heap while it retains it, but a reader's `Arc<V>` clone outlives
+  the candidate without that charge. Closing it delivers the value as one
+  data-tree cell (`OwnedTree`), as the artifact caches do;
+- the two stable request caches whose values are not measured yet
+  (`StableRequestState` under `UnmeasuredValue`: component-meta views and
+  prepared declaration bundles). Their candidates charge their own
+  allocations and key; a prepared bundle's declaration caches also grow after
+  admission, so its charge has to follow that growth;
+- the reverse-indexed candidate stores (the imported registry and its peers),
+  which charge the evidence pages their signatures reach but not a
+  candidate's own allocations or its value;
 - a data tree's inner raw `Arc`s: a reader that clones an inner list or
   subtree out of a delivered artifact value (a type-expression subtree after
   the vault's authorized unwrap, a flow slice's or graph's lists, a compile
   product's code text, which public responses also hand out) aliases it
-  without the cell's charge once the cell drops. Its scope is the question
-  `skr-own-account-artifact-value-dto-aliases`.
+  without the cell's charge once the cell drops.

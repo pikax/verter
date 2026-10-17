@@ -18,7 +18,7 @@ use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_session_query::facts::store_view::StoreView;
 use verter_type_engine::resolver_core::ResolverContext;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub enum FallthroughNodeValue {
     RootFollow(RootFollowResult),
     IntrinsicSurface(IntrinsicSurfaceResult),
@@ -27,7 +27,7 @@ pub enum FallthroughNodeValue {
     BranchUnion(BranchUnionResult),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub struct RootFollowResult {
     pub accepted_props: Vec<AcceptedPropAnalysis>,
     pub accepted_events: Vec<AcceptedEventAnalysis>,
@@ -52,7 +52,7 @@ impl Default for RootFollowResult {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub struct FallthroughBranchResult {
     pub branch_key: String,
     pub inherited_prop_names: Vec<String>,
@@ -60,7 +60,7 @@ pub struct FallthroughBranchResult {
     pub resolved: bool,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, verter_retention::heap_size::HeapSize)]
 pub struct IntrinsicSurfaceResult {
     pub members: Vec<crate::resolver_core::IntrinsicSurfaceMember>,
     pub attr_names: Vec<String>,
@@ -81,7 +81,7 @@ pub struct IntrinsicSurfaceResult {
     pub cache_generation: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub struct ChildSurfaceResult {
     pub accepted_props: Vec<AcceptedPropAnalysis>,
     pub accepted_events: Vec<AcceptedEventAnalysis>,
@@ -108,7 +108,7 @@ impl Default for ChildSurfaceResult {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, verter_retention::heap_size::HeapSize)]
 pub struct ConsumedBindingsResult {
     pub attrs: Vec<String>,
     pub listeners: Vec<String>,
@@ -118,7 +118,7 @@ pub struct ConsumedBindingsResult {
     pub consumed_names: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub struct BranchUnionResult {
     pub accepted_props: Vec<AcceptedPropAnalysis>,
     pub accepted_events: Vec<AcceptedEventAnalysis>,
@@ -143,7 +143,7 @@ impl Default for BranchUnionResult {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub struct FallthroughNodeResult {
     pub value: FallthroughNodeValue,
     pub facts: Vec<FactVersionRef>,

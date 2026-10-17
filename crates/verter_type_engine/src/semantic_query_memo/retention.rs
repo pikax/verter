@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use verter_session_query::retention::owned::{ChargeCtx, OwnedHold};
+use verter_session_query::retention::owned::{ChargeCtx, HeldHandles, OwnedHandles};
 use verter_session_query::retention::shared::CacheHold;
 use verter_session_query::retention::{
     RetentionAdmission, RetentionCharge, RetentionRefusal, SemanticRetentionAccount, StoreAccount,
@@ -34,7 +34,9 @@ use crate::semantic_query::{QueryResult, SemanticQueryValue};
 pub(super) struct MemoRetention {
     _own: RetentionCharge,
     _carrier: Box<[CacheHold]>,
-    _delivered: Box<[OwnedHold]>,
+    /// The `_carrier` slice's own backing.
+    _carrier_backing: RetentionCharge,
+    _delivered: HeldHandles,
 }
 
 impl MemoRetention {
@@ -42,6 +44,13 @@ impl MemoRetention {
     #[cfg(test)]
     pub(super) fn own_bytes(&self) -> usize {
         self._own.bytes()
+    }
+
+    /// How many holds the candidate keeps in each of its two hold slices:
+    /// its carrier holds, and its holds on the allocations it delivers.
+    #[cfg(test)]
+    pub(super) fn hold_slice_lens(&self) -> (usize, usize) {
+        (self._carrier.len(), self._delivered.len())
     }
 
     /// The candidate's registered holds on its carrier.
@@ -241,18 +250,38 @@ impl SemanticGraphStore {
         // The delivery the retained result's warm reads share: its metadata
         // is retained with the result.
         carrier.extend(parts.lease.adopt_metadata()?);
-        let mut owned = Vec::with_capacity(3);
-        owned.extend(parts.lease.hold_metadata_handles(self.charge_ctx())?);
-        if let Some(diagnostics) = parts.diagnostics.owned() {
-            owned.push(diagnostics.hold(self.charge_ctx())?);
-        }
-        if let Some(rail) = parts.dep_signature.owned() {
-            owned.push(rail.hold(self.charge_ctx())?);
-        }
-        owned.extend(result_handles(parts.result).hold(self.charge_ctx())?);
+        // Every delivered allocation is held in one charged slice, all or
+        // nothing.
+        let delivered = parts
+            .lease
+            .metadata_handles()
+            .merge(OwnedHandles::of(|aliases| {
+                parts
+                    .diagnostics
+                    .owned()
+                    .map_or(0, |diagnostics| diagnostics.offer(aliases))
+                    + parts
+                        .dep_signature
+                        .owned()
+                        .map_or(0, |rail| rail.offer(aliases))
+            }))
+            .merge(result_handles(parts.result))
+            .hold(self.charge_ctx())?;
+        // The slice keeping the carrier holds lives as long as they do.
+        let carrier = carrier.into_boxed_slice();
+        let carrier_backing = match account.reserve(
+            verter_session_query::retention::ChargeClass::Retained,
+            verter_session_query::retention::allocation::heap_block_bytes(std::mem::size_of_val::<
+                [CacheHold],
+            >(&carrier)),
+        ) {
+            RetentionAdmission::Admitted(charge) => charge,
+            RetentionAdmission::Refused(refusal) => return Err(refusal),
+        };
         Ok(SharedHolds {
-            carrier: carrier.into_boxed_slice(),
-            delivered: owned.into_boxed_slice(),
+            carrier,
+            carrier_backing,
+            delivered,
         })
     }
 
@@ -367,10 +396,12 @@ impl SemanticGraphStore {
     }
 
     /// Bytes the store's memo bookkeeping is pinned for: its reverse
-    /// index's shards, its shared-charge registry's table and its
-    /// dependency-rail interner. A required current count.
+    /// index's shards and the publishes waiting to enter it, its
+    /// shared-charge registry's table and its dependency-rail interner. A
+    /// required current count.
     pub fn bookkeeping_storage_charge_bytes(&self) -> usize {
         self.canonical_to_entries.storage_charge_bytes()
+            + self.reverse_index_pending.lock().storage_charge_bytes()
             + self.alias_charges.table_charged_bytes()
             + self.dep_signature_interner.storage_charge_bytes()
             + self.derivation.lock().storage_charge_bytes()
@@ -422,7 +453,8 @@ impl<'a> SharedParts<'a> {
 /// A candidate's shared holds, before its own reservation is granted.
 pub(super) struct SharedHolds {
     carrier: Box<[CacheHold]>,
-    delivered: Box<[OwnedHold]>,
+    carrier_backing: RetentionCharge,
+    delivered: HeldHandles,
 }
 
 impl SharedHolds {
@@ -431,6 +463,7 @@ impl SharedHolds {
         MemoRetention {
             _own: own,
             _carrier: self.carrier,
+            _carrier_backing: self.carrier_backing,
             _delivered: self.delivered,
         }
     }

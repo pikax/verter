@@ -83,12 +83,14 @@ fn build(store: &SemanticGraphStore) -> QueryBuildOutput<SemanticNodeId> {
 }
 
 /// What the delivered rail costs, from its allocations alone: the list's
-/// cell and the backing holding the one diagnostic, and the two texts it
-/// names, each its own self-charged allocation. A charge missing the name,
-/// or a second charge of any of them, misses this figure.
+/// cell, the backing holding the one diagnostic and the list's record of
+/// the two texts it names, and those texts, each its own self-charged
+/// allocation. A charge missing the name, or a second charge of any of
+/// them, misses this figure.
 fn rail_charge() -> usize {
     Owned::<Box<[ShallowDiagnostic]>>::cell_block_bytes()
         + heap_block_bytes(std::mem::size_of::<ShallowDiagnostic>())
+        + verter_session_query::retention::owned::child_registration_bytes(2)
         + OwnedStr::charge_for_len(NAME_LEN)
         + OwnedStr::charge_for_len(OWNER.len())
 }
@@ -588,8 +590,10 @@ fn a_cloned_dependency_rail_and_entry_keep_their_charges_through_their_last_hold
     assert_eq!(
         rail_bytes,
         Owned::<verter_type_engine::semantic_query::DepRail>::cell_block_bytes()
-            + heap_block_bytes(2 * std::mem::size_of::<DepEntry>()),
-        "the rail pays its own cell and entry backing; each canonical pays its own"
+            + heap_block_bytes(2 * std::mem::size_of::<DepEntry>())
+            + verter_session_query::retention::owned::child_registration_bytes(2),
+        "the rail pays its own cell, entry backing and record of its canonicals; each \
+         canonical pays its own"
     );
     let names = OwnedStr::charge_for_len(long.len()) + OwnedStr::charge_for_len("/short.ts".len());
 
@@ -609,6 +613,79 @@ fn a_cloned_dependency_rail_and_entry_keep_their_charges_through_their_last_hold
     );
     drop(entry);
     assert_eq!(account.snapshot().total_bytes(), 0);
+}
+
+/// A warm read hands out the rail its store's interner keeps: a weak entry
+/// there may keep the rail's cell block allocated after the rail, and the
+/// rail keeps it allocated after the interner. Through a complete store
+/// teardown an owning clone of that rail keeps its entries, its canonicals
+/// AND its cell block charged, and its drop restores the baseline; in the
+/// inverse order the store's teardown releases the block the interner
+/// alone still kept.
+#[test]
+fn an_interned_rail_from_a_warm_read_keeps_its_block_charged_through_store_teardown() {
+    use verter_session_query::retention::owned::BlockShare;
+    use verter_type_engine::semantic_query::{DepEntry, DepRail, DepSignature, DepVersion};
+    const CANONICAL_LEN: usize = 9_000;
+    for rail_survives_store in [true, false] {
+        let host = host();
+        let account = unbounded();
+        let harness =
+            CountedOwnershipHarness::with_account(StoreAccount::new(Arc::clone(&account)));
+        let long = format!("/{}.ts", "i".repeat(CANONICAL_LEN));
+        let cold = harness.run(|store| {
+            store.execute_cooperative(
+                &host,
+                key(),
+                || panic!("no recursion"),
+                || {
+                    let mut output = build(store);
+                    output.walker_diagnostics.clear();
+                    output.dep_signature = DepSignature::new(vec![DepEntry::new(
+                        &long,
+                        DepVersion::ProjectGeneration(0),
+                    )]);
+                    output
+                },
+            )
+        });
+        drop(cold);
+        let warm = warm_read(&harness, &host);
+        let rail = warm.dep_signature().clone();
+        assert_eq!(rail.len(), 1);
+        let entries = heap_block_bytes(std::mem::size_of::<DepEntry>())
+            + verter_session_query::retention::owned::child_registration_bytes(1);
+        assert_eq!(
+            rail.charge_bytes(),
+            Some(entries),
+            "the interned rail's own charge covers its entries and its record of the \
+             canonical; its block is the share's"
+        );
+        let canonical = OwnedStr::charge_for_len(long.len());
+        let block = BlockShare::bytes_for::<DepRail>();
+
+        drop(warm);
+        if rail_survives_store {
+            harness.run(|store| store.invalidate_all());
+            drop(harness);
+            assert_eq!(
+                account.snapshot().total_bytes(),
+                entries + canonical + block,
+                "the surviving rail keeps its entries, its canonical and its cell block charged"
+            );
+            drop(rail);
+        } else {
+            drop(rail);
+            harness.run(|store| store.invalidate_all());
+            drop(harness);
+        }
+        assert_eq!(
+            account.snapshot().total_bytes(),
+            0,
+            "(rail survives store {rail_survives_store}): the last holder of the block \
+             releases its charge"
+        );
+    }
 }
 
 /// A substitution answer is charged for as long as the memo keeps it and

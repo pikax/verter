@@ -593,6 +593,7 @@ impl SemanticRetentionAccount {
             class,
             bytes,
             held: None,
+            held_backing: 0,
         }
     }
 
@@ -646,6 +647,9 @@ impl SemanticRetentionAccount {
             (ChargeClass::Retained, ChargeClass::Pinned) => {
                 (refusable - bytes, pinned + bytes, active)
             }
+            // A retained slice of cache holds joining the in-flight charge
+            // that keeps it.
+            (ChargeClass::Retained, ChargeClass::Active) => (refusable, pinned, active + bytes),
             _ => unreachable!("only refusable charges are handed to callers"),
         };
         self.refusable_bytes.store(refusable, Ordering::Relaxed);
@@ -773,6 +777,9 @@ pub struct RetentionCharge {
     /// The cache holds on the owned allocations the charged value reaches
     /// ([`Self::holding`]); released with the charge.
     held: Option<Box<[owned::OwnedHold]>>,
+    /// The part of `bytes` that charges the `held` slice's backing: released
+    /// with the slice when the holds end before the charge does.
+    held_backing: usize,
 }
 
 impl RetentionCharge {
@@ -786,8 +793,31 @@ impl RetentionCharge {
     /// allocations its value reaches: the holds live and end with the
     /// charge, so the cache retains the value's whole footprint as one
     /// token.
+    ///
+    /// The slice keeping the holds is charged with them: its backing charge
+    /// joins this one, and leaves it again with the slice.
     #[must_use]
-    pub fn holding(mut self, holds: Box<[owned::OwnedHold]>) -> Self {
+    pub fn holding(mut self, holds: owned::HeldHandles) -> Self {
+        let (holds, backing) = holds.into_parts();
+        if let Some(mut backing) = backing {
+            verter_debug_assert::verter_debug_assert!(
+                self.held.is_none(),
+                "a charge holds one slice of cache holds"
+            );
+            let bytes = std::mem::take(&mut backing.bytes);
+            if let Some(account) = self.account.as_ref() {
+                verter_debug_assert::verter_debug_assert!(
+                    backing
+                        .account
+                        .as_ref()
+                        .is_some_and(|a| Arc::ptr_eq(a, account)),
+                    "the holds' backing is charged to the account their charge is"
+                );
+                account.reclassify(backing.class, self.class, bytes);
+            }
+            self.bytes += bytes;
+            self.held_backing += bytes;
+        }
         if !holds.is_empty() {
             self.held = Some(holds);
         }
@@ -823,9 +853,9 @@ impl RetentionCharge {
     #[must_use]
     pub fn split_off(&mut self, bytes: usize) -> Self {
         assert!(
-            bytes <= self.bytes,
-            "split_off({bytes}) exceeds the {} bytes this charge holds",
-            self.bytes
+            bytes <= self.bytes - self.held_backing,
+            "split_off({bytes}) exceeds the {} bytes this charge holds beside its holds' slice",
+            self.bytes - self.held_backing
         );
         self.bytes -= bytes;
         Self {
@@ -833,6 +863,7 @@ impl RetentionCharge {
             class: self.class,
             bytes,
             held: None,
+            held_backing: 0,
         }
     }
 
@@ -853,8 +884,20 @@ impl RetentionCharge {
         }
         self.class = ChargeClass::Pinned;
         // No cache keeps the value now: its owned allocations are their
-        // own callers' (each moves to pinned in its cell).
+        // own callers' (each moves to pinned in its cell), and the slice
+        // that kept the holds is freed with its charge.
         self.held = None;
+        let backing = std::mem::take(&mut self.held_backing);
+        if backing > 0 {
+            self.bytes -= backing;
+            drop(Self {
+                account: self.account.clone(),
+                class: ChargeClass::Pinned,
+                bytes: backing,
+                held: None,
+                held_backing: 0,
+            });
+        }
     }
 
     /// Adopt a pinned charge into cache retention: a cache is about to
