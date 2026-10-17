@@ -136,7 +136,7 @@ impl super::SemanticGraphStore {
             _ => None,
         };
         let mut prepared = PreparedKeyHandle::prepare_in(Some(&self.arena.core), key);
-        let mut nodes = Vec::new();
+        let mut nodes = super::node_roots::RootIds::new();
         prepared.family().for_each_node_id(|node| {
             if node.0 < super::UNALLOCATABLE_ID_FLOOR {
                 nodes.push(node);

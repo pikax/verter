@@ -78,7 +78,7 @@ impl SemanticGraphStore {
         result: &QueryResult<SemanticQueryValue>,
         diagnostics: &[crate::project_semantic_dispatch::walk::ShallowDiagnostic],
     ) -> Result<SemanticDeliveryLease, QueryError> {
-        let mut nodes = Vec::new();
+        let mut nodes = super::node_roots::RootIds::new();
         result.for_each_retained_node(|node| nodes.push(node));
         for diagnostic in diagnostics {
             diagnostic.for_each_retained_node(|node| nodes.push(node));
@@ -119,7 +119,7 @@ impl SemanticGraphStore {
         diagnostics: &[crate::project_semantic_dispatch::walk::ShallowDiagnostic],
     ) -> Result<SemanticDeliveryLease, QueryError> {
         let mut lease = self.lease_delivery(result, diagnostics)?;
-        let mut nodes = Vec::new();
+        let mut nodes = super::node_roots::RootIds::new();
         family.for_each_node_id(|node| {
             if node.0 < super::UNALLOCATABLE_ID_FLOOR {
                 nodes.push(node);

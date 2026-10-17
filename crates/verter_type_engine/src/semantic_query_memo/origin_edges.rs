@@ -85,25 +85,23 @@ impl SemanticGraphStore {
                     meta,
                     edge_dep_signature,
                 };
-                // Identity check: scan the existing `(result, kind)` bucket
+                // Identity check: probe the existing `(result, kind)` bucket
                 // for an entry that matches this edge's full identity tuple
                 // (sources content, meta value, and interned dep_signature
                 // pointer). The interner guarantees identical signatures
                 // share a single Arc, so `Arc::ptr_eq` is a sound identity
                 // probe; `OriginMeta` derives `PartialEq` and `sources` is
-                // a content-comparable slice.
+                // a content-comparable slice. The bucket narrows by the
+                // edge's identity key and confirms a match on the tuple.
+                let identity = super::derivation::edge_identity_key(
+                    &edge.edge_dep_signature,
+                    &edge.sources,
+                );
                 let already_recorded = store
                     .bucket_for(result, kind)
-                    .map(|existing| {
-                        existing.iter().any(|e| {
-                            Arc::ptr_eq(&e.edge_dep_signature, &edge.edge_dep_signature)
-                                && e.sources.as_ref() == edge.sources.as_ref()
-                                && e.meta == edge.meta
-                        })
-                    })
-                    .unwrap_or(false);
+                    .is_some_and(|existing| existing.holds(identity, &edge));
                 if !already_recorded {
-                    store.record(result, kind, edge.clone());
+                    store.record(result, kind, identity, edge.clone());
                 }
                 (edge, already_recorded)
             };

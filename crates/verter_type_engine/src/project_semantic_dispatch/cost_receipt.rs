@@ -312,8 +312,8 @@ impl DemandCostReceipt {
             // table, and the stored hash rejects most pairs at once.
             for dependency in prerequisites {
                 let mut kept_at = None;
-                for (position, kept) in unique.iter().enumerate() {
-                    if kept.receipt.identity == dependency.receipt.identity {
+                for position in 0..unique.len() {
+                    if unique[position].receipt.identity == dependency.receipt.identity {
                         kept_at = Some(position);
                         break;
                     }
@@ -434,6 +434,24 @@ impl DemandCostReceipt {
     ) -> Result<(), RetentionRefusal> {
         if self.retention.get().is_some() {
             return Ok(());
+        }
+        // Most receipts are retained after every receipt they consumed
+        // already is: reserve the receipt alone, without walking.
+        let mut closure_reserved = true;
+        for dependency in self.prerequisites.iter() {
+            if dependency.receipt.retention.get().is_none() {
+                closure_reserved = false;
+                break;
+            }
+        }
+        if closure_reserved {
+            return match account.reserve(ChargeClass::Retained, self.retained_bytes()) {
+                RetentionAdmission::Admitted(charge) => {
+                    drop(self.retention.set(charge));
+                    Ok(())
+                }
+                RetentionAdmission::Refused(refusal) => Err(refusal),
+            };
         }
         let mut visited: FxHashSet<*const Self> = FxHashSet::default();
         let mut stack: Vec<(&Self, bool)> = vec![(self.as_ref(), false)];

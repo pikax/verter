@@ -120,9 +120,9 @@ fn names_forward_child(data: &SemanticNodeData, id: SemanticNodeId) -> bool {
 /// unallocatable one). Read off the printed payload, independently of the
 /// walk, so a variant or field the walk forgets fails the first test that
 /// interns it, rather than leaving a releasing holder to keep the node it
-/// names alive. The visited ids are sorted once and each printed id found
-/// by a binary search, so a wide payload (a union of hundreds of members)
-/// costs its size, not its size squared.
+/// names alive. Both multisets are sorted once and compared, so a wide
+/// payload (a union of hundreds of members) costs its size, not its size
+/// squared.
 #[cfg(any(test, feature = "test-support"))]
 fn assert_retained_walk_is_complete(data: &SemanticNodeData) {
     let mut retained = SmallVec::<[u64; 16]>::new();
@@ -132,21 +132,10 @@ fn assert_retained_walk_is_complete(data: &SemanticNodeData) {
 
 #[cfg(any(test, feature = "test-support"))]
 fn assert_retained_multiset(data: &SemanticNodeData, mut retained: SmallVec<[u64; 16]>) {
-    const MARK: &str = "SemanticNodeId(";
-    let printed = format!("{data:?}");
-    retained.sort_unstable();
-    let mut expected: SmallVec<[u64; 16]> = SmallVec::new();
-    let mut rest = printed.as_str();
-    while let Some(at) = rest.find(MARK) {
-        rest = &rest[at + MARK.len()..];
-        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-        let Ok(held) = rest[..digits].parse::<u64>() else {
-            continue;
-        };
-        if held < UNALLOCATABLE_ID_FLOOR {
-            expected.push(held);
-        }
-    }
+    use std::fmt::Write as _;
+    let mut printed = PrintedNodeIds::default();
+    write!(printed, "{data:?}").expect("a payload's Debug form writes");
+    let mut expected = printed.ids;
     // This carrier predates typed node ids and prints its retained child as
     // a bare ordinal. Read the field directly, independently of the visitor.
     if let SemanticNodeData::SyntheticBinding { value_node, .. } = data {
@@ -155,6 +144,7 @@ fn assert_retained_multiset(data: &SemanticNodeData, mut retained: SmallVec<[u64
         }
     }
     retained.retain(|held| *held < UNALLOCATABLE_ID_FLOOR);
+    retained.sort_unstable();
     expected.sort_unstable();
     assert_eq!(
         retained,
@@ -162,6 +152,46 @@ fn assert_retained_multiset(data: &SemanticNodeData, mut retained: SmallVec<[u64
         "retained operand multiset for {:?}",
         data.node_tag()
     );
+}
+
+/// The allocatable node ids a `Debug` rendering prints, read as it is
+/// written rather than from a buffered copy. The derived form of
+/// [`SemanticNodeId`] writes its name, then `(`, then its digits, each as
+/// one write, so the reader matches whole writes and never scans text.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Default)]
+struct PrintedNodeIds {
+    stage: PrintedNodeIdStage,
+    ids: SmallVec<[u64; 16]>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum PrintedNodeIdStage {
+    #[default]
+    Text,
+    Name,
+    Open,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl std::fmt::Write for PrintedNodeIds {
+    fn write_str(&mut self, written: &str) -> std::fmt::Result {
+        let stage = std::mem::take(&mut self.stage);
+        match stage {
+            PrintedNodeIdStage::Name if written == "(" => self.stage = PrintedNodeIdStage::Open,
+            PrintedNodeIdStage::Open => {
+                if let Ok(held) = written.parse::<u64>() {
+                    if held < UNALLOCATABLE_ID_FLOOR {
+                        self.ids.push(held);
+                    }
+                }
+            }
+            _ if written == "SemanticNodeId" => self.stage = PrintedNodeIdStage::Name,
+            _ => {}
+        }
+        Ok(())
+    }
 }
 
 pub const NUM_SHARDS: usize = 16;
@@ -179,12 +209,48 @@ type NodeCandidate = (Weak<SemanticNodeData>, NodeScopeId, SemanticNodeId);
 /// `(payload, scope)` against the (usually single) candidate to confirm
 /// identity — the fingerprint only narrows.
 ///
-/// The bucket map uses the std [`RandomState`] (SipHash) hasher, **not**
-/// `FxHash`: workspace-derived names in the payload feed the fingerprint,
-/// so a predictable hash would be a HashDoS vector.
+/// The bucket key is the fingerprint itself, which is already seeded
+/// randomly per process ([`fingerprint_seed`]): workspace-derived names in
+/// the payload feed it, so it must stay unpredictable (a HashDoS vector
+/// otherwise), and keying the map by it keeps that property without hashing
+/// it a second time ([`FingerprintKeyHasher`]).
 #[derive(Default)]
 pub(super) struct ShardIndex {
-    index: HashMap<u64, SmallVec<[NodeCandidate; 1]>>,
+    index: HashMap<u64, SmallVec<[NodeCandidate; 1]>, FingerprintKeys>,
+}
+
+/// Builds [`FingerprintKeyHasher`]s for the dedup index.
+#[derive(Default, Clone, Copy)]
+pub(super) struct FingerprintKeys;
+
+impl BuildHasher for FingerprintKeys {
+    type Hasher = FingerprintKeyHasher;
+
+    fn build_hasher(&self) -> FingerprintKeyHasher {
+        FingerprintKeyHasher(0)
+    }
+}
+
+/// Places a fingerprint in the dedup index without rehashing it. Every
+/// fingerprint of one shard shares its low routing bits
+/// ([`SHARD_MASK`]), so the high half is folded into the low one: the
+/// table's position bits and its tag bits both stay seeded-random.
+pub(super) struct FingerprintKeyHasher(u64);
+
+impl Hasher for FingerprintKeyHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 = self.0.rotate_left(8) ^ u64::from(byte);
+        }
+    }
+
+    fn write_u64(&mut self, fingerprint: u64) {
+        self.0 = fingerprint ^ (fingerprint >> 32);
+    }
 }
 
 impl ShardIndex {
@@ -797,8 +863,8 @@ impl NodeArenaCore {
     }
 
     pub(super) fn release_roots(&self, ids: &[SemanticNodeId]) {
-        let mut pending = ids.to_vec();
-        let mut retired = Vec::new();
+        let mut pending = SmallVec::<[SemanticNodeId; 16]>::from_slice(ids);
+        let mut retired = SmallVec::<[(SemanticNodeId, u64); 4]>::new();
         #[cfg(test)]
         self.race_event(ArenaRaceEvent::BeforeRootRelease {
             blocked: self.inner.try_write().is_none(),

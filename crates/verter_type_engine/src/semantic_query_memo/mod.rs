@@ -956,8 +956,11 @@ pub enum WarmPublishOutcome {
 /// per-candidate identity (NOT by `(family, slot)` alone), so a
 /// cross-canonical cleanup for one evicted candidate does NOT strip a
 /// surviving sibling candidate's registrations in the same slot.
-type CanonicalToEntries =
-    DashMap<Arc<str>, Mutex<FxHashMap<(u64, ModeSlot), (Arc<FamilyKey>, RegisteredFacts)>>>;
+type CanonicalToEntries = DashMap<
+    Arc<str>,
+    Mutex<FxHashMap<(u64, ModeSlot), (Arc<FamilyKey>, RegisteredFacts)>>,
+    rustc_hash::FxBuildHasher,
+>;
 
 /// The `ReadSetSignature.facts` rail an entry registered under a
 /// canonical in [`CanonicalToEntries`] — the diagnostic stamp + the
