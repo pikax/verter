@@ -1,12 +1,153 @@
 //! The contextual reads of a call's arguments: whether a context-sensitive
-//! argument's contextual result reads an inference, and the const context of
+//! argument's contextual result reads an inference, the const context of
 //! a literal member whose contextual type is a `const` type parameter nested
-//! in the parameter's type.
+//! in the parameter's type, and the literal context a type parameter's
+//! constraint makes for the literals an argument nests at its positions.
 
+use std::sync::Arc;
+
+use super::super::inference::session::{InferenceInfoSetup, LiteralContext};
 use super::super::ProjectSemanticDispatch;
-use crate::semantic_query::{SemanticNodeData, SemanticNodeId, SignatureKind};
+use crate::semantic_query::{
+    ConstParamPolicy, PrimitiveKind, SemanticNodeData, SemanticNodeId, SignatureKind, TypeParamDecl,
+};
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    /// The inference setup of a call candidate's type parameters, each with
+    /// its const policy and the literal context its constraint makes.
+    pub(super) fn call_inference_infos(
+        &self,
+        type_parameters: &[TypeParamDecl],
+    ) -> Arc<[InferenceInfoSetup]> {
+        type_parameters
+            .iter()
+            .map(|decl| {
+                InferenceInfoSetup::for_call(
+                    decl.param,
+                    Arc::clone(&decl.name),
+                    if decl.is_const {
+                        ConstParamPolicy::Const
+                    } else {
+                        ConstParamPolicy::NonConst
+                    },
+                    decl.constraint.is_some(),
+                    self.constraint_literal_context(decl.constraint, type_parameters),
+                )
+            })
+            .collect()
+    }
+
+    /// The literal kinds `constraint` makes a literal context for
+    /// (`isLiteralOfContextualType` over a type variable): a primitive, a
+    /// literal, a template literal or `keyof` member admits its kind, a
+    /// union or intersection the kinds of its members, and a type parameter
+    /// the kinds of its own constraint — read off the node, else off the
+    /// clause's declaration (`T extends U`, `U extends string`). Any other
+    /// member (an object, an unresolved carrier) admits none, so its
+    /// literals widen as before.
+    fn constraint_literal_context(
+        &self,
+        constraint: Option<SemanticNodeId>,
+        type_parameters: &[TypeParamDecl],
+    ) -> LiteralContext {
+        let graph = self.graph();
+        let mut context = LiteralContext::empty();
+        let mut pending: Vec<SemanticNodeId> = constraint.into_iter().collect();
+        let mut seen = rustc_hash::FxHashSet::default();
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            let kinds = match graph.node_data(node).as_deref() {
+                Some(SemanticNodeData::Primitive(primitive)) => match primitive {
+                    PrimitiveKind::String => LiteralContext::STRING,
+                    PrimitiveKind::Number => LiteralContext::NUMBER,
+                    PrimitiveKind::BigInt => LiteralContext::BIGINT,
+                    PrimitiveKind::Boolean => LiteralContext::BOOLEAN,
+                    _ => LiteralContext::empty(),
+                },
+                Some(SemanticNodeData::Literal(value)) => match value {
+                    crate::semantic_query::LiteralValue::String(_) => LiteralContext::STRING,
+                    crate::semantic_query::LiteralValue::Number(_) => LiteralContext::NUMBER,
+                    crate::semantic_query::LiteralValue::BigInt(_) => LiteralContext::BIGINT,
+                    crate::semantic_query::LiteralValue::Boolean(_) => LiteralContext::BOOLEAN,
+                },
+                Some(SemanticNodeData::TemplateLiteral { .. }) => LiteralContext::STRING,
+                Some(SemanticNodeData::KeyOf { .. }) => {
+                    LiteralContext::STRING.union(LiteralContext::NUMBER)
+                }
+                Some(SemanticNodeData::Alias(inner)) => {
+                    pending.push(*inner);
+                    continue;
+                }
+                Some(
+                    composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)),
+                ) => {
+                    pending.extend(
+                        composite
+                            .composite_members()
+                            .expect("composite arm")
+                            .iter()
+                            .copied(),
+                    );
+                    continue;
+                }
+                Some(SemanticNodeData::TypeParam {
+                    constraint: own, ..
+                }) => {
+                    let declared = type_parameters
+                        .iter()
+                        .find(|decl| decl.param == node)
+                        .and_then(|decl| decl.constraint);
+                    pending.extend(own.or(declared));
+                    continue;
+                }
+                _ => LiteralContext::empty(),
+            };
+            context = context.union(kinds);
+        }
+        context
+    }
+
+    /// The candidate a NESTED call-argument deposit into a parameter whose
+    /// constraint makes `context` takes: a literal of an admitted kind as
+    /// written (its contextual type is the parameter), every other literal
+    /// widened under `policy`, a union member by member.
+    pub(in crate::project_semantic_dispatch) fn contextual_literal_candidate(
+        &self,
+        bound: SemanticNodeId,
+        context: LiteralContext,
+        policy: ConstParamPolicy,
+    ) -> SemanticNodeId {
+        let graph = self.graph();
+        let admitted = |node: SemanticNodeId| {
+            matches!(
+                graph.node_data(node).as_deref(),
+                Some(SemanticNodeData::Literal(value)) if context.admits(value)
+            )
+        };
+        if admitted(bound) {
+            return bound;
+        }
+        let members = match graph.node_data(bound).as_deref() {
+            Some(SemanticNodeData::Union(members)) if members.iter().any(|m| admitted(*m)) => {
+                members.iter().copied().collect::<Vec<_>>()
+            }
+            _ => return self.call_inference_candidate(bound, policy),
+        };
+        let members: Vec<SemanticNodeId> = members
+            .into_iter()
+            .map(|member| {
+                if admitted(member) {
+                    member
+                } else {
+                    self.call_inference_candidate(member, policy)
+                }
+            })
+            .collect();
+        self.relation_combine_candidates(&members, crate::semantic_query::VariancePhase::Covariant)
+    }
+
     /// An unfixed binder retains its constraint as a contextual literal type.
     pub(super) fn contextual_uninferred_parameter(
         &self,

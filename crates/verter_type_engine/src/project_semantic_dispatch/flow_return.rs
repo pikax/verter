@@ -13073,7 +13073,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// reads it (`checkExpressionWithContextualType` under
     /// `SkipContextSensitive`): each context-sensitive member is the
     /// non-inferring `any` (the checker's `anyFunctionType`), every other
-    /// member its own value.
+    /// member its own value typed by the parameter's `contextual` type, so a
+    /// literal whose contextual type is a literal context keeps its literal.
     pub(super) fn eval_object_literal_first_pass(
         &mut self,
         entries: &[verter_session_query::flow::slice::SliceObjectEntry],
@@ -13089,7 +13090,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     .is_some()
             }),
         };
-        let mut frame = self.object_eval_frame(entries, offset, false, None);
+        let mut frame = self.object_eval_frame(entries, offset, false, contextual);
         frame.skips_context_sensitive = true;
         let result = self.drive_object_literal(&mut frame);
         self.object_first_pass_context = enclosing;

@@ -1458,7 +1458,6 @@ fn primitive_constraint_literals() {
 
 /// An object or array literal argument keeps a literal where the parameter types it with a primitive-constrained type parameter (`isLiteralOfContextualType`), and the parameter keeps it (`hasPrimitiveConstraint`).
 #[test]
-#[ignore = "WRONG-CLEAN / gap in the lane: an object or array literal argument is evaluated before its parameter's contextual type is known, so its members arrive widened"]
 fn pinned_nested_argument_literals_under_a_primitive_constraint() {
     let failures = Matrix::new(PRIMITIVE_CONSTRAINT_LITERALS).four(&[
         (
@@ -1491,19 +1490,11 @@ fn pinned_nested_argument_literals_under_a_primitive_constraint() {
             r#"1 | 2"#,
         ),
     ]);
-    assert!(
-        failures.is_empty(),
-        "{}",
-        failures.join(
-            "
-"
-        )
-    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// The checker keeps an array literal argument's element literals when the parameter's element type is a type parameter with a primitive constraint (`isLiteralOfContextualType`): `ni3(["x", "y"], "x")` is `"x" | "y"`.
 #[test]
-#[ignore = "WRONG-CLEAN in the lane: a call argument is evaluated before its parameter's contextual type is known, so the array literal's elements arrive widened; contextual literal retention for nested argument literals is not modelled yet"]
 fn pinned_array_literal_arguments_keep_literals_under_a_primitive_constraint() {
     let failures = Matrix::new(NO_INFER).four(&[(
         Read::Return(r#"n3"#),
@@ -1512,6 +1503,180 @@ fn pinned_array_literal_arguments_keep_literals_under_a_primitive_constraint() {
         r#""x" | "y""#,
         r#""x" | "y""#,
     )]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The fixture of [`candidate_literal_contexts`].
+const CANDIDATE_LITERAL_CONTEXTS: &str = r##"
+declare function cb<T extends string>(xs: T[], f: (x: T) => void): T;
+declare function cbo<T extends string>(o: { v: T; f: (x: T) => void }): T;
+declare function ov<T extends string>(x: { v: T }, y: number): 1;
+declare function ov<T extends string>(x: { v: T }, y: string): T;
+declare function ovr<T extends string>(x: { v: T }, y: number): T;
+declare function ovr<T>(x: { v: T }, y: string): T;
+declare function nin2<T extends string>(x: { v: T }, y: { w: NoInfer<T> }): T;
+declare function nin3<T extends string>(x: { v: NoInfer<T> }, y: T): T;
+declare function deepn<T extends number>(x: { a: { b: [T, T] } }): T;
+declare function mixk<T extends string | number>(x: { v: T[] }): T;
+declare function pw<T extends string>(a: { v: T }): T;
+declare function bo<T extends boolean>(x: { v: T }): T;
+declare function pk2<T extends "a" | "b">(x: { k: T }): T;
+declare function ts<T extends `p${string}`>(x: { v: T }): T;
+declare function pnul<T extends string | null>(x: { v: T }): T;
+declare function sib<T extends string>(f: (x: number) => T, o: { v: T }): T;
+declare function sib3<T extends string>(f: () => T, o: T): T;
+declare function sib6<T>(f: () => T, o: T): T;
+declare function sib7<T extends string>(o: T, f: () => T): T;
+declare const c: boolean;
+export function l1() { return cb(["a", "b"], (x) => {}); }
+export function l2() { return cbo({ v: "x", f: (x) => {} }); }
+export function l3() { return ov({ v: "x" }, "s"); }
+export function l4() { return ovr({ v: "x" }, "s"); }
+export function l5() { return nin2({ v: "a" }, { w: "b" }); }
+export function l6() { return nin3({ v: "a" }, "b"); }
+export function l7() { return deepn({ a: { b: [1, 2] } }); }
+export function l8() { return mixk({ v: [1, "a"] }); }
+export function l9() { return pw({ v: c ? "a" : "b" }); }
+export function l10() { return bo({ v: true }); }
+export function l11() { return pk2({ k: "a" }); }
+export function l12() { return ts({ v: "pq" }); }
+export function l13() { return pnul({ v: null }); }
+export function l14() { return sib(() => "q", { v: "x" }); }
+export function l15() { return sib3((): "q" => "q", "x"); }
+export function l16() { return sib6(() => "q", "x"); }
+export function l17() { return sib7("x", () => "q"); }
+"##;
+
+/// Each candidate evaluates a nested argument literal under its own type
+/// parameter's constraint (`isLiteralOfContextualType`): a literal context
+/// keeps the literal through arrays, tuples, nested objects, conditional
+/// arms and context-sensitive object literals; a rejected overload's
+/// context does not reach the candidate after it; a nested `NoInfer`
+/// position deposits nothing; and a callback's return infers beside its
+/// sibling arguments at their priority.
+#[test]
+fn candidate_literal_contexts() {
+    let failures = Matrix::new(CANDIDATE_LITERAL_CONTEXTS).four(&[
+        (
+            Read::Return(r#"l1"#),
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+        ),
+        (
+            Read::Return(r#"l2"#),
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+        ),
+        (
+            Read::Return(r#"l3"#),
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+        ),
+        (
+            Read::Return(r#"l4"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"l5"#),
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+        ),
+        (
+            Read::Return(r#"l6"#),
+            r#""b""#,
+            r#""b""#,
+            r#""b""#,
+            r#""b""#,
+        ),
+        (
+            Read::Return(r#"l7"#),
+            r#"1 | 2"#,
+            r#"1 | 2"#,
+            r#"1 | 2"#,
+            r#"1 | 2"#,
+        ),
+        (
+            Read::Return(r#"l8"#),
+            r#""a" | 1"#,
+            r#""a" | 1"#,
+            r#""a" | 1"#,
+            r#""a" | 1"#,
+        ),
+        (
+            Read::Return(r#"l9"#),
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+        ),
+        (
+            Read::Return(r#"l10"#),
+            r#"true"#,
+            r#"true"#,
+            r#"true"#,
+            r#"true"#,
+        ),
+        (
+            Read::Return(r#"l11"#),
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+        ),
+        (
+            Read::Return(r#"l12"#),
+            r#""pq""#,
+            r#""pq""#,
+            r#""pq""#,
+            r#""pq""#,
+        ),
+        (
+            Read::Return(r#"l13"#),
+            r#"null"#,
+            r#"any"#,
+            r#"null"#,
+            r#"any"#,
+        ),
+        (
+            Read::Return(r#"l14"#),
+            r#""q" | "x""#,
+            r#""q" | "x""#,
+            r#""q" | "x""#,
+            r#""q" | "x""#,
+        ),
+        (
+            Read::Return(r#"l15"#),
+            r#""q" | "x""#,
+            r#""q" | "x""#,
+            r#""q" | "x""#,
+            r#""q" | "x""#,
+        ),
+        (
+            Read::Return(r#"l16"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"l17"#),
+            r#""q" | "x""#,
+            r#""q" | "x""#,
+            r#""q" | "x""#,
+            r#""q" | "x""#,
+        ),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

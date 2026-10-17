@@ -58,6 +58,7 @@ fn inference_context_key_projects_every_session_setup_axis() {
         param_name: _,
         const_policy: _,
         has_constraint: _,
+        literal_context: _,
     } = info;
     let InferenceContextKey {
         inferable_params: _,

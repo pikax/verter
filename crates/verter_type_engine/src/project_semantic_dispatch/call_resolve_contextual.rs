@@ -606,21 +606,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             state.diagnostic = None;
             let setup = InferenceSessionSetup::new(
                 self.graph(),
-                type_parameters
-                    .iter()
-                    .map(|decl| {
-                        InferenceInfoSetup::for_call(
-                            decl.param,
-                            Arc::clone(&decl.name),
-                            if decl.is_const {
-                                ConstParamPolicy::Const
-                            } else {
-                                ConstParamPolicy::NonConst
-                            },
-                            decl.constraint.is_some(),
-                        )
-                    })
-                    .collect(),
+                self.call_inference_infos(&type_parameters),
                 VariancePhase::Covariant,
                 InferencePassKind::CallApplicability,
                 InferenceCandidatePriority::Argument,

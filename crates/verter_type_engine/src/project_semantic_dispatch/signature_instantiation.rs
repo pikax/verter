@@ -131,6 +131,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     Arc::clone(&decl.name),
                     ConstParamPolicy::NonConst,
                     decl.constraint.is_some(),
+                    super::inference::session::LiteralContext::empty(),
                 )
             })
             .collect();

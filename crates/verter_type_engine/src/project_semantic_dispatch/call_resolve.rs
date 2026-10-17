@@ -11,9 +11,7 @@ use super::dispatch_txn::{
     ResolveCallPendingState, ResolveCallSelection, ReturnDomainMetadata, ReturnEquationFailure,
     ReturnEquationMember, ReturnObligationIdentity, SessionId,
 };
-use super::inference::session::{
-    InferenceInfoSetup, InferenceSessionSetup, InferenceSessionState, SessionCheckpoint,
-};
+use super::inference::session::{InferenceSessionSetup, InferenceSessionState, SessionCheckpoint};
 use super::walk::QueryBuildOutput;
 use super::ProjectSemanticDispatch;
 
@@ -2089,28 +2087,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return CandidateVerdict::Mismatch;
         }
 
-        #[allow(clippy::useless_conversion)]
-        let infer_params: Arc<[InferenceInfoSetup]> = Arc::from(
-            visible_type_params
-                .iter()
-                .map(|decl| {
-                    InferenceInfoSetup::for_call(
-                        decl.param,
-                        Arc::clone(&decl.name),
-                        if decl.is_const {
-                            ConstParamPolicy::Const
-                        } else {
-                            ConstParamPolicy::NonConst
-                        },
-                        decl.constraint.is_some(),
-                    )
-                })
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-        );
         let setup = InferenceSessionSetup::new(
             self.graph(),
-            infer_params,
+            self.call_inference_infos(&visible_type_params),
             VariancePhase::Covariant,
             InferencePassKind::CallApplicability,
             InferenceCandidatePriority::Argument,
