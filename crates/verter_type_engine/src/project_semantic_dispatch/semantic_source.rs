@@ -584,7 +584,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         Some(self.graph().intern_node_with_scope(
             SemanticNodeData::Opaque(err.clone()),
             NodeScopeId::File {
-                canonical_id: Arc::from(canonical_id),
+                canonical_id: verter_type_expr::OwnedStr::from(canonical_id),
                 owner,
                 whole_hash,
                 local_scope: None,
@@ -1351,9 +1351,9 @@ pub(in crate::project_semantic_dispatch) fn absolutize_locator(
     fn absolutize_anchor(anchor: &AuthoredAnchor, scope_canonical_id: &str) -> AuthoredAnchor {
         if anchor.canonical_id.is_empty() {
             AuthoredAnchor {
-                canonical_id: Arc::from(scope_canonical_id),
+                canonical_id: verter_type_expr::OwnedStr::from(scope_canonical_id),
                 owner: anchor.owner,
-                symbol: Arc::clone(&anchor.symbol),
+                symbol: anchor.symbol.clone(),
                 space: anchor.space,
             }
         } else {
@@ -1365,7 +1365,7 @@ pub(in crate::project_semantic_dispatch) fn absolutize_locator(
             if slot.anchor.canonical_id.is_empty() {
                 AuthoredBodyLocator::DeclBody(verter_type_expr::locators::TypeBodySlot {
                     anchor: absolutize_anchor(&slot.anchor, scope_canonical_id),
-                    path: Arc::clone(&slot.path),
+                    path: slot.path.clone(),
                 })
             } else {
                 locator.clone()
@@ -1377,7 +1377,7 @@ pub(in crate::project_semantic_dispatch) fn absolutize_locator(
                     verter_type_expr::locators::AugmentationBodyLocator {
                         anchor: absolutize_anchor(&aug.anchor, scope_canonical_id),
                         scope: aug.scope.clone(),
-                        path: Arc::clone(&aug.path),
+                        path: aug.path.clone(),
                     },
                 )
             } else {
@@ -1389,7 +1389,7 @@ pub(in crate::project_semantic_dispatch) fn absolutize_locator(
                 AuthoredBodyLocator::JsdocTypedefBody(
                     verter_type_expr::locators::JsdocTypedefBodyLocator {
                         anchor: absolutize_anchor(&typedef.anchor, scope_canonical_id),
-                        path: Arc::clone(&typedef.path),
+                        path: typedef.path.clone(),
                     },
                 )
             } else {

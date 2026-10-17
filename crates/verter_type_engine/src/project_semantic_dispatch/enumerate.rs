@@ -425,8 +425,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 name,
                 whole_hash: _,
             }) => {
-                let base = self.type_slot_for(Arc::clone(canonical_id), *owner, Arc::clone(name));
-                let owner_canonical = Arc::clone(canonical_id);
+                let base = self.type_slot_for(canonical_id.clone(), *owner, name.clone());
+                let owner_canonical = canonical_id.clone();
                 drop(data);
                 let read = self.execute_read(crate::semantic_query::SemanticQueryKey::Instantiate(
                     crate::semantic_query::InstantiateKey::new(

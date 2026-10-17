@@ -1000,7 +1000,7 @@ fn project_shallow_object(
             return RaisedShallowMemberOutput::Opaque;
         };
         properties.push(RaisedShallowObjectProperty {
-            name: Arc::clone(name),
+            name: name.clone(),
             ty: project_shallow_term(interner, *ty, depth + 1),
             optional: *optional,
         });

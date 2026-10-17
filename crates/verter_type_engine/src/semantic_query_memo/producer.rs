@@ -679,7 +679,7 @@ impl Subscription<'_> {
                 completion,
                 super::test_support::ExhaustedJoinAbortForTests::OtherSentinel
             ) {
-                state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
+                state.completed = Some(QueryResult::Error(QueryError::Other(verter_type_expr::OwnedStr::from(
                     "aborted subscriber flight",
                 ))));
             }
@@ -717,7 +717,7 @@ impl Subscription<'_> {
             });
         }
         let result = state.completed.clone().unwrap_or_else(|| {
-            QueryResult::Error(QueryError::Other(Arc::from(
+            QueryResult::Error(QueryError::Other(verter_type_expr::OwnedStr::from(
                 "joiner woke without completion after retry budget exhausted",
             )))
         });

@@ -315,12 +315,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             };
             let value_root = ValueRootKey {
                 scope: crate::semantic_query::ScopeId {
-                    canonical_id: Arc::clone(&block.canonical),
+                    canonical_id: verter_type_expr::OwnedStr::from(block.canonical.clone()),
                     owner: block.owner,
                     local_scope: None,
                     binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(block.owner),
                 },
-                name: Arc::clone(root),
+                name: verter_type_expr::OwnedStr::from(root),
             };
             let resolved = if depth > 0 {
                 self.namespace_private_value(evaluation, user, &candidate[..=depth])
@@ -815,14 +815,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 Arc::from(member.as_str()),
                 ValueRootKey {
                     scope: crate::semantic_query::ScopeId {
-                        canonical_id: Arc::clone(file),
+                        canonical_id: verter_type_expr::OwnedStr::from(file),
                         owner: *file_owner,
                         local_scope: None,
                         binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
                             *file_owner,
                         ),
                     },
-                    name: Arc::from(format!("{symbol}.{member}")),
+                    name: verter_type_expr::OwnedStr::from(format!("{symbol}.{member}")),
                 },
             ));
         }
@@ -863,12 +863,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let path: Arc<[Arc<str>]> = Arc::from(Vec::new().into_boxed_slice());
         let value_root = ValueRootKey {
             scope: crate::semantic_query::ScopeId {
-                canonical_id: canonical,
+                canonical_id: verter_type_expr::OwnedStr::from(canonical),
                 owner,
                 local_scope: None,
                 binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(owner),
             },
-            name: symbol,
+            name: verter_type_expr::OwnedStr::from(symbol),
         };
         let QueryResult::Value(crate::semantic_query::SemanticQueryOutput { value, .. }) = self
             .execute_type_node(self.typeof_key_with_path(
@@ -915,7 +915,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         self.graph().intern_node_with_scope(
             SemanticNodeData::EnumLiteral(EnumLiteralType {
                 enum_decl: enumeration.decl.clone(),
-                member: Arc::from(entry.name.as_str()),
+                member: verter_type_expr::OwnedStr::from(entry.name.as_str()),
                 base,
                 member_count: u32::try_from(enumeration.members.len()).unwrap_or(u32::MAX),
             }),
@@ -960,7 +960,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
                     readonly: true,
                     spans: verter_type_expr::IndexSignatureSpans::default(),
-                    declaration_origin: Some(Arc::clone(&enumeration.decl.canonical_id)),
+                    declaration_origin: Some(verter_type_expr::OwnedStr::from(enumeration.decl.canonical_id.clone())),
                 },
             )
         });
@@ -968,7 +968,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .members
             .iter()
             .map(|entry| crate::semantic_query::SurfaceMember {
-                key: crate::semantic_query::AuthoredPropertyKey::String(Arc::from(
+                key: crate::semantic_query::AuthoredPropertyKey::String(verter_type_expr::OwnedStr::from(
                     entry.name.as_str(),
                 )),
                 value: self.enum_member_literal(enumeration, entry),
@@ -980,7 +980,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                 // The member inventory carries no per-member source span.
                 spans: verter_type_expr::MemberSpans::default(),
-                declaration_origin: Some(Arc::clone(&enumeration.decl.canonical_id)),
+                declaration_origin: Some(verter_type_expr::OwnedStr::from(enumeration.decl.canonical_id.clone())),
                 declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
                 merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
             })
@@ -1069,7 +1069,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     fn enum_scope(&self, enumeration: &EnumDeclaration) -> NodeScopeId {
         NodeScopeId::File {
-            canonical_id: Arc::clone(&enumeration.decl.canonical_id),
+            canonical_id: verter_type_expr::OwnedStr::from(enumeration.decl.canonical_id.clone()),
             owner: enumeration.decl.owner,
             whole_hash: enumeration.decl.whole_hash,
             local_scope: None,

@@ -5,6 +5,8 @@
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use crate::OwnedStr;
+
 /// Where an [`UnknownValue`] spelling came from. DIAGNOSTIC ONLY: provenance
 /// is NEVER part of equality, hashing, the JSON wire shape, or any control
 /// decision — two `UnknownValue`s with the same raw text are identical
@@ -41,13 +43,13 @@ pub enum UnknownProvenance {
 /// preserving the legacy `Unknown { raw: String }` cache/hash behaviour.
 #[derive(Debug, Clone)]
 pub struct UnknownValue {
-    raw: Arc<str>,
+    raw: OwnedStr,
     provenance: UnknownProvenance,
 }
 
 impl UnknownValue {
     /// Authored syntax the lowering could not represent, preserved verbatim.
-    pub fn unsupported_syntax(raw: impl Into<Arc<str>>) -> Self {
+    pub fn unsupported_syntax(raw: impl Into<OwnedStr>) -> Self {
         Self {
             raw: raw.into(),
             provenance: UnknownProvenance::UnsupportedSyntax,
@@ -55,7 +57,7 @@ impl UnknownValue {
     }
 
     /// A JSDoc type expression that failed to parse, preserved verbatim.
-    pub fn jsdoc_parse_fallback(raw: impl Into<Arc<str>>) -> Self {
+    pub fn jsdoc_parse_fallback(raw: impl Into<OwnedStr>) -> Self {
         Self {
             raw: raw.into(),
             provenance: UnknownProvenance::JsdocParseFallback,
@@ -65,14 +67,14 @@ impl UnknownValue {
     /// A producer that had no output to emit (empty raw).
     pub fn missing_output() -> Self {
         Self {
-            raw: Arc::from(""),
+            raw: OwnedStr::from(""),
             provenance: UnknownProvenance::MissingOutput,
         }
     }
 
     /// An `Unknown` decoded from the JSON wire format or interned externally
     /// as opaque raw text.
-    pub fn wire_opaque(raw: impl Into<Arc<str>>) -> Self {
+    pub fn wire_opaque(raw: impl Into<OwnedStr>) -> Self {
         Self {
             raw: raw.into(),
             provenance: UnknownProvenance::WireOpaque,
@@ -85,7 +87,7 @@ impl UnknownValue {
     /// generic raw escape hatch. (`pub` only because the sidecar lives in the
     /// sibling `verter_session` crate.)
     #[doc(hidden)]
-    pub fn compatibility_projection(raw: impl Into<Arc<str>>) -> Self {
+    pub fn compatibility_projection(raw: impl Into<OwnedStr>) -> Self {
         Self {
             raw: raw.into(),
             provenance: UnknownProvenance::CompatibilityProjection,
@@ -117,7 +119,7 @@ impl UnknownValue {
     }
 
     /// Consume the value and return the raw text allocation.
-    pub fn into_raw(self) -> Arc<str> {
+    pub fn into_raw(self) -> OwnedStr {
         self.raw
     }
 }

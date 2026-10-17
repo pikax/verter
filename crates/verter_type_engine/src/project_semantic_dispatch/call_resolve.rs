@@ -562,7 +562,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .any(|(canonical, _)| canonical == &key.point.canonical_id)
             {
                 self_roots.push((
-                    Arc::clone(&key.point.canonical_id),
+                    key.point.canonical_id.clone(),
                     serve.indexed.whole_hash,
                 ));
             }
@@ -1240,7 +1240,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // call site is that site.
         let _demand_scope = super::LexicalDemandScopeGuard::push(
             &self.lexical_demand_scope,
-            Arc::clone(&key.point.canonical_id),
+            key.point.canonical_id.clone(),
         );
         let explicit_type_args: Arc<[SemanticNodeId]> = Arc::from(
             key.explicit_type_args
@@ -1850,7 +1850,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .indexed_expression_source(point.canonical_id.as_ref())
                         .ok_or(ResolveCallFailure::Undecidable)?;
                     let indexed_point = verter_type_expr::facts::ProgramExpressionIdentity {
-                        canonical_id: Arc::clone(&point.canonical_id),
+                        canonical_id: point.canonical_id.clone(),
                         offset: point.offset,
                     };
                     let program_index = source_demand.function_program_index();

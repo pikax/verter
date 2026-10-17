@@ -1403,9 +1403,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .unwrap_or_else(|| {
                 verter_type_expr::facts::FunctionReturnSource::Flow(FlowFunctionReturnIdentity {
                     anchor: verter_type_expr::locators::AuthoredAnchor {
-                        canonical_id: Arc::from(canonical),
+                        canonical_id: verter_type_expr::OwnedStr::from(canonical),
                         owner: target.declaration.owner,
-                        symbol: Arc::clone(&target.declaration.name),
+                        symbol: verter_type_expr::OwnedStr::from(target.declaration.name.clone()),
                         space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                     },
                     function_part: target.part.clone(),
@@ -1459,7 +1459,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // come from the serving scope, as every signature composition fills
         // them.
         let mut identity = identity.clone();
-        identity.anchor.canonical_id = root.canonical_id;
+        identity.anchor.canonical_id = verter_type_expr::OwnedStr::from(root.canonical_id);
         identity.anchor.owner = root.owner;
         Some(identity)
     }

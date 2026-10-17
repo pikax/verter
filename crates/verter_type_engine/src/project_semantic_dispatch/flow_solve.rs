@@ -893,7 +893,7 @@ pub fn derive_demand_subject(
     for segment in projection.path.as_slice() {
         match segment {
             PathSegment::Member(verter_type_expr::PropertyKey::String(name)) => {
-                path.push(Arc::clone(name));
+                path.push(name.clone());
             }
             PathSegment::Member(_) | PathSegment::Index(_) => {
                 return Err(FlowDemandPlanError::UnrepresentableDemand);
@@ -926,7 +926,7 @@ fn derive_execution_subject(
     }
     let name = match point.projection.path.as_slice() {
         [PathSegment::Member(crate::semantic_query::PropertyKey::String(name))]
-        | [PathSegment::Index(crate::semantic_query::IndexKey::String(name))] => Arc::clone(name),
+        | [PathSegment::Index(crate::semantic_query::IndexKey::String(name))] => name.clone(),
         _ => return Err(FlowDemandPlanError::UnrepresentableDemand),
     };
     Ok(FlowDemandSubject {

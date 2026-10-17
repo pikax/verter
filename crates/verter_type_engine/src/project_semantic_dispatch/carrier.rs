@@ -405,7 +405,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let result = self.graph().intern_node_with_scope(
             data.as_ref().clone(),
             NodeScopeId::File {
-                canonical_id: Arc::clone(&identity.canonical_id),
+                canonical_id: verter_type_expr::OwnedStr::from(identity.canonical_id.clone()),
                 owner: identity.owner,
                 whole_hash: identity.whole_hash,
                 local_scope: None,
@@ -706,7 +706,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .map(|shallow| shallow.whole_hash)
             .unwrap_or_default();
         let scope = NodeScopeId::File {
-            canonical_id: Arc::from(scope_canonical_id),
+            canonical_id: verter_type_expr::OwnedStr::from(scope_canonical_id),
             owner,
             whole_hash,
             local_scope: None,
@@ -1126,14 +1126,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // short-circuits to the bare `ResolveDecl` result.
         let anchor = self.carrier_resolution_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: ScopeId {
-                canonical_id: Arc::clone(&resolved_root.canonical_id),
+                canonical_id: verter_type_expr::OwnedStr::from(resolved_root.canonical_id.clone()),
                 owner: resolved_root.owner,
                 local_scope: None,
                 binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
                     resolved_root.owner,
                 ),
             },
-            name: Arc::clone(&resolved_root.symbol_name),
+            name: verter_type_expr::OwnedStr::from(resolved_root.symbol_name.clone()),
         }));
         if matches!(anchor.status, FactStatus::Unavailable(_)) {
             return CarrierResolutionPlan::Ready(anchor);
@@ -1297,7 +1297,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // member projection) cannot carry — emit an HONEST error carrier rather
         // than silently dropping the args.
         if !rest.is_empty() && arg_count > 0 {
-            return CarrierResolutionPlan::complete(self.opaque(QueryError::Other(Arc::from(
+            return CarrierResolutionPlan::complete(self.opaque(QueryError::Other(verter_type_expr::OwnedStr::from(
                 "import-type generic args on a multi-segment qualifier are not yet instantiated",
             ))));
         }

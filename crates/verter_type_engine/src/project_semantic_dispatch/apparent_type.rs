@@ -375,7 +375,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     pub(super) fn apparent_member_name(&self, segment: &PathSegment) -> Option<Arc<str>> {
         let name = match segment {
             PathSegment::Member(PropertyKey::String(name))
-            | PathSegment::Index(IndexKey::String(name)) => Arc::clone(name),
+            | PathSegment::Index(IndexKey::String(name)) => name.clone(),
             PathSegment::Index(IndexKey::Computed(node)) => {
                 match self.normalized_index_key_node(*node) {
                     IndexKey::String(name) => name,
@@ -480,7 +480,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             CallableAnchor::NotCallable | CallableAnchor::Undecided => return miss(),
             CallableAnchor::Authored(canonical) => (canonical, false),
             CallableAnchor::Rootless => match &context.demand_scope {
-                ApparentDemandScope::Rootless { canonical } => (Arc::clone(canonical), true),
+                ApparentDemandScope::Rootless { canonical } => (canonical.clone(), true),
                 // No demand-scope witness — no project to scope the ambient
                 // lookup by. Fail closed.
                 ApparentDemandScope::Anchored => return miss(),
@@ -569,7 +569,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 let canonical = self.lexical_demand_scope.borrow().last().cloned()?;
                 (
                     Arc::clone(&canonical),
-                    ApparentDemandScope::Rootless { canonical },
+                    ApparentDemandScope::Rootless { OwnedStr::from(canonical) },
                 )
             }
         };

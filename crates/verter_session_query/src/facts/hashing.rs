@@ -38,6 +38,7 @@
 //! `NonCacheable`. The walker carries an explicit `BudgetExceeded`
 //! flag that producers check after [`compute_semantic_hash`].
 
+use verter_type_expr::OwnedStr;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -1100,7 +1101,7 @@ impl<'a> Walker<'a> {
         ty: &TypeExpr,
     ) {
         self.buf.push(0x60);
-        self.write_authored_property_key(&AuthoredPropertyKey::String(Arc::from(name)));
+        self.write_authored_property_key(&AuthoredPropertyKey::String(OwnedStr::from(name)));
         self.buf.push(u8::from(optional));
         self.buf.push(u8::from(readonly));
         self.write_member_visibility(visibility);

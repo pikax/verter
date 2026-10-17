@@ -18,6 +18,7 @@
 //! - No partial parses — each node is fully consumed.
 //! - Source text is required for `Unknown` fallback and literal extraction.
 
+use verter_type_expr::OwnedStr;
 use oxc_ast::ast::{
     BindingPattern, FormalParameters, PropertyKey, TSFunctionType, TSImportType,
     TSImportTypeQualifier, TSMappedType, TSMappedTypeModifierOperator, TSQualifiedName,
@@ -1604,7 +1605,7 @@ pub fn lower_property_key(key: &PropertyKey<'_>, source: &str) -> TypeAuthoredPr
             let key = CanonicalIndexInt::from_js_number(literal.value)
                 .map(TypedPropertyKey::Number)
                 .unwrap_or_else(|| {
-                    TypedPropertyKey::String(Arc::from(verter_ecma::js_number_to_string(
+                    TypedPropertyKey::String(OwnedStr::from(verter_ecma::js_number_to_string(
                         literal.value,
                     )))
                 });

@@ -75,7 +75,7 @@ pub(super) fn upsert_at(host: &VerterHost, canonical: &str, source: &str) {
 
 pub(super) fn locator(
     symbol: &str,
-    path: impl Into<Arc<[TypeBodyPathStep]>>,
+    path: impl Into<verter_type_expr::OwnedSlice<TypeBodyPathStep>>,
 ) -> AuthoredBodyLocator {
     locator_at(OWNER, symbol, LocatorSymbolSpace::Type, path)
 }
@@ -84,7 +84,7 @@ pub(super) fn locator_at(
     canonical: &str,
     symbol: &str,
     space: LocatorSymbolSpace,
-    path: impl Into<Arc<[TypeBodyPathStep]>>,
+    path: impl Into<verter_type_expr::OwnedSlice<TypeBodyPathStep>>,
 ) -> AuthoredBodyLocator {
     AuthoredBodyLocator::DeclBody(TypeBodySlot {
         anchor: AuthoredAnchor {
@@ -677,7 +677,7 @@ fn nested_function_mapper_and_infer_binders_are_not_captured_by_outer_substituti
     let number = dispatch
         .mint_node_semantic_operand_for_tests(&number_forced)
         .expect("number operand");
-    let substituted = |path: Arc<[TypeBodyPathStep]>, symbol: &str| {
+    let substituted = |path: verter_type_expr::OwnedSlice<TypeBodyPathStep>, symbol: &str| {
         dispatch
             .mint_authored_semantic_operand_for_tests(
                 locator(symbol, path),
@@ -775,7 +775,7 @@ fn defaults_augmentation_and_structural_child_locators_use_canonical_instantiati
         PrimitiveKind::Number,
     );
 
-    let paths: [Arc<[TypeBodyPathStep]>; 4] = [
+    let paths: [verter_type_expr::OwnedSlice<TypeBodyPathStep>; 4] = [
         Arc::from(
             [
                 TypeBodyPathStep::TupleElement { ordinal: 0 },

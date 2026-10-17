@@ -284,7 +284,7 @@ fn jsdoc_typedef_path_through_a_binder_binds_locally() {
 /// Each entry is `(body, path, label)`; the body is emitted twice — once
 /// as a whole declaration body (pre-lowering navigator) and once nested
 /// under a generic callable's return position (lowered-graph navigator).
-fn navigator_parity_cases() -> Vec<(&'static str, Arc<[TypeBodyPathStep]>, &'static str)> {
+fn navigator_parity_cases() -> Vec<(&'static str, verter_type_expr::OwnedSlice<TypeBodyPathStep>, &'static str)> {
     vec![
         (
             "{ a: string }",
@@ -426,7 +426,7 @@ fn both_locator_navigators_select_the_same_authored_position() {
             ),
         );
         let dispatch = ProjectSemanticDispatch::new(&host);
-        let crossed_path: Arc<[TypeBodyPathStep]> = {
+        let crossed_path: verter_type_expr::OwnedSlice<TypeBodyPathStep> = {
             let mut steps = vec![
                 TypeBodyPathStep::Member { ordinal: 0 },
                 TypeBodyPathStep::MemberValue,
@@ -435,7 +435,7 @@ fn both_locator_navigators_select_the_same_authored_position() {
             steps.extend(path.iter().cloned());
             Arc::from(steps.into_boxed_slice())
         };
-        let select = |symbol: &str, path: Arc<[TypeBodyPathStep]>| match dispatch
+        let select = |symbol: &str, path: verter_type_expr::OwnedSlice<TypeBodyPathStep>| match dispatch
             .force_semantic_operand_for_tests(
                 &mint(&dispatch, locator(symbol, path)),
                 request(ProjectionMode::Identity),
@@ -511,7 +511,7 @@ fn binder_frame_visibility_separates_constraint_default_and_body_positions() {
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
     let context = ProjectionReductionContext::published(ProjectionMode::Identity);
-    let frames: [Arc<[TypeBodyPathStep]>; 4] = [
+    let frames: [verter_type_expr::OwnedSlice<TypeBodyPathStep>; 4] = [
         Arc::from([]),
         Arc::from([TypeBodyPathStep::TypeParamBound {
             ordinal: 1,

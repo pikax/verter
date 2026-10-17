@@ -1127,7 +1127,7 @@ fn runtime_object_macro_surface<C: crate::resolver_core::ResolverCapabilities>(
         AnalyzedMacroKind::DefineExpose => {
             for field in &mac.expose_fields {
                 entries.push(SurfaceEntry::Member(SurfaceMember {
-                    key: AuthoredPropertyKey::String(Arc::from(field.name.as_str())),
+                    key: AuthoredPropertyKey::String(verter_type_expr::OwnedStr::from(field.name.as_str())),
                     // The exposed value's real type is not re-derived
                     // here (see the doc comment above) — `unknown` is
                     // the honest placeholder, never a fabricated shape.
@@ -1150,7 +1150,7 @@ fn runtime_object_macro_surface<C: crate::resolver_core::ResolverCapabilities>(
         AnalyzedMacroKind::DefineProps => {
             for field in &mac.prop_fields {
                 entries.push(SurfaceEntry::Member(SurfaceMember {
-                    key: AuthoredPropertyKey::String(Arc::from(field.name.as_str())),
+                    key: AuthoredPropertyKey::String(verter_type_expr::OwnedStr::from(field.name.as_str())),
                     value: unknown_member_value_node(dispatch),
                     optional: field.is_optional,
                     readonly: false,
@@ -1229,7 +1229,7 @@ fn decompose_indexed_access_chain_node<C: crate::resolver_core::ResolverCapabili
         match data.as_ref() {
             SemanticNodeData::IndexedAccess { object, index } => match index {
                 IndexKey::String(s) => {
-                    rev_path.push(PathSegment::Index(IndexKey::String(Arc::clone(s))));
+                    rev_path.push(PathSegment::Index(IndexKey::String(s.clone())));
                     current = *object;
                 }
                 IndexKey::Number(n) => {

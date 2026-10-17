@@ -34,19 +34,27 @@
 //!   ([`super::owned::Owned`]), a cache-internal one is charged through
 //!   [`super::shared::AliasCharges`].
 //! * **Nested owned allocations.** An [`super::owned::Owned`] handle nested
-//!   in a measured value is its own allocation: a charging measurement
-//!   collects it ([`AliasSet::collecting`]) and the nested cell charges
-//!   itself, once however many parents reach it. Any other measurement
-//!   counts it in full, once.
-//! * **Leaf text.** A raw leaf `Arc<str>` name inside a registered carrier
-//!   or an owned cell (a fact's interned names, an identity string) is its
-//!   own shared allocation: measuring for a charge collects its leaves
-//!   instead of counting them ([`AliasSet::collecting`]) and the registry
-//!   charges each leaf once, held by every holder that reaches it
+//!   in a measured value is its own allocation, charged by its own cell
+//!   once however many owners reach it: a measurement collects it instead
+//!   of counting it, and the owner taking the charge pins or holds every
+//!   handle its measurement reached ([`AliasSet::take_handles`]). Only a
+//!   figure that charges nothing counts handles in full
+//!   ([`AliasSet::estimating`]).
+//! * **Owned values reach no raw `Arc`.** An owned cell's value keeps each
+//!   allocation either exclusively (a `Box`, `Vec`, `String`, counted with
+//!   the cell) or as an owned handle (charged by itself). A raw `Arc` in
+//!   it would be an allocation a caller could clone out and keep past the
+//!   cell's charge; a debug build fails the measurement that reaches one.
+//! * **Leaf text.** A raw leaf `Arc<str>` name inside a registered,
+//!   cache-internal carrier (a fact's interned names) is its own shared
+//!   allocation: measuring for a charge collects its leaves instead of
+//!   counting them ([`AliasSet::collecting`]) and the registry charges each
+//!   leaf once, held by every holder that reaches it
 //!   ([`super::shared::AliasCharges`]). Outside a charge a measurement
 //!   counts each distinct leaf it reaches in full.
 //!
-//! The figures are admission ESTIMATES (see the crate docs): nothing in cache validity reads them.
+//! The figures are admission ESTIMATES (see the crate docs): nothing in
+//! cache validity reads them.
 
 use std::sync::Arc;
 
@@ -91,48 +99,90 @@ pub const fn box_bytes<T>() -> usize {
     heap_block_bytes(std::mem::size_of::<T>())
 }
 
-/// Distinct `Arc` allocations one charge has already counted.
+/// Distinct `Arc` allocations one charge has already counted, and the
+/// owned allocations the measurement reached.
 ///
 /// Keyed by the allocation's address. Every key names an allocation the
 /// measured value holds for the whole measurement, so an address cannot be
 /// freed and reused while the set is live. The first few keys stay inline,
 /// so measuring a small value allocates nothing.
-#[derive(Default)]
+///
+/// A measurement never counts an owned handle ([`super::owned::Owned`],
+/// [`super::owned::OwnedStr`]) it reaches: the handle's allocation is
+/// charged by its own cell, once however many owners reach it. The set
+/// collects each such handle instead, and the owner taking the charge must
+/// take them too ([`Self::take_handles`]) and charge them — a set dropped
+/// with handles it never handed over is an omitted charge, and fails a
+/// debug build. Only a figure that charges nothing — an expectation in a
+/// test, a bound — counts handles in full ([`Self::estimating`]).
 pub struct AliasSet {
     inline: smallvec::SmallVec<[usize; ALIAS_INLINE]>,
     spilled: Option<FxHashSet<usize>>,
-    /// When collecting, the distinct leaf names the measurement reached,
-    /// which it then does not count.
+    /// When collecting leaves, the distinct leaf names the measurement
+    /// reached, which it then does not count.
     leaves: Option<Vec<Arc<str>>>,
-    /// When collecting, the distinct owned allocations the measurement
-    /// reached, each charged by its own cell and not counted here.
+    /// The distinct owned allocations the measurement reached, each charged
+    /// by its own cell and not counted here; `None` when they are counted
+    /// in full instead.
     children: Option<Vec<Arc<dyn super::owned::Node>>>,
+    /// Whether this measures an owned cell's value, which reaches no raw
+    /// `Arc`: each allocation it keeps is exclusively its own or an owned
+    /// handle charged by itself.
+    in_cell: bool,
 }
 
 /// Allocations an [`AliasSet`] tracks before it spills to a hash set.
 const ALIAS_INLINE: usize = 8;
 
+impl Default for AliasSet {
+    fn default() -> Self {
+        Self::with(None, Some(Vec::new()), false)
+    }
+}
+
 impl AliasSet {
-    /// An empty set.
+    fn with(
+        leaves: Option<Vec<Arc<str>>>,
+        children: Option<Vec<Arc<dyn super::owned::Node>>>,
+        in_cell: bool,
+    ) -> Self {
+        Self {
+            inline: smallvec::SmallVec::new(),
+            spilled: None,
+            leaves,
+            children,
+            in_cell,
+        }
+    }
+
+    /// An empty set: counts raw leaves, collects owned handles.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// An empty set that collects every distinct leaf name a measurement
-    /// reaches instead of counting it: a registered carrier's leaves are
-    /// charged as allocations of their own.
+    /// An empty set that also collects every distinct raw leaf name a
+    /// measurement reaches instead of counting it: a registered carrier's
+    /// leaves are charged as allocations of their own.
     #[must_use]
     pub fn collecting() -> Self {
-        Self {
-            leaves: Some(Vec::new()),
-            children: Some(Vec::new()),
-            ..Self::default()
-        }
+        Self::with(Some(Vec::new()), Some(Vec::new()), false)
     }
 
-    /// Record an owned child when collecting; `false` when this
-    /// measurement counts children in full instead.
+    /// An empty set measuring an owned cell's value.
+    pub(crate) fn for_cell() -> Self {
+        Self::with(None, Some(Vec::new()), true)
+    }
+
+    /// An empty set for a figure that charges nothing: it counts every
+    /// owned handle it reaches in full, once.
+    #[must_use]
+    pub fn estimating() -> Self {
+        Self::with(None, None, false)
+    }
+
+    /// Record an owned child; `false` when this measurement counts children
+    /// in full instead.
     pub(crate) fn collect_child(
         &mut self,
         child: impl FnOnce() -> Arc<dyn super::owned::Node>,
@@ -146,9 +196,20 @@ impl AliasSet {
         }
     }
 
-    /// The owned children a collecting measurement reached, each once.
+    /// The owned children the measurement reached, each once.
     pub(crate) fn take_children(&mut self) -> Box<[Arc<dyn super::owned::Node>]> {
-        self.children.take().unwrap_or_default().into_boxed_slice()
+        self.children
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
+            .into_boxed_slice()
+    }
+
+    /// The owned allocations the measurement reached, each once, for the
+    /// owner taking the charge to charge them.
+    #[must_use]
+    pub fn take_handles(&mut self) -> super::owned::OwnedHandles {
+        super::owned::OwnedHandles::from_children(self.take_children())
     }
 
     /// The leaf names a collecting measurement reached, each once.
@@ -158,7 +219,21 @@ impl AliasSet {
     }
 
     /// `true` the first time `arc`'s allocation is offered, `false` after.
+    ///
+    /// An owned cell's value reaches no raw `Arc`: a debug build fails the
+    /// measurement that offers one.
     pub fn first<T: ?Sized>(&mut self, arc: &Arc<T>) -> bool {
+        verter_debug_assert::verter_debug_assert!(
+            !self.in_cell,
+            "an owned value reaches a raw `Arc<{}>`: an allocation a caller can clone out of a \
+             delivered value must be an owned handle charged by itself",
+            std::any::type_name::<T>()
+        );
+        self.first_allocation(arc)
+    }
+
+    /// [`Self::first`] for an owned cell's own allocation.
+    pub(crate) fn first_allocation<T: ?Sized>(&mut self, arc: &Arc<T>) -> bool {
         let key = Arc::as_ptr(arc).cast::<()>() as usize;
         if let Some(spilled) = self.spilled.as_mut() {
             return spilled.insert(key);
@@ -188,6 +263,18 @@ impl AliasSet {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+impl Drop for AliasSet {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            verter_debug_assert::verter_debug_assert!(
+                self.children.as_ref().is_none_or(Vec::is_empty),
+                "a measurement reached owned allocations its owner never charged: take them \
+                 with `AliasSet::take_handles` and pin or hold them"
+            );
+        }
     }
 }
 

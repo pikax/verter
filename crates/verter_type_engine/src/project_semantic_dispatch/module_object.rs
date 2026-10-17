@@ -41,12 +41,12 @@ fn file_root(
 ) -> ValueRootKey {
     ValueRootKey {
         scope: crate::semantic_query::ScopeId {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner,
             local_scope: None,
             binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(owner),
         },
-        name: Arc::from(name),
+        name: verter_type_expr::OwnedStr::from(name),
     }
 }
 
@@ -215,7 +215,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             true,
                         ),
                         NodeScopeId::File {
-                            canonical_id: Arc::from(module),
+                            canonical_id: verter_type_expr::OwnedStr::from(module),
                             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                             whole_hash: indexed.whole_hash,
                             local_scope: None,
@@ -227,7 +227,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             members.push(Self::module_member(Arc::clone(name), node, module));
         }
         let scope = NodeScopeId::File {
-            canonical_id: Arc::from(module),
+            canonical_id: verter_type_expr::OwnedStr::from(module),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: indexed.whole_hash,
             local_scope: None,
@@ -291,7 +291,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .indexed
             .whole_hash;
         let scope = NodeScopeId::File {
-            canonical_id: Arc::clone(&first.canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(first.canonical.clone()),
             owner: first.owner,
             whole_hash: hash,
             local_scope: None,
@@ -375,7 +375,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .indexed
             .whole_hash;
         let scope = NodeScopeId::File {
-            canonical_id: Arc::clone(&first_canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(first_canonical.clone()),
             owner: first.owner,
             whole_hash: hash,
             local_scope: None,
@@ -416,7 +416,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             })
             .collect();
         let node_scope = NodeScopeId::File {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner,
             whole_hash: indexed.whole_hash,
             local_scope: None,
@@ -440,7 +440,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     ) -> Option<ModuleObject> {
         let canonical = assigned.scope.canonical_id.as_ref();
         let indexed = self.ctx.ensure_indexed_ready_serve(canonical)?.indexed;
-        let roots = vec![(Arc::clone(&assigned.scope.canonical_id), indexed.whole_hash)];
+        let roots = vec![(assigned.scope.canonical_id.clone(), indexed.whole_hash)];
         let whole = match self
             .execute_read(self.typeof_key_for(assigned.clone(), context))
             .value
@@ -492,7 +492,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
         members.sort_by(|left, right| left.key.as_string().cmp(&right.key.as_string()));
         let node_scope = NodeScopeId::File {
-            canonical_id: Arc::clone(&assigned.scope.canonical_id),
+            canonical_id: assigned.scope.canonical_id.clone(),
             owner: assigned.scope.owner,
             whole_hash: indexed.whole_hash,
             local_scope: None,
@@ -615,7 +615,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         origin: &str,
     ) -> SurfaceMember {
         SurfaceMember {
-            key: crate::semantic_query::AuthoredPropertyKey::String(name),
+            key: crate::semantic_query::AuthoredPropertyKey::String(verter_type_expr::OwnedStr::from(name)),
             value,
             optional: false,
             readonly: false,
@@ -627,7 +627,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             // It has no one declaration site; its declaration lives in the
             // module.
             spans: verter_type_expr::MemberSpans::default(),
-            declaration_origin: Some(Arc::from(origin)),
+            declaration_origin: Some(verter_type_expr::OwnedStr::from(origin)),
             declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
             merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
         }

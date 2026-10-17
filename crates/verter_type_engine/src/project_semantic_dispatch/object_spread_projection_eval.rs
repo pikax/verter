@@ -30,7 +30,7 @@ struct CollisionKey(PropertyKey);
 impl CollisionKey {
     fn new(key: &PropertyKey) -> Self {
         Self(match key {
-            PropertyKey::Number(number) => PropertyKey::String(Arc::from(number.to_string())),
+            PropertyKey::Number(number) => PropertyKey::String(verter_type_expr::OwnedStr::from(number.to_string())),
             _ => key.clone(),
         })
     }

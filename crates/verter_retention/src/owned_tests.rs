@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use super::*;
 use crate::allocation::{arc_str_bytes, vec_bytes};
-use crate::shared::registration_bytes;
+
 use crate::RetentionLimits;
 
 fn account(ceiling: usize) -> Arc<SemanticRetentionAccount> {
@@ -59,8 +59,7 @@ fn a_clone_outliving_every_holder_keeps_the_one_charge_until_its_own_drop() {
     const LIST: usize = 4096;
     for cache_first in [true, false] {
         let account = account(1 << 30);
-        let registry = AliasCharges::new();
-        let ctx = ChargeCtx::new(&account, &registry);
+        let ctx = ChargeCtx::new(&account);
         let name = OwnedStr::new("n");
         let read = carrier(&name, LIST);
         read.pin(ctx);
@@ -100,8 +99,7 @@ fn a_clone_outliving_every_holder_keeps_the_one_charge_until_its_own_drop() {
 fn a_shared_nested_string_is_charged_once_and_survives_its_parents() {
     const NAME: usize = 30_000;
     let account = account(1 << 30);
-    let registry = AliasCharges::new();
-    let ctx = ChargeCtx::new(&account, &registry);
+    let ctx = ChargeCtx::new(&account);
     let name = OwnedStr::from("x".repeat(NAME));
     let first = carrier(&name, 1);
     let second = carrier(&name, 1);
@@ -134,12 +132,12 @@ fn a_shared_nested_string_is_charged_once_and_survives_its_parents() {
     assert_eq!(occupancy(&account), (0, 0));
 }
 
-/// A plain measurement of a value embedding an owned handle counts the
-/// handle's allocation in full, once however often it is reached.
+/// An estimating measurement of a value embedding an owned handle counts
+/// the handle's allocation in full, once however often it is reached.
 #[test]
-fn an_uncollected_measurement_counts_a_nested_handle_once_in_full() {
+fn an_estimating_measurement_counts_a_nested_handle_once_in_full() {
     let name = OwnedStr::from("y".repeat(1000));
-    let mut aliases = AliasSet::new();
+    let mut aliases = AliasSet::estimating();
     assert_eq!(name.offer(&mut aliases), OwnedStr::charge_for_len(1000));
     assert_eq!(name.clone().offer(&mut aliases), 0);
 }
@@ -150,8 +148,7 @@ fn an_uncollected_measurement_counts_a_nested_handle_once_in_full() {
 #[test]
 fn zero_headroom_pins_callers_and_refuses_retention_all_or_nothing() {
     let account = account(0);
-    let registry = AliasCharges::new();
-    let ctx = ChargeCtx::new(&account, &registry);
+    let ctx = ChargeCtx::new(&account);
     let name = OwnedStr::from("z".repeat(500));
     let value = carrier(&name, 64);
 
@@ -186,8 +183,7 @@ fn a_refused_adoption_hands_an_adopted_child_back_to_its_callers() {
     let list = 512;
     let name_charge = OwnedStr::charge_for_len(name_len);
     let account = account(name_charge + own_bytes(list) / 2);
-    let registry = AliasCharges::new();
-    let ctx = ChargeCtx::new(&account, &registry);
+    let ctx = ChargeCtx::new(&account);
     let name = OwnedStr::from("w".repeat(name_len));
     let value = carrier(&name, list);
     value.pin(ctx);
@@ -198,51 +194,57 @@ fn a_refused_adoption_hands_an_adopted_child_back_to_its_callers() {
     assert_eq!(occupancy(&account), (0, name_charge + own_bytes(list)));
 }
 
-/// A raw leaf name two owned values reach is charged once through the
-/// registry, in the class of whichever holds it, and released with the
-/// last of them.
+/// An owned value that reaches a raw `Arc` would let a caller clone that
+/// allocation out and keep it past the value's charge: a debug build fails
+/// the measurement that reaches one.
 #[test]
-fn a_raw_leaf_two_owned_values_share_is_charged_once_through_the_registry() {
-    const LEAF: usize = 20_000;
+#[should_panic(expected = "an owned value reaches a raw `Arc<str>`")]
+#[cfg(debug_assertions)]
+fn an_owned_value_reaching_a_raw_arc_fails_its_measurement() {
     let account = account(1 << 30);
-    let registry = AliasCharges::new();
-    let ctx = ChargeCtx::new(&account, &registry);
-    let leaf: Arc<str> = Arc::from("l".repeat(LEAF));
-    let name = OwnedStr::new("n");
-    let with_leaf = |list| {
-        Owned::new(Carrier {
-            name: name.clone(),
-            raw: Some(Arc::clone(&leaf)),
-            list: vec![0; list],
-        })
-    };
-    let first = with_leaf(1);
-    let second = with_leaf(2);
-    let hold = first.hold(ctx).expect("admitted");
-    second.pin(ctx);
-    let leaf_charge = arc_block_bytes(LEAF) + registration_bytes();
-    let table = || registry.table_charged_bytes();
-    assert_eq!(
-        occupancy(&account),
-        (
-            own_bytes(1) + OwnedStr::charge_for_len(1) + leaf_charge,
-            own_bytes(2) + table()
-        ),
-        "the leaf is retained once, with the cached value"
-    );
-    drop(hold);
-    drop(first);
-    assert_eq!(
-        occupancy(&account),
-        (
-            0,
-            own_bytes(2) + OwnedStr::charge_for_len(1) + leaf_charge + table()
-        ),
-        "the surviving value keeps the leaf, pinned"
-    );
-    drop(second);
+    let value = Owned::new(Carrier {
+        name: OwnedStr::new("n"),
+        raw: Some(Arc::from("leaf")),
+        list: Vec::new(),
+    });
+    value.pin(ChargeCtx::new(&account));
+}
+
+/// A measurement that reaches an owned handle hands it to the owner taking
+/// the charge; one that drops it uncharged fails a debug build.
+#[test]
+#[should_panic(expected = "a measurement reached owned allocations its owner never charged")]
+#[cfg(debug_assertions)]
+fn a_measurement_dropping_a_reached_handle_fails() {
+    let name = OwnedStr::new("dropped");
+    let mut aliases = AliasSet::new();
+    assert_eq!(name.offer(&mut aliases), 0, "collected, not counted");
+    drop(aliases);
+}
+
+/// The handles a delivered carrier reaches are pinned for its caller and
+/// held by a cache exactly as each handle alone would be.
+#[test]
+fn a_carriers_top_level_handles_are_charged_by_their_own_cells() {
+    const NAME: usize = 4_000;
+    let account = account(1 << 30);
+    let ctx = ChargeCtx::new(&account);
+    let name = OwnedStr::from("h".repeat(NAME));
+    let list: OwnedSlice<u32> = vec![7; 100].into();
+    let carrier = (name.clone(), list.clone());
+    let handles = || OwnedHandles::of(|aliases| carrier.heap_bytes(aliases));
+    assert_eq!(handles().len(), 2);
+    handles().pin(ctx);
+    let name_charge = OwnedStr::charge_for_len(NAME);
+    let list_charge = OwnedSlice::<u32>::cell_block_bytes() + heap_block_bytes(400);
+    assert_eq!(occupancy(&account), (0, name_charge + list_charge));
+    let holds = handles().hold(ctx).expect("admitted");
+    assert_eq!(occupancy(&account), (name_charge + list_charge, 0));
+    drop(holds);
+    drop(carrier);
+    drop(list);
+    assert_eq!(occupancy(&account), (0, name_charge), "the name alone survives");
     drop(name);
-    assert!(registry.is_empty());
     assert_eq!(occupancy(&account), (0, 0));
 }
 
@@ -251,8 +253,7 @@ fn a_raw_leaf_two_owned_values_share_is_charged_once_through_the_registry() {
 #[test]
 fn sibling_cache_holds_share_one_retained_charge() {
     let account = account(1 << 30);
-    let registry = AliasCharges::new();
-    let ctx = ChargeCtx::new(&account, &registry);
+    let ctx = ChargeCtx::new(&account);
     let value = carrier(&OwnedStr::new("s"), 16);
     let total = own_bytes(16) + OwnedStr::charge_for_len(1);
     let first = value.hold(ctx).expect("admitted");

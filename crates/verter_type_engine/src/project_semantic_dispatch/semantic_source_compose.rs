@@ -56,7 +56,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .map(|state| state.whole_hash)
             .unwrap_or_default();
         NodeScopeId::File {
-            canonical_id: Arc::from(ctx.scope_canonical_id),
+            canonical_id: verter_type_expr::OwnedStr::from(ctx.scope_canonical_id),
             owner: ctx.scope_owner,
             whole_hash,
             local_scope: None,
@@ -981,7 +981,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             node = self.graph().intern_node_with_scope(
                 SemanticNodeData::IndexedAccess {
                     object: node,
-                    index: IndexKey::String(Arc::from(key.as_str())),
+                    index: IndexKey::String(verter_type_expr::OwnedStr::from(key.as_str())),
                 },
                 scope.clone(),
             );

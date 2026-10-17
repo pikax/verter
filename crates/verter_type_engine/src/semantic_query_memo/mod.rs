@@ -1503,7 +1503,7 @@ impl SemanticGraphStore {
                     let mut state = inflight.state.lock();
                     state.aborted = true;
                     if state.completed.is_none() {
-                        state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
+                        state.completed = Some(QueryResult::Error(QueryError::Other(verter_type_expr::OwnedStr::from(
                             "aborted by canonical invalidation",
                         ))));
                         state.dep_signature = Some(empty_signature());
@@ -1693,7 +1693,7 @@ impl SemanticGraphStore {
                     let mut state = inflight.state.lock();
                     state.aborted = true;
                     if state.completed.is_none() {
-                        state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
+                        state.completed = Some(QueryResult::Error(QueryError::Other(verter_type_expr::OwnedStr::from(
                             "aborted by project-generation reset",
                         ))));
                         state.dep_signature = Some(empty_signature());

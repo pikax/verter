@@ -32,6 +32,7 @@
 //! masked to `⊥` by [`apply_mask`] before a demand could enter any
 //! typed-value cache key.
 
+use verter_type_expr::OwnedSlice;
 use std::sync::Arc;
 
 // NON-`pub`: these pre-existing types are owned by `semantic_query` and stay on
@@ -60,19 +61,18 @@ use crate::semantic_query::{PathSegment, ProjectionMode};
 /// the normal form), so structural equality is the sound pure semantics and
 /// is what this module implements.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ProjectionPath(Arc<[PathSegment]>);
+pub struct ProjectionPath(OwnedSlice<PathSegment>);
 
-impl From<Arc<[PathSegment]>> for ProjectionPath {
-    /// O(1): adopts the existing `Arc` allocation verbatim (no copy, no
-    /// re-interning). `ProjectionPath` carries no datum beyond this `Arc`.
-    fn from(segments: Arc<[PathSegment]>) -> Self {
+impl From<OwnedSlice<PathSegment>> for ProjectionPath {
+    /// O(1): adopts the existing owned allocation verbatim (no copy, no
+    /// re-interning). `ProjectionPath` carries no datum beyond it.
+    fn from(segments: OwnedSlice<PathSegment>) -> Self {
         ProjectionPath(segments)
     }
 }
 
-impl From<ProjectionPath> for Arc<[PathSegment]> {
-    /// O(1): hands back the wrapped `Arc` by move — the round-trip
-    /// `Arc<[PathSegment]> → ProjectionPath → Arc<[PathSegment]>` is identity.
+impl From<ProjectionPath> for OwnedSlice<PathSegment> {
+    /// O(1): hands back the wrapped allocation by move.
     fn from(path: ProjectionPath) -> Self {
         path.0
     }
@@ -81,18 +81,17 @@ impl From<ProjectionPath> for Arc<[PathSegment]> {
 impl ProjectionPath {
     /// The empty path `[]` — the `⊥` of the prefix order.
     pub fn empty() -> Self {
-        ProjectionPath(Arc::from([]))
+        ProjectionPath(OwnedSlice::default())
     }
 
-    /// Borrow the underlying `Arc<[PathSegment]>` — proves there is no second
+    /// Borrow the underlying owned allocation — proves there is no second
     /// representation: this IS the stored datum (O(1), no allocation).
-    pub fn as_arc(&self) -> &Arc<[PathSegment]> {
+    pub fn as_owned(&self) -> &OwnedSlice<PathSegment> {
         &self.0
     }
 
-    /// Move out the underlying `Arc<[PathSegment]>` (O(1), no copy). Pairs with
-    /// [`From<Arc<[PathSegment]>>`] for an identity round-trip.
-    pub fn into_arc(self) -> Arc<[PathSegment]> {
+    /// Move out the underlying owned allocation (O(1), no copy).
+    pub fn into_owned(self) -> OwnedSlice<PathSegment> {
         self.0
     }
 

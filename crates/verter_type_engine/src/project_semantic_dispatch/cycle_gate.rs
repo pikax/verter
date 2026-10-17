@@ -223,10 +223,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .map(|serve| serve.indexed.whole_hash)
             .unwrap_or_default();
         let root_identity = DeclIdentity {
-            canonical_id: Arc::clone(&root.defining_canonical),
+            canonical_id: root.defining_canonical.clone(),
             owner: root.owner,
             whole_hash: root_whole_hash,
-            decl_name: Arc::clone(&root.merged_symbol_name),
+            decl_name: root.merged_symbol_name.clone(),
         };
 
         let mut dep_facts: Vec<crate::semantic_query::DepEntry> = self

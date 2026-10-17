@@ -2170,7 +2170,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         arg: SemanticNodeId,
     ) -> (IndexKey, bool) {
         match index {
-            IndexKey::String(text) => (IndexKey::String(Arc::clone(text)), false),
+            IndexKey::String(text) => (IndexKey::String(text.clone()), false),
             IndexKey::Number(number) => (IndexKey::Number(*number), false),
             IndexKey::UniqueSymbol(identity) => (IndexKey::UniqueSymbol(identity.clone()), false),
             IndexKey::Computed(node) => {

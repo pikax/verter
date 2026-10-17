@@ -745,6 +745,12 @@ pub struct RetentionCharge {
 }
 
 impl RetentionCharge {
+    /// The account this charge is held against; `None` only while it is
+    /// being released.
+    pub(crate) fn account(&self) -> Option<&Arc<SemanticRetentionAccount>> {
+        self.account.as_ref()
+    }
+
     /// Bytes this charge holds.
     #[must_use]
     pub fn bytes(&self) -> usize {

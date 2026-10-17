@@ -1,3 +1,5 @@
+use verter_type_expr::OwnedSlice;
+use verter_type_expr::OwnedStr;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
@@ -112,12 +114,12 @@ mod canary_absolutize_already_absolute_zero_alloc {
             ty: TypeBodySlot {
                 // ALREADY-ABSOLUTE anchor: nothing to rewrite.
                 anchor: AuthoredAnchor {
-                    canonical_id: Arc::from("/already/absolute.ts"),
+                    canonical_id: verter_type_expr::OwnedStr::from("/already/absolute.ts"),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    symbol: Arc::from("Anchored"),
+                    symbol: verter_type_expr::OwnedStr::from("Anchored"),
                     space: LocatorSymbolSpace::Type,
                 },
-                path: Arc::from(Vec::new().into_boxed_slice()),
+                path: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             },
             span_origin: MemberSpansOrigin::Synthetic(SourceSynthetic),
         })

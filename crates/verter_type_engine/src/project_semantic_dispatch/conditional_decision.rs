@@ -1024,7 +1024,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     result,
                     OriginEdgeKind::InferBind,
                     Arc::from([check, extends]),
-                    OriginMeta::SubstitutedParam(Arc::clone(&binding.name)),
+                    OriginMeta::SubstitutedParam(binding.name.clone()),
                     fence.clone(),
                 );
             }
@@ -1197,10 +1197,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 name,
                 whole_hash,
             })) => crate::semantic_query::DeclIdentity {
-                canonical_id: Arc::clone(canonical_id),
+                canonical_id: canonical_id.clone(),
                 owner: *owner,
                 whole_hash: *whole_hash,
-                decl_name: Arc::clone(name),
+                decl_name: name.clone(),
             },
             _ => return node,
         };

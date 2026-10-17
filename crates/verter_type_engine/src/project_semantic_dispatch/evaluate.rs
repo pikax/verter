@@ -475,7 +475,7 @@ enum DeferredEvaluationAction {
 
 fn clone_index_key(index: &IndexKey) -> IndexKey {
     match index {
-        IndexKey::String(text) => IndexKey::String(Arc::clone(text)),
+        IndexKey::String(text) => IndexKey::String(text.clone()),
         IndexKey::Number(number) => IndexKey::Number(*number),
         IndexKey::UniqueSymbol(identity) => IndexKey::UniqueSymbol(identity.clone()),
         IndexKey::Computed(node) => IndexKey::Computed(*node),
@@ -804,7 +804,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .clone(),
             ),
             Some(SemanticNodeData::Literal(LiteralValue::String(text))) => {
-                IndexKey::String(Arc::from(text.as_str()))
+                IndexKey::String(verter_type_expr::OwnedStr::from(text.as_str()))
             }
             Some(SemanticNodeData::Literal(LiteralValue::Number(number))) => {
                 // Bounded integer-convention fold: `IndexKey::Number`
@@ -1407,14 +1407,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let probe = self.observe_read(|| {
                         self.execute_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                             scope: ScopeId {
-                                canonical_id: Arc::clone(&identity.canonical_id),
+                                canonical_id: verter_type_expr::OwnedStr::from(identity.canonical_id.clone()),
                                 owner: identity.owner,
                                 local_scope: None,
                                 binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
                                     identity.owner,
                                 ),
                             },
-                            name: Arc::clone(&identity.decl_name),
+                            name: verter_type_expr::OwnedStr::from(identity.decl_name.clone()),
                         }))
                     });
                     // A negative lookup does not replace this authored carrier.
@@ -1996,12 +1996,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         match self.lower_locator(AuthoredBodyLocator::DeclBody(TypeBodySlot {
             anchor: AuthoredAnchor {
-                canonical_id: Arc::clone(&identity.canonical_id),
+                canonical_id: verter_type_expr::OwnedStr::from(identity.canonical_id.clone()),
                 owner: identity.owner,
-                symbol: Arc::clone(&identity.decl_name),
+                symbol: verter_type_expr::OwnedStr::from(identity.decl_name.clone()),
                 space: LocatorSymbolSpace::Type,
             },
-            path: Arc::from(Vec::new().into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
         })) {
             QueryResult::Value(body) => Some(body),
             QueryResult::Recursive(_) | QueryResult::Error(_) => None,
@@ -2873,9 +2873,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 whole_hash: _,
                             }) => {
                                 let base = self.type_slot_for(
-                                    Arc::clone(canonical_id),
+                                    canonical_id.clone(),
                                     *owner,
-                                    Arc::clone(name),
+                                    name.clone(),
                                 );
                                 let context =
                                     frames.last().expect("active evaluator frame").context;

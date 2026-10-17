@@ -121,5 +121,5 @@ pub struct DerefedAuthoredBody {
 #[derive(Debug, Clone)]
 pub struct DerefedLexicalRoot {
     pub expr: TypeExpr,
-    pub path: Arc<[TypeBodyPathStep]>,
+    pub path: verter_type_expr::OwnedSlice<TypeBodyPathStep>,
 }

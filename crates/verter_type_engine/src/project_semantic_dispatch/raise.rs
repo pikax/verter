@@ -188,7 +188,7 @@ fn canonicalise_for_digest(
                 base: *base,
                 path: Arc::from(
                     vec![PathSegment::Member(
-                        crate::semantic_query::PropertyKey::identifier(Arc::clone(member)),
+                        crate::semantic_query::PropertyKey::identifier(member.clone()),
                     )]
                     .into_boxed_slice(),
                 ),
@@ -1076,7 +1076,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // `ensure_indexed_ready_serve`.
                 let _ = whole_hash;
                 let base =
-                    self.type_slot_for(Arc::clone(canonical_id), *owner, Arc::clone(name));
+                    self.type_slot_for(canonical_id.clone(), *owner, name.clone());
                 let inst_ctx = self.instantiate_context_for(&base.defining_canonical, context);
                 let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
                     base,
@@ -1392,14 +1392,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // semantically transparent. Dispatch and recurse — same
                 // as Expanded for DeclRef.
                 let scope = ScopeId {
-                    canonical_id: Arc::clone(&identity.canonical_id),
+                    canonical_id: verter_type_expr::OwnedStr::from(identity.canonical_id.clone()),
                     owner: identity.owner,
                     local_scope: None,
                     binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(identity.owner),
                 };
                 let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                     scope,
-                    name: Arc::clone(&identity.decl_name),
+                    name: verter_type_expr::OwnedStr::from(identity.decl_name.clone()),
                 });
                 self.dispatch_operator_with_recurse(node, key, context, state)
             }
@@ -1744,7 +1744,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     fn opaque_unknown_with(&self, origin: SemanticNodeId, reason: &str) -> SemanticNodeId {
         self.graph().intern_preserving_scope(
             origin,
-            SemanticNodeData::Opaque(QueryError::Other(Arc::from(reason))),
+            SemanticNodeData::Opaque(QueryError::Other(verter_type_expr::OwnedStr::from(reason))),
         )
     }
 }
@@ -2818,7 +2818,7 @@ fn lower_body_under_env<C: crate::resolver_core::ResolverCapabilities>(
     env: &FxHashMap<String, SemanticNodeId>,
 ) -> SemanticNodeId {
     let scope = crate::semantic_query::NodeScopeId::File {
-        canonical_id: Arc::clone(&prepared.root_identity.canonical_id),
+        canonical_id: verter_type_expr::OwnedStr::from(prepared.root_identity.canonical_id.clone()),
         owner: prepared.root_identity.owner,
         whole_hash: crate::semantic_query::HashValue::default(),
         local_scope: None,

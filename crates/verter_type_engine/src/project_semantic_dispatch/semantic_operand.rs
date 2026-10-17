@@ -668,9 +668,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let anchor = authored_anchor(authored.locator());
         let (parse, resolve, type_env, lib_env, project) = authored.split_env().parts();
         let slot = DeclarationSlotSeed::new(
-            Arc::clone(&anchor.canonical_id),
+            anchor.canonical_id.clone(),
             anchor.owner,
-            Arc::clone(&anchor.symbol),
+            anchor.symbol.clone(),
             semantic_space_for_locator_space(anchor.space),
         )
         .finalize(SlotEnvIdentity::new(type_env, lib_env, project));
@@ -854,7 +854,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .map(|serve| serve.indexed)
         {
             output = output.with_observed_self_roots(vec![(
-                Arc::clone(&slot.defining_canonical),
+                slot.defining_canonical.clone(),
                 indexed.whole_hash,
             )]);
         }
@@ -898,9 +898,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     param_index,
                     default,
                     ..
-                } if decl.canonical_id == anchor.canonical_id
+                } if anchor.canonical_id == anchor.canonical_id
                     && decl.owner == anchor.owner
-                    && decl.decl_name == anchor.symbol =>
+                    && anchor.symbol == anchor.symbol =>
                 {
                     let entry = found.entry(*param_index).or_default();
                     if !entry.0.contains(&node) {

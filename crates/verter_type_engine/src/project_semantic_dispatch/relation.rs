@@ -984,7 +984,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let occurrence = InferenceOccurrence::ARGUMENT_COVARIANT;
         let binding = InferBinding {
             param: infer,
-            name: Arc::from("SubstitutionEdgeBinding"),
+            name: verter_type_expr::OwnedStr::from("SubstitutionEdgeBinding"),
             bound: string,
         };
         let fixed = Arc::from(vec![binding].into_boxed_slice());
@@ -7277,7 +7277,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         canonical_id,
                         owner,
                         ..
-                    }) => (canonical_id, owner, Arc::clone(name)),
+                    }) => (canonical_id, owner, name.clone()),
                     _ => return false,
                 }
             }
@@ -9895,10 +9895,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 whole_hash,
             }) => (
                 DeclIdentity {
-                    canonical_id: Arc::clone(canonical_id),
+                    canonical_id: canonical_id.clone(),
                     owner: *owner,
                     whole_hash: *whole_hash,
-                    decl_name: Arc::clone(name),
+                    decl_name: name.clone(),
                 },
                 Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             ),
@@ -10049,10 +10049,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     whole_hash,
                 }) => (
                     DeclIdentity {
-                        canonical_id: Arc::clone(canonical_id),
+                        canonical_id: canonical_id.clone(),
                         owner: *owner,
                         whole_hash: *whole_hash,
-                        decl_name: Arc::clone(name),
+                        decl_name: name.clone(),
                     },
                     Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                 ),
@@ -10082,7 +10082,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             canonical_id,
                             owner,
                             whole_hash,
-                            decl_name: Arc::clone(name),
+                            decl_name: name.clone(),
                         },
                         Arc::from(args.operands()),
                     )
@@ -10410,7 +10410,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             match &*data {
                 SemanticNodeData::Literal(LiteralValue::String(text)) => {
                     let property =
-                        crate::semantic_query::PropertyKey::String(Arc::from(text.as_str()));
+                        crate::semantic_query::PropertyKey::String(verter_type_expr::OwnedStr::from(text.as_str()));
                     drop(data);
                     members.push(crate::semantic_query::SurfaceMember {
                         key: crate::semantic_query::AuthoredPropertyKey::from_known(property),
@@ -10491,10 +10491,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 name,
                 whole_hash,
             }) => Some(DeclIdentity {
-                canonical_id: Arc::clone(canonical_id),
+                canonical_id: canonical_id.clone(),
                 owner: *owner,
                 whole_hash: *whole_hash,
-                decl_name: Arc::clone(name),
+                decl_name: name.clone(),
             }),
             SemanticNodeData::DeclRef { identity } => Some(identity.clone()),
             SemanticNodeData::Object(_) => None,
@@ -11000,7 +11000,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let graph = self.graph();
         let name = match graph.node_data(value).as_deref() {
             Some(SemanticNodeData::Opaque(QueryError::RecursiveRef { name, .. })) => {
-                Arc::clone(name)
+                name.clone()
             }
             _ => return value,
         };

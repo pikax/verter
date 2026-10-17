@@ -503,7 +503,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                         ))
                                 }),
                             verter_type_expr::AuthoredPropertyKey::String(value) => {
-                                verter_type_expr::AuthoredPropertyKey::String(Arc::clone(value))
+                                verter_type_expr::AuthoredPropertyKey::String(value.clone())
                             }
                             verter_type_expr::AuthoredPropertyKey::Number(value) => {
                                 verter_type_expr::AuthoredPropertyKey::Number(*value)
@@ -709,7 +709,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let object_context = self.indexed_access_operand_context(*object, context);
                 let object_id = projected(memo, *object, object_context);
                 let index = match index {
-                    IndexKey::String(value) => IndexKey::String(Arc::clone(value)),
+                    IndexKey::String(value) => IndexKey::String(value.clone()),
                     IndexKey::Number(value) => IndexKey::Number(*value),
                     IndexKey::UniqueSymbol(identity) => IndexKey::UniqueSymbol(identity.clone()),
                     // A key that already names a nominal identity is

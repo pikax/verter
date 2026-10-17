@@ -312,6 +312,9 @@ impl key_safe_sealed::Sealed for String {}
 impl R6KeySafe for String {}
 impl key_safe_sealed::Sealed for str {}
 impl R6KeySafe for str {}
+// An owned string is text identity; its allocation's charge is transport.
+impl key_safe_sealed::Sealed for verter_type_expr::OwnedStr {}
+impl R6KeySafe for verter_type_expr::OwnedStr {}
 
 // Container forwarding: a container is key-safe iff its element is. This is what
 // makes a forbidden dimension nested in a container (e.g. `Option<SemanticNodeId>`)
@@ -324,6 +327,14 @@ impl<T: R6KeySafe> key_safe_sealed::Sealed for Option<T> {}
 impl<T: R6KeySafe> R6KeySafe for Option<T> {}
 impl<T: R6KeySafe> key_safe_sealed::Sealed for Vec<T> {}
 impl<T: R6KeySafe> R6KeySafe for Vec<T> {}
+impl<T: R6KeySafe + verter_session_query::retention::owned::Measured> key_safe_sealed::Sealed
+    for verter_type_expr::OwnedSlice<T>
+{
+}
+impl<T: R6KeySafe + verter_session_query::retention::owned::Measured> R6KeySafe
+    for verter_type_expr::OwnedSlice<T>
+{
+}
 
 // The sealed env dimensions are key-safe LEAVES (no fields).
 impl_r6_key_safe_leaf!(
@@ -653,8 +664,8 @@ impl LocatorLoweringKey {
         };
         if anchor.canonical_id != slot.defining_canonical {
             return Err(LocatorKeyError::CanonicalMismatch {
-                slot_canonical: Arc::clone(&slot.defining_canonical),
-                locator_canonical: Arc::clone(&anchor.canonical_id),
+                slot_canonical: slot.defining_canonical.clone(),
+                locator_canonical: anchor.canonical_id.clone(),
             });
         }
         if anchor.owner != slot.owner {
@@ -665,8 +676,8 @@ impl LocatorLoweringKey {
         }
         if anchor.symbol != slot.merged_symbol_name {
             return Err(LocatorKeyError::SymbolMismatch {
-                slot_symbol: Arc::clone(&slot.merged_symbol_name),
-                locator_symbol: Arc::clone(&anchor.symbol),
+                slot_symbol: slot.merged_symbol_name.clone(),
+                locator_symbol: anchor.symbol.clone(),
             });
         }
         if semantic_space_for_locator_space(anchor.space) != slot.symbol_space {

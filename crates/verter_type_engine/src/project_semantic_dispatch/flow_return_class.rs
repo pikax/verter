@@ -573,7 +573,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 visibility: member.visibility,
                 excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                 spans: member.spans,
-                declaration_origin: Some(Arc::from(self.canonical)),
+                declaration_origin: Some(verter_type_expr::OwnedStr::from(self.canonical)),
                 declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::default(),
                 merge_role: crate::semantic_query::MergeRoleStamp::default(),
             });
@@ -592,7 +592,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     value_type,
                     readonly: signature.readonly,
                     spans: verter_type_expr::IndexSignatureSpans::default(),
-                    declaration_origin: Some(Arc::from(self.canonical)),
+                    declaration_origin: Some(verter_type_expr::OwnedStr::from(self.canonical)),
                 });
         }
         self.add_computed_index_signatures(&mut instance_side);
@@ -642,10 +642,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         type_arguments.extend(own_type_parameters.iter().map(|decl| decl.param));
         let type_arguments: Arc<[SemanticNodeId]> = Arc::from(type_arguments.into_boxed_slice());
         let identity = crate::semantic_query::ClassExpressionIdentity {
-            canonical_id: Arc::from(self.canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(self.canonical),
             owner: self.owner,
             offset: class.offset,
-            name: Arc::clone(&class.name),
+            name: verter_type_expr::OwnedStr::from(class.name.clone()),
             outer_clauses: Arc::from(outer_clauses.into_boxed_slice()),
             own_arity: own_type_parameters.len() as u32,
             constructor_visibility: class
@@ -820,7 +820,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             visibility: member.visibility,
             excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             spans: member.spans,
-            declaration_origin: Some(Arc::from(self.canonical)),
+            declaration_origin: Some(verter_type_expr::OwnedStr::from(self.canonical)),
             declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::default(),
             merge_role: crate::semantic_query::MergeRoleStamp::default(),
         });
@@ -893,14 +893,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 };
                 let value_root = crate::semantic_query::ValueRootKey {
                     scope: crate::semantic_query::ScopeId {
-                        canonical_id: Arc::from(self.canonical),
+                        canonical_id: verter_type_expr::OwnedStr::from(self.canonical),
                         owner: self.owner,
                         local_scope: None,
                         binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
                             self.owner,
                         ),
                     },
-                    name: Arc::from(root),
+                    name: verter_type_expr::OwnedStr::from(root),
                 };
                 let path: Arc<[Arc<str>]> = path.map(Arc::from).collect();
                 Positional::Value(self.dispatch.graph().intern_node_with_scope(
@@ -1174,7 +1174,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     value_type,
                     readonly,
                     spans: verter_type_expr::IndexSignatureSpans::default(),
-                    declaration_origin: Some(Arc::from(self.canonical)),
+                    declaration_origin: Some(verter_type_expr::OwnedStr::from(self.canonical)),
                 });
         }
     }

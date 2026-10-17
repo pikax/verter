@@ -1047,10 +1047,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticQueryKey::Instantiate(key) => {
                 graph.intern_node(SemanticNodeData::InstantiationRef {
                     base: DeclIdentity {
-                        canonical_id: Arc::clone(&key.base().defining_canonical),
+                        canonical_id: key.base().defining_canonical.clone(),
                         owner: key.base().owner,
                         whole_hash: crate::semantic_query::HashValue::default(),
-                        decl_name: Arc::clone(&key.base().merged_symbol_name),
+                        decl_name: key.base().merged_symbol_name.clone(),
                     },
                     args: crate::semantic_query::PayloadArray::from(Arc::clone(key.args())),
                 })
@@ -1068,7 +1068,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticQueryKey::ProjectMember { base, member, .. } => {
                 graph.intern_node(SemanticNodeData::IndexedAccess {
                     object: *base,
-                    index: crate::semantic_query::IndexKey::String(Arc::clone(member)),
+                    index: crate::semantic_query::IndexKey::String(verter_type_expr::OwnedStr::from(member)),
                 })
             }
             SemanticQueryKey::ProjectPath { base, path, .. } => {
@@ -1076,7 +1076,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let index = match segment {
                         crate::semantic_query::PathSegment::Member(key) => match key {
                             crate::semantic_query::PropertyKey::String(value) => {
-                                crate::semantic_query::IndexKey::String(Arc::clone(value))
+                                crate::semantic_query::IndexKey::String(verter_type_expr::OwnedStr::from(value))
                             }
                             crate::semantic_query::PropertyKey::Number(value) => {
                                 crate::semantic_query::IndexKey::Number(*value)
@@ -1132,7 +1132,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 value_root, path, ..
             } => graph.intern_node(SemanticNodeData::new_typeof(
                 value_root.root.clone(),
-                Arc::clone(path),
+                path.clone(),
                 Arc::from([]),
             )),
             SemanticQueryKey::TemplateLiteralReduce { pattern, args, .. } => {
@@ -2040,7 +2040,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         name: Arc<str>,
     ) -> crate::semantic_query::ResolvedDeclSlotIdentity {
         self.finalize_slot_seed(crate::semantic_query::DeclarationSlotSeed::new(
-            canonical,
+            verter_type_expr::OwnedStr::from(canonical),
             owner,
             name,
             crate::semantic_query::SemanticSymbolSpace::Type,
@@ -2329,9 +2329,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         crate::semantic_query::SignatureOccurrenceIdentity {
             function: {
                 let mut function = self.flow_function_slot_for(
-                    Arc::clone(&occurrence.function.anchor.canonical_id),
+                    occurrence.function.anchor.canonical_id.clone(),
                     occurrence.function.anchor.owner,
-                    Arc::clone(&occurrence.function.anchor.symbol),
+                    occurrence.function.anchor.symbol.clone(),
                     occurrence.function.function_part.clone(),
                     occurrence.function.overload_ordinal,
                 );
@@ -2561,11 +2561,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> SemanticNodeId {
         self.graph().intern_node_with_scope(
             SemanticNodeData::Opaque(QueryError::RecursiveRef {
-                name: Arc::clone(&identity.decl_name),
+                name: verter_type_expr::OwnedStr::from(identity.decl_name.clone()),
                 args: args.into(),
             }),
             NodeScopeId::File {
-                canonical_id: Arc::clone(&identity.canonical_id),
+                canonical_id: verter_type_expr::OwnedStr::from(identity.canonical_id.clone()),
                 owner: identity.owner,
                 whole_hash: identity.whole_hash,
                 local_scope: None,
@@ -2746,7 +2746,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .map(|shallow| shallow.whole_hash)
             .unwrap_or_default();
         let scope = NodeScopeId::File {
-            canonical_id: Arc::from(scope_canonical_id),
+            canonical_id: verter_type_expr::OwnedStr::from(scope_canonical_id),
             owner,
             whole_hash,
             local_scope: None,
@@ -4141,7 +4141,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             move || {
                 if let SemanticQueryKey::Instantiate(k) = &sentinel_key {
                     return graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
-                        name: Arc::clone(&k.base().merged_symbol_name),
+                        name: k.base().merged_symbol_name.clone(),
                         args: Arc::clone(k.args()).into(),
                     }));
                 }
@@ -5283,12 +5283,12 @@ pub fn resolve_decl_key(
 ) -> ResolveDeclKey {
     ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::from(canonical_id),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical_id),
             owner,
             local_scope: None,
             binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(owner),
         },
-        name: Arc::from(name),
+        name: verter_type_expr::OwnedStr::from(name),
     }
 }
 
@@ -5345,7 +5345,7 @@ pub(crate) fn node_data_for(
 #[must_use]
 pub fn pick_builtin_decl_identity() -> crate::semantic_query::ResolvedDeclSlotIdentity {
     crate::semantic_query::ResolvedDeclSlotIdentity::type_slot(
-        Arc::from("__builtin__"),
+        verter_type_expr::OwnedStr::from("__builtin__"),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::from("Pick"),
         0,
@@ -5362,7 +5362,7 @@ pub fn pick_builtin_decl_identity() -> crate::semantic_query::ResolvedDeclSlotId
 #[must_use]
 pub fn omit_builtin_decl_identity() -> crate::semantic_query::ResolvedDeclSlotIdentity {
     crate::semantic_query::ResolvedDeclSlotIdentity::type_slot(
-        Arc::from("__builtin__"),
+        verter_type_expr::OwnedStr::from("__builtin__"),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::from("Omit"),
         0,

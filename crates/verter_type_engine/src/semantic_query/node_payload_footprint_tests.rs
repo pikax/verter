@@ -29,6 +29,12 @@ impl PayloadHeapVisitor for RecordingVisitor {
         self.seen.push(key);
         true
     }
+
+    fn handle(
+        &mut self,
+        _offer: &mut dyn FnMut(&mut verter_session_query::retention::allocation::AliasSet) -> usize,
+    ) {
+    }
 }
 
 fn arc_key<T: ?Sized>(arc: &Arc<T>) -> usize {

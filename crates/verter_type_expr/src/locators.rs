@@ -11,6 +11,8 @@
 //! the memo itself lives in `verter_session`).
 
 use std::sync::Arc;
+
+use crate::{OwnedSlice, OwnedStr};
 use verter_no_storedspan::NoStoredSpan;
 use verter_no_typeexpr::NoTypeExpr;
 
@@ -56,11 +58,11 @@ pub enum LocatorSymbolSpace {
 )]
 pub struct AuthoredAnchor {
     /// Canonical id of the file whose parse produced the authored body.
-    pub canonical_id: Arc<str>,
+    pub canonical_id: OwnedStr,
     /// Top-level lexical owner within the producing file.
     pub owner: TopLevelOwnerId,
     /// Stable merged-symbol name of the owning declaration.
-    pub symbol: Arc<str>,
+    pub symbol: OwnedStr,
     /// Type / value / namespace space of the owning declaration.
     pub space: LocatorSymbolSpace,
 }
@@ -265,6 +267,13 @@ pub enum TypeBodyPathStep {
     TupleElement { ordinal: u32 },
 }
 
+impl verter_retention::owned::Measured for TypeBodyPathStep {
+    /// A path step is inline: named positions and small indices.
+    fn heap_bytes(&self, _aliases: &mut verter_retention::allocation::AliasSet) -> usize {
+        0
+    }
+}
+
 /// Locator for a whole authored declaration body OR a named sub-slot of it.
 #[derive(
     Debug,
@@ -281,7 +290,7 @@ pub struct TypeBodySlot {
     /// The owning declaration.
     pub anchor: AuthoredAnchor,
     /// Empty = the whole decl body; non-empty = the named sub-slot.
-    pub path: Arc<[TypeBodyPathStep]>,
+    pub path: OwnedSlice<TypeBodyPathStep>,
 }
 
 /// Locator for a DECLARED function return type — an authored TS `(): T`
@@ -362,7 +371,7 @@ pub struct TypeArgLocator {
     /// The owning declaration.
     pub anchor: AuthoredAnchor,
     /// Path to the arg-bearing position (empty = the decl's own header).
-    pub path: Arc<[TypeBodyPathStep]>,
+    pub path: OwnedSlice<TypeBodyPathStep>,
     /// Which type argument at that position (source order).
     pub arg_index: u32,
 }
@@ -439,7 +448,7 @@ pub enum AuthoredAugmentationScope {
     /// A `declare module "<specifier>" { ... }` block.
     Module {
         /// The authored module specifier the block names.
-        specifier: Arc<str>,
+        specifier: OwnedStr,
     },
 }
 
@@ -473,7 +482,7 @@ pub struct AugmentationBodyLocator {
     pub scope: AuthoredAugmentationScope,
     /// Empty = the whole augmentation contribution body; non-empty = the
     /// named sub-slot (mirrors [`TypeBodySlot::path`]).
-    pub path: Arc<[TypeBodyPathStep]>,
+    pub path: OwnedSlice<TypeBodyPathStep>,
 }
 
 /// Locator for a JSDoc `@typedef {T} Name` alias body — a NAMED sub-kind of the
@@ -509,7 +518,7 @@ pub struct JsdocTypedefBodyLocator {
     pub anchor: AuthoredAnchor,
     /// Empty = the whole `@typedef` payload body; non-empty = a named sub-slot
     /// within the re-parsed payload (mirrors [`TypeBodySlot::path`]).
-    pub path: Arc<[TypeBodyPathStep]>,
+    pub path: OwnedSlice<TypeBodyPathStep>,
 }
 
 /// The cross-boundary CONTENT-FREE slot identity — a CLOSED sum over the authored
@@ -592,9 +601,9 @@ impl AuthoredAnchor {
     /// `canonical_id`); `None` when it is already absolute.
     pub(crate) fn absolutize(&self, canonical_id: &str) -> Option<Self> {
         self.canonical_id.is_empty().then(|| Self {
-            canonical_id: Arc::from(canonical_id),
+            canonical_id: OwnedStr::from(canonical_id),
             owner: self.owner,
-            symbol: Arc::clone(&self.symbol),
+            symbol: self.symbol.clone(),
             space: self.space,
         })
     }
@@ -604,7 +613,7 @@ impl TypeBodySlot {
     pub(crate) fn absolutize(&self, canonical_id: &str) -> Option<Self> {
         self.anchor.absolutize(canonical_id).map(|anchor| Self {
             anchor,
-            path: Arc::clone(&self.path),
+            path: self.path.clone(),
         })
     }
 }
@@ -613,7 +622,7 @@ impl TypeArgLocator {
     pub(crate) fn absolutize(&self, canonical_id: &str) -> Option<Self> {
         self.anchor.absolutize(canonical_id).map(|anchor| Self {
             anchor,
-            path: Arc::clone(&self.path),
+            path: self.path.clone(),
             arg_index: self.arg_index,
         })
     }
@@ -642,7 +651,7 @@ impl AugmentationBodyLocator {
         self.anchor.absolutize(canonical_id).map(|anchor| Self {
             anchor,
             scope: self.scope.clone(),
-            path: Arc::clone(&self.path),
+            path: self.path.clone(),
         })
     }
 }
@@ -651,7 +660,7 @@ impl JsdocTypedefBodyLocator {
     pub(crate) fn absolutize(&self, canonical_id: &str) -> Option<Self> {
         self.anchor.absolutize(canonical_id).map(|anchor| Self {
             anchor,
-            path: Arc::clone(&self.path),
+            path: self.path.clone(),
         })
     }
 }

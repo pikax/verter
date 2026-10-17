@@ -39,16 +39,17 @@
 //! reaches when it is first charged, and a cache retaining the parent
 //! retains each child too — all or nothing — and hands them back with it.
 //!
-//! Leaf `Arc<str>` names a value still holds raw are charged through the
-//! registry ([`AliasCharges`]): the cell holds their shared charges in its
-//! own class for as long as the allocation lives.
+//! An owned value reaches no raw `Arc`: every allocation it keeps is
+//! either exclusively its own (counted with the cell) or an owned handle
+//! (charged by itself). A raw `Arc` in it would be an allocation a caller
+//! could clone out and keep past the cell's charge, so a debug build fails
+//! the measurement that reaches one.
 
 use std::sync::{Arc, Weak};
 
 use parking_lot::Mutex;
 
 use super::allocation::{arc_block_bytes, heap_block_bytes, AliasSet};
-use super::shared::{AliasCharges, CacheHold, CallerHold};
 use super::{
     ChargeClass, RetentionAdmission, RetentionCharge, RetentionRefusal, SemanticRetentionAccount,
 };
@@ -84,19 +85,43 @@ impl<T: Measured> Measured for Option<T> {
     }
 }
 
-/// Where a charge is taken: the account it is charged to and the registry
-/// that shares the charges of raw leaf names.
+impl<A: Measured, B: Measured> Measured for (A, B) {
+    fn heap_bytes(&self, aliases: &mut AliasSet) -> usize {
+        self.0.heap_bytes(aliases) + self.1.heap_bytes(aliases)
+    }
+}
+
+/// Values whose every byte is inline.
+macro_rules! inline_measured {
+    ($($t:ty),* $(,)?) => {
+        $(impl Measured for $t {
+            fn heap_bytes(&self, _aliases: &mut AliasSet) -> usize {
+                0
+            }
+        })*
+    };
+}
+
+inline_measured!(bool, u8, u16, u32, u64, u128, usize, i32, i64, [u8; 16]);
+
+impl Measured for String {
+    /// An exclusively owned string: its backing, by capacity.
+    fn heap_bytes(&self, _aliases: &mut AliasSet) -> usize {
+        heap_block_bytes(self.capacity())
+    }
+}
+
+/// Where a charge is taken: the account it is charged to.
 #[derive(Clone, Copy)]
 pub struct ChargeCtx<'a> {
     account: &'a Arc<SemanticRetentionAccount>,
-    leaves: &'a AliasCharges,
 }
 
 impl<'a> ChargeCtx<'a> {
-    /// Charges to `account`, sharing raw leaf names through `leaves`.
+    /// Charges to `account`.
     #[must_use]
-    pub fn new(account: &'a Arc<SemanticRetentionAccount>, leaves: &'a AliasCharges) -> Self {
-        Self { account, leaves }
+    pub fn new(account: &'a Arc<SemanticRetentionAccount>) -> Self {
+        Self { account }
     }
 }
 
@@ -105,30 +130,27 @@ impl<'a> ChargeCtx<'a> {
 pub(crate) struct Slot {
     /// `None` until a semantic owner first keeps the allocation.
     charge: Option<RetentionCharge>,
+    /// Live cache holds.
+    cache_holds: u32,
     /// Whether the cell's own block is charged by a weak holder that keeps
     /// it allocated longer than the value (an interner).
     block_elsewhere: bool,
-    /// Live cache holds.
-    cache_holds: usize,
-    /// The owned children the value reaches, recorded when it is charged.
+    /// The owned children the value reaches and the cache holds on them
+    /// while this cell is retained; `None` for a value that reaches none.
+    nested: Option<Box<Nested>>,
+}
+
+/// An owned cell's children.
+struct Nested {
+    /// Recorded when the cell is first charged.
     children: Box<[Arc<dyn Node>]>,
-    /// The cache holds on those children while this cell is retained.
-    child_holds: Box<[OwnedHold]>,
-    /// The shared charges of the raw leaf names the value reaches, in this
-    /// cell's class.
-    leaves: Leaves,
+    /// The cache holds on them while this cell is retained.
+    holds: Box<[OwnedHold]>,
 }
 
-/// A cell's holds on its raw leaves: cache holds while it is retained,
-/// caller holds otherwise.
-enum Leaves {
-    Cache(Box<[CacheHold]>),
-    Caller(Box<[CallerHold]>),
-}
-
-impl Default for Leaves {
-    fn default() -> Self {
-        Self::Caller(Box::new([]))
+impl Slot {
+    fn children(&self) -> &[Arc<dyn Node>] {
+        self.nested.as_ref().map_or(&[], |nested| &nested.children)
     }
 }
 
@@ -159,114 +181,154 @@ impl<T: Measured> Node for Cell<T> {
     }
 }
 
-/// What a first charge covers: the bytes, the children and the raw leaves
-/// the measurement reached.
-struct Measurement {
-    bytes: usize,
-    children: Box<[Arc<dyn Node>]>,
-    leaves: Vec<Arc<str>>,
-}
-
-fn measure(node: &dyn Node, block_elsewhere: bool) -> Measurement {
-    let mut aliases = AliasSet::collecting();
+/// What a first charge covers: the bytes and the children the measurement
+/// reached.
+fn measure(node: &dyn Node, block_elsewhere: bool) -> (usize, Box<[Arc<dyn Node>]>) {
+    let mut aliases = AliasSet::for_cell();
     let heap = node.value_heap_bytes(&mut aliases);
     let block = if block_elsewhere {
         0
     } else {
         node.block_bytes()
     };
-    Measurement {
-        bytes: block + heap,
-        children: aliases.take_children(),
-        leaves: aliases.take_leaves(),
-    }
+    (block + heap, aliases.take_children())
 }
 
 /// Charge `node` for its callers if no owner has yet. Locks parent before
 /// child, so it is safe under any ancestor's slot lock.
-fn pin_node(node: &dyn Node, ctx: ChargeCtx<'_>) {
+pub(crate) fn pin_node(node: &dyn Node, ctx: ChargeCtx<'_>) {
     let mut slot = node.slot().lock();
     if slot.charge.is_some() {
         return;
     }
-    let Measurement {
-        bytes,
-        children,
-        leaves,
-    } = measure(node, slot.block_elsewhere);
+    let (bytes, children) = measure(node, slot.block_elsewhere);
     slot.charge = Some(ctx.account.pin(bytes));
-    slot.leaves = Leaves::Caller(
-        leaves
-            .iter()
-            .map(|leaf| ctx.leaves.pin_leaf(ctx.account, leaf))
-            .collect(),
-    );
     for child in children.iter() {
         pin_node(&**child, ctx);
     }
-    slot.children = children;
+    if !children.is_empty() {
+        slot.nested = Some(Box::new(Nested {
+            children,
+            holds: Box::new([]),
+        }));
+    }
+}
+
+/// A cache hold on each of `children`, all or nothing: a refusal drops the
+/// holds taken so far, handing each child straight back to its callers.
+pub(crate) fn hold_nodes(
+    children: &[Arc<dyn Node>],
+    ctx: ChargeCtx<'_>,
+) -> Result<Box<[OwnedHold]>, RetentionRefusal> {
+    children
+        .iter()
+        .map(|child| hold_node(Arc::clone(child), ctx))
+        .collect()
 }
 
 /// One more cache hold on `node`: a first refusable reservation, the
 /// adoption of its callers' pin, or a share of its retained charge. `Err`
 /// leaves every holder and every class unchanged.
-fn hold_node(node: Arc<dyn Node>, ctx: ChargeCtx<'_>) -> Result<OwnedHold, RetentionRefusal> {
+pub(crate) fn hold_node(
+    node: Arc<dyn Node>,
+    ctx: ChargeCtx<'_>,
+) -> Result<OwnedHold, RetentionRefusal> {
     {
         let mut guard = node.slot().lock();
         let slot = &mut *guard;
         if slot.cache_holds == 0 {
-            if let Some(charge) = slot.charge.as_mut() {
-                // Only callers hold it: its children, its leaves and then
-                // its own pin are adopted back into retention. A refusal
-                // hands every adopted part straight back to the callers
-                // still holding it — none is released.
-                let child_holds = slot
-                    .children
-                    .iter()
-                    .map(|child| hold_node(Arc::clone(child), ctx))
-                    .collect::<Result<Box<[OwnedHold]>, _>>()?;
-                let leaf_holds = match &slot.leaves {
-                    Leaves::Caller(callers) => callers
-                        .iter()
-                        .map(CallerHold::adopt)
-                        .collect::<Result<Box<[CacheHold]>, _>>()?,
-                    Leaves::Cache(_) => {
-                        unreachable!("an allocation no cache holds holds its leaves as a caller")
-                    }
-                };
-                charge.try_adopt_retained()?;
-                slot.leaves = Leaves::Cache(leaf_holds);
-                slot.child_holds = child_holds;
+            if slot.charge.is_some() {
+                // Only callers hold it: its children and then its own pin
+                // are adopted back into retention. A refusal hands every
+                // adopted child straight back to the callers still holding
+                // it — none is released.
+                let holds = hold_nodes(slot.children(), ctx)?;
+                slot.charge
+                    .as_mut()
+                    .expect("checked above")
+                    .try_adopt_retained()?;
+                if let Some(nested) = slot.nested.as_mut() {
+                    nested.holds = holds;
+                }
             } else {
-                let Measurement {
-                    bytes,
-                    children,
-                    leaves,
-                } = measure(&*node, slot.block_elsewhere);
+                let (bytes, children) = measure(&*node, slot.block_elsewhere);
                 let charge = match ctx.account.reserve(ChargeClass::Retained, bytes) {
                     RetentionAdmission::Admitted(charge) => charge,
                     RetentionAdmission::Refused(refusal) => return Err(refusal),
                 };
-                // A refusal below drops what was taken so far: the charge,
-                // the leaf holds and the child holds each release only what
-                // this hold just granted.
-                let leaf_holds = leaves
-                    .iter()
-                    .map(|leaf| ctx.leaves.hold_leaf(ctx.account, leaf))
-                    .collect::<Result<Box<[CacheHold]>, _>>()?;
-                let child_holds = children
-                    .iter()
-                    .map(|child| hold_node(Arc::clone(child), ctx))
-                    .collect::<Result<Box<[OwnedHold]>, _>>()?;
+                // A refusal below drops what was taken so far: the charge
+                // and the child holds each release only what this hold
+                // just granted.
+                let holds = hold_nodes(&children, ctx)?;
                 slot.charge = Some(charge);
-                slot.leaves = Leaves::Cache(leaf_holds);
-                slot.children = children;
-                slot.child_holds = child_holds;
+                if !children.is_empty() {
+                    slot.nested = Some(Box::new(Nested { children, holds }));
+                }
             }
         }
         slot.cache_holds += 1;
     }
     Ok(OwnedHold(node))
+}
+
+/// The owned allocations a carrier reaches at its top level, each once
+/// ([`AliasSet::take_handles`]): what an owner keeping the carrier pins or
+/// holds, so each is charged by its own cell.
+#[must_use = "an owned allocation an owner reaches must be pinned or held"]
+pub struct OwnedHandles(Box<[Arc<dyn Node>]>);
+
+impl OwnedHandles {
+    pub(crate) fn from_children(children: Box<[Arc<dyn Node>]>) -> Self {
+        Self(children)
+    }
+
+    pub(crate) fn into_children(self) -> Box<[Arc<dyn Node>]> {
+        self.0
+    }
+
+    /// The handles a carrier `measure` reaches. The carrier is delivered
+    /// whole: it reaches no raw `Arc` and keeps no heap outside its
+    /// handles, which a debug build checks.
+    pub fn of(measure: impl FnOnce(&mut AliasSet) -> usize) -> Self {
+        let mut aliases = AliasSet::for_cell();
+        let unowned = measure(&mut aliases);
+        verter_debug_assert::verter_debug_assert_eq!(
+            unowned,
+            0,
+            "a delivered carrier keeps heap outside its owned handles"
+        );
+        aliases.take_handles()
+    }
+
+    /// Charge each to its callers if no owner has yet (see [`Owned::pin`]).
+    pub fn pin(self, ctx: ChargeCtx<'_>) {
+        for child in self.0.iter() {
+            pin_node(&**child, ctx);
+        }
+    }
+
+    /// A cache's holds on all of them, all or nothing (see
+    /// [`Owned::hold`]).
+    ///
+    /// # Errors
+    ///
+    /// The account's refusal: nothing is retained and every existing
+    /// holder, charge and class is unchanged.
+    pub fn hold(self, ctx: ChargeCtx<'_>) -> Result<Box<[OwnedHold]>, RetentionRefusal> {
+        hold_nodes(&self.0, ctx)
+    }
+
+    /// Whether the carrier reached no owned allocation.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// How many owned allocations it reached.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
 }
 
 /// A sealed owning handle on one charged allocation. See the module docs.
@@ -322,7 +384,7 @@ impl<T: Measured> Owned<T> {
     /// own cell, and counts nothing; any other measurement counts its
     /// block and heap in full, once per `aliases`.
     pub fn offer(&self, aliases: &mut AliasSet) -> usize {
-        if !aliases.first(&self.0) {
+        if !aliases.first_allocation(&self.0) {
             return 0;
         }
         if aliases.collect_child(|| Arc::clone(&self.0) as Arc<dyn Node>) {
@@ -382,6 +444,12 @@ impl<T: Measured> Owned<T> {
     #[must_use]
     pub fn weak_count(this: &Self) -> usize {
         Arc::weak_count(&this.0)
+    }
+
+    /// Owning handles of this allocation.
+    #[must_use]
+    pub fn strong_count(this: &Self) -> usize {
+        Arc::strong_count(&this.0)
     }
 
     /// Bytes the cell's block holds beside its value's heap.
@@ -455,19 +523,241 @@ impl<T: Measured + Default> Default for Owned<T> {
     }
 }
 
-/// An owned slice: a sealed, self-charged list allocation.
-pub type OwnedSlice<T> = Owned<Box<[T]>>;
+/// An owned slice: a sealed, self-charged list allocation. Derefs to the
+/// slice; cloning shares the allocation and its one charge.
+pub struct OwnedSlice<T: Measured>(Owned<Box<[T]>>);
 
-impl<T: Measured> From<Vec<T>> for Owned<Box<[T]>> {
+impl<T: Measured> OwnedSlice<T> {
+    /// A new allocation of `items`, charged by the first owner that keeps
+    /// it.
+    #[must_use]
+    pub fn new(items: Box<[T]>) -> Self {
+        Self(Owned::new(items))
+    }
+
+    /// The allocation as an owned cell.
+    #[must_use]
+    pub fn as_owned(&self) -> &Owned<Box<[T]>> {
+        &self.0
+    }
+
+    /// Offer this nested handle to a measurement (see [`Owned::offer`]).
+    pub fn offer(&self, aliases: &mut AliasSet) -> usize {
+        self.0.offer(aliases)
+    }
+
+    /// Charge it to its callers (see [`Owned::pin`]).
+    pub fn pin(&self, ctx: ChargeCtx<'_>) {
+        self.0.pin(ctx);
+    }
+
+    /// A cache's hold on it (see [`Owned::hold`]).
+    ///
+    /// # Errors
+    ///
+    /// The account's refusal.
+    pub fn hold(&self, ctx: ChargeCtx<'_>) -> Result<OwnedHold, RetentionRefusal> {
+        self.0.hold(ctx)
+    }
+
+    /// Bytes its charge holds, once charged.
+    #[must_use]
+    pub fn charge_bytes(&self) -> Option<usize> {
+        self.0.charge_bytes()
+    }
+
+    /// Its charge's class, once charged.
+    #[must_use]
+    pub fn charge_class(&self) -> Option<ChargeClass> {
+        self.0.charge_class()
+    }
+
+    /// Whether two slices share one allocation.
+    #[must_use]
+    pub fn ptr_eq(this: &Self, other: &Self) -> bool {
+        Owned::ptr_eq(&this.0, &other.0)
+    }
+
+    /// The allocation's address, for identity checks that never deref.
+    #[must_use]
+    pub fn addr(this: &Self) -> usize {
+        Owned::addr(&this.0)
+    }
+
+    /// Owning handles of this allocation.
+    #[must_use]
+    pub fn strong_count(this: &Self) -> usize {
+        Owned::strong_count(&this.0)
+    }
+
+    /// Bytes the cell's block holds beside the slice's backing.
+    #[must_use]
+    pub fn cell_block_bytes() -> usize {
+        Owned::<Box<[T]>>::cell_block_bytes()
+    }
+}
+
+impl<T: Measured> Clone for OwnedSlice<T> {
+    /// Another owner of the same allocation: shares its one charge.
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<T: Measured> std::ops::Deref for OwnedSlice<T> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        &self.0
+    }
+}
+
+impl<T: Measured> AsRef<[T]> for OwnedSlice<T> {
+    fn as_ref(&self) -> &[T] {
+        &self.0
+    }
+}
+
+impl<T: Measured> std::borrow::Borrow<[T]> for OwnedSlice<T> {
+    fn borrow(&self) -> &[T] {
+        &self.0
+    }
+}
+
+impl<'a, T: Measured> IntoIterator for &'a OwnedSlice<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl<T: Measured> Default for OwnedSlice<T> {
+    fn default() -> Self {
+        Self::new(Box::new([]))
+    }
+}
+
+impl<T: Measured> From<Vec<T>> for OwnedSlice<T> {
     fn from(items: Vec<T>) -> Self {
         Self::new(items.into_boxed_slice())
     }
 }
 
-impl<T: Measured> FromIterator<T> for Owned<Box<[T]>> {
+impl<T: Measured> From<Box<[T]>> for OwnedSlice<T> {
+    fn from(items: Box<[T]>) -> Self {
+        Self::new(items)
+    }
+}
+
+impl<T: Measured, const N: usize> From<[T; N]> for OwnedSlice<T> {
+    fn from(items: [T; N]) -> Self {
+        Self::new(Box::new(items))
+    }
+}
+
+impl<T: Measured + Clone> From<&[T]> for OwnedSlice<T> {
+    fn from(items: &[T]) -> Self {
+        Self::new(items.into())
+    }
+}
+
+impl<T: Measured + Clone> From<&Vec<T>> for OwnedSlice<T> {
+    fn from(items: &Vec<T>) -> Self {
+        Self::new(items.as_slice().into())
+    }
+}
+
+impl<T: Measured + Clone> From<std::sync::Arc<[T]>> for OwnedSlice<T> {
+    /// An owned copy of a raw shared slice: a new allocation, charged by
+    /// its own cell.
+    fn from(items: std::sync::Arc<[T]>) -> Self {
+        Self::new(items.iter().cloned().collect())
+    }
+}
+
+impl<T: Measured> FromIterator<T> for OwnedSlice<T> {
     fn from_iter<I: IntoIterator<Item = T>>(items: I) -> Self {
         Self::new(items.into_iter().collect())
     }
+}
+
+impl<T: Measured + PartialEq> PartialEq for OwnedSlice<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl<T: Measured + Eq> Eq for OwnedSlice<T> {}
+
+impl<T: Measured + PartialEq> PartialEq<[T]> for OwnedSlice<T> {
+    fn eq(&self, other: &[T]) -> bool {
+        **self == *other
+    }
+}
+
+impl<T: Measured + PartialEq, const N: usize> PartialEq<[T; N]> for OwnedSlice<T> {
+    fn eq(&self, other: &[T; N]) -> bool {
+        **self == other[..]
+    }
+}
+
+impl<T: Measured + PartialEq> PartialEq<Vec<T>> for OwnedSlice<T> {
+    fn eq(&self, other: &Vec<T>) -> bool {
+        **self == other[..]
+    }
+}
+
+impl<T: Measured + std::hash::Hash> std::hash::Hash for OwnedSlice<T> {
+    /// Hashes as its slice.
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (**self).hash(state);
+    }
+}
+
+impl<T: Measured + PartialOrd> PartialOrd for OwnedSlice<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        (**self).partial_cmp(&**other)
+    }
+}
+
+impl<T: Measured + Ord> Ord for OwnedSlice<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (**self).cmp(&**other)
+    }
+}
+
+impl<T: Measured + std::fmt::Debug> std::fmt::Debug for OwnedSlice<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        (**self).fmt(f)
+    }
+}
+
+impl<T: Measured> Measured for OwnedSlice<T> {
+    /// A nested owned slice: charged by its own cell.
+    fn heap_bytes(&self, aliases: &mut AliasSet) -> usize {
+        self.offer(aliases)
+    }
+}
+
+impl<T: Measured + serde::Serialize> serde::Serialize for OwnedSlice<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        (**self).serialize(serializer)
+    }
+}
+
+impl<'de, T: Measured + serde::Deserialize<'de>> serde::Deserialize<'de> for OwnedSlice<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Vec::<T>::deserialize(deserializer).map(Self::from)
+    }
+}
+
+impl<T: Measured + verter_no_typeexpr::__private::NoTypeExprWitness>
+    verter_no_typeexpr::__private::NoTypeExprWitness for OwnedSlice<T>
+{
+}
+impl<T: Measured + verter_no_storedspan::__private::NoStoredSpanWitness>
+    verter_no_storedspan::__private::NoStoredSpanWitness for OwnedSlice<T>
+{
 }
 
 /// A weak view of an [`Owned`] allocation.
@@ -528,20 +818,18 @@ impl Drop for OwnedHold {
             let slot = &mut *guard;
             slot.cache_holds -= 1;
             if slot.cache_holds == 0 {
-                // The remaining handles are callers now: the charge, and
-                // its leaves', are theirs. A hold that was the last handle
-                // frees the cell right after, releasing the pin with it.
+                // The remaining handles are callers now: the charge is
+                // theirs. A hold that was the last handle frees the cell
+                // right after, releasing the pin with it.
                 slot.charge
                     .as_mut()
                     .expect("a held allocation is charged")
                     .transfer_to_pinned();
-                if let Leaves::Cache(caches) = &slot.leaves {
-                    let callers = caches.iter().map(CacheHold::caller).collect();
-                    slot.leaves = Leaves::Caller(callers);
-                }
-                std::mem::take(&mut slot.child_holds)
+                slot.nested
+                    .as_mut()
+                    .map(|nested| std::mem::take(&mut nested.holds))
             } else {
-                Box::new([])
+                None
             }
         };
         // The children transfer to whoever else still holds them.
@@ -621,6 +909,18 @@ impl OwnedStr {
     pub fn charge_for_len(len: usize) -> usize {
         Owned::<Box<str>>::cell_block_bytes() + heap_block_bytes(len)
     }
+
+    /// Owning handles of this string's allocation.
+    #[must_use]
+    pub fn strong_count(this: &Self) -> usize {
+        Owned::strong_count(&this.0)
+    }
+
+    /// The allocation's address, for identity checks that never deref.
+    #[must_use]
+    pub fn addr(this: &Self) -> usize {
+        Owned::addr(&this.0)
+    }
 }
 
 impl std::ops::Deref for OwnedStr {
@@ -687,9 +987,40 @@ impl From<&Arc<str>> for OwnedStr {
     }
 }
 
+impl From<&OwnedStr> for OwnedStr {
+    /// Another owning handle of the same allocation.
+    fn from(text: &OwnedStr) -> Self {
+        text.clone()
+    }
+}
+
 impl From<&String> for OwnedStr {
     fn from(text: &String) -> Self {
         Self::new(text)
+    }
+}
+
+impl PartialEq<String> for OwnedStr {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl PartialEq<Arc<str>> for OwnedStr {
+    fn eq(&self, other: &Arc<str>) -> bool {
+        self.as_str() == &**other
+    }
+}
+
+impl PartialEq<OwnedStr> for str {
+    fn eq(&self, other: &OwnedStr) -> bool {
+        self == other.as_str()
+    }
+}
+
+impl PartialEq<OwnedStr> for &str {
+    fn eq(&self, other: &OwnedStr) -> bool {
+        *self == other.as_str()
     }
 }
 
@@ -702,6 +1033,51 @@ impl std::fmt::Debug for OwnedStr {
 impl std::fmt::Display for OwnedStr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.as_str().fmt(f)
+    }
+}
+
+impl serde::Serialize for OwnedStr {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for OwnedStr {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(Self::from)
+    }
+}
+
+impl<T: Measured + serde::Serialize> serde::Serialize for Owned<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.value.serialize(serializer)
+    }
+}
+
+impl<'de, T: Measured + serde::Deserialize<'de>> serde::Deserialize<'de> for Owned<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        T::deserialize(deserializer).map(Self::new)
+    }
+}
+
+// An owned allocation owns exactly its value: it carries a type expression
+// or a stored span exactly when the value does. An owned string is text.
+impl verter_no_typeexpr::__private::NoTypeExprWitness for OwnedStr {}
+impl verter_no_storedspan::__private::NoStoredSpanWitness for OwnedStr {}
+impl<T: Measured + verter_no_typeexpr::__private::NoTypeExprWitness>
+    verter_no_typeexpr::__private::NoTypeExprWitness for Owned<T>
+{
+}
+impl<T: Measured + verter_no_storedspan::__private::NoStoredSpanWitness>
+    verter_no_storedspan::__private::NoStoredSpanWitness for Owned<T>
+{
+}
+
+impl<T: Measured> Measured for Owned<T> {
+    /// An owned allocation embedded in a measured value is a nested
+    /// allocation, charged by its own cell.
+    fn heap_bytes(&self, aliases: &mut AliasSet) -> usize {
+        self.offer(aliases)
     }
 }
 

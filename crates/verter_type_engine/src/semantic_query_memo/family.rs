@@ -2122,7 +2122,7 @@ pub(crate) fn family_and_slot_in(
         SemanticQueryKey::ProjectMember { base, member, mode } => (
             FamilyKey::ProjectMember {
                 base: *base,
-                member: Arc::clone(member),
+                member: member.clone(),
             },
             mode_to_slot(*mode),
         ),
@@ -2181,7 +2181,7 @@ pub(crate) fn family_and_slot_in(
         } => (
             FamilyKey::TypeOf {
                 value_root: value_root.clone(),
-                path: Box::new(Arc::clone(path)),
+                path: Box::new(path.clone()),
                 resolve_env_hash: context.resolve_env_hash,
                 provenance: context.projection_reduction.provenance,
                 merge_role: context.projection_reduction.merge_role,
@@ -2243,7 +2243,7 @@ pub(crate) fn family_and_slot_in(
         } => (
             FamilyKey::ProjectPath {
                 base: *base,
-                path: Arc::clone(path),
+                path: path.clone(),
                 provenance: context.provenance,
                 merge_role: context.merge_role,
                 vue_heritage_policy: context.vue_heritage_policy,
@@ -2576,10 +2576,10 @@ pub(crate) fn family_and_slot_in(
 /// the requested point the same real point.
 pub(crate) fn requested_path_for_key(key: &SemanticQueryKey) -> ProjectionPath {
     match key {
-        SemanticQueryKey::ProjectPath { path, .. } => ProjectionPath::from(Arc::clone(path)),
+        SemanticQueryKey::ProjectPath { path, .. } => ProjectionPath::from(path.clone()),
         SemanticQueryKey::ProjectMember { member, .. } => {
             ProjectionPath::from_segments([PathSegment::Member(PropertyKey::identifier(
-                Arc::clone(member),
+                member.clone(),
             ))])
         }
         SemanticQueryKey::IndexedAccess { index, .. } => {

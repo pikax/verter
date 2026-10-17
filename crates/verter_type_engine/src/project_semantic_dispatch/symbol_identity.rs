@@ -318,7 +318,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     }
                     let read = self.execute_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                         scope: ScopeId::file(Arc::clone(&symbol.canonical_id), symbol.owner),
-                        name: Arc::clone(&symbol.symbol),
+                        name: verter_type_expr::OwnedStr::from(symbol.symbol.clone()),
                     }));
                     subject = match self.identity_read_subject(read) {
                         Ok(next) => IdentitySubject::Node(next),
@@ -461,7 +461,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     last_symbol = Some(symbol.clone());
                     let read = self.execute_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                         scope: ScopeId::file(Arc::clone(&symbol.canonical_id), symbol.owner),
-                        name: Arc::clone(&symbol.symbol),
+                        name: verter_type_expr::OwnedStr::from(symbol.symbol.clone()),
                     }));
                     subject = match self.identity_read_subject(read) {
                         Ok(node) => IdentitySubject::Node(node),
@@ -578,9 +578,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             ..
                         }) => {
                             let symbol = ResolvedSymbolIdentity {
-                                canonical_id: Arc::clone(canonical_id),
+                                canonical_id: canonical_id.clone(),
                                 owner: *owner,
-                                symbol: Arc::clone(name),
+                                symbol: name.clone(),
                             };
                             if expected.contains(&symbol) {
                                 return SymbolIdentityDemandOutcome::Complete(Some(symbol));
@@ -595,9 +595,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                 return self.partial_symbol_identity(partial_reason(reasons));
                             }
                             let slot = self.type_slot_for(
-                                Arc::clone(canonical_id),
+                                canonical_id.clone(),
                                 *owner,
-                                Arc::clone(name),
+                                name.clone(),
                             );
                             let read = self.execute_read(SemanticQueryKey::Instantiate(
                                 crate::semantic_query::InstantiateKey::new(

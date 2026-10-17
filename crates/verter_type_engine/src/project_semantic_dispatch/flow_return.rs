@@ -1568,7 +1568,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         crate::semantic_query::FlowFunctionSlotIdentity {
             declaration_slot: self.finalize_slot_seed(
                 crate::semantic_query::DeclarationSlotSeed::new(
-                    canonical,
+                    verter_type_expr::OwnedStr::from(canonical),
                     owner,
                     name,
                     crate::semantic_query::SemanticSymbolSpace::Value,
@@ -1617,9 +1617,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> FlowReturnKey {
         FlowReturnKey {
             function: self.flow_function_slot_for(
-                Arc::clone(&identity.anchor.canonical_id),
+                identity.anchor.canonical_id.clone(),
                 identity.anchor.owner,
-                Arc::clone(&identity.anchor.symbol),
+                identity.anchor.symbol.clone(),
                 identity.function_part.clone(),
                 identity.overload_ordinal,
             ),
@@ -2046,7 +2046,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let (result, held) = self.execute_indexed_resolve_call_with_flow_hold(
             crate::semantic_query::ResolveCallKey {
                 point: crate::semantic_query::ProgramPointId {
-                    canonical_id: Arc::from(canonical),
+                    canonical_id: verter_type_expr::OwnedStr::from(canonical),
                     offset: call.point,
                 },
                 callee,
@@ -2342,9 +2342,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !typeof_path.is_empty() {
             return None;
         }
-        let scope_canonical = Arc::clone(&value_root.scope.canonical_id);
+        let scope_canonical = value_root.scope.canonical_id.clone();
         let scope_owner = value_root.scope.owner;
-        let value_name = Arc::clone(&value_root.name);
+        let value_name = value_root.name.clone();
         drop(data);
         let prepared = self.ctx.prepared_value_decl_return_only(
             scope_canonical.as_ref(),
@@ -2363,7 +2363,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // extractor stamps the declaration name; canonical / owner come
         // from the serving scope.
         let mut identity = identity.clone();
-        identity.anchor.canonical_id = scope_canonical;
+        identity.anchor.canonical_id = verter_type_expr::OwnedStr::from(scope_canonical);
         identity.anchor.owner = scope_owner;
         Some(identity)
     }
@@ -2492,7 +2492,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             crate::semantic_query::PathSegment::Member(key) => Arc::from(key.as_string()?),
             crate::semantic_query::PathSegment::Index(crate::semantic_query::IndexKey::String(
                 value,
-            )) => Arc::clone(value),
+            )) => value.clone(),
             crate::semantic_query::PathSegment::Index(_) => return None,
         };
         let identity = self.flow_return_callee_for_typeof_arg(callee_arg)?;
@@ -2640,7 +2640,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let key = verter_session_query::function_program::FunctionProgramKey {
             declaration: verter_session_query::function_program::FunctionDeclarationRef {
                 owner: identity.anchor.owner,
-                name: Arc::clone(&identity.anchor.symbol),
+                name: identity.anchor.symbol.clone(),
                 space: verter_session_query::facts::SymbolSpace::Value,
             },
             part: identity.function_part.clone(),
@@ -5781,7 +5781,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .map(|state| state.whole_hash)
             .unwrap_or_default();
         let scope = crate::semantic_query::NodeScopeId::File {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner,
             whole_hash,
             local_scope: None,
@@ -7766,7 +7766,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .ensure_indexed_ready_serve(&identity.canonical_id)?
                 .indexed;
             let scope = crate::semantic_query::NodeScopeId::File {
-                canonical_id: Arc::clone(&identity.canonical_id),
+                canonical_id: verter_type_expr::OwnedStr::from(identity.canonical_id.clone()),
                 owner: identity.owner,
                 whole_hash: indexed.whole_hash,
                 local_scope: None,
@@ -8533,7 +8533,7 @@ fn flow_demanded_member_name(
         crate::semantic_query::PathSegment::Member(key) => key.as_string().map(Arc::<str>::from),
         crate::semantic_query::PathSegment::Index(crate::semantic_query::IndexKey::String(
             value,
-        )) => Some(Arc::clone(value)),
+        )) => Some(value.clone()),
         crate::semantic_query::PathSegment::Index(_) => None,
     }
 }
@@ -13609,7 +13609,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         visibility: verter_type_expr::MemberVisibility::Public,
                         excess_origin: verter_type_expr::ExcessPropertyOrigin::FreshOwn,
                         spans: member.spans,
-                        declaration_origin: Some(Arc::from(self.canonical)),
+                        declaration_origin: Some(verter_type_expr::OwnedStr::from(self.canonical)),
                         declared_in_macro_type_arg:
                             crate::semantic_query::MacroOwnBodyStamp::default(),
                         merge_role: crate::semantic_query::MergeRoleStamp::default(),
@@ -13872,7 +13872,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             visibility: verter_type_expr::MemberVisibility::Public,
             excess_origin: verter_type_expr::ExcessPropertyOrigin::FreshOwn,
             spans: member.spans,
-            declaration_origin: Some(Arc::from(self.canonical)),
+            declaration_origin: Some(verter_type_expr::OwnedStr::from(self.canonical)),
             declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::default(),
             merge_role: crate::semantic_query::MergeRoleStamp::default(),
         };
@@ -14241,10 +14241,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             self.dispatch.graph().intern_node_with_scope(
                 SemanticNodeData::ClassExpressionInstance {
                     identity: Arc::new(crate::semantic_query::ClassExpressionIdentity {
-                        canonical_id: Arc::from(self.canonical),
+                        canonical_id: verter_type_expr::OwnedStr::from(self.canonical),
                         owner: self.owner,
                         offset,
-                        name: Arc::from("(object literal)"),
+                        name: verter_type_expr::OwnedStr::from("(object literal)"),
                         outer_clauses: Arc::from([]),
                         own_arity: 0,
                         constructor_visibility: None,
@@ -28320,9 +28320,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     verter_type_expr::facts::FunctionReturnSource::Flow(
                         verter_type_expr::facts::FlowFunctionReturnIdentity {
                             anchor: verter_type_expr::locators::AuthoredAnchor {
-                                canonical_id: Arc::from(self.canonical),
+                                canonical_id: verter_type_expr::OwnedStr::from(self.canonical),
                                 owner: target.declaration.owner,
-                                symbol: Arc::clone(&target.declaration.name),
+                                symbol: verter_type_expr::OwnedStr::from(target.declaration.name.clone()),
                                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                             },
                             function_part: target.part.clone(),
@@ -28396,7 +28396,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             }
                             FlowReturnStep::Hold(key) => {
                                 self.holds
-                                    .push(HeldCallee::foreign(*key.clone(), callee_clause));
+                                    .push(HeldCallee::foreign(key.clone(), callee_clause));
                                 Positional::Hold
                             }
                             FlowReturnStep::NoValue(FlowReturnFailure::EmptyCycle) => {

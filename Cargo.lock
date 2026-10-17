@@ -4198,6 +4198,7 @@ dependencies = [
  "verter_ecma",
  "verter_no_storedspan",
  "verter_no_typeexpr",
+ "verter_retention",
  "verter_span",
 ]
 

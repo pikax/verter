@@ -543,6 +543,9 @@ const SHARED_HEAP_BUCKET_BYTES: usize = std::mem::size_of::<(usize, usize)>() + 
 struct ChargeHeap<'a> {
     shared: &'a mut rustc_hash::FxHashMap<usize, usize>,
     bytes: usize,
+    /// The owned allocations the payload reaches: charged by their own
+    /// cells, which the payload's handles keep alive.
+    handles: verter_session_query::retention::allocation::AliasSet,
 }
 
 impl crate::semantic_query::node_payload_footprint::PayloadHeapVisitor for ChargeHeap<'_> {
@@ -558,6 +561,14 @@ impl crate::semantic_query::node_payload_footprint::PayloadHeapVisitor for Charg
             self.bytes += bytes;
         }
         first
+    }
+
+    fn handle(
+        &mut self,
+        offer: &mut dyn FnMut(&mut verter_session_query::retention::allocation::AliasSet) -> usize,
+    ) {
+        let counted = offer(&mut self.handles);
+        verter_debug_assert::verter_debug_assert_eq!(counted, 0, "an owned handle is collected");
     }
 }
 
@@ -586,6 +597,13 @@ impl crate::semantic_query::node_payload_footprint::PayloadHeapVisitor for Relea
         }
         last
     }
+
+    /// An owned allocation releases its own charge with its last handle.
+    fn handle(
+        &mut self,
+        _offer: &mut dyn FnMut(&mut verter_session_query::retention::allocation::AliasSet) -> usize,
+    ) {
+    }
 }
 
 impl ArenaInner {
@@ -596,16 +614,29 @@ impl ArenaInner {
 
     /// The heap `payload` and `scope` reach that is not charged yet, now
     /// owned by one more live slot, plus the table growth recording it.
-    fn charge_payload_heap(&mut self, payload: &SemanticNodeData, scope: &NodeScopeId) -> usize {
+    fn charge_payload_heap(
+        &mut self,
+        payload: &SemanticNodeData,
+        scope: &NodeScopeId,
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) -> usize {
         use crate::semantic_query::node_payload_footprint::PayloadHeap as _;
         let table_before = self.shared_heap_table_bytes();
         let mut visitor = ChargeHeap {
             shared: &mut self.shared_heap,
             bytes: 0,
+            handles: verter_session_query::retention::allocation::AliasSet::new(),
         };
         payload.visit_payload_heap(&mut visitor);
         scope.visit_payload_heap(&mut visitor);
         let bytes = visitor.bytes;
+        // The payload's owned allocations are charged by their own cells —
+        // pinned, like the graph storage that keeps them — and shared with
+        // every other holder of the same allocation.
+        visitor
+            .handles
+            .take_handles()
+            .pin(verter_session_query::retention::owned::ChargeCtx::new(account));
         bytes + (self.shared_heap_table_bytes() - table_before)
     }
 
@@ -664,7 +695,7 @@ impl ArenaInner {
             storage.add(chunk_storage_bytes());
         }
         storage.add(payload_block_bytes());
-        let heap = self.charge_payload_heap(&payload, &scope);
+        let heap = self.charge_payload_heap(&payload, &scope, account);
         self.storage
             .as_mut()
             .expect("the storage pin was created above")

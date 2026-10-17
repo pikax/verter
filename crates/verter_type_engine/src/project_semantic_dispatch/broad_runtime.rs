@@ -249,10 +249,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     ..
                 }) => {
                     let identity = crate::semantic_query::DeclIdentity {
-                        canonical_id: Arc::clone(canonical_id),
+                        canonical_id: canonical_id.clone(),
                         owner: *owner,
                         whole_hash: Default::default(),
-                        decl_name: Arc::clone(name),
+                        decl_name: name.clone(),
                     };
                     undecidable = !self.push_instantiated_runtime_subject(
                         &identity,
@@ -407,11 +407,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             };
         };
         let indexed = serve.indexed;
-        let owner_root = (Arc::clone(&owner.defining_canonical), indexed.whole_hash);
+        let owner_root = (owner.defining_canonical.clone(), indexed.whole_hash);
         let Some(macro_index) = usize::try_from(locator.macro_index()).ok() else {
             self.fold_local_partial_completeness(PartialReasonSet::SEMANTIC_QUERY_FAULT);
             return RehydratedRuntimeSubject {
-                node: self.opaque(QueryError::Other(Arc::from(
+                node: self.opaque(QueryError::Other(verter_type_expr::OwnedStr::from(
                     "broad-runtime macro index exceeds host index width",
                 ))),
                 dep_signature: crate::semantic_query::DepSignature::new(dep_facts),

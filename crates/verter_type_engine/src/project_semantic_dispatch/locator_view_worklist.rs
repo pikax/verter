@@ -487,9 +487,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     && type_args.is_empty()
                     && inputs.self_value.is_some_and(|anchor| {
                         value_root.scope.local_scope.is_none()
-                            && value_root.scope.canonical_id == anchor.canonical_id
+                            && anchor.canonical_id == anchor.canonical_id
                             && value_root.scope.owner == anchor.owner
-                            && value_root.name == anchor.symbol
+                            && anchor.symbol == anchor.symbol
                     })
                 {
                     return ReferenceProjectionPlan::Ready(node);
@@ -518,7 +518,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         match self.execute_type_node(self.typeof_key_with_path(
                             ValueRootKey {
                                 scope: value_root.scope.clone(),
-                                name: joined,
+                                name: verter_type_expr::OwnedStr::from(joined),
                             },
                             rest,
                             context,
@@ -569,14 +569,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let anchor =
                     match self.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                         scope: ScopeId {
-                            canonical_id: Arc::clone(&identity.canonical_id),
+                            canonical_id: verter_type_expr::OwnedStr::from(identity.canonical_id.clone()),
                             owner: identity.owner,
                             local_scope: None,
                             binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
                                 identity.owner,
                             ),
                         },
-                        name: Arc::clone(&identity.decl_name),
+                        name: verter_type_expr::OwnedStr::from(identity.decl_name.clone()),
                     })) {
                         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
                         _ => {

@@ -9,6 +9,7 @@
 //! - `PreparedLocalImportedTypeAlias`
 //! - `PreparedImportedDeclContext`
 
+use verter_type_expr::OwnedStr;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
@@ -35,9 +36,9 @@ fn decl_anchor(root_identity: &ResolvedRootIdentity, space: LocatorSymbolSpace) 
     AuthoredAnchor {
         // The identity fields are shared `Arc<str>` — the anchor reuses the
         // same allocations instead of copying.
-        canonical_id: Arc::clone(&root_identity.canonical_id),
+        canonical_id: OwnedStr::from(root_identity.canonical_id.clone()),
         owner: root_identity.owner,
-        symbol: Arc::clone(&root_identity.symbol_name),
+        symbol: OwnedStr::from(root_identity.symbol_name.clone()),
         space,
     }
 }
@@ -907,12 +908,12 @@ pub fn collect_heritage_base_facts(
             let mut path: Vec<TypeBodyPathStep> = Vec::with_capacity(path_prefix.len() + 1);
             path.extend_from_slice(path_prefix);
             path.push(TypeBodyPathStep::IntersectionArm { ordinal });
-            let path: Arc<[TypeBodyPathStep]> = path.into();
+            let path: verter_type_expr::OwnedSlice<TypeBodyPathStep> = path.into();
             let type_args: Arc<[TypeArgLocator]> = (0..type_arguments.len())
                 .map(|arg_index| {
                     Some(TypeArgLocator {
                         anchor: anchor.clone(),
-                        path: Arc::clone(&path),
+                        path: path.clone(),
                         arg_index: u32::try_from(arg_index).ok()?,
                     })
                 })

@@ -261,12 +261,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectionBenchHarness<'
             .dispatch
             .lower_locator(AuthoredBodyLocator::DeclBody(TypeBodySlot {
                 anchor: AuthoredAnchor {
-                    canonical_id: Arc::from(canonical_id),
+                    canonical_id: verter_type_expr::OwnedStr::from(canonical_id),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    symbol: Arc::from(symbol),
+                    symbol: verter_type_expr::OwnedStr::from(symbol),
                     space: LocatorSymbolSpace::Type,
                 },
-                path: Arc::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+                path: verter_type_expr::OwnedSlice::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
             })) {
             crate::semantic_query::QueryResult::Value(root) => root,
             crate::semantic_query::QueryResult::Recursive(root) => root,
@@ -279,7 +279,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectionBenchHarness<'
             .map(|state| state.whole_hash)
             .unwrap_or_default();
         let scope = NodeScopeId::File {
-            canonical_id: Arc::from(canonical_id),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical_id),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash,
             local_scope: None,

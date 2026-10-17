@@ -918,7 +918,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         canonical_id,
                         owner,
                         whole_hash,
-                        decl_name: Arc::clone(name),
+                        decl_name: name.clone(),
                     },
                     Arc::from(args.operands()),
                 ))
@@ -936,7 +936,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 /// at most six per type parameter: three markers and three instantiations.
 pub fn declaration_scope(declaration: &DeclIdentity) -> NodeScopeId {
     NodeScopeId::File {
-        canonical_id: Arc::clone(&declaration.canonical_id),
+        canonical_id: verter_type_expr::OwnedStr::from(declaration.canonical_id.clone()),
         owner: declaration.owner,
         whole_hash: declaration.whole_hash,
         local_scope: None,

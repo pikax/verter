@@ -106,7 +106,7 @@ impl OperandLexicalScope {
     fn for_locator(locator: &AuthoredBodyLocator) -> Self {
         let anchor = authored_anchor(locator);
         Self {
-            canonical_id: Arc::clone(&anchor.canonical_id),
+            canonical_id: anchor.canonical_id.clone(),
             owner: anchor.owner,
         }
     }

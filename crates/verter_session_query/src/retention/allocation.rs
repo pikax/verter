@@ -73,7 +73,7 @@ pub fn fact_heap_bytes(fact: &FactVersionRef, aliases: &mut AliasSet) -> usize {
                 + arc_str_bytes(&function.merged_symbol_name, aliases)
                 + match &function.function_part {
                     verter_type_expr::facts::FunctionPartIdentity::Member { member_path } => {
-                        arc_slice_block_bytes(member_path, aliases).unwrap_or(0)
+                        member_path.offer(aliases)
                     }
                     verter_type_expr::facts::FunctionPartIdentity::DeclarationBody
                     | verter_type_expr::facts::FunctionPartIdentity::Initializer
@@ -102,7 +102,8 @@ fn fact_key_heap_bytes(key: &FactKey, aliases: &mut AliasSet) -> usize {
         } => {
             name(&exporter.0);
             if let verter_type_expr::PropertyKey::String(text) = n {
-                name(text);
+                // An owned name: charged by its own cell, collected here.
+                bytes += text.offer(aliases);
             }
         }
         FactKey::MemberShape { exporter, .. } => name(&exporter.0),

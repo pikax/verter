@@ -1975,7 +1975,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 PathSegment::Index(key) => key.clone(),
                 PathSegment::Member(key) => match key {
                     crate::semantic_query::PropertyKey::String(text) => {
-                        IndexKey::String(Arc::clone(text))
+                        IndexKey::String(text.clone())
                     }
                     crate::semantic_query::PropertyKey::Number(number) => IndexKey::Number(*number),
                     crate::semantic_query::PropertyKey::UniqueSymbol(symbol) => {
@@ -2336,7 +2336,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         match segment {
             PathSegment::Member(key) => OwnedIndexAccessKey::Name(key.clone()),
             PathSegment::Index(IndexKey::String(value)) => {
-                OwnedIndexAccessKey::Name(PropertyKey::String(Arc::clone(value)))
+                OwnedIndexAccessKey::Name(PropertyKey::String(value.clone()))
             }
             PathSegment::Index(IndexKey::Number(value)) => {
                 OwnedIndexAccessKey::Name(PropertyKey::Number(*value))
@@ -2841,7 +2841,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     fn classify_numeric_index_segment(&self, segment: &PathSegment) -> Option<NumericIndexDemand> {
         let key = match segment {
             PathSegment::Index(IndexKey::Number(n)) => IndexKey::Number(*n),
-            PathSegment::Index(IndexKey::String(s)) => IndexKey::String(Arc::clone(s)),
+            PathSegment::Index(IndexKey::String(s)) => IndexKey::String(s.clone()),
             PathSegment::Index(IndexKey::UniqueSymbol(identity)) => {
                 IndexKey::UniqueSymbol(identity.clone())
             }
@@ -3052,7 +3052,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         }
         if !keys.iter().all(|key| match key {
             IndexKey::String(name) => {
-                domain.membership(&PropertyKey::String(Arc::clone(name))) == Some(true)
+                domain.membership(&PropertyKey::String(name.clone())) == Some(true)
             }
             _ => false,
         }) {
@@ -3103,7 +3103,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             let IndexKey::String(name) = key else {
                 unreachable!("finite string keys checked above")
             };
-            let property = PropertyKey::String(Arc::clone(name));
+            let property = PropertyKey::String(verter_type_expr::OwnedStr::from(name));
             let source_optional = || match source_index.as_ref()?.project_known_key(&property) {
                 crate::semantic_query::SurfaceKeyProjection::Exact(member) => Some(member.optional),
                 crate::semantic_query::SurfaceKeyProjection::AbsentProven => None,
@@ -3285,7 +3285,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             }
             let known = match key {
                 IndexKey::String(value) => {
-                    crate::semantic_query::PropertyKey::String(Arc::clone(value))
+                    crate::semantic_query::PropertyKey::String(value.clone())
                 }
                 IndexKey::Number(value) => crate::semantic_query::PropertyKey::Number(*value),
                 IndexKey::UniqueSymbol(value) => {
@@ -3495,7 +3495,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 canonical_id,
                 name,
                 ..
-            }) => Some((Arc::clone(canonical_id), Arc::clone(name))),
+            }) => Some((canonical_id.clone(), name.clone())),
             _ => None,
         }
     }
@@ -3637,7 +3637,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         while index < path.len() {
             if cap_active && index >= budget {
                 results.push(self.dispatch.opaque(QueryError::RecursiveRef {
-                    name: Arc::from("depth-budget-exceeded"),
+                    name: verter_type_expr::OwnedStr::from("depth-budget-exceeded"),
                     args: Default::default(),
                 }));
                 return;
@@ -3670,7 +3670,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     let known_key = match segment {
                         PathSegment::Member(key) => key.clone(),
                         PathSegment::Index(IndexKey::String(value)) => {
-                            crate::semantic_query::PropertyKey::String(Arc::clone(value))
+                            crate::semantic_query::PropertyKey::String(value.clone())
                         }
                         PathSegment::Index(IndexKey::Number(value)) => {
                             crate::semantic_query::PropertyKey::Number(*value)
@@ -3829,7 +3829,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     let known_key = match segment {
                         PathSegment::Member(key) => key.clone(),
                         PathSegment::Index(IndexKey::String(value)) => {
-                            crate::semantic_query::PropertyKey::String(Arc::clone(value))
+                            crate::semantic_query::PropertyKey::String(verter_type_expr::OwnedStr::from(value))
                         }
                         PathSegment::Index(IndexKey::Number(value)) => {
                             crate::semantic_query::PropertyKey::Number(*value)
@@ -4305,7 +4305,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     let true_projection =
                         self.execute_read_folding_partial(SemanticQueryKey::ProjectPath {
                             base: true_branch,
-                            path: Arc::clone(&rest_path),
+                            path: rest_path.clone(),
                             context: self.context_from_template(
                                 crate::semantic_query::ProjectionReductionContext::published(
                                     self.mode(),
@@ -4505,7 +4505,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         match next_segment {
                             Some(PathSegment::Member(
                                 crate::semantic_query::PropertyKey::String(name),
-                            )) => (Some(LiteralKey::String(Arc::clone(name))), true),
+                            )) => (Some(LiteralKey::String(name.clone())), true),
                             Some(PathSegment::Member(
                                 crate::semantic_query::PropertyKey::Number(number),
                             )) => (Some(LiteralKey::Number(number.get() as f64)), false),
@@ -4513,7 +4513,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                 crate::semantic_query::PropertyKey::UniqueSymbol(_),
                             )) => (None, false),
                             Some(PathSegment::Index(IndexKey::String(s))) => {
-                                (Some(LiteralKey::String(Arc::clone(s))), true)
+                                (Some(LiteralKey::String(s.clone())), true)
                             }
                             Some(PathSegment::Index(IndexKey::Number(n))) => {
                                 // G4.4: integer-convention recovery.
@@ -4552,7 +4552,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             Some(PathSegment::Index(IndexKey::Computed(node))) => {
                                 match self.dispatch.normalized_index_key_node(*node) {
                                     IndexKey::String(text) => {
-                                        (Some(LiteralKey::String(Arc::clone(&text))), true)
+                                        (Some(LiteralKey::String(text.clone())), true)
                                     }
                                     IndexKey::Number(number) => {
                                         // `normalized_index_key_node`
@@ -4733,7 +4733,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             // under their canonical names.
                             let needle_key = match key {
                                 LiteralKey::String(s) => {
-                                    crate::semantic_query::PropertyKey::String(Arc::clone(s))
+                                    crate::semantic_query::PropertyKey::String(verter_type_expr::OwnedStr::from(s))
                                 }
                                 LiteralKey::Number(n) => {
                                     crate::semantic_query::PropertyKey::from_js_number(*n)
@@ -5284,9 +5284,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     whole_hash: _,
                 }) => {
                     let base = self.dispatch.type_slot_for(
-                        Arc::clone(canonical_id),
+                        canonical_id.clone(),
                         *owner,
-                        Arc::clone(name),
+                        name.clone(),
                     );
                     let inst_ctx = self.dispatch.instantiate_context_for(
                         canonical_id,
@@ -5335,7 +5335,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 // site but transparent through alias chains during walk.
                 SemanticNodeData::DeclRef { identity } => {
                     let scope = ScopeId {
-                        canonical_id: Arc::clone(&identity.canonical_id),
+                        canonical_id: verter_type_expr::OwnedStr::from(identity.canonical_id.clone()),
                         owner: identity.owner,
                         local_scope: None,
                         binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(identity.owner),
@@ -5343,7 +5343,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     let name = Arc::clone(&identity.decl_name);
                     drop(data);
                     let resolved = match self.execute_read_folding_partial(
-                        SemanticQueryKey::ResolveDecl(ResolveDeclKey { scope, name }),
+                        SemanticQueryKey::ResolveDecl(ResolveDeclKey { scope, OwnedStr::from(name) }),
                     ) {
                         QueryResult::Value(id) => id,
                         QueryResult::Recursive(id) => {
@@ -5987,7 +5987,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         match &*data {
             SemanticNodeData::DeclRef { identity } => {
                 let scope = ScopeId {
-                    canonical_id: Arc::clone(&identity.canonical_id),
+                    canonical_id: verter_type_expr::OwnedStr::from(identity.canonical_id.clone()),
                     owner: identity.owner,
                     local_scope: None,
                     binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
@@ -5997,7 +5997,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 let name = Arc::clone(&identity.decl_name);
                 drop(data);
                 match self.execute_read_folding_partial(SemanticQueryKey::ResolveDecl(
-                    ResolveDeclKey { scope, name },
+                    ResolveDeclKey { scope, OwnedStr::from(name) },
                 )) {
                     QueryResult::Value(id) => id,
                     // A recursive / errored terminal carrier keeps the
@@ -6274,10 +6274,10 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         name,
                         whole_hash,
                     })) => crate::semantic_query::DeclIdentity {
-                        canonical_id: Arc::clone(canonical_id),
+                        canonical_id: canonical_id.clone(),
                         owner: *owner,
                         whole_hash: *whole_hash,
-                        decl_name: Arc::clone(name),
+                        decl_name: name.clone(),
                     },
                     _ => return value,
                 };
@@ -6720,7 +6720,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             }) => {
                 let identity =
                     self.dispatch
-                        .type_slot_for(Arc::clone(canonical_id), *owner, Arc::clone(name));
+                        .type_slot_for(canonical_id.clone(), *owner, name.clone());
                 if let Some(alias_id) = self.alias_identity(node) {
                     if self.visited_aliases.iter().any(|a| a == &alias_id) {
                         drop(data);
@@ -8002,10 +8002,10 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 whole_hash,
             }) => {
                 let identity = DeclIdentity {
-                    canonical_id: Arc::clone(canonical_id),
+                    canonical_id: canonical_id.clone(),
                     owner: *owner,
                     whole_hash: *whole_hash,
-                    decl_name: Arc::clone(name),
+                    decl_name: name.clone(),
                 };
                 drop(data);
                 // Preserve the walker's surface provenance onto the
@@ -8292,7 +8292,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             }
             SemanticNodeData::DeclRef { identity } => {
                 let scope = ScopeId {
-                    canonical_id: Arc::clone(&identity.canonical_id),
+                    canonical_id: verter_type_expr::OwnedStr::from(identity.canonical_id.clone()),
                     owner: identity.owner,
                     local_scope: None,
                     binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(identity.owner),
@@ -8313,11 +8313,11 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     } => Some((canonical_id, owner)),
                     crate::semantic_query::NodeScopeId::Global => None,
                 });
-                let ref_owner = ref_owner.or(Some((target_canonical, target_owner)));
+                let ref_owner = ref_owner.or(Some((verter_type_expr::OwnedStr::from(target_canonical), target_owner)));
                 match self.execute_read_folding_partial(SemanticQueryKey::ResolveDecl(
                     ResolveDeclKey {
                         scope,
-                        name: Arc::clone(&name),
+                        name: verter_type_expr::OwnedStr::from(name.clone()),
                     },
                 )) {
                     QueryResult::Value(resolved) => {
@@ -8407,7 +8407,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         canonical_id,
                         owner,
                         ..
-                    } => Some((Arc::clone(canonical_id), *owner)),
+                    } => Some((canonical_id.clone(), *owner)),
                     crate::semantic_query::NodeScopeId::Global => None,
                 });
                 drop(data);
@@ -8883,7 +8883,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     ) -> Option<RemappedKeyNarrowing> {
         let demanded = match literal_key? {
             LiteralKey::String(text) => {
-                crate::semantic_query::PropertyKey::String(Arc::clone(text))
+                crate::semantic_query::PropertyKey::String(verter_type_expr::OwnedStr::from(text))
             }
             LiteralKey::Number(number) => {
                 crate::semantic_query::PropertyKey::from_js_number(*number)
@@ -11064,7 +11064,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> bool {
         let key = match index {
-            IndexKey::String(name) => PropertyKey::String(Arc::clone(name)),
+            IndexKey::String(name) => PropertyKey::String(verter_type_expr::OwnedStr::from(name)),
             IndexKey::Number(value) => PropertyKey::from_js_number(value.get() as f64),
             IndexKey::UniqueSymbol(identity) => PropertyKey::UniqueSymbol(identity.clone()),
             IndexKey::Computed(_) => return false,

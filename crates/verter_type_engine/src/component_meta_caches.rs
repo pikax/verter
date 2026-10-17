@@ -1271,10 +1271,10 @@ impl ShapeCacheDb {
         // subject requires a lowered node).
         let key = ShapeCacheKey::synthetic_binding_whole(
             crate::semantic_query::SyntheticBindingId {
-                scope_canonical_id: Arc::from(marker),
+                scope_canonical_id: verter_type_expr::OwnedStr::from(marker),
                 surface_kind: verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding,
                 slot_name: None,
-                binding_name: Arc::from("__schema_probe__"),
+                binding_name: verter_type_expr::OwnedStr::from("__schema_probe__"),
             },
             ProjectionMode::Shallow,
         );

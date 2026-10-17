@@ -86,6 +86,7 @@ macro_rules! measured_by_owned_heap {
 }
 
 measured_by_owned_heap!(
+    super::PathSegment,
     super::SemanticNodeId,
     super::SignatureRef,
     super::BroadRuntimeKind,
@@ -118,6 +119,22 @@ impl<T: verter_session_query::retention::owned::Measured> OwnedHeap
     for verter_session_query::retention::owned::Owned<T>
 {
     /// A nested owned allocation: charged by its own cell.
+    fn owned_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
+        self.offer(aliases)
+    }
+}
+
+impl<T: verter_session_query::retention::owned::Measured> OwnedHeap
+    for verter_session_query::retention::owned::OwnedSlice<T>
+{
+    /// A nested owned slice: charged by its own cell.
+    fn owned_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
+        self.offer(aliases)
+    }
+}
+
+impl OwnedHeap for verter_session_query::retention::owned::OwnedStr {
+    /// A nested owned string: charged by its own cell.
     fn owned_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
         self.offer(aliases)
     }

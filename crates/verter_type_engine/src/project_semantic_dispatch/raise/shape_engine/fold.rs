@@ -207,7 +207,7 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
             return fold_node(alg, dispatch, merged, active);
         }
         SemanticNodeData::Opaque(QueryError::DeclPlaceholder { name, .. }) => {
-            alg.reference(Arc::clone(name), Vec::new())
+            alg.reference(name.clone(), Vec::new())
         }
         SemanticNodeData::Conditional {
             check,
@@ -346,7 +346,7 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
                         })
                     })
                     .collect();
-                alg.recursive_ref(Arc::clone(name), raised_args)
+                alg.recursive_ref(name.clone(), raised_args)
             }
             // The checker's recovered error type raises as the recovery the
             // diagnostic defines.
@@ -679,7 +679,7 @@ fn fold_object_spread_program<
             fold_open_object_spread_program(alg, dispatch, program)
         }
         QueryResult::Recursive(_) => alg.opaque_sentinel(&QueryError::RecursiveRef {
-            name: Arc::from("object-spread-projection"),
+            name: verter_type_expr::OwnedStr::from("object-spread-projection"),
             args: Default::default(),
         }),
         QueryResult::Error(error) => alg.opaque_sentinel(&error),
