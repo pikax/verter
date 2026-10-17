@@ -1241,6 +1241,17 @@ pub mod test_support {
         }
     }
 
+    /// The formula's retained allocation through the owned-heap account —
+    /// an accounting independent of the connected-work ledger construction
+    /// charges: it walks the factored product the formula actually retains.
+    #[must_use]
+    pub fn retained_heap_bytes(formula: &ObjectProjectionFormula) -> usize {
+        use crate::semantic_query::allocation_footprint::OwnedHeap as _;
+        formula.owned_heap_bytes(
+            &mut verter_session_query::retention::allocation::AliasSet::estimating(),
+        )
+    }
+
     #[must_use]
     pub fn positive_key(
         key: PropertyKey,

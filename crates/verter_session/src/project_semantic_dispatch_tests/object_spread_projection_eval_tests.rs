@@ -5066,6 +5066,49 @@ fn a_selected_key_read_grows_with_the_arms_not_their_product() {
     );
 }
 
+/// The retained allocation a spread formula owns — measured by the
+/// owned-heap account, which walks the factored product the formula
+/// actually retains and is independent of the connected-work ledger
+/// construction charges — grows with the arms folded, not with their
+/// Cartesian product: doubling both unions at most about doubles the
+/// retained bytes, where a materialised product would quadruple them
+/// (its width does).
+#[test]
+fn a_retained_formula_grows_with_its_arms_not_their_product() {
+    let owned = |widths: &[usize]| -> (u64, usize) {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = host.project_type_store().semantic_graph();
+        let effects = widths
+            .iter()
+            .zip(["a", "b", "c"])
+            .map(|(width, prefix)| {
+                ObjectConstructionEffect::Spread(keyed_union(graph, prefix, *width))
+            })
+            .collect::<Vec<_>>();
+        let root = program(graph, effects);
+        match dispatch.execute(SemanticQueryKey::ProjectObjectSpread {
+            program: root,
+            selector: ObjectProjectionSelector::Surface,
+            context: context(ExactOptionalPropertyPolicy::Disabled),
+        }) {
+            QueryResult::Value(SemanticQueryOutput {
+                value: SemanticQueryValue::ObjectProjection(formula),
+                ..
+            }) => (formula.width(), test_support::retained_heap_bytes(&formula)),
+            other => panic!("{widths:?}: the product builds, got {other:?}"),
+        }
+    };
+    let ((small_width, small), (large_width, large)) = (owned(&[60, 60]), owned(&[120, 120]));
+    assert_eq!(small_width, 3_600);
+    assert_eq!(large_width, 14_400, "the product width quadruples");
+    assert!(small > 0, "the retained formula owns allocation");
+    assert!(
+        large * 10 <= small * 25,
+        "the retained formula grows with its arms, not their product: {small} -> {large}"
+    );
+}
+
 /// A chain of nested property-only spreads (`p(i) = { ...p(i-1), a(i): 0 }`)
 /// is paid for link by link before its id lists grow: the charged work grows with the chain, so a small connected allowance
 /// stops a long chain before it is traversed.
