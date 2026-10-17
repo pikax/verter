@@ -2639,7 +2639,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             let read = self.execute_read(SemanticQueryKey::IndexedAccess {
                                 base: child.node,
                                 index,
-                                mode: frame.context.mode,
+                                mode: indexed_read_mode(frame.context),
                             });
                             self.deferred_read_action(frame, read, || self.opaque(QueryError::Miss))
                         }
@@ -2649,7 +2649,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         let read = self.execute_read(SemanticQueryKey::IndexedAccess {
                             base: object,
                             index,
-                            mode: frame.context.mode,
+                            mode: indexed_read_mode(frame.context),
                         });
                         self.deferred_read_action(frame, read, || self.opaque(QueryError::Miss))
                     }
@@ -4129,5 +4129,20 @@ pub mod forwarding_tests {
             Some(FactInterpretation::PresenceOnly)
         );
         assert_eq!(read.fact_status, copied.fact_status);
+    }
+}
+
+/// The mode an evaluated indexed access reads its member at. A structural
+/// transit demand (a relation operand, a substitution, a deferred shell)
+/// needs the member's TYPE, so a `Shallow` demand reads it at `Navigate`:
+/// the `Shallow` terminal of a projected path is a one-level publication
+/// surface, and the surface of a union member (`Local | { $: number }`) is
+/// the empty object its arms share, never the union a relation compares.
+fn indexed_read_mode(context: ProjectionReductionContext) -> ProjectionMode {
+    match (context.demand, context.mode) {
+        (crate::semantic_query::ReductionDemand::StructuralTransit, ProjectionMode::Shallow) => {
+            ProjectionMode::Navigate
+        }
+        (_, mode) => mode,
     }
 }

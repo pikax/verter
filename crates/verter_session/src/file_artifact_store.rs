@@ -3684,10 +3684,11 @@ impl verter_type_engine::invalidation_domain::InvalidationByCanonical for FileAr
 ///
 /// Exact arms (`ExternalSpecifier` / `WildcardAmbient` / `GlobalAugmentation`)
 /// are decided from the fact's specifier alone — no resolver needed. The
-/// `ResolvedRelativeCanonical` arm cannot resolve the augmenter's relative
-/// specifier without a module resolver (the store layer has none), so it
-/// answers CONSERVATIVELY: any relative `declare module "./x"` fact is treated
-/// as a potential contributor to EVERY relative-target entry.
+/// `ResolvedRelativeCanonical` arm cannot resolve the augmenter's specifier
+/// without a module resolver (the store layer has none), so it answers
+/// CONSERVATIVELY: any `declare module` fact naming a module (`"./x"` or
+/// `"pkg"`) is treated as a potential contributor to EVERY resolved-file
+/// entry.
 ///
 /// Over-matching here is correctness-safe: an invalidation only DROPS an index
 /// entry, and the next [`FileArtifactStore::ensure_augmentation_index_populated`]
@@ -3702,11 +3703,10 @@ fn augmenter_fact_could_contribute(
     target_key: &AugmentationTargetKey,
 ) -> bool {
     let specifier: &str = fact.specifier.as_ref();
-    // Same relative class as `augmenter_matches_target` — the exact
-    // matcher and this conservative invalidation variant must agree on
-    // which facts are relative, or a `declare module '..'` fact would
-    // be exact-matched as relative but never invalidate relative-target
-    // entries.
+    // Same relative class as `augmenter_matches_target`'s external arm —
+    // the exact matcher and this conservative invalidation variant must
+    // agree on which facts are relative, or a `declare module '..'` fact
+    // would be exact-matched as relative yet invalidate external entries.
     let is_relative = verter_session_query::resolution::is_relative_specifier(specifier);
     match &target_key.target {
         AugmentationTargetKind::ExternalSpecifier(target_spec) => {
@@ -3714,9 +3714,13 @@ fn augmenter_fact_could_contribute(
             let is_global = specifier == GLOBAL_AUGMENTATION_TAG;
             !is_relative && !is_wildcard && !is_global && specifier == target_spec.as_ref()
         }
-        // Conservative: cannot resolve the relative specifier without a
-        // module resolver, so any relative fact could target this entry.
-        AugmentationTargetKind::ResolvedRelativeCanonical(_) => is_relative,
+        // Conservative: cannot resolve the specifier without a module
+        // resolver, so any fact naming a module could target this entry.
+        AugmentationTargetKind::ResolvedRelativeCanonical(_) => {
+            verter_session_query::source::augmentation::specifier_augments_resolved_module(
+                specifier,
+            )
+        }
         AugmentationTargetKind::WildcardAmbient(target_pattern) => {
             specifier.contains('*') && specifier == target_pattern.as_ref()
         }

@@ -32,8 +32,8 @@ use std::sync::Arc;
 use verter_type_expr::{
     AuthoredPropertyKey, CanonicalIndexInt, FunctionExpr, FunctionParam, FunctionSpans,
     IndexSignature, IndexSignatureSpans, MappedModifier, MemberSpans, MethodSignature, ObjectExpr,
-    ObjectMember, ObjectProperty, PrimitiveName, PropertyKey as TypedPropertyKey, SpreadMember,
-    TupleElement, TypeAuthoredPropertyKey, TypeExpr, TypeParam, TypePredicate,
+    ObjectMember, ObjectMethodKind, ObjectProperty, PrimitiveName, PropertyKey as TypedPropertyKey,
+    SpreadMember, TupleElement, TypeAuthoredPropertyKey, TypeExpr, TypeParam, TypePredicate,
     TypePredicateSubject, UnknownValue, ValueRef,
 };
 
@@ -841,9 +841,10 @@ fn lower_ts_signature<'b, 'a>(
                 )),
                 type_annotation: None,
             };
-            Some(ObjectMember::Method(
-                MethodSignature::with_key_spans_public(key, func, method.optional, spans),
-            ))
+            let mut signature =
+                MethodSignature::with_key_spans_public(key, func, method.optional, spans);
+            signature.method_kind = interface_method_kind(method.kind);
+            Some(ObjectMember::Method(signature))
         }
         TSSignature::TSCallSignatureDeclaration(call) => {
             let func = normalize_function_type_params(function_with_authored_return(
@@ -1589,6 +1590,17 @@ fn normalize_property_key_type_params<'e>(
 // ---------------------------------------------------------------------------
 // Property-key lowering
 // ---------------------------------------------------------------------------
+
+/// The member kind an interface or type-literal method signature declares:
+/// `get value(): T` and `set value(v: T)` are the two halves of one accessor
+/// property, never two overloads of a method.
+pub fn interface_method_kind(kind: oxc_ast::ast::TSMethodSignatureKind) -> ObjectMethodKind {
+    match kind {
+        oxc_ast::ast::TSMethodSignatureKind::Get => ObjectMethodKind::Get,
+        oxc_ast::ast::TSMethodSignatureKind::Set => ObjectMethodKind::Set,
+        oxc_ast::ast::TSMethodSignatureKind::Method => ObjectMethodKind::Method,
+    }
+}
 
 /// Lower an authored OXC key without erasing computed syntax or canonical
 /// numeric identity.

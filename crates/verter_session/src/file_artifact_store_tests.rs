@@ -1406,6 +1406,55 @@ fn backslash_relative_augmentation_fact_classifies_relative_not_external() {
 }
 
 #[test]
+fn package_augmentation_fact_augments_the_file_its_specifier_resolves_to() {
+    // `declare module "@vue/reactivity"` in a file of another package
+    // augments the module FILE the specifier resolves to from that file, as
+    // a relative specifier does: it is discovered for that resolved-file
+    // target, never for a file it does not resolve to, and a change to it
+    // retires the resolved-file entries.
+    let store = FileArtifactStore::new();
+    store.insert_artifacts(
+        FileArtifactKey::base_for_test(Arc::from("/nm/core/index.d.ts"), [9u8; 16]),
+        synth_augmenter_artifacts_for_specifier("@vue/reactivity", [0x55u8; 16]),
+    );
+    let resolve = |augmenter: &str, specifier: &str| {
+        assert_eq!(augmenter, "/nm/core/index.d.ts");
+        (specifier == "@vue/reactivity").then(|| Arc::<str>::from("/nm/reactivity/index.d.ts"))
+    };
+    let resolved_key = target_key_for(AugmentationTargetKind::ResolvedRelativeCanonical(
+        Arc::from("/nm/reactivity/index.d.ts"),
+    ));
+    let set = store.ensure_augmentation_index_populated(&resolved_key, resolve, None);
+    assert_eq!(
+        set.entries.len(),
+        1,
+        "the package augmentation is discovered for the file its specifier resolves to"
+    );
+    let other_key = target_key_for(AugmentationTargetKind::ResolvedRelativeCanonical(
+        Arc::from("/nm/other/index.d.ts"),
+    ));
+    let set = store.ensure_augmentation_index_populated(&other_key, resolve, None);
+    assert!(
+        set.entries.is_empty(),
+        "a file the specifier does not resolve to is not augmented"
+    );
+
+    let fact = verter_session_query::source::augmentation::ModuleAugmentationFact {
+        specifier: super::InternedSpecifier::from("@vue/reactivity"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        augmented_name: verter_session_query::facts::registry::InternedName::from("Augmented"),
+        space: verter_session_query::facts::registry::SymbolSpace::Type,
+        augmented_member_shape_fingerprint: [0u8; 16],
+    };
+    assert_eq!(
+        store.invalidate_augmentation_index_for_augmenter(std::slice::from_ref(&fact)),
+        2,
+        "a package augmentation's change retires every resolved-file entry"
+    );
+    assert!(store.get_augmenter_set(&resolved_key).is_none());
+}
+
+#[test]
 fn bare_dot_dot_fact_conservatively_invalidates_relative_target_entries() {
     // The resolver-free invalidation variant
     // (`augmenter_fact_could_contribute`) must agree with the exact

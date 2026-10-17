@@ -536,6 +536,35 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             (check, self.conditional_operands(check, extends))
         });
         let operands_complete = operand_read.observations_are_complete();
+        let incomplete_without_recovery = !operands_complete && {
+            let (_, operands) = operand_read.value();
+            !operands.checker_recovery
+                && !self.is_conditional_checker_recovery(operands.absorbed_check)
+                && !self.is_conditional_checker_recovery(operands.extends)
+        };
+        if incomplete_without_recovery && operand_read.value().0 == authored_check {
+            if let Some(arm) = self.true_through_written_arm(authored_check, extends) {
+                // The normalized operands are unused: the arm's own complete
+                // relation proves the true branch. Their reuse evidence
+                // still belongs to this build.
+                operand_read.preserve_reuse_evidence(self);
+                let _ = operand_read.discard();
+                if arm.adopt(self).is_err() || self.cancellation.is_cancelled() {
+                    return self.cancelled_build_output();
+                }
+                let winner = branches.branch(self, true);
+                let mut output = self.commit_conditional_winner(
+                    authored_check,
+                    extends,
+                    winner,
+                    ConditionalBranchSelection::True,
+                    None,
+                    false,
+                );
+                branches.committed(self, true, &mut output);
+                return output;
+            }
+        }
         let (check, operands) = match operand_read.adopt(self) {
             Ok(operands) => operands,
             Err(abort) => {
@@ -545,11 +574,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 ));
             }
         };
-        if !operands_complete
-            && !operands.checker_recovery
-            && !self.is_conditional_checker_recovery(operands.absorbed_check)
-            && !self.is_conditional_checker_recovery(operands.extends)
-        {
+        if incomplete_without_recovery {
             // A relation can reject an early constituent without demanding
             // a later one. That short circuit cannot repair an operand whose
             // normalization already lacked exact evidence: an approximate
@@ -678,6 +703,52 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 )
             }
         }
+    }
+
+    /// The complete relation proving a conditional's true branch through
+    /// one written arm of its union `extends` operand, when normalizing the
+    /// whole operand could not finish: a check related to one arm is
+    /// related to the union whatever its other arms are
+    /// (`someTypeRelatedToType`), so an arm the lane cannot read never takes
+    /// that branch away. Only the true branch is proven so — the false one
+    /// needs every arm — and only for a check that is no lattice extreme or
+    /// union, over operands holding no type parameter and an `extends`
+    /// inferring nothing. `None` when no arm relates completely.
+    fn true_through_written_arm(
+        &self,
+        check: SemanticNodeId,
+        extends: SemanticNodeId,
+    ) -> Option<super::flow_return_fact::ObservedRead<super::dispatch_txn::RelationStep>> {
+        let arms = match self.graph().node_data(extends).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.members_arc(),
+            _ => return None,
+        };
+        if self.peek_special(check).is_some()
+            || matches!(
+                self.graph().node_data(check).as_deref(),
+                Some(SemanticNodeData::Union(_) | SemanticNodeData::IndexedAccess { .. })
+            )
+            || !matches!(
+                self.conditional_infer_route(extends),
+                ConditionalInferRoute::None
+            )
+            || !self.type_params_within(&[check, extends]).is_empty()
+        {
+            return None;
+        }
+        for arm in arms.iter() {
+            let read = self.observe_read(|| self.execute_relate_pair(check, *arm));
+            if read.observations_are_complete()
+                && matches!(
+                    read.value(),
+                    super::dispatch_txn::RelationStep::Assignable { .. }
+                )
+            {
+                return Some(read);
+            }
+            let _ = read.discard();
+        }
+        None
     }
 
     /// A conditional's operands as the checker constructs them before it

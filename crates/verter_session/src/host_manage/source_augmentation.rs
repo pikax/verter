@@ -54,7 +54,7 @@ impl<'a> AugmentationRequestDriver<'a> {
                 let relative = if matches!(
                     key.target,
                     AugmentationTargetKind::ResolvedRelativeCanonical(_)
-                ) && verter_session_query::resolution::is_relative_specifier(
+                ) && verter_session_query::source::augmentation::specifier_augments_resolved_module(
                     fact.specifier.as_ref(),
                 ) {
                     resolve_relative_canonical(

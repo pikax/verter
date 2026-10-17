@@ -8375,7 +8375,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         }
         let _ = concrete_read.adopt(self);
-        if let Some(r) = self.try_object_vs_record_relation(source, target, bindings) {
+        if let Some(r) =
+            self.try_object_vs_record_relation(source, target, bindings, intersection_target_arm)
+        {
             return r;
         }
         // A naked type parameter on the other side takes the operand as it
@@ -9332,6 +9334,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some(targets) = self.weak_target_surfaces(target) else {
             return false;
         };
+        self.weak_surfaces_reject(source, target, &targets)
+    }
+
+    /// The weak-type check of `source` against the weak surfaces `targets`
+    /// of `target` ([`Self::weak_target_rejects`]).
+    fn weak_surfaces_reject(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        targets: &[SurfaceView],
+    ) -> bool {
         let Some((keys, has_signatures)) = self.weak_check_source_members(source, target, true)
         else {
             return false;
@@ -9354,15 +9367,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// intersection whose arms are all weak objects. `None` otherwise.
     fn weak_target_surfaces(&self, target: SemanticNodeId) -> Option<Vec<SurfaceView>> {
         let graph = self.graph();
-        let is_weak = |surface: &SurfaceView| {
-            let members = surface.closed().complete_members();
-            !members.is_empty()
-                && members.iter().all(|member| member.optional)
-                && surface.call_signatures.is_empty()
-                && surface.construct_signatures.is_empty()
-                && surface.index_signatures.is_empty()
-                && !surface.closed().has_index_signature()
-        };
+        let is_weak = surface_is_weak;
         match graph.node_data(target).as_deref()? {
             SemanticNodeData::Object(surface) => is_weak(surface).then(|| vec![surface.clone()]),
             SemanticNodeData::Intersection(members) => {
@@ -10113,8 +10118,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // property type it reads (`Box['lit']` IS `2`, and an
                 // optional `opt?: 3` reads `3 | undefined`): the checker
                 // resolves it where it is written, so a relation compares
-                // that type. One the deferred evaluator cannot read further
-                // (`T['k']` over an open `T`) stays the operand it is.
+                // that type — read at `Navigate`, which keeps the member's
+                // type, never at `Shallow`, whose one-level surface of a
+                // union member (`Local | { $: number }`) is the empty object
+                // its arms share. One the deferred evaluator cannot read
+                // further (`T['k']` over an open `T`) stays the operand it
+                // is.
                 SemanticNodeData::DeferredCallable(_) => {
                     drop(data);
                     let materialized = self.materialize_returned_callable(current);
@@ -10127,7 +10136,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 SemanticNodeData::IndexedAccess { .. } => {
                     drop(data);
                     let read = self
-                        .evaluate_deferred_semantic_node_with_context(current, transit)
+                        .evaluate_deferred_semantic_node_with_context(
+                            current,
+                            ProjectionReductionContext::structural_transit_with_mode(
+                                crate::semantic_query::ProjectionMode::Navigate,
+                            ),
+                        )
                         .into_active_query_build_node(self);
                     if read == current {
                         return IdentityCarrierUnwrap::Concrete(current);
@@ -10496,6 +10510,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         source: SemanticNodeId,
         target: SemanticNodeId,
         bindings: &mut Vec<InferBinding>,
+        intersection_target_arm: bool,
     ) -> Option<RelationResult> {
         let graph = self.graph();
         let source_data = graph.node_data(source)?;
@@ -10544,6 +10559,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
 
         Some(match target_record {
+            // A weak target takes no source sharing none of its properties,
+            // checked on the whole target, never on one intersection arm.
+            RecordTargetShape::LiteralKey(target_view)
+                if !intersection_target_arm
+                    && surface_is_weak(&target_view)
+                    && self.weak_surfaces_reject(
+                        unwrapped,
+                        target,
+                        std::slice::from_ref(&target_view),
+                    ) =>
+            {
+                RelationResult::NotAssignable
+            }
             RecordTargetShape::LiteralKey(target_view) => {
                 self.relate_objects(&source_view, &target_view, bindings)
             }
@@ -15612,4 +15640,16 @@ pub mod reverse_ownership_tests {
             "the accepted aggregate reaches bindings only through session fixation"
         );
     }
+}
+
+/// Whether `surface` is a weak type (`isWeakType`): at least one property,
+/// every property optional, and no call, construct or index signature.
+fn surface_is_weak(surface: &SurfaceView) -> bool {
+    let members = surface.closed().complete_members();
+    !members.is_empty()
+        && members.iter().all(|member| member.optional)
+        && surface.call_signatures.is_empty()
+        && surface.construct_signatures.is_empty()
+        && surface.index_signatures.is_empty()
+        && !surface.closed().has_index_signature()
 }

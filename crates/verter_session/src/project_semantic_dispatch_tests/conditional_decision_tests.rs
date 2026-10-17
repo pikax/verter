@@ -9,9 +9,12 @@
 //! here): the type a generic function's body holds is read off TS2322 for
 //! `const s: never = null! as <probe>` inside that function, and a call's
 //! answer off `const s: never = f()`, with no diagnostic in the calling
-//! function.
+//! function. Rows over installed packages are measured the same way with
+//! `--moduleResolution bundler --module esnext --target es2020
+//! --skipLibCheck`, in a directory whose `node_modules` is the one the
+//! matrix links.
 
-use super::differential_harness_tests::{Matrix, Read, ALL};
+use super::differential_harness_tests::{Matrix, Read, Setting, ALL, LOOSE_IMPLICIT, STRICT};
 
 /// Generic functions holding each conditional; overloads choosing between a
 /// parameter a deferred conditional argument may relate to and `unknown`;
@@ -209,4 +212,246 @@ fn a_distributive_target_whose_reading_is_unknown_is_not_answered() {
             );
         }
     }
+}
+
+/// Instantiated conditionals of each lattice row and distribution shape,
+/// constrained generic operands, and `keyof T` arguments to overloads.
+const CLOSED_SOURCE: &str = r##"
+declare function pickStr(s: string): "hit"; declare function pickStr(s: unknown): "other";
+type D<T> = T extends string ? "y" : "n";
+type W<T> = [T] extends [string] ? "y" : "n";
+type Bx<T> = T extends any ? { v: T } : never;
+type N<T> = [T] extends [never] ? "never" : "other";
+type IsAny<T> = 0 extends 1 & T ? true : false;
+type K<T> = keyof T extends never ? "empty" : "keys";
+export function d1() { return null! as D<string | number>; }
+export function d2() { return null! as W<string | number>; }
+export function d3() { return null! as D<never>; }
+export function d4() { return null! as W<never>; }
+export function d5() { return null! as D<any>; }
+export function d6() { return null! as W<any>; }
+export function d7() { return null! as Bx<1 | 2>; }
+export function d8() { return null! as N<never>; }
+export function d9() { return null! as IsAny<any>; }
+export function d10() { return null! as IsAny<unknown>; }
+export function d11() { return null! as D<boolean>; }
+export function d12() { return null! as K<{}>; }
+export function d13() { return null! as K<{ a: 1 }>; }
+export function d14() { return null! as D<unknown>; }
+export function d18<T extends string>() { return null! as (T extends string ? 1 : 2); }
+declare const RefSymbol: unique symbol;
+declare const RawSymbol: unique symbol;
+declare const Marker: unique symbol;
+interface Acc<T = any, S = T> { get value(): T; set value(_: S); [RefSymbol]: true; }
+type ShallowAcc<T = any, S = T> = Acc<T, S> & { [Marker]?: true };
+export function a1() { return null! as (Acc<number> extends Acc<infer V, unknown> ? V : 0); }
+export function a2() { return null! as (Acc<number> extends ShallowAcc<infer V, unknown> ? V : 0); }
+export function a3() { return null! as (Acc<number> extends Acc<number, unknown> ? 1 : 2); }
+export function a4() { return null! as (Acc<number> extends { value: string } ? 1 : 2); }
+export function a5() { return null! as Acc<number>["value"]; }
+export function w1() { return null! as ({ a: 1 } extends { [RawSymbol]?: true } ? 1 : 2); }
+export function w2() { return null! as ({ a: 1 } extends { a?: 1; b?: 2 } ? 1 : 2); }
+export function w3() { return null! as ({} extends { [RawSymbol]?: true } ? 1 : 2); }
+export function k5<T>(x: T extends string ? "a" : "b") { return pickStr(x); }
+export function k6<T>(x: T extends string ? "a" : 1) { return pickStr(x); }
+"##;
+
+/// A union check distributes and a wrapped one does not (`D<string |
+/// number>` is `"y" | "n"`, `W<string | number>` `"n"`); `never` is the
+/// empty union to a distributive check and an ordinary type to a wrapped
+/// one; `any` takes both branches of a distributive check and relates to a
+/// wrapped one. A check holding a type parameter its constraint would
+/// decide (`T extends string`) stays deferred. An interface's `get` / `set`
+/// pair is one property of its getter's type, so a reference to it relates
+/// and infers through that property whatever its setter takes. A weak
+/// target (every property optional) takes no source that has properties
+/// and shares none of them. A deferred conditional argument relates to a
+/// parameter both its branches relate to, never to one only its true
+/// branch does.
+#[test]
+fn instantiated_and_constrained_conditionals_decide_as_the_checker_decides_them() {
+    let failures = Matrix::new(CLOSED_SOURCE).settings(&ALL).returns(&[
+        ("d1", "\"n\" | \"y\""),
+        ("d2", "\"n\""),
+        ("d3", "never"),
+        ("d4", "\"y\""),
+        ("d5", "\"n\" | \"y\""),
+        ("d6", "\"y\""),
+        ("d7", "{ v: 1; } | { v: 2; }"),
+        ("d8", "\"never\""),
+        ("d9", "true"),
+        ("d10", "false"),
+        ("d11", "\"n\""),
+        ("d12", "\"empty\""),
+        ("d13", "\"keys\""),
+        ("d14", "\"n\""),
+        ("d18", "T extends string ? 1 : 2"),
+        ("a1", "number"),
+        ("a2", "number"),
+        ("a3", "1"),
+        ("a4", "2"),
+        ("a5", "number"),
+        ("w1", "2"),
+        ("w2", "1"),
+        ("w3", "1"),
+        ("k5", "\"hit\""),
+        ("k6", "\"other\""),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Vue's ref unwrapping read through the real `vue` package, whose
+/// `UnwrapRef` and `Ref` reach the probe through the `vue` → runtime-dom →
+/// runtime-core → reactivity re-export chain. `Ref` declares its value as a
+/// `get value()` / `set value()` accessor pair.
+const VUE_SOURCE: &str = r#"
+import { ref, proxyRefs, type UnwrapRef, type ShallowUnwrapRef, type Ref, type ShallowRef } from 'vue'
+declare function r<T>(value: T): UnwrapRef<T>
+const count = ref(0)
+export function unwrapNumber() { return null! as UnwrapRef<number>; }
+export function unwrapString() { return null! as UnwrapRef<string>; }
+export function refZero() { return ref(0); }
+export function unwrapInferred() { return r(0); }
+export function unwrapRefNumber() { return null! as UnwrapRef<Ref<number>>; }
+export function refAsShallow() { return null! as (Ref<number> extends ShallowRef<infer V, unknown> ? V : 0); }
+export function exposedRefs() { return null! as ShallowUnwrapRef<{ count: typeof count }>; }
+export function returnedRefs() { return null! as ShallowUnwrapRef<{ a: Ref<number>; b: string }>; }
+export function proxied() { return proxyRefs({ count }); }
+"#;
+
+/// The two outermost settings of the four, for the installed-package rows:
+/// each project loads the real packages, and their answers are alike in all
+/// four settings.
+const EXTREMES: [Setting; 2] = [STRICT, LOOSE_IMPLICIT];
+
+/// Each answer is the checker's, alike in all four settings: a primitive
+/// and a ref decide their unwrapping, `ref(0)` is a `Ref<number, number>`,
+/// and the refs a component exposes or returns unwrap to their values — a
+/// `Ref` relates to `ShallowRef<infer V>` and `Ref<infer V>` through its
+/// accessor's read type.
+#[test]
+fn vue_ref_unwrapping_decides_through_the_real_re_export_chain() {
+    let failures = Matrix::new(VUE_SOURCE)
+        .settings(&EXTREMES)
+        .installed_packages()
+        .returns(&[
+            ("unwrapNumber", "number"),
+            ("unwrapString", "string"),
+            ("refZero", "Ref<number, number>"),
+            ("unwrapInferred", "number"),
+            ("unwrapRefNumber", "number"),
+            ("refAsShallow", "number"),
+            ("exposedRefs", "{ count: number; }"),
+            ("returnedRefs", "{ a: number; b: string; }"),
+            ("proxied", "{ count: number; }"),
+        ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Vue's `RefUnwrapBailTypes`, declared empty by reactivity and augmented
+/// by `declare module "@vue/reactivity"` blocks in runtime-core and
+/// runtime-dom, read from the dependencies `vue`'s runtime-dom installs.
+const BAIL_SOURCE: &str = r#"
+import type { RefUnwrapBailTypes, UnwrapRef } from '@vue/reactivity'
+import type { VNode, ComponentInternalInstance } from '@vue/runtime-core'
+import type {} from '@vue/runtime-dom'
+type Bail = RefUnwrapBailTypes[keyof RefUnwrapBailTypes];
+type CoreBail = RefUnwrapBailTypes["runtimeCoreBailTypes"];
+export function coreKey() { return null! as ("runtimeCoreBailTypes" extends keyof RefUnwrapBailTypes ? 1 : 2); }
+export function domKey() { return null! as ("runtimeDOMBailTypes" extends keyof RefUnwrapBailTypes ? 1 : 2); }
+export function vnodeCore() { return null! as (VNode extends CoreBail ? 1 : 2); }
+export function holderCore() { return null! as ({ $: ComponentInternalInstance } extends CoreBail ? 1 : 2); }
+export function plainCore() { return null! as ({ a: 1 } extends CoreBail ? 1 : 2); }
+export function vnode() { return null! as (VNode extends Bail ? 1 : 2); }
+export function unwrapVNode() { return null! as (UnwrapRef<VNode> extends VNode ? 1 : 2); }
+"#;
+
+/// A package's `declare module "<package>"` block augments the module file
+/// the specifier resolves to from the augmenting file, so the bail-type
+/// interface holds both the runtime-core and the runtime-dom member, the
+/// runtime-core member reads as the checker reads it, and a `VNode` bails
+/// out of ref unwrapping through the written bail arm it relates to.
+#[test]
+fn package_augmentations_merge_into_the_module_they_resolve_to() {
+    let failures = Matrix::new(BAIL_SOURCE)
+        .settings(&EXTREMES)
+        .installed_packages_of(&["vue", "@vue/runtime-dom"])
+        .returns(&[
+            ("coreKey", "1"),
+            ("domKey", "1"),
+            ("vnodeCore", "1"),
+            ("holderCore", "1"),
+            ("plainCore", "2"),
+            ("unwrapVNode", "1"),
+        ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The runtime-dom member is `DomType<Node | Window>`, which reads
+/// `typeof globalThis`: with no standard library registered the lane cannot
+/// read it, so a conditional whose `extends` is the whole bail union, not a
+/// union written with an arm the check relates to, stays unavailable —
+/// never a branch the missing member could overturn (the checker answers
+/// `1`).
+#[test]
+fn a_bail_union_with_an_unreadable_member_is_not_answered() {
+    let reads: Vec<(Read<'_>, Vec<&str>)> = ["vnode"]
+        .into_iter()
+        .map(|function| (Read::Return(function), vec!["1"]))
+        .collect();
+    let verdicts = Matrix::new(BAIL_SOURCE)
+        .settings(&ALL[..1])
+        .installed_packages_of(&["vue", "@vue/runtime-dom"])
+        .verdicts(&reads);
+    for ((read, _), row) in reads.iter().zip(&verdicts) {
+        for verdict in row {
+            assert!(
+                !verdict.matched && verdict.class == "GAP",
+                "`{}` is unavailable, not {} ({})",
+                read.text(),
+                verdict.class,
+                verdict.lane
+            );
+        }
+    }
+}
+
+/// An interface a sibling file augments through `declare module "./base"`,
+/// read by an indexed access as a conditional's `extends` operand.
+const AUGMENTED_FILES: &[(&str, &str)] = &[
+    ("base.ts", "export interface Bag {}\n"),
+    (
+        "aug.ts",
+        "import type {} from './base'\ninterface Local { req: string }\ndeclare module './base' { interface Bag { core: Local | { $: number } } }\n",
+    ),
+];
+
+const AUGMENTED_SOURCE: &str = r#"
+import type { Bag } from './base'
+import type {} from './aug'
+type Core = Bag["core"];
+export function m1() { return null! as ({ a: 1 } extends Bag["core"] ? 1 : 2); }
+export function m2() { return null! as ({ $: 1 } extends Bag["core"] ? 1 : 2); }
+export function m3() { return null! as ({ a: 1 } extends Bag[keyof Bag] ? 1 : 2); }
+export function m4() { return null! as ({ a: 1 } extends Core ? 1 : 2); }
+export function m5() { return null! as ({ req: "x" } extends Core ? 1 : 2); }
+"#;
+
+/// A relation reads an indexed access operand as the member's TYPE: a union
+/// member read through an augmented interface (`Local | { $: number }`),
+/// directly or through an alias, relates arm by arm — never as the empty
+/// one-level surface its arms share, which every object would satisfy.
+#[test]
+fn indexed_members_of_an_augmented_interface_relate_as_their_type() {
+    let failures = Matrix::new(AUGMENTED_SOURCE)
+        .settings(&ALL)
+        .files(AUGMENTED_FILES)
+        .returns(&[
+            ("m1", "2"),
+            ("m2", "1"),
+            ("m3", "2"),
+            ("m4", "2"),
+            ("m5", "1"),
+        ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

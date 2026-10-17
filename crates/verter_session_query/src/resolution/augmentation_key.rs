@@ -74,8 +74,11 @@ pub enum AugmentationTargetKind {
     /// `declare module "vue" {}` — bare specifier resolved through the
     /// project's module resolver under the resolve env.
     ExternalSpecifier(InternedSpecifier),
-    /// `declare module "./local" {}` — relative path resolved against
-    /// the augmenter's own canonical.
+    /// The module FILE a `declare module` specifier resolves to from the
+    /// augmenter's own canonical: a relative path (`declare module
+    /// "./local" {}`) or a package (`declare module "@vue/reactivity" {}`
+    /// in a file of another package), each augmenting the file it resolves
+    /// to.
     ResolvedRelativeCanonical(Arc<str>),
     /// `declare module "*.css" {}` — wildcard ambient module pattern.
     WildcardAmbient(InternedGlobPattern),

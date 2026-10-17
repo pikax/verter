@@ -40,8 +40,20 @@ pub struct ModuleAugmentationFact {
 /// Duplicated here to keep the matcher free-standing of fact_emission.
 pub const GLOBAL_AUGMENTATION_TAG: &str = "$global";
 
-/// Classify an owned augmentation fact against a target. Relative resolution is
-/// supplied by the request owner; this predicate performs no source work.
+/// Whether a `declare module` specifier names a module whose FILE, resolved
+/// from the augmenter, it augments: every specifier but a wildcard pattern
+/// and the global tag. A relative specifier and a package specifier alike
+/// augment the file they resolve to, as the checker merges a module
+/// augmentation into the module its name resolves to.
+#[must_use]
+pub fn specifier_augments_resolved_module(specifier: &str) -> bool {
+    !specifier.contains('*') && specifier != GLOBAL_AUGMENTATION_TAG
+}
+
+/// Classify an owned augmentation fact against a target. The resolution of
+/// the fact's specifier from the augmenter is supplied by the request owner
+/// for a [`AugmentationTargetKind::ResolvedRelativeCanonical`] target; this
+/// predicate performs no source work.
 pub fn augmenter_matches_target(
     fact: &ModuleAugmentationFact,
     target_key: &AugmentationTargetKey,
@@ -58,7 +70,7 @@ pub fn augmenter_matches_target(
             !is_relative && !is_wildcard && !is_global && specifier == target_spec.as_ref()
         }
         AugmentationTargetKind::ResolvedRelativeCanonical(target_canon) => {
-            if !is_relative_specifier(specifier) {
+            if !specifier_augments_resolved_module(specifier) {
                 return false;
             }
             match resolved_relative_canonical {
