@@ -989,7 +989,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 };
                 nodes_of.push(crate::signature_kernel::SignatureCandidateNodes {
                     authored: walk.authored.get(&candidate.signature).copied(),
-                    constituents: Arc::from(nodes.into_boxed_slice()),
+                    constituents: verter_type_expr::OwnedSlice::from(nodes.into_boxed_slice()),
                 });
             }
             let set = set_from_candidates(store, list)?;

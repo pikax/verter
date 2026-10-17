@@ -22,6 +22,17 @@ pub(crate) fn construction_root_bytes() -> usize {
         + 2 * std::mem::size_of::<NodeRoot>()
 }
 
+impl verter_session_query::retention::owned::Measured for RootOwner {
+    /// Its operand list. The arena it roots in is the graph's storage,
+    /// charged with it.
+    fn heap_bytes(
+        &self,
+        _aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        verter_session_query::retention::allocation::vec_bytes(&self.ids)
+    }
+}
+
 impl Drop for RootOwner {
     fn drop(&mut self) {
         self.arena.release_roots(&self.ids);
@@ -31,7 +42,7 @@ impl Drop for RootOwner {
 /// One immutable retained operand multiset. Clones share one root reservation;
 /// separate owners acquire separate counts, including repeated operands.
 #[derive(Clone, Default)]
-pub struct NodeRootSet(Option<Arc<RootOwner>>);
+pub struct NodeRootSet(Option<verter_session_query::retention::owned::Owned<RootOwner>>);
 
 /// An ownership attachment is transport, never semantic key identity.
 /// Each wrapper holds its issuing arena's reservation even when the weak
@@ -108,9 +119,11 @@ impl NodeRootSet {
     /// without alias tracking: for a holder that is the set's only charged
     /// owner.
     pub(crate) fn heap_bytes(&self) -> usize {
-        use verter_session_query::retention::allocation::{arc_block_bytes, vec_bytes};
+        use verter_session_query::retention::allocation::{heap_block_bytes, vec_bytes};
         self.0.as_ref().map_or(0, |owner| {
-            arc_block_bytes(std::mem::size_of::<RootOwner>()) + vec_bytes(&owner.ids)
+            verter_session_query::retention::owned::Owned::<RootOwner>::cell_block_bytes()
+                .max(heap_block_bytes(0))
+                + vec_bytes(&owner.ids)
         })
     }
 
@@ -121,13 +134,8 @@ impl NodeRootSet {
         &self,
         aliases: &mut verter_session_query::retention::allocation::AliasSet,
     ) -> usize {
-        use verter_session_query::retention::allocation::{arc_block_bytes, vec_bytes};
-        match &self.0 {
-            Some(owner) if aliases.first(owner) => {
-                arc_block_bytes(std::mem::size_of::<RootOwner>()) + vec_bytes(&owner.ids)
-            }
-            _ => 0,
-        }
+        // The root owner is an owned allocation, charged by its own cell.
+        self.0.as_ref().map_or(0, |owner| owner.offer(aliases))
     }
 
     /// Keep a cache hit alive in the active issuing graph construction scope.
@@ -165,7 +173,9 @@ impl NodeRootSet {
             return Ok(Self::default());
         }
         arena.retain(&ids)?;
-        Ok(Self(Some(Arc::new(RootOwner { arena, ids }))))
+        Ok(Self(Some(verter_session_query::retention::owned::Owned::new(
+            RootOwner { arena, ids },
+        ))))
     }
 
     pub fn operands(&self) -> &[SemanticNodeId] {
@@ -268,10 +278,12 @@ impl NodeRoot {
     pub(crate) fn adopt(arena: Arc<NodeArenaCore>, id: SemanticNodeId) -> Self {
         Self {
             id,
-            roots: NodeRootSet(Some(Arc::new(RootOwner {
-                arena,
-                ids: vec![id],
-            }))),
+            roots: NodeRootSet(Some(verter_session_query::retention::owned::Owned::new(
+                RootOwner {
+                    arena,
+                    ids: vec![id],
+                },
+            ))),
         }
     }
     pub fn id(&self) -> SemanticNodeId {

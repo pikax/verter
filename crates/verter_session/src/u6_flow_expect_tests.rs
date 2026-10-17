@@ -6368,7 +6368,7 @@ fn flow_return_candidate_count(id: &str, script: &str) -> usize {
             FunctionPartIdentity::DeclarationBody,
             0,
         ),
-        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(&canonical),
         demand: ReturnProjectionDemand::whole_return(),
         input: verter_type_engine::semantic_query::FlowInputContext::empty(),

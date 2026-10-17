@@ -61,6 +61,17 @@ impl<T: OwnedHeap> OwnedHeap for Arc<[T]> {
     }
 }
 
+impl<T: OwnedHeap> OwnedHeap for Box<[T]> {
+    /// An exclusively owned list: its backing and its items' heap.
+    fn owned_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
+        heap_block_bytes(std::mem::size_of_val::<[T]>(self))
+            + self
+                .iter()
+                .map(|item| item.owned_heap_bytes(aliases))
+                .sum::<usize>()
+    }
+}
+
 impl<T: OwnedHeap> OwnedHeap for Option<T> {
     fn owned_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
         self.as_ref()
@@ -395,8 +406,15 @@ node_set_key_heap_bytes!(
     super::FlowNarrowingKey,
     super::ContextualTypingKey,
     super::InferableParamSetId,
-    super::CanonicalTypeSubstitution,
 );
+
+impl super::CanonicalTypeSubstitution {
+    /// The pair list — an owned allocation charged by its own cell — and
+    /// its root attachment's owner.
+    pub(crate) fn key_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
+        self.0.offer(aliases) + self.1 .0.owned_heap_bytes(aliases)
+    }
+}
 
 impl super::PendingSubstitutionFrame {
     /// The frame's pair list.

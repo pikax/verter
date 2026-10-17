@@ -854,7 +854,7 @@ fn key_full(
             part,
             overload_ordinal,
         ),
-        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(canonical),
         demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
         input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -1479,7 +1479,7 @@ fn non_empty_contextual_input_point_fails_closed() {
             ),
         );
         key.input = verter_type_engine::semantic_query::FlowInputContext {
-            contextual_parameters: Arc::from(vec![contextual].into_boxed_slice()),
+            contextual_parameters: verter_type_expr::OwnedSlice::from(vec![contextual].into_boxed_slice()),
         };
         assert_eq!(eval_key_on(&host, dispatch, key.clone()), Outcome::Miss);
         assert_eq!(

@@ -30,10 +30,12 @@ struct DeliveryOwner {
 }
 
 impl DeliveryOwner {
-    /// Pin this owner's own allocations against `account`: its `Arc` block
-    /// and its two root owners' blocks and operand lists. The rooted nodes
-    /// are the arena's; the signature epoch is its owner's; the allocations
-    /// the delivery hands out carry their own charges.
+    /// Pin this owner's own allocations against `account`: its `Arc` block.
+    /// Its two root owners are owned allocations a caller can clone out of
+    /// a delivered value, so each charges itself, pinned here for the
+    /// owner's readers. The rooted nodes are the arena's; the signature
+    /// epoch is its owner's; the allocations the delivery hands out carry
+    /// their own charges.
     fn charged(
         mut self,
         account: &std::sync::Arc<verter_session_query::retention::SemanticRetentionAccount>,
@@ -43,6 +45,9 @@ impl DeliveryOwner {
         let bytes = arc_block_bytes(std::mem::size_of::<Self>())
             + self.roots.owned_heap_bytes(&mut aliases)
             + self.key_roots.owned_heap_bytes(&mut aliases);
+        aliases
+            .take_handles()
+            .pin(verter_session_query::retention::owned::ChargeCtx::new(account));
         self._own = Some(verter_session_query::retention::shared::CallerHold::pin(
             account, bytes,
         ));

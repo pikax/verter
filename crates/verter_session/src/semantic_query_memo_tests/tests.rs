@@ -9243,7 +9243,7 @@ mod prepared_identity_bijection {
                 function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
                 overload_ordinal,
             },
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: verter_type_engine::semantic_query::FlowReturnContext {
                 parse_env_hash: h16(0),
                 resolve_env_hash: h16(0),
@@ -9875,7 +9875,7 @@ mod release_embedded_node_family_tests {
                 function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
                 overload_ordinal: 0,
             },
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: verter_type_engine::semantic_query::FlowReturnContext {
                 parse_env_hash: h16(0),
                 resolve_env_hash: h16(0),

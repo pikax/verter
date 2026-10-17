@@ -1002,7 +1002,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 continue;
             };
             let mut instantiated = demand;
-            instantiated.normalized_type_args = Arc::from(arguments.into_boxed_slice());
+            instantiated.normalized_type_args = verter_type_expr::OwnedSlice::from(arguments.into_boxed_slice());
             instantiated.context.type_substitution =
                 crate::semantic_query::CanonicalTypeSubstitution::new(self.graph(), bindings);
             push_unique(out, instantiated);
@@ -1561,7 +1561,7 @@ pub(super) fn is_uninstantiated(key: &FlowReturnKey) -> bool {
 /// demand, its own binders unbound.
 pub(super) fn uninstantiated(key: &FlowReturnKey) -> FlowReturnKey {
     let mut uninstantiated = key.clone();
-    uninstantiated.normalized_type_args = Arc::from(Vec::new().into_boxed_slice());
+    uninstantiated.normalized_type_args = verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice());
     uninstantiated.context.type_substitution =
         crate::semantic_query::CanonicalTypeSubstitution::empty();
     uninstantiated

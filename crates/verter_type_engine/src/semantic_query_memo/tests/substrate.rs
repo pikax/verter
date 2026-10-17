@@ -2944,7 +2944,6 @@ fn display_and_union_by_ordinal_answer_only_inside_a_construction_lane() {
 #[test]
 fn dep_signature_interner_charges_the_rail_blocks_it_keeps_until_swept() {
     use verter_session_query::retention::owned::{ChargeCtx, Owned};
-    use verter_session_query::retention::shared::AliasCharges;
     use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
 
     const RAILS: usize = 64;
@@ -2976,7 +2975,6 @@ fn dep_signature_interner_charges_the_rail_blocks_it_keeps_until_swept() {
     );
 
     // A caller keeping a rail pays for its entries, never its block again.
-    let registry = AliasCharges::new();
     rails[0]
         .owned()
         .expect("a nonempty rail")

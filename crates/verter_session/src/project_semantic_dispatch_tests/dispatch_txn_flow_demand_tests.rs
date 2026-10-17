@@ -38,7 +38,7 @@ fn flow_demand_carriers_default_none_and_round_trip() {
             function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
             overload_ordinal: 0,
         },
-        normalized_type_args: Arc::from([]),
+        normalized_type_args: verter_type_expr::OwnedSlice::from([]),
         context: FlowReturnContext {
             parse_env_hash: [0; 16],
             resolve_env_hash: [0; 16],
@@ -159,7 +159,7 @@ fn zero_obligation_demand_never_converges_or_seals() {
             function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
             overload_ordinal: 0,
         },
-        normalized_type_args: Arc::from([]),
+        normalized_type_args: verter_type_expr::OwnedSlice::from([]),
         context: FlowReturnContext {
             parse_env_hash: [0; 16],
             resolve_env_hash: [0; 16],

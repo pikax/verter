@@ -128,22 +128,30 @@ impl MemoEntry {
     /// owner for as long as it lives; the carrier, the delivered rails and
     /// the value are shared allocations, charged once through
     /// [`super::retention::MemoRetention`]'s shared holds.
-    pub(super) fn own_retained_footprint_bytes(
+    ///
+    /// The materialised point's path names owned strings: those are charged
+    /// by their own cells and held by the candidate beside this charge.
+    pub(super) fn own_retained_footprint(
         &self,
         family: &FamilyKey,
         populated_slots: usize,
         registered_canonicals: usize,
-    ) -> usize {
+    ) -> verter_session_query::retention::Footprint {
         use crate::semantic_query::allocation_footprint::OwnedHeap as _;
         let mut aliases = verter_session_query::retention::allocation::AliasSet::new();
-        populated_slots
+        let registration = super::reverse_index::registration_footprint(
+            family,
+            registered_canonicals,
+            populated_slots,
+        );
+        let bytes = populated_slots
             * (std::mem::size_of::<Self>() + verter_session_query::retention::ENTRY_OVERHEAD_BYTES)
             + self.satisfied_projection.owned_heap_bytes(&mut aliases)
-            + super::reverse_index::registration_bytes(
-                family,
-                registered_canonicals,
-                populated_slots,
-            )
+            + registration.bytes;
+        verter_session_query::retention::Footprint {
+            bytes,
+            handles: aliases.take_handles().merge(registration.handles),
+        }
     }
 }
 
@@ -1401,7 +1409,7 @@ pub(super) struct FamilyPublishOutcome {
 pub(crate) struct FamilySlots {
     /// The family's own container charge: its key and slot lists in the
     /// family map and its record in the retention budget's ledger, held for
-    /// as long as the family is keyed ([`super::retention::family_container_bytes`]).
+    /// as long as the family is keyed ([`super::retention::family_container_footprint`]).
     _retention: Arc<verter_session_query::retention::RetentionCharge>,
     single: CandidateList,
     identity: CandidateList,

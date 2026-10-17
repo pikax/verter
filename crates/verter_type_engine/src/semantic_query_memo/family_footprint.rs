@@ -53,10 +53,19 @@ use crate::semantic_query::{
 /// owned bytes inside them).
 /// The heap a clone of `key` allocates afresh: its boxes and their
 /// contents, every `Arc` being shared with `key`.
-pub(super) fn family_key_clone_heap_bytes(key: &FamilyKey) -> usize {
+///
+/// A clone shares the key's owned names too: they are handed back with the
+/// figure, for the clone's holder to hold.
+pub(super) fn family_key_clone_heap_bytes(
+    key: &FamilyKey,
+) -> verter_session_query::retention::Footprint {
     let mut aliases = AliasSet::new();
     let _ = family_key_heap_bytes(key, &mut aliases);
-    family_key_heap_bytes(key, &mut aliases)
+    let bytes = family_key_heap_bytes(key, &mut aliases);
+    verter_session_query::retention::Footprint {
+        bytes,
+        handles: aliases.take_handles(),
+    }
 }
 
 pub(super) fn family_key_heap_bytes(key: &FamilyKey, aliases: &mut AliasSet) -> usize {

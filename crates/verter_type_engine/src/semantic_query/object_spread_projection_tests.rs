@@ -21,7 +21,7 @@ fn key(name: &str) -> PropertyKey {
 fn every_projection_selector_is_distinct_query_identity() {
     let selectors = [
         ObjectProjectionSelector::Key(key("x")),
-        ObjectProjectionSelector::RelationShape(Arc::from([key("x"), key("y")])),
+        ObjectProjectionSelector::RelationShape(verter_type_expr::OwnedSlice::from([key("x"), key("y")])),
         ObjectProjectionSelector::Surface,
         ObjectProjectionSelector::IndexDomain(IndexDomain::String),
         ObjectProjectionSelector::Signature(ObjectSignatureKind::Call),

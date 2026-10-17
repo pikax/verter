@@ -662,7 +662,7 @@ struct EvaluatedFlowRoot {
 pub(crate) struct ExactMemberValue {
     key: FlowReturnKey,
     node: SemanticNodeId,
-    roots: Arc<[crate::semantic_query_memo::ObservedGraphSelfRoot]>,
+    roots: Box<[crate::semantic_query_memo::ObservedGraphSelfRoot]>,
 }
 
 impl ExactMemberValue {
@@ -671,7 +671,7 @@ impl ExactMemberValue {
         Self {
             key,
             node,
-            roots: Arc::from([]),
+            roots: Box::new([]),
         }
     }
 
@@ -694,8 +694,8 @@ pub(super) enum FlowMemberHop {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExactReturnKeyDomain {
     key: FlowReturnKey,
-    keys: Arc<[Arc<str>]>,
-    roots: Arc<[crate::semantic_query_memo::ObservedGraphSelfRoot]>,
+    keys: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
+    roots: Box<[crate::semantic_query_memo::ObservedGraphSelfRoot]>,
 }
 impl ExactReturnKeyDomain {
     pub(crate) fn proves_absent(&self, key: &FlowReturnKey, member: &str) -> bool {
@@ -1623,7 +1623,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 identity.function_part.clone(),
                 identity.overload_ordinal,
             ),
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: self.flow_return_context_for(identity.anchor.canonical_id.as_ref()),
             demand,
             input: crate::semantic_query::FlowInputContext::empty(),
@@ -1661,7 +1661,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             identity,
             crate::semantic_query::ReturnProjectionDemand::whole_return(),
         );
-        key.normalized_type_args = normalized_type_args;
+        key.normalized_type_args = verter_type_expr::OwnedSlice::from(normalized_type_args);
         key.context.type_substitution = substitution;
         key.context.result_evaluation = evaluation;
         key
@@ -6983,7 +6983,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let proof = ExactMemberValue {
                 key: key.clone(),
                 node: result.return_type(),
-                roots: Arc::from(self_roots.clone()),
+                roots: Box::from(self_roots.clone()),
             };
             result.with_independent_member(proof)
         } else {
@@ -7026,8 +7026,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if let Some(keys) = keys {
                 result.with_exact_return_keys(ExactReturnKeyDomain {
                     key: key.clone(),
-                    keys: Arc::from(keys),
-                    roots: Arc::from(self_roots.clone()),
+                    keys: verter_type_expr::OwnedSlice::from(keys),
+                    roots: Box::from(self_roots.clone()),
                 })
             } else {
                 result

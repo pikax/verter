@@ -35,7 +35,7 @@ fn request(basis: u8) -> FlowDemandRequest {
                 function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
                 overload_ordinal: 0,
             },
-            normalized_type_args: Arc::from([]),
+            normalized_type_args: verter_type_expr::OwnedSlice::from([]),
             context: FlowReturnContext {
                 parse_env_hash: [0; 16],
                 resolve_env_hash: [0; 16],

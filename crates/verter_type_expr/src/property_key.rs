@@ -420,3 +420,28 @@ mod authored_property_key_contract_tests {
         assert_eq!(method.key, computed);
     }
 }
+
+impl<I: verter_retention::owned::Measured> verter_retention::owned::Measured for PropertyKey<I> {
+    /// A string key's text is an owned allocation, charged by its own cell.
+    fn heap_bytes(&self, aliases: &mut verter_retention::allocation::AliasSet) -> usize {
+        match self {
+            Self::String(text) => text.offer(aliases),
+            Self::Number(_) => 0,
+            Self::UniqueSymbol(identity) => identity.heap_bytes(aliases),
+        }
+    }
+}
+
+impl<C: verter_retention::owned::Measured, I: verter_retention::owned::Measured>
+    verter_retention::owned::Measured for AuthoredPropertyKey<C, I>
+{
+    /// A string key's text is an owned allocation, charged by its own cell.
+    fn heap_bytes(&self, aliases: &mut verter_retention::allocation::AliasSet) -> usize {
+        match self {
+            Self::String(text) => text.offer(aliases),
+            Self::Number(_) => 0,
+            Self::UniqueSymbol(identity) => identity.heap_bytes(aliases),
+            Self::Computed(child) => child.heap_bytes(aliases),
+        }
+    }
+}

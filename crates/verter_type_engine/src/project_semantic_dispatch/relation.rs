@@ -2255,7 +2255,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 identities: (!recursion.repeats[0].identities.is_empty()
                     || !recursion.repeats[1].identities.is_empty())
                 .then(|| {
-                    Arc::new(crate::semantic_query::RecursionIdentities {
+                    verter_session_query::retention::owned::Owned::new(crate::semantic_query::RecursionIdentities {
                         sides: [
                             recursion.repeats[0].published_identities(),
                             recursion.repeats[1].published_identities(),

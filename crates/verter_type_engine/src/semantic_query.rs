@@ -1688,7 +1688,7 @@ impl FlowFunctionSlotIdentity {
 /// demanding instantiation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct CanonicalTypeSubstitution(
-    Arc<[(SemanticNodeId, SemanticNodeId)]>,
+    OwnedSlice<(SemanticNodeId, SemanticNodeId)>,
     crate::semantic_query_memo::node_roots::IdentityNodeRoots,
 );
 
@@ -1705,7 +1705,7 @@ impl CanonicalTypeSubstitution {
     /// The empty substitution.
     #[must_use]
     pub fn empty() -> Self {
-        Self(Arc::from(Vec::new().into_boxed_slice()), Default::default())
+        Self(verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()), Default::default())
     }
 
     /// Canonicalize `(type_parameter, bound)` pairs of `graph`: sorted and
@@ -1761,7 +1761,7 @@ impl CanonicalTypeSubstitution {
                 .iter()
                 .flat_map(|&(parameter, value)| [parameter, value]),
         );
-        Self(Arc::from(bindings.into_boxed_slice()), roots)
+        Self(verter_type_expr::OwnedSlice::from(bindings.into_boxed_slice()), roots)
     }
 
     /// The canonical bindings.
@@ -1842,7 +1842,7 @@ impl ReturnProjectionDemand {
 pub struct FlowInputContext {
     /// Contextual parameter-type bindings pre-bound by the demanding
     /// call, in parameter order (empty = no contextual input).
-    pub contextual_parameters: Arc<[SemanticNodeId]>,
+    pub contextual_parameters: OwnedSlice<SemanticNodeId>,
 }
 
 impl FlowInputContext {
@@ -1874,7 +1874,7 @@ pub struct FlowReturnKey {
     pub function: FlowFunctionSlotIdentity,
     /// Normalized type arguments of the demanding instantiation
     /// (concatenation order matters).
-    pub normalized_type_args: Arc<[SemanticNodeId]>,
+    pub normalized_type_args: OwnedSlice<SemanticNodeId>,
     /// Env + substitution + policy.
     pub context: FlowReturnContext,
     /// The demanded return-projection point (whole-return is the
@@ -6813,13 +6813,6 @@ pub struct BroadRuntimeClassification {
 }
 
 impl BroadRuntimeClassification {
-    /// The kind allocation, which carries the value's charge.
-    pub(crate) fn kinds_owned(
-        &self,
-    ) -> &verter_session_query::retention::owned::OwnedSlice<BroadRuntimeKind> {
-        &self.kinds
-    }
-
     #[must_use]
     pub fn new(kinds: impl IntoIterator<Item = BroadRuntimeKind>) -> Self {
         let mut seen = 0u16;
@@ -7299,7 +7292,7 @@ pub struct RelationRecursionFootprint {
     /// most distinct instantiations of each on one path; `None` when
     /// neither side stacked one (every memo entry carries a footprint, so
     /// the rare list sits behind one pointer).
-    pub identities: Option<Arc<RecursionIdentities>>,
+    pub identities: Option<verter_session_query::retention::owned::Owned<RecursionIdentities>>,
 }
 
 /// The per-side identity lists of a [`RelationRecursionFootprint`]:

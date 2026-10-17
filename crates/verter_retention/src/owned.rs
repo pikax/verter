@@ -359,6 +359,22 @@ impl OwnedHandles {
         Ok(charge.holding(self.hold(ctx)?))
     }
 
+    /// Bytes the allocations' own charges hold now; an uncharged one counts
+    /// nothing.
+    #[must_use]
+    pub fn charged_bytes(&self) -> usize {
+        self.0
+            .iter()
+            .map(|node| {
+                node.slot()
+                    .lock()
+                    .charge
+                    .as_ref()
+                    .map_or(0, RetentionCharge::bytes)
+            })
+            .sum()
+    }
+
     /// Whether the carrier reached no owned allocation.
     #[must_use]
     pub fn is_empty(&self) -> bool {

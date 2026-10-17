@@ -108,9 +108,8 @@ impl IntersectionInputId {
 intern_domain!(IntersectionRecipe {
     /// The operand or step list, and each nested subgroup handle's root
     /// attachment; a subgroup's recipe is its own self-charged record.
-    fn value_heap_bytes(&self) -> usize {
-        use verter_session_query::retention::allocation::{arc_block_bytes, AliasSet};
-        let mut aliases = AliasSet::new();
+    fn value_heap_bytes(&self, aliases: &mut verter_session_query::retention::allocation::AliasSet) -> usize {
+        use verter_session_query::retention::allocation::arc_block_bytes;
         match self {
             IntersectionRecipe::OrderedOperands(operands) => {
                 arc_block_bytes(std::mem::size_of_val::<[_]>(operands))
@@ -131,7 +130,7 @@ intern_domain!(IntersectionRecipe {
                             IntersectionTerm::EvaluateSubgroup {
                                 input: IntersectionInputRef::Recipe(child),
                                 purpose: _,
-                            } => child.key_heap_bytes(&mut aliases),
+                            } => child.key_heap_bytes(aliases),
                         })
                         .sum::<usize>()
             }

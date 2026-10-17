@@ -265,7 +265,7 @@ impl OwnedHeap for RelationPayload {
             + copy_inline(unreliable)
             + identities
                 .as_ref()
-                .map_or(0, |identities| arc_value_bytes(identities, aliases))
+                .map_or(0, |identities| identities.offer(aliases))
     }
 }
 

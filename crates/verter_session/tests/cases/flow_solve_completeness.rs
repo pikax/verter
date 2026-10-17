@@ -129,7 +129,7 @@ fn flow_return_query_named(env_tag: u8, name: &str) -> SemanticQueryKey {
             function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
             overload_ordinal: 0,
         },
-        normalized_type_args: Arc::from([]),
+        normalized_type_args: verter_type_expr::OwnedSlice::from([]),
         context: FlowReturnContext {
             parse_env_hash: [env_tag; 16],
             resolve_env_hash: [env_tag; 16],
@@ -1451,7 +1451,7 @@ fn stale_basis_or_foreign_contract_cannot_complete() {
             unreachable!()
         };
         key.input = FlowInputContext {
-            contextual_parameters: Arc::from(vec![solve_value().return_type()]),
+            contextual_parameters: verter_type_expr::OwnedSlice::from(vec![solve_value().return_type()]),
         };
         legs.push(("query input", input));
 

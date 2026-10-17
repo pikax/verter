@@ -812,6 +812,20 @@ pub struct ValueDeclIdentityPart {
     pub member_path: OwnedSlice<String>,
 }
 
+impl verter_retention::owned::Measured for ValueDeclIdentityPart {
+    /// Its names and member path are owned allocations, each charged by its
+    /// own cell.
+    fn heap_bytes(&self, aliases: &mut verter_retention::allocation::AliasSet) -> usize {
+        let Self {
+            canonical_id,
+            owner: _,
+            symbol,
+            member_path,
+        } = self;
+        canonical_id.offer(aliases) + symbol.offer(aliases) + member_path.offer(aliases)
+    }
+}
+
 // ===========================================================================
 // Surface A facts — authored-shape closed facts (heritage / closedness /
 // key-domain), consumed at dispatch time in place of query-time TypeExpr walking.

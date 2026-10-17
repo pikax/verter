@@ -606,10 +606,10 @@ impl SemanticGraphStore {
             })
             .collect::<Result<Vec<_>, _>>()
             .map_err(refuse)?;
-        let own: Vec<usize> = members
+        let own: Vec<verter_session_query::retention::Footprint> = members
             .iter()
             .map(|(family, entry)| {
-                super::retention::own_reservation_bytes(entry, family, 1, registered_canonicals)
+                super::retention::own_reservation(entry, family, 1, registered_canonicals)
             })
             .collect();
         // A shared carrier's evidence pages were claimed with the root; a
@@ -620,17 +620,24 @@ impl SemanticGraphStore {
             .collect();
         let mut batch = match verter_session_query::facts::receipt::reserve_retained_with_evidence(
             account,
-            own.iter().sum(),
+            own.iter().map(|footprint| footprint.bytes).sum(),
             &carriers,
         ) {
             RetentionAdmission::Admitted(charge) => charge,
             RetentionAdmission::Refused(refusal) => return Err(refuse(refusal)),
         };
-        Ok(shared
+        shared
             .into_iter()
             .zip(own)
-            .map(|(holds, bytes)| Arc::new(holds.with_own(batch.split_off(bytes))))
-            .collect())
+            .map(|(holds, own)| {
+                let charge = batch.split_off(own.bytes);
+                let charge = own
+                    .handles
+                    .retained_with(charge, self.charge_ctx())
+                    .map_err(refuse)?;
+                Ok(Arc::new(holds.with_own(charge)))
+            })
+            .collect()
     }
 
     /// Reserve the container charge of EVERY staged member's family, keyed
@@ -647,12 +654,9 @@ impl SemanticGraphStore {
         &self,
         staged: &mut [StagedMember],
     ) -> Result<(), verter_session_query::retention::RetentionRefusal> {
-        use verter_session_query::retention::{ChargeClass, RetentionAdmission};
+        use verter_session_query::retention::RetentionAdmission;
         for member in staged.iter_mut() {
-            match self.retention_account().reserve(
-                ChargeClass::Retained,
-                super::retention::family_container_bytes(&member.family),
-            ) {
+            match self.reserve_family_container(&member.family) {
                 RetentionAdmission::Admitted(charge) => member.family_charge = Some(charge),
                 RetentionAdmission::Refused(refusal) => {
                     crate::cache_runtime::admission::propagate_non_admission(

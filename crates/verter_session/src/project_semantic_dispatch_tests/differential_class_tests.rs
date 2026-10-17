@@ -129,7 +129,7 @@ fn generic_method_return_inference_precedes_enclosing_specialization() {
                 },
                 0,
             ),
-            normalized_type_args: Arc::from([]),
+            normalized_type_args: verter_type_expr::OwnedSlice::from([]),
             context: dispatch.flow_return_context_for("/ws/cls/classes.ts"),
             demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
             input: verter_type_engine::semantic_query::FlowInputContext::empty(),

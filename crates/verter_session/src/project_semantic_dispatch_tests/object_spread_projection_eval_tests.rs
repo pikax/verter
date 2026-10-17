@@ -259,7 +259,7 @@ fn finite_union_spread_keeps_correlated_alternatives_through_final_overwrite() {
     let formula = project(
         &dispatch,
         program,
-        ObjectProjectionSelector::RelationShape(Arc::from([key("a"), key("b"), key("x")])),
+        ObjectProjectionSelector::RelationShape(verter_type_expr::OwnedSlice::from([key("a"), key("b"), key("x")])),
         ExactOptionalPropertyPolicy::Disabled,
     );
     assert_eq!(formula.alternatives().len(), 2);
@@ -1024,7 +1024,7 @@ fn unclassifiable_spread_residual_yields_indeterminate_excess_not_generic_suppre
     assert_eq!(
         excess_of(closed),
         ExcessEligibility::Eligible {
-            direct_candidates: Arc::from([key("extra")]),
+            direct_candidates: verter_type_expr::OwnedSlice::from([key("extra")]),
         }
     );
 }
