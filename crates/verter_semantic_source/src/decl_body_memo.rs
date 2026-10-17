@@ -2724,7 +2724,22 @@ impl DeclBodyMemo {
         let lens = self.shallow_lens();
         let lens = lens.for_owner(owner);
         let space = verter_session_query::facts::SymbolSpace::Type;
-        let elements = compute_semantic_hash(&elements.body, space, &lens);
+        // One fingerprint per declaring element, in selection (source) order:
+        // an object-level hash would sort the members and lose which
+        // declaration comes first.
+        let elements: Vec<HashOutcome> = match &elements.body {
+            TypeExpr::Object(object) => object
+                .properties
+                .iter()
+                .map(|member| {
+                    let single = TypeExpr::Object(Arc::new(ObjectExpr {
+                        properties: vec![member.clone()],
+                    }));
+                    compute_semantic_hash(&single, space, &lens)
+                })
+                .collect(),
+            other => vec![compute_semantic_hash(other, space, &lens)],
+        };
         let heritage = heritage.map(|heritage| compute_semantic_hash(&heritage.body, space, &lens));
         SourceRead::clean(Some(compute_class_member_read_hash(
             &elements,

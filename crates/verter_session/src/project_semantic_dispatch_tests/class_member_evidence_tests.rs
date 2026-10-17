@@ -242,6 +242,38 @@ fn a_class_member_fact_moves_only_with_the_elements_declaring_the_name() {
     upsert(
         &host,
         CLASS,
+        "class B { a: string = 's'; a: number = 1; }\n",
+    );
+    let ordered = member_fact(&host, "B", "a").expect("duplicate declarations keep a fact");
+    upsert(
+        &host,
+        CLASS,
+        "class B { a: number = 1; a: string = 's'; }\n",
+    );
+    assert_ne!(
+        member_fact(&host, "B", "a"),
+        Some(ordered),
+        "swapping which declaring element comes first moves the member fact"
+    );
+
+    // A selected type deeper than the fingerprint budget is never certified.
+    let deep = |leaf: &str| {
+        format!(
+            "class B {{ a!: {}{leaf}{}; }}\n",
+            "Array<".repeat(70),
+            ">".repeat(70)
+        )
+    };
+    upsert(&host, CLASS, &deep("string"));
+    assert_eq!(
+        member_fact(&host, "B", "a"),
+        None,
+        "a budget-exhausted fingerprint publishes no member fact"
+    );
+
+    upsert(
+        &host,
+        CLASS,
         "class A0 { }\nclass A1 { }\nclass B extends A0 { a: string = 's'; u = 1; m() { return 1; } }\ninterface B { z: 1 }\n",
     );
     assert_eq!(
@@ -366,9 +398,13 @@ fn member_reads_without_equivalent_proof_keep_content_evidence() {
         // A substituted argument can carry the caller's node scope. The
         // fallback must still retain the class's whole-content evidence;
         // node provenance alone does not enumerate all dependency facts.
-        let has_content_fact = read.facts.iter().any(|fact| {
-            matches!(fact, FactVersionRef::FileWholeHash { canonical_id, .. } if canonical_id == CLASS)
-        });
+        let has_content_fact = if receiver == "B<string>" {
+            read.facts.iter().any(|fact| {
+                matches!(fact, FactVersionRef::FileWholeHash { canonical_id, .. } if canonical_id == CLASS)
+            })
+        } else {
+            read.self_roots.iter().any(|root| root.as_ref() == CLASS)
+        };
         if !has_content_fact || read.facts.iter().any(|fact| is_member_fact(fact, "B", "a")) {
             failures.push(format!(
                 "{source}: roots {:?}, facts {:?}",

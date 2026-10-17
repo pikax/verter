@@ -426,6 +426,11 @@ impl LazyBodyFactSource {
                     member,
                 ),
             )?;
+            // A truncated fingerprint cannot certify the elements it did not
+            // fully walk: decline, so the read keeps conservative evidence.
+            if outcome.budget_exceeded {
+                return None;
+            }
             let fact = Fact {
                 key: key.clone(),
                 semantic_hash: outcome.hash,
