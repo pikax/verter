@@ -1022,19 +1022,15 @@ does hold deliveries merges the smaller holding into the larger.
 
 Kept results: a dispatcher keeps the results its builds published
 (`keep_published`: admitted results, and request-local completions) under the
-workspace edit clocks they were computed at. A later synchronous or frame entry
-of the same key is answered from them BEFORE any family-memo lookup, tracer,
-closure or claim is set up (`replay_kept_read`, after the entry's charge;
-`claim_cold_query` holds the protocol the entry runs otherwise): the entry
-records the lookup observations the memo would have made
-(`SemanticGraphStore::note_replayed_lookup`: a warm hit for an admitted
-result, the miss a lookup of a request-local completion makes), replays the
-result's receipt into the active demand (`served_read`) and delivers its
-carrier, exactly as `own_published_read` serves the same result after a missed
-lookup. A result the demand cannot pay for is recomputed under the entry's
-claim, never served. Results a lookup SERVED are not kept: a memo candidate is
-validated against the live view on every read, and the edit clocks alone miss
-a file the host reloads mid-request (`invalidation_imported_prop_type_file_edit`).
+workspace edit clocks they were computed at. A later read first performs the
+family memo's validated lookup. After a miss, `own_published_read` can answer
+from a kept result before a producer claim is installed, provided its edit
+clocks are current and its nodes and kernel epochs remain live. The read
+replays the result's receipt into the active demand (`served_read`) and
+delivers its carrier. A result the demand cannot pay for is recomputed, never
+served. Results a lookup SERVED are not kept: a memo candidate is validated
+against the live view on every read, and the edit clocks alone miss a file the
+host reloads mid-request (`invalidation_imported_prop_type_file_edit`).
 
 Request-local completion: a NESTED read of a cheap intermediate family —
 `Conditional`, `TemplateLiteralReduce`, `ProjectPath` (`completes_request_locally`
