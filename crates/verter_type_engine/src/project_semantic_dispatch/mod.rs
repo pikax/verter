@@ -1239,7 +1239,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return ServedAdmission::Admitted;
         }
         let request = crate::request_context::current_request_budget();
-        let admitted = if in_reader_check {
+        // A receipt that consumed nothing and compared nothing replays no
+        // structured comparison, so the reader's check has nothing to bound.
+        let compares_nothing =
+            receipt.prerequisites().is_empty() && receipt.exclusive().comparisons == 0;
+        let admitted = if in_reader_check && compares_nothing {
+            self.connected_demand
+                .replay_admit_within(receipt, request.as_deref(), nesting, u32::MAX)
+                .map(|_| ())
+        } else if in_reader_check {
             self.admit_within_relation_check(|room| {
                 self.connected_demand.replay_admit_within(
                     receipt,

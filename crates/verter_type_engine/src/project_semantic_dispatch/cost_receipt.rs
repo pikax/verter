@@ -312,8 +312,8 @@ impl DemandCostReceipt {
             // table, and the stored hash rejects most pairs at once.
             for dependency in prerequisites {
                 let mut kept_at = None;
-                for position in 0..unique.len() {
-                    if unique[position].receipt.identity == dependency.receipt.identity {
+                for (position, kept) in unique.iter().enumerate() {
+                    if kept.receipt.identity == dependency.receipt.identity {
                         kept_at = Some(position);
                         break;
                     }

@@ -477,8 +477,8 @@ pub(super) fn edge_identity_key(signature: &Arc<DepSignature>, sources: &[Semant
     const MIX: u64 = 0x9E37_79B9_7F4A_7C15;
     let mut key = (Arc::as_ptr(signature) as *const u8 as usize as u64).wrapping_mul(MIX);
     key = (key.rotate_left(5) ^ sources.len() as u64).wrapping_mul(MIX);
-    for index in 0..sources.len() {
-        key = (key.rotate_left(5) ^ sources[index].0).wrapping_mul(MIX);
+    for source in sources {
+        key = (key.rotate_left(5) ^ source.0).wrapping_mul(MIX);
     }
     key
 }
