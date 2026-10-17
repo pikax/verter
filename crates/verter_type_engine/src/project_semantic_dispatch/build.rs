@@ -971,7 +971,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             shadowing,
             substitutions,
             self_value: None,
-            body: TypeofBody::Lowering(BodyLowering::Ready(self.opaque(QueryError::Miss))),
+            body: TypeofBody::Unstarted,
             then: TypeofThen::Value,
             value_root: value_root.clone(),
             path: Arc::from(path.to_vec().into_boxed_slice()),
@@ -1084,7 +1084,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             shadowing,
             substitutions,
             self_value: None,
-            body: TypeofBody::Lowering(BodyLowering::Ready(self.opaque(QueryError::Miss))),
+            body: TypeofBody::Unstarted,
             then: TypeofThen::Signatures(Box::new(signatures)),
             value_root: value_root.clone(),
             path: Arc::from(path.to_vec().into_boxed_slice()),
@@ -1107,6 +1107,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         delivery: Option<super::query_frames::FrameDelivery>,
     ) -> InstantiatePoll {
         let mut delivery = match &mut build.body {
+            TypeofBody::Unstarted => unreachable!("a build begins its first body before it drains"),
             TypeofBody::Lowering(_) => {
                 delivery.map(|delivery| self.consume_frame_delivery(delivery))
             }
@@ -19894,6 +19895,8 @@ pub(super) struct TypeofBuild {
 
 /// What a `typeof` build evaluates between its frame's steps.
 enum TypeofBody {
+    /// Nothing yet: the build is about to begin its first body.
+    Unstarted,
     /// A declaration body's lowering.
     Lowering(BodyLowering),
     /// The value's initializer, an expression source.
