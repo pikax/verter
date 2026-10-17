@@ -901,6 +901,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// `SessionResolverContext`. Test-support builds may additionally use the
     /// explicitly fenced host seam when exercising dispatch in isolation.
     #[must_use]
+    #[allow(
+        clippy::new_ret_no_self,
+        reason = "a dispatcher is created on its thread, as the handle that roots its construction ordinals there"
+    )]
     pub fn new(ctx: &'a dyn ResolverContext<C>) -> ThreadDispatch<'a, C> {
         Self::bind(ctx, None)
     }
@@ -1054,10 +1058,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // changes: whichever side computed it first hands it to the other.
         match (relation_env.get(), other.relation_env.get()) {
             (Some(env), None) => {
-                let _ = other.relation_env.set(env.clone());
+                let _ = other.relation_env.set(*env);
             }
             (None, Some(env)) => {
-                let _ = relation_env.set(env.clone());
+                let _ = relation_env.set(*env);
             }
             _ => {}
         }
