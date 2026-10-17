@@ -480,7 +480,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         projection: &mut DeclBodyProjection,
         inputs: &LocatorViewInputs<'_>,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
-        mut delivery: Option<SemanticNodeId>,
+        mut delivery: Option<super::locator_view_worklist::ProjectionDelivery>,
     ) -> BodyProjectionPoll {
         // Every root this call projects belongs to one connected demand.
         let (_connected_guard, _) = self.enter_connected_demand(false);

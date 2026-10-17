@@ -2223,7 +2223,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(observed) => observed.resume(self),
             None => self.begin_read_observation(),
         };
-        let mut delivered = delivery.map(|delivery| self.consume_frame_delivery(delivery));
+        let mut delivered = delivery.map(|delivery| self.consume_frame_delivery(delivery).node);
         let owner = run.owner;
         let value = loop {
             let indexed = match &mut run.state {

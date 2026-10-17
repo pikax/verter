@@ -737,14 +737,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// taint, and read the instantiated node as a synchronous
     /// instantiation's reader does.
     /// [`Self::consume_delivery`] for a delivery a build consumes itself.
-    pub(super) fn consume_frame_delivery(&self, delivery: FrameDelivery) -> SemanticNodeId {
+    pub(super) fn consume_frame_delivery(
+        &self,
+        delivery: FrameDelivery,
+    ) -> super::locator_view_worklist::ProjectionDelivery {
         self.consume_delivery(delivery.delivery, delivery.depth)
     }
 
-    fn consume_delivery(&self, delivery: QueryDelivery, depth: u32) -> SemanticNodeId {
-        match self.read_delivery(delivery, Nesting::Frame { depth }).value {
-            QueryResult::Value(SemanticQueryValue::TypeNode(node)) => node,
-            _ => self.opaque(QueryError::Miss),
+    /// The node a delivery answers its consumer with, and whether it
+    /// answered a value: a read of no value delivers the shared miss.
+    fn consume_delivery(
+        &self,
+        delivery: QueryDelivery,
+        depth: u32,
+    ) -> super::locator_view_worklist::ProjectionDelivery {
+        let read = self.read_delivery(delivery, Nesting::Frame { depth });
+        match read.value {
+            QueryResult::Value(SemanticQueryValue::TypeNode(node)) => {
+                super::locator_view_worklist::ProjectionDelivery {
+                    node,
+                    answered: Some(read.fact_status),
+                }
+            }
+            _ => super::locator_view_worklist::ProjectionDelivery {
+                node: self.opaque(QueryError::Miss),
+                answered: None,
+            },
         }
     }
 

@@ -234,19 +234,16 @@ pub struct Subscription<'s> {
 struct Parked {
     _edge: verter_execution::tasks::WaitEdge,
     since: Instant,
-    waker: Option<std::task::Waker>,
+    /// The subscription's own waker registration on the flight.
+    waker: Option<super::inflight::WakeRegistration>,
 }
 
 impl Drop for Subscription<'_> {
     fn drop(&mut self) {
         // A subscriber abandoned while parked (its execution stopped or was
         // dropped) takes its waker off the flight; the edge drops with it.
-        if let Some(waker) = self.parked.take().and_then(|parked| parked.waker) {
-            self.inflight
-                .state
-                .lock()
-                .wakers
-                .retain(|registered| !registered.will_wake(&waker));
+        if let Some(registration) = self.parked.take().and_then(|parked| parked.waker) {
+            self.inflight.state.lock().withdraw_waker(registration);
         }
     }
 }
@@ -702,15 +699,12 @@ impl Subscription<'_> {
             .expect("a pending subscriber is parked");
         let registered = parked
             .waker
-            .as_ref()
-            .is_some_and(|previous| previous.will_wake(waker))
-            && state.wakers.iter().any(|w| w.will_wake(waker));
+            .is_some_and(|registration| state.holds_waker(registration, waker));
         if !registered {
             if let Some(previous) = parked.waker.take() {
-                state.wakers.retain(|w| !w.will_wake(&previous));
+                state.withdraw_waker(previous);
             }
-            state.wakers.push(waker.clone());
-            parked.waker = Some(waker.clone());
+            parked.waker = Some(state.register_waker(waker.clone()));
         }
         std::task::Poll::Pending
     }
@@ -754,8 +748,8 @@ impl Subscription<'_> {
         // and wait-for edge are spent.
         let wait_start = match self.parked.take() {
             Some(parked) => {
-                if let Some(waker) = &parked.waker {
-                    state.wakers.retain(|w| !w.will_wake(waker));
+                if let Some(registration) = parked.waker {
+                    state.withdraw_waker(registration);
                 }
                 parked.since
             }
