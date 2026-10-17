@@ -255,7 +255,6 @@ impl CanonicalToEntries {
     }
 
     /// Bytes the index's own storage is charged.
-    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn storage_charge_bytes(&self) -> usize {
         self.storage.lock().pin.as_ref().map_or(
             0,

@@ -4003,6 +4003,10 @@ pub struct HostRetentionSnapshot {
     /// for its own storage: its arena's chunks, payload blocks and dedup
     /// tables, and its current signature epoch's tables.
     pub semantic_graph_storage_bytes: usize,
+    /// The part of [`Self::pinned_bytes`] this host's semantic memo pins for
+    /// its own bookkeeping: its reverse index's shards, its shared-charge
+    /// registry's table and its dependency-rail interner.
+    pub semantic_bookkeeping_storage_bytes: usize,
     /// High-water mark of the aggregate account's charged bytes.
     pub peak_total_bytes: usize,
     /// Reservations the aggregate account refused for PRESSURE over its

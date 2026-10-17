@@ -107,10 +107,13 @@ fn an_scc_member_shares_the_carrier_charge_and_keeps_it_after_the_root_drains() 
     // bookkeeping and its own (empty) relation-binding value under one
     // registration. The carrier and self-root list are the root's already.
     let member_value = arc_block_bytes(0) + registration_bytes();
+    // Its delivery's metadata, pinned to the delivery until now, is adopted
+    // into retention with it.
+    let member_metadata = member.lease.own_charge_bytes_for_tests();
     let delta = account.snapshot().retained_bytes - after_root;
     assert_eq!(
         delta,
-        member_own + member_value,
+        member_own + member_value + member_metadata,
         "the member pays its own bookkeeping and its own value — never the shared \
          carrier or self-root list a second time"
     );
@@ -202,13 +205,14 @@ fn a_name_a_diagnostic_and_a_dependency_rail_share_is_charged_once() {
             }]);
         let dep_signature: crate::semantic_query::DepSignature =
             Arc::from(vec![(Arc::clone(&name), DepVersion::ProjectGeneration(1))]);
-        let facts: Arc<[FactVersionRef]> = Arc::from(Vec::new());
+        let facts = crate::fact_signature_helpers::empty_fact_signature();
         let roots: Arc<[Arc<str>]> = Arc::from(Vec::new());
         let result = QueryResult::Value(SemanticQueryValue::TypeNode(
             crate::semantic_query::SemanticNodeId(0),
         ));
         let holds = store
             .hold_shared_allocations(super::retention::SharedParts {
+                lease: &Default::default(),
                 facts: &facts,
                 self_roots: &roots,
                 diagnostics: &diagnostics,
@@ -230,6 +234,7 @@ fn a_name_a_diagnostic_and_a_dependency_rail_share_is_charged_once() {
         );
         let survivor = store
             .hold_shared_allocations(super::retention::SharedParts {
+                lease: &Default::default(),
                 facts: &facts,
                 self_roots: &roots,
                 diagnostics: if diagnostics_first {

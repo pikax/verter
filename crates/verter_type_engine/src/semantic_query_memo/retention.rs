@@ -258,7 +258,7 @@ impl SemanticGraphStore {
     ) -> Result<SharedHolds, RetentionRefusal> {
         use verter_session_query::retention::allocation::{arc_str_list_bytes, fact_slice_bytes};
         let account = self.retention_account();
-        let carrier = vec![
+        let mut carrier = vec![
             self.alias_charges.hold(account, parts.facts, |aliases| {
                 fact_slice_bytes(parts.facts, aliases)
             })?,
@@ -267,6 +267,9 @@ impl SemanticGraphStore {
                     arc_str_list_bytes(parts.self_roots, aliases)
                 })?,
         ];
+        // The delivery the retained result's warm reads share: its metadata
+        // is retained with the result.
+        carrier.extend(parts.lease.adopt_metadata()?);
         let mut delivered = Vec::with_capacity(3);
         if !super::is_static_empty(parts.diagnostics) {
             delivered.push(
@@ -441,16 +444,21 @@ impl SemanticGraphStore {
         self.arena.core.storage_charge_bytes()
     }
 
-    /// Bytes the store's own storage is pinned for: its graph storage, its
-    /// reverse index's shards, its shared-charge registry's table and its
-    /// dependency-rail interner. Everything else a store's account pins is
-    /// a caller's: the allocations live deliveries hold and their metadata.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn store_storage_pins_for_tests(&self) -> usize {
-        self.graph_storage_charge_bytes()
-            + self.canonical_to_entries.storage_charge_bytes()
+    /// Bytes the store's memo bookkeeping is pinned for: its reverse
+    /// index's shards, its shared-charge registry's table and its
+    /// dependency-rail interner. A required current count.
+    pub fn bookkeeping_storage_charge_bytes(&self) -> usize {
+        self.canonical_to_entries.storage_charge_bytes()
             + self.alias_charges.table_charged_bytes()
             + self.dep_signature_interner.storage_charge_bytes()
+    }
+
+    /// Bytes the store's own storage is pinned for: its graph storage and
+    /// its memo bookkeeping. Everything else a store's account pins is a
+    /// caller's: the allocations live deliveries hold and their metadata.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn store_storage_pins_for_tests(&self) -> usize {
+        self.graph_storage_charge_bytes() + self.bookkeeping_storage_charge_bytes()
     }
 
     /// The registry of shared allocation charges this store's candidates
@@ -466,6 +474,7 @@ impl SemanticGraphStore {
 /// carrier and self-root list, and the diagnostics, dependency rail and
 /// value its reads deliver.
 pub(super) struct SharedParts<'a> {
+    pub(super) lease: &'a super::delivery_lease::SemanticDeliveryLease,
     pub(super) facts: &'a Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
     pub(super) self_roots: &'a Arc<[Arc<str>]>,
     pub(super) diagnostics: &'a Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
@@ -477,6 +486,7 @@ impl<'a> SharedParts<'a> {
     /// A memo candidate's shared allocations.
     pub(super) fn of(entry: &'a MemoEntry) -> Self {
         Self {
+            lease: &entry.lease,
             facts: &entry.read_set_signature.facts,
             self_roots: &entry.self_root_canonicals,
             diagnostics: &entry.walker_diagnostics,

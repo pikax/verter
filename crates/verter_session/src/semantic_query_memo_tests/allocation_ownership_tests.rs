@@ -155,9 +155,9 @@ fn a_read_outliving_its_candidate_keeps_exactly_the_delivered_rail_charged() {
     );
     assert_eq!(
         caller_pinned(&harness, &account),
-        metadata(&cold) + metadata(&warm),
-        "while the candidate retains the rail, callers pin only their delivery metadata: \
-         the cold winner's owner and the candidate's, which the warm read shares"
+        metadata(&cold),
+        "while the candidate retains the rail and its own delivery — which the warm read \
+         shares — callers pin only the cold winner's delivery metadata"
     );
     drop(cold);
 
@@ -212,11 +212,12 @@ fn reads_dropped_first_leave_one_retained_charge_until_the_candidate_drains() {
         retained.retained_bytes,
         "a reader's drop changes nothing the candidate retains"
     );
+    assert!(candidate_metadata > 0);
     assert_eq!(
         caller_pinned(&harness, &account),
-        candidate_metadata,
+        0,
         "the cold winner's metadata is released with it; the warm reads shared the \
-         candidate's owner, which the candidate still holds"
+         candidate's delivery, whose metadata the candidate retains"
     );
 
     harness.run(|store| store.invalidate_all());

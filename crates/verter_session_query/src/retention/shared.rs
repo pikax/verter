@@ -341,6 +341,14 @@ impl std::fmt::Debug for CacheHold {
 pub struct CallerHold(Arc<SharedCharge>);
 
 impl CallerHold {
+    /// A new caller-first charge of `bytes` for an allocation no registry
+    /// keys: pinned, never refused, until a cache retaining the same
+    /// allocation adopts it ([`Self::adopt`]).
+    #[must_use]
+    pub fn pin(account: &Arc<SemanticRetentionAccount>, bytes: usize) -> Self {
+        Self(Arc::new(SharedCharge::with_holds(account.pin(bytes), 0, 1)))
+    }
+
     /// A cache retaining the allocation this caller already holds: shares a
     /// still-retained charge, or adopts the callers' pin back into
     /// retention.

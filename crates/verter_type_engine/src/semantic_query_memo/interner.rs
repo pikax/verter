@@ -321,7 +321,6 @@ impl DepSignatureInterner {
     }
 
     /// Bytes the interner's own storage is charged.
-    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn storage_charge_bytes(&self) -> usize {
         self.storage.lock().pin.as_ref().map_or(

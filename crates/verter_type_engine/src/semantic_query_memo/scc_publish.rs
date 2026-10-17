@@ -322,6 +322,7 @@ impl SemanticGraphStore {
                 validated_at_generation,
                 cost_receipt,
             );
+            let entry = self.with_candidate_lease(&family, entry);
             prepared.push(PreparedMember {
                 family,
                 entry,
@@ -347,6 +348,7 @@ impl SemanticGraphStore {
                 validated_at_generation,
                 cost_receipt,
             );
+            let entry = self.with_candidate_lease(&family, entry);
             prepared.push(PreparedMember {
                 family,
                 entry,
@@ -373,6 +375,7 @@ impl SemanticGraphStore {
                 validated_at_generation,
                 cost_receipt,
             );
+            let entry = self.with_candidate_lease(&family, entry);
             prepared.push(PreparedMember {
                 family,
                 entry,
@@ -658,6 +661,23 @@ impl SemanticGraphStore {
         Ok(())
     }
 
+    /// `entry` with its candidate delivery: the lease its warm reads will
+    /// share, rooting the family key's operands. Minted before the batch is
+    /// charged, so the batch retains this lease's metadata.
+    fn with_candidate_lease(&self, family: &FamilyKey, mut entry: MemoEntry) -> MemoEntry {
+        entry.lease = self
+            .lease_candidate(
+                family,
+                super::delivery_lease::DeliveredAllocations::read(
+                    &entry.result,
+                    &entry.walker_diagnostics,
+                    &entry.dispatch_dep_signature,
+                ),
+            )
+            .expect("component candidate operands are live");
+        entry
+    }
+
     /// Finish staging one member: allocate its admission token and plan
     /// its per-family bounded-retention eviction against the publishing
     /// caller's stable store view. Both run OUTSIDE the batch's `entries`
@@ -669,16 +689,6 @@ impl SemanticGraphStore {
         flight: InlineMemberFlight,
         ctx: Option<&dyn crate::resolver_core::ResolverContext<C>>,
     ) -> StagedMember {
-        entry.lease = self
-            .lease_candidate(
-                &family,
-                super::delivery_lease::DeliveredAllocations::read(
-                    &entry.result,
-                    &entry.walker_diagnostics,
-                    &entry.dispatch_dep_signature,
-                ),
-            )
-            .expect("component candidate operands are live");
         let admission_seq = self.alloc_candidate_admission_seq();
         entry.admission_seq = admission_seq;
         let QueryResult::Value(value) = &entry.result else {

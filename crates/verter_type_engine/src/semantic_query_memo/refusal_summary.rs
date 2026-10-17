@@ -117,6 +117,7 @@ impl RefusalSummary {
 
     fn shared_parts(&self) -> super::retention::SharedParts<'_> {
         super::retention::SharedParts {
+            lease: &self.read.lease,
             facts: &self.carrier.facts,
             self_roots: &self.self_root_canonicals,
             diagnostics: &self.read.walker_diagnostics,

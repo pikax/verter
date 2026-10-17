@@ -847,8 +847,12 @@ fn retained(host: &VerterHost) -> Retained {
     Retained {
         retained_bytes: snapshot.retained_bytes,
         // Parse-snapshot pins: the graph's own storage pin grows with the
-        // nodes each answer interned, which the candidate bounds cover.
-        pinned_bytes: snapshot.pinned_bytes - snapshot.semantic_graph_storage_bytes,
+        // nodes each answer interned, and the memo's bookkeeping pin with
+        // the candidates it indexes, both of which the candidate bounds
+        // cover.
+        pinned_bytes: snapshot.pinned_bytes
+            - snapshot.semantic_graph_storage_bytes
+            - snapshot.semantic_bookkeeping_storage_bytes,
         live_artifacts: snapshot.live_artifacts,
         retired_versions: snapshot.retained_retired_versions,
         snapshot_leases: snapshot.snapshot_leases,

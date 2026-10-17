@@ -49,6 +49,9 @@ pub(crate) struct DeferredEvaluationMemoEntry {
     evidence: crate::fact_signature_helpers::StructuralCarrierReadSet,
     lease: super::delivery_lease::SemanticDeliveryLease,
     _retention: verter_session_query::retention::RetentionCharge,
+    /// The entry's retention of its delivery's metadata, which its hits
+    /// share with their readers.
+    _lease_metadata: Option<verter_session_query::retention::shared::CacheHold>,
 }
 
 impl SemanticGraphStore {
@@ -242,8 +245,8 @@ impl SemanticGraphStore {
             roots,
             self.retention_account(),
         );
-        // The entry's block, slot and FIFO record, its delivery metadata, and
-        // its proof: the fact slice with every fact's owned text and the
+        // The entry's block, slot and FIFO record and its proof (its
+        // delivery's metadata is adopted below): the fact slice with every fact's owned text and the
         // self-root list. A page of a wide proof is claimed into the same
         // reservation and charged once wherever it is shared.
         let own_bytes = {
@@ -264,12 +267,16 @@ impl SemanticGraphStore {
             verter_session_query::retention::RetentionAdmission::Admitted(charge) => charge,
             verter_session_query::retention::RetentionAdmission::Refused(_) => return,
         };
+        let Ok(lease_metadata) = lease.adopt_metadata() else {
+            return;
+        };
         let entry = Arc::new(DeferredEvaluationMemoEntry {
             result,
             receipt,
             evidence,
             lease,
             _retention: retention,
+            _lease_metadata: lease_metadata,
         });
         let key = (node, context, demand);
         match self.evaluate_deferred_memo.entry(key) {

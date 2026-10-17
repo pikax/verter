@@ -27,11 +27,13 @@ struct DeliveryOwner {
     /// them adopts the same charge; one that drains first hands it back
     /// ([`verter_session_query::retention::shared`]).
     holds: Box<[verter_session_query::retention::shared::CallerHold]>,
-    /// This owner's own block, root-owner metadata and hold list, pinned
-    /// for exactly as long as the owner lives: caller metadata is charged
-    /// separately from the shared allocations it holds and is released with
-    /// its last clone.
-    _own: Option<verter_session_query::retention::RetentionCharge>,
+    /// This owner's own block, root-owner metadata and hold list, charged
+    /// separately from the shared allocations it holds for exactly as long
+    /// as the owner lives: the owner is its caller-first holder, so it is
+    /// pinned while only readers keep it, and a cache retaining the owner
+    /// (a memo candidate whose warm reads share it) adopts the same charge
+    /// into retention for as long as it does ([`SemanticDeliveryLease::adopt_metadata`]).
+    _own: Option<verter_session_query::retention::shared::CallerHold>,
 }
 
 impl DeliveryOwner {
@@ -51,7 +53,9 @@ impl DeliveryOwner {
             + self.roots.owned_heap_bytes(&mut aliases)
             + self.key_roots.owned_heap_bytes(&mut aliases)
             + heap_block_bytes(std::mem::size_of_val(&*self.holds));
-        self._own = Some(account.pin(bytes));
+        self._own = Some(verter_session_query::retention::shared::CallerHold::pin(
+            account, bytes,
+        ));
         std::sync::Arc::new(self)
     }
 }
@@ -104,7 +108,32 @@ impl SemanticDeliveryLease {
         self.0
             .as_ref()
             .and_then(|owner| owner._own.as_ref())
-            .map_or(0, verter_session_query::retention::RetentionCharge::bytes)
+            .map_or(
+                0,
+                verter_session_query::retention::shared::CallerHold::bytes,
+            )
+    }
+
+    /// A cache's hold on this delivery's metadata charge, for a cache that
+    /// retains the delivery (its warm reads share the owner): retained while
+    /// the cache holds it, handed back to the owner's readers when it drains.
+    /// `None` for an empty delivery.
+    ///
+    /// # Errors
+    ///
+    /// The account's refusal: the cache must not retain the delivery, and
+    /// the metadata stays pinned to its readers.
+    pub(super) fn adopt_metadata(
+        &self,
+    ) -> Result<
+        Option<verter_session_query::retention::shared::CacheHold>,
+        verter_session_query::retention::RetentionRefusal,
+    > {
+        self.0
+            .as_ref()
+            .and_then(|owner| owner._own.as_ref())
+            .map(verter_session_query::retention::shared::CallerHold::adopt)
+            .transpose()
     }
 
     /// The bytes of the shared allocations this delivery holds, whoever
