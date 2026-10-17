@@ -47,7 +47,8 @@ impl CheckerDiagnostic {
             | CheckerDiagnosticCode::CircularTypeAlias
             | CheckerDiagnosticCode::RecursiveFulfillmentCallback
             | CheckerDiagnosticCode::UnionTooComplex
-            | CheckerDiagnosticCode::TupleTooLarge => Some(PrimitiveKind::Any),
+            | CheckerDiagnosticCode::TupleTooLarge
+            | CheckerDiagnosticCode::ExpressionTupleTooLarge => Some(PrimitiveKind::Any),
             CheckerDiagnosticCode::TypeNotAssignable
             | CheckerDiagnosticCode::NoMatchingOverload
             | CheckerDiagnosticCode::ArgumentNotAssignable
@@ -84,9 +85,12 @@ pub enum CheckerDiagnosticCode {
     /// ([`checker_policy::cross_product_union`](super::checker_policy::cross_product_union)).
     UnionTooComplex,
     /// TS2799: splicing a tuple into a tuple type reaches the checker's
-    /// tuple-size limit. Written in an expression, the checker reports the
-    /// same limit as TS2800.
+    /// tuple-size limit
+    /// ([`checker_policy::tuple_splice`](super::checker_policy::tuple_splice)).
     TupleTooLarge,
+    /// TS2800: the same tuple-size limit reached by a tuple an expression
+    /// produces (an array literal spreading tuples as a tuple).
+    ExpressionTupleTooLarge,
     /// TS2859: one relation check recorded as many structured comparisons as
     /// the checker allows it
     /// ([`checker_policy::RelationComplexity`](super::checker_policy::RelationComplexity));
@@ -115,7 +119,7 @@ pub enum CheckerDiagnosticCode {
 // https://github.com/microsoft/TypeScript/blob/v5.9.3/src/compiler/diagnosticMessages.json
 impl CheckerDiagnosticCode {
     /// Whether the checker reports this code when a type operation runs out
-    /// of an allowance (TS2589, TS2590, TS2799, TS2859). Verter reports these
+    /// of an allowance (TS2589, TS2590, TS2799, TS2800, TS2859). Verter reports these
     /// at its own allowance for the operation, as a resource partial, or —
     /// TS2589 only — at a certified divergence, as a complete answer.
     #[must_use]
@@ -124,6 +128,7 @@ impl CheckerDiagnosticCode {
             Self::ExcessivelyDeepInstantiation
             | Self::UnionTooComplex
             | Self::TupleTooLarge
+            | Self::ExpressionTupleTooLarge
             | Self::RelationTooComplex => true,
             Self::CircularTypeAlias
             | Self::NoMatchingOverload
@@ -145,6 +150,7 @@ impl CheckerDiagnosticCode {
             Self::CircularTypeAlias => 2456,
             Self::UnionTooComplex => 2590,
             Self::TupleTooLarge => 2799,
+            Self::ExpressionTupleTooLarge => 2800,
             Self::RelationTooComplex => 2859,
             Self::RecursiveFulfillmentCallback => 1062,
             Self::ArgumentNotAssignable => 2345,
@@ -167,6 +173,9 @@ impl CheckerDiagnosticCode {
                 "Expression produces a union type that is too complex to represent."
             }
             Self::TupleTooLarge => "Type produces a tuple type that is too large to represent.",
+            Self::ExpressionTupleTooLarge => {
+                "Expression produces a tuple type that is too large to represent."
+            }
             Self::RelationTooComplex => "Excessive complexity comparing types '{0}' and '{1}'.",
             Self::RecursiveFulfillmentCallback => {
                 "Type is referenced directly or indirectly in the fulfillment callback of its \
@@ -203,7 +212,8 @@ pub enum CheckerDiagnosticOperation {
     TemplateLiteral,
     /// An object spread over union operands (`getSpreadType`).
     ObjectSpread,
-    /// A tuple spread into a tuple type (`createNormalizedTupleType`).
+    /// A tuple spread into a tuple, in a type or an expression
+    /// (`createNormalizedTupleType`).
     TupleSpread,
     /// One tail run of a conditional alias (`getConditionalType`): its
     /// selected branch applying the alias again.

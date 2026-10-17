@@ -45,6 +45,22 @@ pub(crate) const INSTANTIATION_COUNT: u32 = 5_000_000;
 /// many constituents fails with TS2590 before a constituent is built.
 pub(crate) const CROSS_PRODUCT_UNION_SIZE: u64 = 100_000;
 
+/// The checker's tuple-size limit (`createNormalizedTupleType`): splicing
+/// a tuple of `n` elements after the `prefix` elements the tuple being
+/// built has expanded so far fails once `prefix + n` reaches this, before
+/// an element is copied. Only a splice is checked: a directly authored
+/// tuple, and the elements written after the last splice, are never
+/// counted, so a tuple may end up longer than the limit.
+///
+/// Measured on TypeScript 7.0.2 (`tsc --strict`), with `A<n>` an authored
+/// tuple of `n` elements: `[...A9999]`, `[1, ...A9998]` and `[...A5000,
+/// ...A4999]` build; `[...A10000]`, `[1, ...A9999]` and `[...A5000,
+/// ...A5000]` are TS2799 and `any`; `[...A9999, 1]` (10,000 elements) and
+/// an authored 10,001-element tuple build; `[...a, ...b] as const` over
+/// values of 5,000 elements each is TS2800 and `any`. An enclosing tuple
+/// spreading the refused `any` reports nothing more.
+pub(crate) const TUPLE_SPLICE_SIZE: usize = 10_000;
+
 /// The checker's relation-complexity allowance for one relation check
 /// (`checkTypeRelatedTo`'s `relationCount`): it starts at `(16,000,000 -
 /// relation cache size) >> 3` and falls by one for each structured
@@ -355,6 +371,37 @@ impl RelationComplexity {
     }
 }
 
+/// Where the tuple a splice builds is written, which decides the
+/// diagnostic its refusal reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TupleSplicePosition {
+    /// A tuple type: TS2799.
+    Type,
+    /// A tuple an expression produces: TS2800.
+    Expression,
+}
+
+/// Splice `incoming` elements after the `prefix` elements a tuple has
+/// expanded so far, checked against [`TUPLE_SPLICE_SIZE`] BEFORE any is
+/// copied: `Ok(prefix + incoming)` when the splice builds, the refusal of
+/// the tuple at `position` otherwise.
+pub(crate) fn tuple_splice(
+    prefix: usize,
+    incoming: usize,
+    position: TupleSplicePosition,
+) -> Result<usize, OperationRefusal> {
+    match prefix.checked_add(incoming) {
+        Some(expanded) if expanded < TUPLE_SPLICE_SIZE => Ok(expanded),
+        _ => Err(OperationRefusal::of(
+            match position {
+                TupleSplicePosition::Type => CheckerDiagnosticCode::TupleTooLarge,
+                TupleSplicePosition::Expression => CheckerDiagnosticCode::ExpressionTupleTooLarge,
+            },
+            CheckerDiagnosticOperation::TupleSpread,
+        )),
+    }
+}
+
 /// One factor of a cross product, as `getCrossProductUnionSize` counts it: a
 /// union contributes its constituents, `never` makes the product empty, and
 /// any other type contributes one.
@@ -443,6 +490,38 @@ mod tests {
         );
     }
 
+    /// A splice is refused when the prefix and the spliced tuple together
+    /// reach 10,000 elements, with the code of the tuple's position.
+    #[test]
+    fn a_tuple_splice_is_refused_at_the_checker_size() {
+        let refused = |code| {
+            Err(OperationRefusal::of(
+                code,
+                CheckerDiagnosticOperation::TupleSpread,
+            ))
+        };
+        let ty = TupleSplicePosition::Type;
+        assert_eq!(tuple_splice(0, 9_999, ty), Ok(9_999));
+        assert_eq!(tuple_splice(1, 9_998, ty), Ok(9_999));
+        assert_eq!(tuple_splice(5_000, 4_999, ty), Ok(9_999));
+        assert_eq!(
+            tuple_splice(0, 10_000, ty),
+            refused(CheckerDiagnosticCode::TupleTooLarge)
+        );
+        assert_eq!(
+            tuple_splice(5_000, 5_001, ty),
+            refused(CheckerDiagnosticCode::TupleTooLarge)
+        );
+        assert_eq!(
+            tuple_splice(usize::MAX, 1, ty),
+            refused(CheckerDiagnosticCode::TupleTooLarge)
+        );
+        assert_eq!(
+            tuple_splice(5_000, 5_000, TupleSplicePosition::Expression),
+            refused(CheckerDiagnosticCode::ExpressionTupleTooLarge)
+        );
+    }
+
     /// A relation check records 2,000,000 structured comparisons and is
     /// refused the next.
     #[test]
@@ -505,6 +584,8 @@ mod tests {
                 .step(5, CheckerDiagnosticOperation::ConditionalTail)
                 .unwrap_err(),
             cross_product_union([ProductFactor::Union(usize::MAX)], OP).unwrap_err(),
+            tuple_splice(10_000, 0, TupleSplicePosition::Type).unwrap_err(),
+            tuple_splice(10_000, 0, TupleSplicePosition::Expression).unwrap_err(),
             with_relation_comparisons_for_tests(0, || RelationComplexity::default().record())
                 .unwrap_err(),
         ];

@@ -149,6 +149,7 @@ mod tests;
 mod this_receiver_tests;
 mod truthiness_domain_tests;
 mod tuple_length_and_apparent_member_tests;
+mod tuple_splice_tests;
 mod type_syntax_depth_tests;
 mod undecided_call_tests;
 mod undecided_conditional_tests;

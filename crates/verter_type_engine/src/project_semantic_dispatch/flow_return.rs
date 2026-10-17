@@ -9942,11 +9942,20 @@ pub(super) trait FlowDemandDriver {
         node: SemanticNodeId,
         context: ProjectionReductionContext,
     ) -> StructuralFactDemandOutcome;
-    fn normalize_tuple_spread(
+    /// Spread-normalise the tuple an array literal produces: a splice past
+    /// the checker's tuple-size limit is its TS2800 recovery.
+    fn normalize_expression_tuple_spread(
         &self,
         elements: &[crate::semantic_query::TupleElement],
         readonly: bool,
     ) -> NormalizedTupleShape;
+    /// Weigh and pay for an array literal splicing a tuple of `incoming`
+    /// elements after the `prefix` its tuple holds.
+    fn admit_expression_tuple_splice(
+        &self,
+        prefix: usize,
+        incoming: usize,
+    ) -> super::build::ExpressionSplice;
     fn opaque(&self, err: QueryError) -> SemanticNodeId;
     fn receiver_this_types(&self, node: SemanticNodeId) -> Vec<SemanticNodeId>;
     fn contextual_object_this_type(
@@ -10500,12 +10509,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     ) -> StructuralFactDemandOutcome {
         ProjectSemanticDispatch::normalize_node_for_structural_fact_demand(self, node, context)
     }
-    fn normalize_tuple_spread(
+    fn normalize_expression_tuple_spread(
         &self,
         elements: &[crate::semantic_query::TupleElement],
         readonly: bool,
     ) -> NormalizedTupleShape {
-        ProjectSemanticDispatch::normalize_tuple_spread(self, elements, readonly)
+        ProjectSemanticDispatch::normalize_expression_tuple_spread(self, elements, readonly)
+    }
+    fn admit_expression_tuple_splice(
+        &self,
+        prefix: usize,
+        incoming: usize,
+    ) -> super::build::ExpressionSplice {
+        ProjectSemanticDispatch::admit_expression_tuple_splice(self, prefix, incoming)
     }
     fn opaque(&self, err: QueryError) -> SemanticNodeId {
         ProjectSemanticDispatch::opaque(self, err)
@@ -11165,12 +11181,20 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         self.driver
             .normalize_node_for_structural_fact_demand(node, context)
     }
-    fn normalize_tuple_spread(
+    fn normalize_expression_tuple_spread(
         &self,
         elements: &[crate::semantic_query::TupleElement],
         readonly: bool,
     ) -> NormalizedTupleShape {
-        self.driver.normalize_tuple_spread(elements, readonly)
+        self.driver
+            .normalize_expression_tuple_spread(elements, readonly)
+    }
+    fn admit_expression_tuple_splice(
+        &self,
+        prefix: usize,
+        incoming: usize,
+    ) -> super::build::ExpressionSplice {
+        self.driver.admit_expression_tuple_splice(prefix, incoming)
     }
     fn opaque(&self, err: QueryError) -> SemanticNodeId {
         self.driver.opaque(err)
@@ -14908,13 +14932,37 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                 frame.tuple.push(element);
                             }
                             Some(SemanticNodeData::Tuple { elements, .. }) => {
-                                for element in elements.iter() {
-                                    let mut element = element.copy();
-                                    if element.optional && self.nullability.is_strict() {
-                                        element.value = self.union(&[element.value, undefined]);
+                                match self.dispatch.admit_expression_tuple_splice(
+                                    frame.tuple.len(),
+                                    elements.len(),
+                                ) {
+                                    super::build::ExpressionSplice::Copy => {
+                                        for element in elements.iter() {
+                                            let mut element = element.copy();
+                                            if element.optional && self.nullability.is_strict() {
+                                                element.value =
+                                                    self.union(&[element.value, undefined]);
+                                            }
+                                            frame.tuple_view.push(element.copy());
+                                            frame.tuple.push(element);
+                                        }
                                     }
-                                    frame.tuple_view.push(element.copy());
-                                    frame.tuple.push(element);
+                                    super::build::ExpressionSplice::Refused(recovery) => {
+                                        return ArrayEvalStep::Done(Positional::Value(recovery));
+                                    }
+                                    // The spread stays in place, never a
+                                    // truncated tuple: the trip is the
+                                    // literal's partial.
+                                    super::build::ExpressionSplice::Unpaid => {
+                                        let element = crate::semantic_query::TupleElement {
+                                            label: None,
+                                            value: source,
+                                            optional: false,
+                                            rest: true,
+                                        };
+                                        frame.tuple_view.push(element.copy());
+                                        frame.tuple.push(element);
+                                    }
                                 }
                             }
                             _ => return ArrayEvalStep::Done(Positional::Unmodeled),
@@ -14950,7 +14998,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         if tupled {
             let intern_tuple = |elements: &[crate::semantic_query::TupleElement]| match self
                 .dispatch
-                .normalize_tuple_spread(elements, const_asserted)
+                .normalize_expression_tuple_spread(elements, const_asserted)
             {
                 super::build::NormalizedTupleShape::Array(array) => array,
                 super::build::NormalizedTupleShape::Tuple(elements) => {
