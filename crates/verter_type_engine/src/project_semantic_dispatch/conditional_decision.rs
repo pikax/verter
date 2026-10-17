@@ -40,9 +40,11 @@ pub(super) struct FreeTypeVariables {
 
 /// The dispatcher's summaries of [`FreeTypeVariables`] by node, kept for
 /// the dispatcher's lifetime (one request) and dropped with it. Node ids
-/// are never reused and their payloads never change, so a kept summary
-/// never goes stale; a node whose payload is released is never asked
-/// about again.
+/// are append-only and the dispatcher asks only about nodes it keeps
+/// rooted, whose payloads therefore do not change while it holds them, so
+/// a kept summary does not go stale. A node whose last owner releases it
+/// reads as the shared placeholder afterwards; its id is never asked about
+/// again by a dispatcher that did not root it.
 pub(super) type FreeTypeVariableSummaries =
     rustc_hash::FxHashMap<SemanticNodeId, FreeTypeVariables>;
 
@@ -99,17 +101,28 @@ impl ParamUnion {
         }
     }
 
-    /// The union without the parameters `declared` binds.
-    fn finish_without(self, declared: &[SemanticNodeId]) -> Option<Arc<[SemanticNodeId]>> {
+    /// The union without the parameters `declared` binds. A short
+    /// declaration list is checked by scanning; a long one is indexed, so a
+    /// wide generic signature costs work linear in its parameters.
+    fn finish_without(
+        self,
+        declared: impl ExactSizeIterator<Item = SemanticNodeId> + Clone,
+    ) -> Option<Arc<[SemanticNodeId]>> {
+        const SCAN_LIMIT: usize = 8;
         let params = self.finish()?;
-        if !params.iter().any(|param| declared.contains(param)) {
+        if declared.len() == 0 {
             return Some(params);
         }
-        let free: Vec<SemanticNodeId> = params
-            .iter()
-            .copied()
-            .filter(|param| !declared.contains(param))
-            .collect();
+        let indexed: Option<FxHashSet<SemanticNodeId>> =
+            (declared.len() > SCAN_LIMIT).then(|| declared.clone().collect());
+        let binds = |param: &SemanticNodeId| match &indexed {
+            Some(indexed) => indexed.contains(param),
+            None => declared.clone().any(|declared| declared == *param),
+        };
+        if !params.iter().any(binds) {
+            return Some(params);
+        }
+        let free: Vec<SemanticNodeId> = params.iter().copied().filter(|p| !binds(p)).collect();
         (!free.is_empty()).then(|| Arc::from(free))
     }
 }
@@ -1872,6 +1885,23 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             return found.clone();
         }
         let graph = self.graph();
+        // A node with no children is summarised from its own payload, without
+        // the traversal's containers.
+        if let Some(data) = graph.node_data(root) {
+            let mut has_child = false;
+            let _ = data.for_each_child(|_| has_child = true);
+            if !has_child {
+                let summary = FreeTypeVariables {
+                    params: matches!(data.as_ref(), SemanticNodeData::TypeParam { .. })
+                        .then(|| Arc::from([root])),
+                    infer_ref: matches!(data.as_ref(), SemanticNodeData::InferRef { .. }),
+                };
+                self.free_type_variables
+                    .borrow_mut()
+                    .insert(root, summary.clone());
+                return summary;
+            }
+        }
         let mut computed: rustc_hash::FxHashMap<SemanticNodeId, FreeTypeVariables> =
             rustc_hash::FxHashMap::default();
         let mut on_path: FxHashSet<SemanticNodeId> = FxHashSet::default();
@@ -1921,12 +1951,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         SemanticNodeData::TypeParam { .. } => Some(Arc::from([node])),
                         SemanticNodeData::Signature {
                             type_parameters, ..
-                        } => params.finish_without(
-                            &type_parameters
-                                .iter()
-                                .map(|declared| declared.param)
-                                .collect::<Vec<_>>(),
-                        ),
+                        } => params
+                            .finish_without(type_parameters.iter().map(|declared| declared.param)),
                         _ => params.finish(),
                     };
                     FreeTypeVariables { params, infer_ref }
@@ -1934,7 +1960,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             };
             computed.insert(node, summary);
         }
-        let summary = computed.get(&root).cloned().unwrap_or_default();
+        let summary = computed
+            .get(&root)
+            .cloned()
+            .expect("the traversal composes the root's summary before it ends");
         if !cyclic {
             self.free_type_variables.borrow_mut().extend(computed);
         }
