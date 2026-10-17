@@ -369,7 +369,7 @@ fn a_drain_through_tombstones_releases_every_charged_byte() {
     const N: u32 = 3500;
     let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
     let index = Index::charging_registrations(&account);
-    let empty: Arc<[FactVersionRef]> = Arc::from(Vec::new());
+    let empty = crate::fact_signature_helpers::empty_fact_signature();
     let mut random = 0x1234_5678_u64;
     for key in 0..N {
         random ^= random << 13;
