@@ -271,13 +271,15 @@ impl SemanticGraphStore {
         ExecutionScope::enter(&self.task_registry)
     }
 
-    /// Whether the task installed on this thread already has `key`'s
-    /// producer open, so a claim would answer with the same-path carrier.
-    /// A read-only preflight: the claim stays the sole authority that
-    /// records and returns the carrier.
-    pub fn is_same_path_claim(&self, key: &SemanticQueryKey) -> bool {
-        ExecutionScope::current(&self.task_registry)
-            .is_some_and(|task| task.produces_key(key, prepared::hash_key(key)))
+    construction_ordinal_seam! {
+        /// Whether the task installed on this thread already has `key`'s
+        /// producer open, so a claim would answer with the same-path carrier.
+        /// A read-only preflight: the claim stays the sole authority that
+        /// records and returns the carrier.
+        fn is_same_path_claim(&self, key: &SemanticQueryKey) -> bool {
+            ExecutionScope::current(&self.task_registry)
+                .is_some_and(|task| task.produces_key(key, prepared::hash_key(key)))
+        }
     }
 
     /// The recursion carrier for `recursion`, with `sentinel` as its value.
@@ -304,253 +306,261 @@ impl SemanticGraphStore {
         }
     }
 
-    /// Lookup, claim and wait: the synchronous acquisition of `key`. Never
-    /// returns a subscription — it waits each one out. With `recompute` the
-    /// claim computes the key rather than reads it warm: the claimant was
-    /// refused the stored result's receipt.
-    ///
-    /// A claim needs the synchronous entry's task: `execution` is entered
-    /// only once the warm lookup misses, so a warm read takes no task, and
-    /// the caller keeps the scope for as long as the producer it may be
-    /// handed runs, so every query nested in that build joins the task.
-    ///
-    /// unclaimed is consulted once the warm lookup misses and before the
-    /// first claim: a read it answers with ([Acquired::Served]) installs
-    /// no flight, so no other task can join one that is never produced.
-    pub fn acquire_query<'s, C: crate::resolver_core::ResolverCapabilities>(
-        &'s self,
-        ctx: &dyn crate::resolver_core::ResolverContext<C>,
-        flags: &crate::resolver_core::resolver_context::RequestFlags,
-        key: SemanticQueryKey,
-        execution: &mut Option<ExecutionScope>,
-        capture: &mut ReadCapture<'_>,
-        recompute: bool,
-        unclaimed: &mut dyn FnMut() -> Option<ValueRead>,
-    ) -> Acquired<'s> {
-        let begun = if recompute {
-            self.begin_query_recompute(flags, key)
-        } else {
-            self.begin_query_claim(ctx, flags, key, capture)
-        };
-        let mut attempt = match begun {
-            Ok(attempt) => attempt,
-            Err(read) => return Acquired::Read(read),
-        };
-        if let Some(read) = unclaimed() {
-            return Acquired::Served(read);
-        }
-        let task = execution
-            .get_or_insert_with(|| self.enter_execution())
-            .task();
-        loop {
-            match self.claim_query(ctx, flags, &mut attempt, task, capture) {
-                Claim::Read(read) => return Acquired::Read(read),
-                Claim::Recursive(recursion) => return Acquired::Recursive(recursion),
-                Claim::Produce(lease) => return Acquired::Produce(lease),
-                Claim::Subscribed(subscription) => {
-                    match subscription.wait(ctx, flags, &mut attempt, capture) {
-                        Joined::Read(read) => return Acquired::Read(read),
-                        Joined::Recursive(recursion) => return Acquired::Recursive(recursion),
-                        Joined::Retry => {}
+    construction_ordinal_seam! {
+        /// Lookup, claim and wait: the synchronous acquisition of `key`. Never
+        /// returns a subscription — it waits each one out. With `recompute` the
+        /// claim computes the key rather than reads it warm: the claimant was
+        /// refused the stored result's receipt.
+        ///
+        /// A claim needs the synchronous entry's task: `execution` is entered
+        /// only once the warm lookup misses, so a warm read takes no task, and
+        /// the caller keeps the scope for as long as the producer it may be
+        /// handed runs, so every query nested in that build joins the task.
+        ///
+        /// unclaimed is consulted once the warm lookup misses and before the
+        /// first claim: a read it answers with ([Acquired::Served]) installs
+        /// no flight, so no other task can join one that is never produced.
+        fn acquire_query<'s, C: crate::resolver_core::ResolverCapabilities>(
+            &'s self,
+            ctx: &dyn crate::resolver_core::ResolverContext<C>,
+            flags: &crate::resolver_core::resolver_context::RequestFlags,
+            key: SemanticQueryKey,
+            execution: &mut Option<ExecutionScope>,
+            capture: &mut ReadCapture<'_>,
+            recompute: bool,
+            unclaimed: &mut dyn FnMut() -> Option<ValueRead>,
+        ) -> Acquired<'s> {
+            let begun = if recompute {
+                self.begin_query_recompute(flags, key)
+            } else {
+                self.begin_query_claim(ctx, flags, key, capture)
+            };
+            let mut attempt = match begun {
+                Ok(attempt) => attempt,
+                Err(read) => return Acquired::Read(read),
+            };
+            if let Some(read) = unclaimed() {
+                return Acquired::Served(read);
+            }
+            let task = execution
+                .get_or_insert_with(|| self.enter_execution())
+                .task();
+            loop {
+                match self.claim_query(ctx, flags, &mut attempt, task, capture) {
+                    Claim::Read(read) => return Acquired::Read(read),
+                    Claim::Recursive(recursion) => return Acquired::Recursive(recursion),
+                    Claim::Produce(lease) => return Acquired::Produce(lease),
+                    Claim::Subscribed(subscription) => {
+                        match subscription.wait(ctx, flags, &mut attempt, capture) {
+                            Joined::Read(read) => return Acquired::Read(read),
+                            Joined::Recursive(recursion) => return Acquired::Recursive(recursion),
+                            Joined::Retry => {}
+                        }
                     }
                 }
             }
         }
     }
 
-    /// Begin one logical claim of `key`. `Err` answers it without a claim:
-    /// a cancelled request, or a validated warm result.
-    ///
-    /// `flags` is the request snapshot's flag handles, borrowed once at the
-    /// caller's request boundary: every cancellation observation below is a
-    /// plain field read, with no per-checkpoint port dispatch.
-    pub fn begin_query_claim<C: crate::resolver_core::ResolverCapabilities>(
-        &self,
-        ctx: &dyn crate::resolver_core::ResolverContext<C>,
-        flags: &crate::resolver_core::resolver_context::RequestFlags,
-        key: SemanticQueryKey,
-        capture: &mut ReadCapture<'_>,
-    ) -> Result<ClaimAttempt, ValueRead> {
-        // Count every logical entry, warm and cold alike.
-        crate::loop5_instrumentation::EXECUTE_COOPERATIVE_CALLS.fetch_add(1, Ordering::Relaxed);
+    construction_ordinal_seam! {
+        /// Begin one logical claim of `key`. `Err` answers it without a claim:
+        /// a cancelled request, or a validated warm result.
+        ///
+        /// `flags` is the request snapshot's flag handles, borrowed once at the
+        /// caller's request boundary: every cancellation observation below is a
+        /// plain field read, with no per-checkpoint port dispatch.
+        fn begin_query_claim<C: crate::resolver_core::ResolverCapabilities>(
+            &self,
+            ctx: &dyn crate::resolver_core::ResolverContext<C>,
+            flags: &crate::resolver_core::resolver_context::RequestFlags,
+            key: SemanticQueryKey,
+            capture: &mut ReadCapture<'_>,
+        ) -> Result<ClaimAttempt, ValueRead> {
+            // Count every logical entry, warm and cold alike.
+            crate::loop5_instrumentation::EXECUTE_COOPERATIVE_CALLS.fetch_add(1, Ordering::Relaxed);
 
-        // Request cancellation is a typed ReturnOnly terminal and must be
-        // observed before even a warm probe: canceled requests do not consume
-        // shared semantic work or reuse a value as if they completed normally.
-        if flags.is_cancelled() {
-            return Err(cancelled_cache_read());
-        }
-
-        // Binding relations carry transaction-local inference candidates.
-        // Their producers therefore keep the whole claim/settle/admit
-        // protocol but never serve another claimant for the same key.
-        let independent = matches!(
-            &key,
-            SemanticQueryKey::Relate {
-                inference_context: Some(_),
-                ..
+            // Request cancellation is a typed ReturnOnly terminal and must be
+            // observed before even a warm probe: canceled requests do not consume
+            // shared semantic work or reuse a value as if they completed normally.
+            if flags.is_cancelled() {
+                return Err(cancelled_cache_read());
             }
-        );
 
-        // Prepare the key ONCE per logical claim: one `family_and_slot`
-        // projection, one requested-point build, one key hash — shared
-        // (behind one `Arc`) by the warm probe, the in-flight table, the
-        // producer registration, the panic guard and the publish. See the
-        // `prepared` module for the equality contract (token equality ⟺
-        // key equality).
-        let prepared = self.prepare_rooted_key(key);
+            // Binding relations carry transaction-local inference candidates.
+            // Their producers therefore keep the whole claim/settle/admit
+            // protocol but never serve another claimant for the same key.
+            let independent = matches!(
+                &key,
+                SemanticQueryKey::Relate {
+                    inference_context: Some(_),
+                    ..
+                }
+            );
 
-        // Warm lookup. One lock acquisition snapshots the slot; the
-        // candidate's carrier is validated strictly (self-roots through
-        // `validates_self_root_whole_hash`) before it is bubbled or
-        // returned, so a stale candidate misses and the claim below
-        // recomputes it.
-        if let Some(hit) = self.try_warm_value_hit_fast_path(ctx, &prepared, capture) {
-            return Err(if flags.is_cancelled() {
-                cancelled_cache_read()
-            } else {
-                hit
+            // Prepare the key ONCE per logical claim: one `family_and_slot`
+            // projection, one requested-point build, one key hash — shared
+            // (behind one `Arc`) by the warm probe, the in-flight table, the
+            // producer registration, the panic guard and the publish. See the
+            // `prepared` module for the equality contract (token equality ⟺
+            // key equality).
+            let prepared = self.prepare_rooted_key(key);
+
+            // Warm lookup. One lock acquisition snapshots the slot; the
+            // candidate's carrier is validated strictly (self-roots through
+            // `validates_self_root_whole_hash`) before it is bubbled or
+            // returned, so a stale candidate misses and the claim below
+            // recomputes it.
+            if let Some(hit) = self.try_warm_value_hit_fast_path(ctx, &prepared, capture) {
+                return Err(if flags.is_cancelled() {
+                    cancelled_cache_read()
+                } else {
+                    hit
+                });
+            }
+
+            // One logical miss per claim. A producer that publishes between
+            // this lookup and the claim's own warm re-read is credited as a
+            // hit there; that race is benign.
+            crate::loop5_instrumentation::FAMILY_MEMO_MISSES.fetch_add(1, Ordering::Relaxed);
+            #[cfg(any(test, feature = "test-support"))]
+            crate::project_semantic_dispatch::raise::record_dispatch_cold(prepared.key());
+            #[cfg(any(test, feature = "test-support"))]
+            crate::capture_token::with_active_capture(|t| {
+                t.record_dispatch(prepared.key(), /* hit */ false)
             });
+            tracing::debug!(
+                target: "verter::memo::miss",
+                key = ?prepared.key(),
+                "memo_miss"
+            );
+            Ok(ClaimAttempt {
+                prepared,
+                independent,
+                miss_recorded: false,
+                retries: 0,
+                recompute: false,
+            })
         }
-
-        // One logical miss per claim. A producer that publishes between
-        // this lookup and the claim's own warm re-read is credited as a
-        // hit there; that race is benign.
-        crate::loop5_instrumentation::FAMILY_MEMO_MISSES.fetch_add(1, Ordering::Relaxed);
-        #[cfg(any(test, feature = "test-support"))]
-        crate::project_semantic_dispatch::raise::record_dispatch_cold(prepared.key());
-        #[cfg(any(test, feature = "test-support"))]
-        crate::capture_token::with_active_capture(|t| {
-            t.record_dispatch(prepared.key(), /* hit */ false)
-        });
-        tracing::debug!(
-            target: "verter::memo::miss",
-            key = ?prepared.key(),
-            "memo_miss"
-        );
-        Ok(ClaimAttempt {
-            prepared,
-            independent,
-            miss_recorded: false,
-            retries: 0,
-            recompute: false,
-        })
     }
 
-    /// Begin one logical claim of `key` that computes it rather than read
-    /// it warm: the claimant was refused the stored result's receipt. The
-    /// claim produces on a flight of its own and never subscribes to
-    /// another producer of the key.
-    /// `Err` is the cancellation read.
-    pub fn begin_query_recompute(
-        &self,
-        flags: &crate::resolver_core::resolver_context::RequestFlags,
-        key: SemanticQueryKey,
-    ) -> Result<ClaimAttempt, ValueRead> {
-        if flags.is_cancelled() {
-            return Err(cancelled_cache_read());
+    construction_ordinal_seam! {
+        /// Begin one logical claim of `key` that computes it rather than read
+        /// it warm: the claimant was refused the stored result's receipt. The
+        /// claim produces on a flight of its own and never subscribes to
+        /// another producer of the key.
+        /// `Err` is the cancellation read.
+        fn begin_query_recompute(
+            &self,
+            flags: &crate::resolver_core::resolver_context::RequestFlags,
+            key: SemanticQueryKey,
+        ) -> Result<ClaimAttempt, ValueRead> {
+            if flags.is_cancelled() {
+                return Err(cancelled_cache_read());
+            }
+            Ok(ClaimAttempt {
+                prepared: self.prepare_rooted_key(key),
+                independent: true,
+                miss_recorded: false,
+                retries: 0,
+                recompute: true,
+            })
         }
-        Ok(ClaimAttempt {
-            prepared: self.prepare_rooted_key(key),
-            independent: true,
-            miss_recorded: false,
-            retries: 0,
-            recompute: true,
-        })
     }
 
-    /// One claim attempt of `attempt`'s key for `task`.
-    pub fn claim_query<'s, C: crate::resolver_core::ResolverCapabilities>(
-        &'s self,
-        ctx: &dyn crate::resolver_core::ResolverContext<C>,
-        flags: &crate::resolver_core::resolver_context::RequestFlags,
-        attempt: &mut ClaimAttempt,
-        task: &ExecutionTask,
-        capture: &mut ReadCapture<'_>,
-    ) -> Claim<'s> {
-        if flags.is_cancelled() {
-            return Claim::Read(cancelled_cache_read());
-        }
-        let prepared = &attempt.prepared;
-        // 1. Warm re-read: reached on the rare race where another producer
-        //    published after the lookup, or on a retry after an abort. The
-        //    read validates strictly for this claimant's view. A claimant
-        //    refused the stored result's receipt computes instead.
-        let warm = if attempt.recompute {
-            None
-        } else {
-            self.get_validated_value_prepared(prepared, ctx, capture)
-        };
-        if let Some(hit) = warm {
-            self.stats.hits.fetch_add(1, Ordering::Relaxed);
-            if let Some(sched_ctx) = verter_execution::request_context::current_context() {
-                sched_ctx
-                    .0
-                    .record_cache_event(verter_execution::request_context::CacheEventKind::Hit);
+    construction_ordinal_seam! {
+        /// One claim attempt of `attempt`'s key for `task`.
+        fn claim_query<'s, C: crate::resolver_core::ResolverCapabilities>(
+            &'s self,
+            ctx: &dyn crate::resolver_core::ResolverContext<C>,
+            flags: &crate::resolver_core::resolver_context::RequestFlags,
+            attempt: &mut ClaimAttempt,
+            task: &ExecutionTask,
+            capture: &mut ReadCapture<'_>,
+        ) -> Claim<'s> {
+            if flags.is_cancelled() {
+                return Claim::Read(cancelled_cache_read());
             }
-            return Claim::Read(hit);
-        }
-        if !attempt.miss_recorded {
-            // One miss per logical claim, however many attempts it takes.
-            self.stats.misses.fetch_add(1, Ordering::Relaxed);
-            if let Some(ctx) = verter_execution::request_context::current_context() {
-                ctx.0
-                    .record_cache_event(verter_execution::request_context::CacheEventKind::Miss);
+            let prepared = &attempt.prepared;
+            // 1. Warm re-read: reached on the rare race where another producer
+            //    published after the lookup, or on a retry after an abort. The
+            //    read validates strictly for this claimant's view. A claimant
+            //    refused the stored result's receipt computes instead.
+            let warm = if attempt.recompute {
+                None
+            } else {
+                self.get_validated_value_prepared(prepared, ctx, capture)
+            };
+            if let Some(hit) = warm {
+                self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                if let Some(sched_ctx) = verter_execution::request_context::current_context() {
+                    sched_ctx
+                        .0
+                        .record_cache_event(verter_execution::request_context::CacheEventKind::Hit);
+                }
+                return Claim::Read(hit);
             }
-            attempt.miss_recorded = true;
-        }
+            if !attempt.miss_recorded {
+                // One miss per logical claim, however many attempts it takes.
+                self.stats.misses.fetch_add(1, Ordering::Relaxed);
+                if let Some(ctx) = verter_execution::request_context::current_context() {
+                    ctx.0
+                        .record_cache_event(verter_execution::request_context::CacheEventKind::Miss);
+                }
+                attempt.miss_recorded = true;
+            }
 
-        // 2. Same-path recursion: the claiming task already produces this
-        //    key. Its producer is still open, so answering it would wait on
-        //    itself.
-        if task.produces(prepared) {
-            self.stats
-                .same_path_sentinel_returns
-                .fetch_add(1, Ordering::Relaxed);
-            if let Some(ctx) = verter_execution::request_context::current_context() {
-                ctx.0.record_cache_event(
-                    verter_execution::request_context::CacheEventKind::Sentinel,
-                );
+            // 2. Same-path recursion: the claiming task already produces this
+            //    key. Its producer is still open, so answering it would wait on
+            //    itself.
+            if task.produces(prepared) {
+                self.stats
+                    .same_path_sentinel_returns
+                    .fetch_add(1, Ordering::Relaxed);
+                if let Some(ctx) = verter_execution::request_context::current_context() {
+                    ctx.0.record_cache_event(
+                        verter_execution::request_context::CacheEventKind::Sentinel,
+                    );
+                }
+                return Claim::Recursive(Recursion::SamePath);
             }
-            return Claim::Recursive(Recursion::SamePath);
-        }
 
-        // 3. Become the producer, or subscribe to the one another task owns.
-        if attempt.independent {
-            let inflight = Arc::new(FlightCell::charged(self.retention_account()));
+            // 3. Become the producer, or subscribe to the one another task owns.
+            if attempt.independent {
+                let inflight = Arc::new(FlightCell::charged(self.retention_account()));
+                {
+                    let mut state = inflight.state.lock();
+                    state.claimed = true;
+                    state.owner = Some(task.id());
+                }
+                self.independent_inflight
+                    .lock()
+                    .entry(prepared.clone())
+                    .or_default()
+                    .push(Arc::clone(&inflight));
+                return Claim::Produce(self.open_producer(prepared.clone(), inflight, true, task));
+            }
+            let inflight = {
+                let mut table = self.inflight.lock();
+                table
+                    .entry(prepared.clone())
+                    .or_insert_with(|| Arc::new(FlightCell::charged(self.retention_account())))
+                    .clone()
+            };
             {
                 let mut state = inflight.state.lock();
+                if state.claimed {
+                    drop(state);
+                    return Claim::Subscribed(Subscription {
+                        store: self,
+                        inflight,
+                        waiter: task.id(),
+                    });
+                }
                 state.claimed = true;
                 state.owner = Some(task.id());
             }
-            self.independent_inflight
-                .lock()
-                .entry(prepared.clone())
-                .or_default()
-                .push(Arc::clone(&inflight));
-            return Claim::Produce(self.open_producer(prepared.clone(), inflight, true, task));
+            Claim::Produce(self.open_producer(prepared.clone(), inflight, false, task))
         }
-        let inflight = {
-            let mut table = self.inflight.lock();
-            table
-                .entry(prepared.clone())
-                .or_insert_with(|| Arc::new(FlightCell::charged(self.retention_account())))
-                .clone()
-        };
-        {
-            let mut state = inflight.state.lock();
-            if state.claimed {
-                drop(state);
-                return Claim::Subscribed(Subscription {
-                    store: self,
-                    inflight,
-                    waiter: task.id(),
-                });
-            }
-            state.claimed = true;
-            state.owner = Some(task.id());
-        }
-        Claim::Produce(self.open_producer(prepared.clone(), inflight, false, task))
     }
 
     fn open_producer<'s>(

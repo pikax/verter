@@ -59,18 +59,34 @@ fn make_host() -> Arc<VerterHost> {
     host
 }
 
-/// Lower a top-level alias to its deferred carrier (DeclRef /
-/// IndexedAccess / similar) so the evaluator has something
-/// non-trivial to fix-point on.
+/// Lower a top-level alias to its deferred carrier, a declaration
+/// reference no evaluator step rewrites.
 fn lower_alias_carrier(host: &Arc<VerterHost>, alias_name: &str) -> SemanticNodeId {
     let expr = TypeExpr::Ref {
         name: Arc::from(alias_name),
         type_arguments: Arc::from(Vec::new().into_boxed_slice()),
     };
+    lower(host, &expr)
+}
+
+/// Lower `DeepSource['alpha']`: an indexed access the evaluator rewrites,
+/// so it has something to evaluate and memoize.
+fn lower_indexed_access(host: &Arc<VerterHost>) -> SemanticNodeId {
+    let expr = TypeExpr::IndexedAccess {
+        object: Arc::new(TypeExpr::Ref {
+            name: Arc::from("DeepSource"),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        }),
+        index: Arc::new(TypeExpr::Literal(LiteralValue::String("alpha".to_string()))),
+    };
+    lower(host, &expr)
+}
+
+fn lower(host: &Arc<VerterHost>, expr: &TypeExpr) -> SemanticNodeId {
     for_tests::dispatch_lower_type_expr_in_scope_with_context_for_tests(
         host,
         "/source.ts",
-        &expr,
+        expr,
         ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
     )
     .expect("lowering must succeed")
@@ -79,7 +95,7 @@ fn lower_alias_carrier(host: &Arc<VerterHost>, alias_name: &str) -> SemanticNode
 #[test]
 fn repeated_evaluate_with_same_node_and_context_hits_memo() {
     let host = make_host();
-    let carrier = lower_alias_carrier(&host, "Indirect");
+    let carrier = lower_indexed_access(&host);
     let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
 
     let store = host.project_type_store().semantic_graph();
@@ -164,10 +180,44 @@ fn an_operand_finished_as_itself_takes_no_memo_probe() {
     );
 }
 
+/// A root the evaluator finishes as itself is admitted without a memo
+/// probe, cold or repeated: its receipt is known before it runs, so it
+/// neither reads nor publishes an evaluation memo entry.
+#[test]
+fn a_root_finished_as_itself_takes_no_memo_probe() {
+    let host = make_host();
+    let carrier = lower_alias_carrier(&host, "Indirect");
+    let store = host.project_type_store().semantic_graph();
+    assert!(
+        matches!(
+            store.node_data(carrier).as_deref(),
+            Some(SemanticNodeData::DeclRef { .. })
+        ),
+        "the fixture must be a declaration reference"
+    );
+    let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+    let baseline = store.stats_snapshot();
+    for _ in 0..2 {
+        let (node, completeness) =
+            for_tests::dispatch_evaluate_deferred_for_tests(&host, carrier, context);
+        assert_eq!(node, carrier, "the reference finishes as itself");
+        assert!(!completeness.is_partial(), "the evaluation is complete");
+    }
+    let after = store.stats_snapshot();
+    assert_eq!(
+        (
+            after.evaluate_deferred_memo_misses - baseline.evaluate_deferred_memo_misses,
+            after.evaluate_deferred_memo_hits - baseline.evaluate_deferred_memo_hits,
+        ),
+        (0, 0),
+        "a root finished as itself must not probe the evaluation memo"
+    );
+}
+
 #[test]
 fn different_contexts_produce_distinct_memo_keys() {
     let host = make_host();
-    let carrier = lower_alias_carrier(&host, "Indirect");
+    let carrier = lower_indexed_access(&host);
 
     let store = host.project_type_store().semantic_graph();
     let baseline = store.stats_snapshot();

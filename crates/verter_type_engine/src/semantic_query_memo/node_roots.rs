@@ -389,6 +389,13 @@ impl ScopeStack {
             });
         if let Some(heir) = heir {
             let heir = &mut self.entries[heir];
+            // The heir keeps the union, so merge the smaller holding into
+            // the larger: an attachment that rises through every enclosing
+            // owner of a deep evaluation is moved, not re-adopted, at each.
+            if heir.deliveries.len() < owners.deliveries.len() {
+                std::mem::swap(&mut heir.deliveries, &mut owners.deliveries);
+                std::mem::swap(&mut heir.delivered, &mut owners.delivered);
+            }
             for lease in owners.deliveries.drain(..) {
                 // A repeat is another handle on an owner the heir keeps.
                 let _ = heir.adopt(lease);
@@ -405,6 +412,10 @@ struct ConstructionOwners {
     /// How many dispatchers share this owner; `0` for a lexical scope.
     dispatchers: usize,
     roots: Vec<NodeRoot>,
+    /// The ordinals interned while this owner was the innermost one of its
+    /// arena: each holds the one count its intern took, released together
+    /// when the owner closes.
+    constructed: Vec<SemanticNodeId>,
     deliveries: Vec<super::delivery_lease::SemanticDeliveryLease>,
     /// The shared delivery owners `deliveries` already holds. Every clone
     /// of one delivery names the same owner, so an owner keeps it once
@@ -412,7 +423,27 @@ struct ConstructionOwners {
     delivered: rustc_hash::FxHashSet<usize>,
 }
 
+impl Drop for ConstructionOwners {
+    fn drop(&mut self) {
+        if !self.constructed.is_empty() {
+            self.arena.release_roots(&self.constructed);
+        }
+    }
+}
+
 impl ConstructionOwners {
+    fn new(token: u64, arena: &Arc<NodeArenaCore>) -> Self {
+        Self {
+            token,
+            arena: Arc::clone(arena),
+            dispatchers: 0,
+            roots: Vec::new(),
+            constructed: Vec::new(),
+            deliveries: Vec::new(),
+            delivered: Default::default(),
+        }
+    }
+
     /// Keep `lease` unless this owner already holds its delivery; a
     /// repeat is handed back for the caller to drop.
     fn adopt(
@@ -462,14 +493,7 @@ impl DispatchConstructionScope {
                 Some(position) => scopes.entries.remove(position),
                 None => {
                     let token = scopes.mint();
-                    ConstructionOwners {
-                        token,
-                        arena: Arc::clone(arena),
-                        dispatchers: 0,
-                        roots: Vec::new(),
-                        deliveries: Vec::new(),
-                        delivered: Default::default(),
-                    }
+                    ConstructionOwners::new(token, arena)
                 }
             };
             owners.dispatchers += 1;
@@ -511,14 +535,7 @@ impl NodeRootScope {
         let token = SCOPES.with(|scopes| {
             let mut scopes = scopes.borrow_mut();
             let token = scopes.mint();
-            scopes.entries.push(ConstructionOwners {
-                token,
-                arena: Arc::clone(arena),
-                dispatchers: 0,
-                roots: Vec::new(),
-                deliveries: Vec::new(),
-                delivered: Default::default(),
-            });
+            scopes.entries.push(ConstructionOwners::new(token, arena));
             token
         });
         Self {
@@ -573,6 +590,26 @@ impl NodeRootScope {
             }
         });
         drop(root);
+    }
+
+    /// Hand the count a fresh intern of `id` took in `arena` to the
+    /// innermost construction owner of that arena on this thread, which
+    /// releases it when it closes; with no such owner the count is released
+    /// now.
+    pub(crate) fn capture_constructed(arena: &Arc<NodeArenaCore>, id: SemanticNodeId) {
+        let held = SCOPES.with(|scopes| {
+            scopes
+                .borrow_mut()
+                .entries
+                .iter_mut()
+                .rev()
+                .find(|candidate| Arc::ptr_eq(&candidate.arena, arena))
+                .map(|scope| scope.constructed.push(id))
+                .is_some()
+        });
+        if !held {
+            arena.release_roots(&[id]);
+        }
     }
 
     pub(crate) fn capture_delivery(

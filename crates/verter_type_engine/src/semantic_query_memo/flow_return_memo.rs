@@ -20,14 +20,16 @@
 use super::*;
 
 impl SemanticGraphStore {
-    /// Claim the ordinary family flight for a flow-return member computed
-    /// inline. `None` means another cold owner already owns this exact
-    /// full key.
-    pub fn begin_inline_flow_return_flight(
-        &self,
-        key: &crate::semantic_query::FlowReturnKey,
-    ) -> Option<InlineMemberFlight> {
-        self.begin_inline_member_flight(SemanticQueryKey::FlowReturn(Box::new(key.clone())))
+    construction_ordinal_seam! {
+        /// Claim the ordinary family flight for a flow-return member computed
+        /// inline. `None` means another cold owner already owns this exact
+        /// full key.
+        fn begin_inline_flow_return_flight(
+            &self,
+            key: &crate::semantic_query::FlowReturnKey,
+        ) -> Option<InlineMemberFlight> {
+            self.begin_inline_member_flight(SemanticQueryKey::FlowReturn(Box::new(key.clone())))
+        }
     }
 
     /// Whether the `FlowReturn` family holds a candidate for `key` the warm
@@ -60,56 +62,58 @@ impl SemanticGraphStore {
         })
     }
 
-    /// The strict warm read of the `FlowReturn` family (design §3.4):
-    /// the TWO-GATE hit — `cached_satisfies` over the entry's RECORDED
-    /// materialised point against the key's OWN demand point (never the
-    /// nominal `Single` preset), AND carrier validation. An entry carries the `FlowBody` fact rail
-    /// plus its consumed subquery facts and self roots; `validate(ctx)`
-    /// revalidates that whole signature against the caller's live view,
-    /// so a body edit or a torn fact set hard-misses. Warm validity
-    /// consults the `FlowBody` rooting + the unioned consumed facts
-    /// ONLY — no slice hash or selected-ID is re-derived or consulted
-    /// here (the sole-rail invariant; slice identity is structurally
-    /// unrepresentable in the fact rail).
-    pub fn get_flow_return_result<C: crate::resolver_core::ResolverCapabilities>(
-        &self,
-        ctx: &dyn crate::resolver_core::ResolverContext<C>,
-        key: &crate::semantic_query::FlowReturnKey,
-    ) -> Option<CacheRead<crate::semantic_query::FlowReturnResult>> {
-        let family = FamilyKey::FlowReturn {
-            key: Box::new(key.clone()),
-        };
-        // The §3.4 point gate is LIVE here: a flow-return family's
-        // candidates record different materialised points, so a warm hit
-        // must cover the caller's OWN demand point.
-        let requested = MaterializedPoint::new(key.demand.point.clone());
-        // Miss-neutral probe: a miss falls through to the owning
-        // cooperative dispatch, which records the single miss (see
-        // `get_validated_value_impl`'s `record_miss` contract).
-        let hit = self.get_validated_value_impl(
-            &family,
-            ModeSlot::Single,
-            &requested,
-            ctx,
-            None,
-            None,
-            false,
-        )?;
-        Some(hit.map_value(|value| match value {
-            QueryResult::Value(SemanticQueryValue::FlowReturn(result)) => {
-                verter_debug_assert!(
-                    result.degradation().is_none(),
-                    "the FlowReturn memo never stores a degraded success (ReturnOnly by contract)"
-                );
-                (*result).clone()
-            }
-            // Structural invariant: the flow-return authority only ever
-            // stores `FlowReturn` payloads in `FlowReturn` family entries.
-            other => {
-                unreachable!(
-                    "FlowReturn family entries store FlowReturn payloads only; found {other:?}"
-                )
-            }
-        }))
+    construction_ordinal_seam! {
+        /// The strict warm read of the `FlowReturn` family (design §3.4):
+        /// the TWO-GATE hit — `cached_satisfies` over the entry's RECORDED
+        /// materialised point against the key's OWN demand point (never the
+        /// nominal `Single` preset), AND carrier validation. An entry carries the `FlowBody` fact rail
+        /// plus its consumed subquery facts and self roots; `validate(ctx)`
+        /// revalidates that whole signature against the caller's live view,
+        /// so a body edit or a torn fact set hard-misses. Warm validity
+        /// consults the `FlowBody` rooting + the unioned consumed facts
+        /// ONLY — no slice hash or selected-ID is re-derived or consulted
+        /// here (the sole-rail invariant; slice identity is structurally
+        /// unrepresentable in the fact rail).
+        fn get_flow_return_result<C: crate::resolver_core::ResolverCapabilities>(
+            &self,
+            ctx: &dyn crate::resolver_core::ResolverContext<C>,
+            key: &crate::semantic_query::FlowReturnKey,
+        ) -> Option<CacheRead<crate::semantic_query::FlowReturnResult>> {
+            let family = FamilyKey::FlowReturn {
+                key: Box::new(key.clone()),
+            };
+            // The §3.4 point gate is LIVE here: a flow-return family's
+            // candidates record different materialised points, so a warm hit
+            // must cover the caller's OWN demand point.
+            let requested = MaterializedPoint::new(key.demand.point.clone());
+            // Miss-neutral probe: a miss falls through to the owning
+            // cooperative dispatch, which records the single miss (see
+            // `get_validated_value_impl`'s `record_miss` contract).
+            let hit = self.get_validated_value_impl(
+                &family,
+                ModeSlot::Single,
+                &requested,
+                ctx,
+                None,
+                None,
+                false,
+            )?;
+            Some(hit.map_value(|value| match value {
+                QueryResult::Value(SemanticQueryValue::FlowReturn(result)) => {
+                    verter_debug_assert!(
+                        result.degradation().is_none(),
+                        "the FlowReturn memo never stores a degraded success (ReturnOnly by contract)"
+                    );
+                    (*result).clone()
+                }
+                // Structural invariant: the flow-return authority only ever
+                // stores `FlowReturn` payloads in `FlowReturn` family entries.
+                other => {
+                    unreachable!(
+                        "FlowReturn family entries store FlowReturn payloads only; found {other:?}"
+                    )
+                }
+            }))
+        }
     }
 }

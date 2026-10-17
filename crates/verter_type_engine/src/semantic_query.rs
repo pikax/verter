@@ -1170,39 +1170,41 @@ pub enum PrintedUnionArm {
     Enum(DeclIdentity),
 }
 
-/// A union's constituents as the checker prints them: a union holding
-/// every member of an enum prints the enum's name in place of them, where
-/// its first member stands (`E.A | E.B` over a two-member `E` prints `E`;
-/// `E3.A | E3.B` over a three-member `E3` prints both members).
-pub fn printed_union_arms(
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
-    members: &[SemanticNodeId],
-) -> Vec<PrintedUnionArm> {
-    let literals: Vec<Option<EnumLiteralType>> = members
-        .iter()
-        .map(|member| match graph.node_data(*member).as_deref() {
-            Some(SemanticNodeData::EnumLiteral(literal)) => Some(literal.clone()),
-            _ => None,
-        })
-        .collect();
-    let mut present: std::collections::HashMap<&DeclIdentity, u32> =
-        std::collections::HashMap::new();
-    for literal in literals.iter().flatten() {
-        *present.entry(&literal.enum_decl).or_default() += 1;
-    }
-    let mut printed: std::collections::HashSet<&DeclIdentity> = std::collections::HashSet::new();
-    let mut arms = Vec::with_capacity(members.len());
-    for (member, literal) in members.iter().zip(literals.iter()) {
-        match literal {
-            Some(literal) if present.get(&literal.enum_decl) == Some(&literal.member_count) => {
-                if printed.insert(&literal.enum_decl) {
-                    arms.push(PrintedUnionArm::Enum(literal.enum_decl.clone()));
-                }
-            }
-            _ => arms.push(PrintedUnionArm::Node(*member)),
+construction_ordinal_seam! {
+    /// A union's constituents as the checker prints them: a union holding
+    /// every member of an enum prints the enum's name in place of them, where
+    /// its first member stands (`E.A | E.B` over a two-member `E` prints `E`;
+    /// `E3.A | E3.B` over a three-member `E3` prints both members).
+    fn printed_union_arms(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        members: &[SemanticNodeId],
+    ) -> Vec<PrintedUnionArm> {
+        let literals: Vec<Option<EnumLiteralType>> = members
+            .iter()
+            .map(|member| match graph.node_data(*member).as_deref() {
+                Some(SemanticNodeData::EnumLiteral(literal)) => Some(literal.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut present: std::collections::HashMap<&DeclIdentity, u32> =
+            std::collections::HashMap::new();
+        for literal in literals.iter().flatten() {
+            *present.entry(&literal.enum_decl).or_default() += 1;
         }
+        let mut printed: std::collections::HashSet<&DeclIdentity> = std::collections::HashSet::new();
+        let mut arms = Vec::with_capacity(members.len());
+        for (member, literal) in members.iter().zip(literals.iter()) {
+            match literal {
+                Some(literal) if present.get(&literal.enum_decl) == Some(&literal.member_count) => {
+                    if printed.insert(&literal.enum_decl) {
+                        arms.push(PrintedUnionArm::Enum(literal.enum_decl.clone()));
+                    }
+                }
+                _ => arms.push(PrintedUnionArm::Node(*member)),
+            }
+        }
+        arms
     }
-    arms
 }
 
 /// Identity of one class EXPRESSION — the payload of
@@ -1294,21 +1296,23 @@ impl ClassExpressionIdentity {
         printed
     }
 
-    /// [`Self::printed_name`] over `store`: an argument is its clause's
-    /// parameter when it is the type parameter of that name.
-    #[must_use]
-    pub fn printed_name_in(
-        &self,
-        store: &crate::semantic_query_memo::SemanticGraphStore,
-        type_arguments: &[SemanticNodeId],
-    ) -> String {
-        self.printed_name(type_arguments, |argument, name| {
-            matches!(
-                store.node_data(argument).as_deref(),
-                Some(SemanticNodeData::TypeParam { display_name, .. })
-                    if display_name.as_ref() == name
-            )
-        })
+    construction_ordinal_seam! {
+        /// [`Self::printed_name`] over `store`: an argument is its clause's
+        /// parameter when it is the type parameter of that name.
+        #[must_use]
+        fn printed_name_in(
+            &self,
+            store: &crate::semantic_query_memo::SemanticGraphStore,
+            type_arguments: &[SemanticNodeId],
+        ) -> String {
+            self.printed_name(type_arguments, |argument, name| {
+                matches!(
+                    store.node_data(argument).as_deref(),
+                    Some(SemanticNodeData::TypeParam { display_name, .. })
+                        if display_name.as_ref() == name
+                )
+            })
+        }
     }
 
     /// The arguments a reference passes to the class's OWN type
@@ -2721,72 +2725,76 @@ pub enum MapperKind {
 }
 
 impl MapperKind {
-    /// Classify `value_expr` against `source` and `mapper_param` by
-    /// checking whether it is structurally the identity projection
-    /// `source[mapper_param]`. Used by the lowering path to tag each
-    /// `MapperKey` at construction time.
-    ///
-    /// Matches two shapes after unwrapping a single `Alias`:
-    /// - `IndexedAccess { object = source, index = TypeNode(id) }` where
-    ///   `id` resolves (possibly through one `Alias`) to a
-    ///   `TypeParam` node with the same name as `mapper_param`.
-    /// - Anything else → [`MapperKind::Computed`].
-    ///
-    /// `mapper_param_node` is the mapper's binder node id (the
-    /// `TypeParam` introduced by the enclosing `[K in ...]`
-    /// binding). Classification checks that the indexed-access
-    /// `index`'s type node equals this binder by `SemanticNodeId`,
-    /// not by `display_name` string — two binders that share a
-    /// display name but are semantically distinct must not conflate.
-    #[must_use]
-    pub fn classify_value_expr(
-        graph: &crate::semantic_query_memo::SemanticGraphStore,
-        value_expr: SemanticNodeId,
-        source: SemanticNodeId,
-        mapper_param_node: SemanticNodeId,
-    ) -> Self {
-        let mut value_id = value_expr;
-        if let Some(SemanticNodeData::Alias(inner)) = graph.node_data(value_id).as_deref() {
-            value_id = *inner;
-        }
-        let (object, index) = match graph.node_data(value_id).as_deref() {
-            Some(SemanticNodeData::IndexedAccess { object, index }) => (*object, index.clone()),
-            _ => return MapperKind::Computed,
-        };
-        if object != source {
-            return MapperKind::Computed;
-        }
-        let mut index_id = match index {
-            IndexKey::Computed(id) => id,
-            _ => return MapperKind::Computed,
-        };
-        if let Some(SemanticNodeData::Alias(inner)) = graph.node_data(index_id).as_deref() {
-            index_id = *inner;
-        }
-        if index_id == mapper_param_node {
-            MapperKind::Identity
-        } else {
-            MapperKind::Computed
+    construction_ordinal_seam! {
+        /// Classify `value_expr` against `source` and `mapper_param` by
+        /// checking whether it is structurally the identity projection
+        /// `source[mapper_param]`. Used by the lowering path to tag each
+        /// `MapperKey` at construction time.
+        ///
+        /// Matches two shapes after unwrapping a single `Alias`:
+        /// - `IndexedAccess { object = source, index = TypeNode(id) }` where
+        ///   `id` resolves (possibly through one `Alias`) to a
+        ///   `TypeParam` node with the same name as `mapper_param`.
+        /// - Anything else → [`MapperKind::Computed`].
+        ///
+        /// `mapper_param_node` is the mapper's binder node id (the
+        /// `TypeParam` introduced by the enclosing `[K in ...]`
+        /// binding). Classification checks that the indexed-access
+        /// `index`'s type node equals this binder by `SemanticNodeId`,
+        /// not by `display_name` string — two binders that share a
+        /// display name but are semantically distinct must not conflate.
+        #[must_use]
+        fn classify_value_expr(
+            graph: &crate::semantic_query_memo::SemanticGraphStore,
+            value_expr: SemanticNodeId,
+            source: SemanticNodeId,
+            mapper_param_node: SemanticNodeId,
+        ) -> Self {
+            let mut value_id = value_expr;
+            if let Some(SemanticNodeData::Alias(inner)) = graph.node_data(value_id).as_deref() {
+                value_id = *inner;
+            }
+            let (object, index) = match graph.node_data(value_id).as_deref() {
+                Some(SemanticNodeData::IndexedAccess { object, index }) => (*object, index.clone()),
+                _ => return MapperKind::Computed,
+            };
+            if object != source {
+                return MapperKind::Computed;
+            }
+            let mut index_id = match index {
+                IndexKey::Computed(id) => id,
+                _ => return MapperKind::Computed,
+            };
+            if let Some(SemanticNodeData::Alias(inner)) = graph.node_data(index_id).as_deref() {
+                index_id = *inner;
+            }
+            if index_id == mapper_param_node {
+                MapperKind::Identity
+            } else {
+                MapperKind::Computed
+            }
         }
     }
 }
 
-/// Whether a mapped type's lowered `keyof` operand is a TYPE VARIABLE — a
-/// type parameter binder or an `infer` declaration or reference — so the
-/// mapping is homomorphic over it ([`MapperKey::over_type_variable`]).
-#[must_use]
-pub fn keyof_operand_is_type_variable(
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
-    operand: SemanticNodeId,
-) -> bool {
-    matches!(
-        graph.node_data(operand).as_deref(),
-        Some(
-            SemanticNodeData::TypeParam { .. }
-                | SemanticNodeData::Infer { .. }
-                | SemanticNodeData::InferRef { .. }
+construction_ordinal_seam! {
+    /// Whether a mapped type's lowered `keyof` operand is a TYPE VARIABLE — a
+    /// type parameter binder or an `infer` declaration or reference — so the
+    /// mapping is homomorphic over it ([`MapperKey::over_type_variable`]).
+    #[must_use]
+    fn keyof_operand_is_type_variable(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        operand: SemanticNodeId,
+    ) -> bool {
+        matches!(
+            graph.node_data(operand).as_deref(),
+            Some(
+                SemanticNodeData::TypeParam { .. }
+                    | SemanticNodeData::Infer { .. }
+                    | SemanticNodeData::InferRef { .. }
+            )
         )
-    )
+    }
 }
 
 /// Mapper identity for mapped-type queries. Separates the key space from the

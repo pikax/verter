@@ -439,16 +439,7 @@ pub(crate) fn resolve_payload_surface_with_scope(
                             return Err(NonEmptyReasons::from_query_error(&error));
                         }
                     };
-                    let mut canonical_evidence =
-                    verter_type_engine::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default(
-                    );
-                    let members =
-                    verter_type_engine::project_semantic_dispatch::walk::spread_formula_positive_members_for_macro(
-                        dispatch.graph(),
-                        &formula,
-                        &mut canonical_evidence,
-                    );
-                    dispatch.deposit_canonical_evidence(canonical_evidence);
+                    let members = dispatch.spread_formula_positive_members_for_macro(&formula);
                     Ok(Some(members))
                 }
                 other => {

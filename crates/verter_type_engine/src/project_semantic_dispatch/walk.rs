@@ -1441,53 +1441,55 @@ pub(crate) struct MergedDeclDisplaySurface {
     pub(crate) own_surface: MergedDeclSurface,
 }
 
-/// Reduce a [`SemanticNodeData::MergedDecl`] carrier to a single peer-merged
-/// node (graph-only entry point; the dispatch method delegates here).
-///
-/// Each contributor body is split into its OWN-body surface(s) and its
-/// `extends`/`implements` HERITAGE arms:
-/// * an interface body with no heritage is a bare `Object` — its members are
-///   own-body;
-/// * an interface-with-`extends` body is an `Intersection` whose `Object`
-///   arm(s) are own-body and whose remaining (reference) arms are heritage.
-///
-/// All contributors' own-body surfaces peer-merge via
-/// [`merge_declaration_surfaces`] (member union + ordered method overload
-/// accumulation). Heritage arms are PRESERVED, not flattened here: the reducer
-/// emits `Intersection([heritage…, peer_merged_own_Object])` so the existing
-/// consumer paths (raise / expand / walk-segment / relation) resolve the
-/// heritage references lazily and apply own-body-shadows-heritage precedence
-/// (the own `Object` arm is last). When a contributor has no heritage the
-/// result is the peer-merged `Object` directly. This keeps a single
-/// declaration-merge engine and a single heritage-resolution path — the reducer
-/// never eagerly expands a heritage `Ref`.
-pub fn reduce_merged_decl_with_graph(
-    graph: &SemanticGraphStore,
-    contributors: &[SemanticNodeId],
-) -> SemanticNodeId {
-    let mut own_surfaces: Vec<ShallowSurface> = Vec::with_capacity(contributors.len());
-    let mut heritage_arms: Vec<SemanticNodeId> = Vec::new();
-    for contributor in contributors {
-        collect_merged_contributor_arms(graph, *contributor, &mut own_surfaces, &mut heritage_arms);
+construction_ordinal_seam! {
+    /// Reduce a [`SemanticNodeData::MergedDecl`] carrier to a single peer-merged
+    /// node (graph-only entry point; the dispatch method delegates here).
+    ///
+    /// Each contributor body is split into its OWN-body surface(s) and its
+    /// `extends`/`implements` HERITAGE arms:
+    /// * an interface body with no heritage is a bare `Object` — its members are
+    ///   own-body;
+    /// * an interface-with-`extends` body is an `Intersection` whose `Object`
+    ///   arm(s) are own-body and whose remaining (reference) arms are heritage.
+    ///
+    /// All contributors' own-body surfaces peer-merge via
+    /// [`merge_declaration_surfaces`] (member union + ordered method overload
+    /// accumulation). Heritage arms are PRESERVED, not flattened here: the reducer
+    /// emits `Intersection([heritage…, peer_merged_own_Object])` so the existing
+    /// consumer paths (raise / expand / walk-segment / relation) resolve the
+    /// heritage references lazily and apply own-body-shadows-heritage precedence
+    /// (the own `Object` arm is last). When a contributor has no heritage the
+    /// result is the peer-merged `Object` directly. This keeps a single
+    /// declaration-merge engine and a single heritage-resolution path — the reducer
+    /// never eagerly expands a heritage `Ref`.
+    fn reduce_merged_decl_with_graph(
+        graph: &SemanticGraphStore,
+        contributors: &[SemanticNodeId],
+    ) -> SemanticNodeId {
+        let mut own_surfaces: Vec<ShallowSurface> = Vec::with_capacity(contributors.len());
+        let mut heritage_arms: Vec<SemanticNodeId> = Vec::new();
+        for contributor in contributors {
+            collect_merged_contributor_arms(graph, *contributor, &mut own_surfaces, &mut heritage_arms);
+        }
+        let merged = merge_declaration_surfaces(graph, &own_surfaces);
+        let own_object =
+            graph.intern_node(SemanticNodeData::Object(surface_view_from_shallow(&merged)));
+        if heritage_arms.is_empty() {
+            return own_object;
+        }
+        // Preserve heritage: own-body object LAST so the intersection heritage-shadow
+        // reducer lets the merged own members shadow inherited same-name members.
+        // A HERITAGE body: arm order is own-body-last topology and rendered
+        // type-text fidelity — never the commutative canonical route — and its
+        // signatures inherit by concatenation, own first.
+        let mut arms = heritage_arms;
+        arms.push(own_object);
+        graph.intern_node(SemanticNodeData::Intersection(
+            crate::semantic_query::composite::CompositeList::heritage(Arc::from(
+                arms.into_boxed_slice(),
+            )),
+        ))
     }
-    let merged = merge_declaration_surfaces(graph, &own_surfaces);
-    let own_object =
-        graph.intern_node(SemanticNodeData::Object(surface_view_from_shallow(&merged)));
-    if heritage_arms.is_empty() {
-        return own_object;
-    }
-    // Preserve heritage: own-body object LAST so the intersection heritage-shadow
-    // reducer lets the merged own members shadow inherited same-name members.
-    // A HERITAGE body: arm order is own-body-last topology and rendered
-    // type-text fidelity — never the commutative canonical route — and its
-    // signatures inherit by concatenation, own first.
-    let mut arms = heritage_arms;
-    arms.push(own_object);
-    graph.intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::heritage(Arc::from(
-            arms.into_boxed_slice(),
-        )),
-    ))
 }
 
 /// Compute the peer-merged declaration surface for display without interning
@@ -10325,100 +10327,102 @@ pub(super) fn value_may_contribute_call_signatures(
     false
 }
 
-/// Merge per-arm union surfaces under the TS-correct common-member rule,
-/// matching the canonical union common-member semantics:
-///
-/// - A member survives iff it is present (by name) in EVERY resolvable arm.
-/// - Its value is the UNION of the per-arm member value nodes (`(A | B)['k']`
-///   is `A['k'] | B['k']`).
-/// - `optional` iff optional in ANY arm; `readonly` iff readonly in ALL arms.
-/// - `is_method` / `declared_in_macro_type_arg` are `false`; the merge role is
-///   [`MemberMergeRole::Authored`] — a synthesized common member is reached
-///   THROUGH the union, never the macro-T own body or a heritage overlay, so
-///   it must not pretend to be own-body / heritage.
-/// - A union has no single call/construct/index surface, so the merged surface
-///   carries none.
-///
-/// Returns `Some(empty)` when there are no common members (a disjoint union
-/// resolved, it simply has no common members) or when any arm is a non-Object
-/// (`None`) surface — a union with an unreadable / non-Object arm has no
-/// common Object members. Returns `None` only when the arm vector is empty
-/// (defensive).
-pub fn merge_union_surfaces(
-    graph: &SemanticGraphStore,
-    arm_surfaces: &[Option<ShallowSurface>],
-    evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
-) -> Option<ShallowSurface> {
-    if arm_surfaces.is_empty() {
-        return None;
-    }
-    // Any None arm means the union has a non-Object arm — there are
-    // no common Object members, so the merged surface is empty.
-    if arm_surfaces.iter().any(|s| s.is_none()) {
-        return Some(ShallowSurface::empty());
-    }
-    let live: Vec<&ShallowSurface> = arm_surfaces.iter().filter_map(|s| s.as_ref()).collect();
-    if live.is_empty() {
-        return Some(ShallowSurface::empty());
-    }
-    // One-pass per-name aggregation (replacing the retired
-    // O(arms × members²) per-name `find` loop): each arm contributes its
-    // FIRST occurrence of a name, in arm order — identical selection to
-    // the retired per-arm `find`.
-    let by_name = aggregate_union_members(&live);
-    // Emit in ARM-0 SOURCE ORDER, including duplicate-name occurrences —
-    // each arm-0 occurrence emits one row aggregated from the per-arm
-    // first occurrences, exactly as the retired per-name loop did. The
-    // lookup matches under JS property identity ([`authored_keys_collide`])
-    // so a dual-spelling arm-0 key finds its aggregated entry.
-    let mut members: Vec<ShallowSurfaceMember> = Vec::new();
-    for first_member in &live[0].members {
-        let Some((_, accum)) = by_name
-            .iter()
-            .find(|(key, _)| authored_keys_collide(key, &first_member.key))
-        else {
-            // Unreachable: arm 0's own members always aggregate.
-            continue;
-        };
-        // Common-member rule: a member survives iff present (by name) in
-        // EVERY resolvable arm.
-        if accum.declaring_arms != live.len() {
-            continue;
+construction_ordinal_seam! {
+    /// Merge per-arm union surfaces under the TS-correct common-member rule,
+    /// matching the canonical union common-member semantics:
+    ///
+    /// - A member survives iff it is present (by name) in EVERY resolvable arm.
+    /// - Its value is the UNION of the per-arm member value nodes (`(A | B)['k']`
+    ///   is `A['k'] | B['k']`).
+    /// - `optional` iff optional in ANY arm; `readonly` iff readonly in ALL arms.
+    /// - `is_method` / `declared_in_macro_type_arg` are `false`; the merge role is
+    ///   [`MemberMergeRole::Authored`] — a synthesized common member is reached
+    ///   THROUGH the union, never the macro-T own body or a heritage overlay, so
+    ///   it must not pretend to be own-body / heritage.
+    /// - A union has no single call/construct/index surface, so the merged surface
+    ///   carries none.
+    ///
+    /// Returns `Some(empty)` when there are no common members (a disjoint union
+    /// resolved, it simply has no common members) or when any arm is a non-Object
+    /// (`None`) surface — a union with an unreadable / non-Object arm has no
+    /// common Object members. Returns `None` only when the arm vector is empty
+    /// (defensive).
+    fn merge_union_surfaces(
+        graph: &SemanticGraphStore,
+        arm_surfaces: &[Option<ShallowSurface>],
+        evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
+    ) -> Option<ShallowSurface> {
+        if arm_surfaces.is_empty() {
+            return None;
         }
-        members.push(ShallowSurfaceMember {
-            key: first_member.key.clone(),
-            // Value type = union of the per-arm member values. A single
-            // shared value node stays as-is (no singleton union wrapper).
-            value: accum.value_node(graph, evidence),
-            optional: accum.optional_in_any,
-            readonly: accum.readonly_in_all,
-            method_kind: None,
-            has_implementation_body: false,
-            // Union common-member synthesis is never a literal origin.
-            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-            // Union common-member (`(A|B)['k']`): the MOST-RESTRICTIVE
-            // accessibility across the per-arm contributors via the shared
-            // fold, so a member non-public in any arm is never synthesized
-            // as `Public` (matching the `_for_macro` sibling and TS
-            // member-access rules). For a single declaring arm the fold
-            // returns that arm's accessibility.
-            visibility: accum.visibility,
-            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
-            // Union common-member: the name appears in every arm, so there is
-            // no single source declaration site — genuinely synthetic. No spans
-            // and no single declaration file (a multi-origin fact).
-            spans: verter_type_expr::MemberSpans::default(),
-            declaration_origin: None,
-        });
+        // Any None arm means the union has a non-Object arm — there are
+        // no common Object members, so the merged surface is empty.
+        if arm_surfaces.iter().any(|s| s.is_none()) {
+            return Some(ShallowSurface::empty());
+        }
+        let live: Vec<&ShallowSurface> = arm_surfaces.iter().filter_map(|s| s.as_ref()).collect();
+        if live.is_empty() {
+            return Some(ShallowSurface::empty());
+        }
+        // One-pass per-name aggregation (replacing the retired
+        // O(arms × members²) per-name `find` loop): each arm contributes its
+        // FIRST occurrence of a name, in arm order — identical selection to
+        // the retired per-arm `find`.
+        let by_name = aggregate_union_members(&live);
+        // Emit in ARM-0 SOURCE ORDER, including duplicate-name occurrences —
+        // each arm-0 occurrence emits one row aggregated from the per-arm
+        // first occurrences, exactly as the retired per-name loop did. The
+        // lookup matches under JS property identity ([`authored_keys_collide`])
+        // so a dual-spelling arm-0 key finds its aggregated entry.
+        let mut members: Vec<ShallowSurfaceMember> = Vec::new();
+        for first_member in &live[0].members {
+            let Some((_, accum)) = by_name
+                .iter()
+                .find(|(key, _)| authored_keys_collide(key, &first_member.key))
+            else {
+                // Unreachable: arm 0's own members always aggregate.
+                continue;
+            };
+            // Common-member rule: a member survives iff present (by name) in
+            // EVERY resolvable arm.
+            if accum.declaring_arms != live.len() {
+                continue;
+            }
+            members.push(ShallowSurfaceMember {
+                key: first_member.key.clone(),
+                // Value type = union of the per-arm member values. A single
+                // shared value node stays as-is (no singleton union wrapper).
+                value: accum.value_node(graph, evidence),
+                optional: accum.optional_in_any,
+                readonly: accum.readonly_in_all,
+                method_kind: None,
+                has_implementation_body: false,
+                // Union common-member synthesis is never a literal origin.
+                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                // Union common-member (`(A|B)['k']`): the MOST-RESTRICTIVE
+                // accessibility across the per-arm contributors via the shared
+                // fold, so a member non-public in any arm is never synthesized
+                // as `Public` (matching the `_for_macro` sibling and TS
+                // member-access rules). For a single declaring arm the fold
+                // returns that arm's accessibility.
+                visibility: accum.visibility,
+                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                // Union common-member: the name appears in every arm, so there is
+                // no single source declaration site — genuinely synthetic. No spans
+                // and no single declaration file (a multi-origin fact).
+                spans: verter_type_expr::MemberSpans::default(),
+                declaration_origin: None,
+            });
+        }
+        Some(ShallowSurface::from_entries(
+            members
+                .into_iter()
+                .map(ShallowSurfaceEntry::Member)
+                .collect(),
+            None,
+        ))
     }
-    Some(ShallowSurface::from_entries(
-        members
-            .into_iter()
-            .map(ShallowSurfaceEntry::Member)
-            .collect(),
-        None,
-    ))
 }
 
 /// One-pass per-name aggregation state shared by the two union-arm merge
@@ -10545,108 +10549,110 @@ fn aggregate_union_members(
     ordered
 }
 
-/// Merge per-arm union surfaces under the **Vue macro object-surface**
-/// rule — the UNION of arm members, NOT the TS
-/// property-access common-member intersection.
-///
-/// A prop / slot present in ANY union arm is part of the component macro
-/// surface (`defineProps<FixedProps | BubbleProps>()` declares every
-/// arm's props). The merge rules:
-///
-/// - A member survives iff it is present (by name) in AT LEAST ONE arm.
-/// - Its value is the UNION of the per-arm member values for the arms
-///   that declare it (a single declaring arm stays as-is).
-/// - `optional` iff optional in ANY arm OR ABSENT from any arm (a member
-///   not declared by every arm is optional on the merged surface).
-/// - `readonly` iff readonly in ALL arms that declare it.
-/// - `is_method` / `declared_in_macro_type_arg` are `false`; merge role is
-///   [`MemberMergeRole::Authored`] — a member reached THROUGH the union is
-///   neither macro-T own-body nor heritage.
-/// - A union has no single call/construct/index surface, so the merged
-///   surface carries none.
-///
-/// Returns `Some(empty)` when no arm declares any Object member. Returns
-/// `None` only when the arm vector is empty (defensive). Unlike the
-/// common-member rule, a non-Object (`None`) arm does NOT collapse the
-/// whole surface — the Object arms still contribute their members (a
-/// `{ a } | string` macro surface publishes `a`, optional).
-pub fn merge_union_surfaces_for_macro(
-    graph: &SemanticGraphStore,
-    arm_surfaces: &[Option<ShallowSurface>],
-    evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
-) -> Option<ShallowSurface> {
-    if arm_surfaces.is_empty() {
-        return None;
-    }
-    let arm_count = arm_surfaces.len();
-    let live: Vec<&ShallowSurface> = arm_surfaces.iter().filter_map(|s| s.as_ref()).collect();
-    if live.is_empty() {
-        return Some(ShallowSurface::empty());
-    }
-    // A non-Object arm (`None`) means that arm declares NO members, so
-    // every member is effectively absent from it → optional on the union.
-    let has_non_object_arm = arm_surfaces.iter().any(|s| s.is_none());
+construction_ordinal_seam! {
+    /// Merge per-arm union surfaces under the **Vue macro object-surface**
+    /// rule — the UNION of arm members, NOT the TS
+    /// property-access common-member intersection.
+    ///
+    /// A prop / slot present in ANY union arm is part of the component macro
+    /// surface (`defineProps<FixedProps | BubbleProps>()` declares every
+    /// arm's props). The merge rules:
+    ///
+    /// - A member survives iff it is present (by name) in AT LEAST ONE arm.
+    /// - Its value is the UNION of the per-arm member values for the arms
+    ///   that declare it (a single declaring arm stays as-is).
+    /// - `optional` iff optional in ANY arm OR ABSENT from any arm (a member
+    ///   not declared by every arm is optional on the merged surface).
+    /// - `readonly` iff readonly in ALL arms that declare it.
+    /// - `is_method` / `declared_in_macro_type_arg` are `false`; merge role is
+    ///   [`MemberMergeRole::Authored`] — a member reached THROUGH the union is
+    ///   neither macro-T own-body nor heritage.
+    /// - A union has no single call/construct/index surface, so the merged
+    ///   surface carries none.
+    ///
+    /// Returns `Some(empty)` when no arm declares any Object member. Returns
+    /// `None` only when the arm vector is empty (defensive). Unlike the
+    /// common-member rule, a non-Object (`None`) arm does NOT collapse the
+    /// whole surface — the Object arms still contribute their members (a
+    /// `{ a } | string` macro surface publishes `a`, optional).
+    fn merge_union_surfaces_for_macro(
+        graph: &SemanticGraphStore,
+        arm_surfaces: &[Option<ShallowSurface>],
+        evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
+    ) -> Option<ShallowSurface> {
+        if arm_surfaces.is_empty() {
+            return None;
+        }
+        let arm_count = arm_surfaces.len();
+        let live: Vec<&ShallowSurface> = arm_surfaces.iter().filter_map(|s| s.as_ref()).collect();
+        if live.is_empty() {
+            return Some(ShallowSurface::empty());
+        }
+        // A non-Object arm (`None`) means that arm declares NO members, so
+        // every member is effectively absent from it → optional on the union.
+        let has_non_object_arm = arm_surfaces.iter().any(|s| s.is_none());
 
-    // Per-name aggregation emitting in first-seen order across all arms.
-    // JS property identity: dual spellings of one property
-    // (`{1: x} | {"1": y}`) aggregate into ONE entry — the fold's
-    // `member_position` already collides them, so the macro merge matches
-    // (surfaces are one-level and small, so a linear collides scan
-    // replaces the strict-key map).
-    let mut ordered: Vec<(crate::semantic_query::AuthoredPropertyKey, UnionMemberAccum)> =
-        Vec::new();
-    for (arm_index, arm) in live.iter().enumerate() {
-        for member in &arm.members {
-            let position = ordered
-                .iter()
-                .position(|(key, _)| authored_keys_collide(key, &member.key));
-            match position {
-                Some(index) => ordered[index].1.absorb(arm_index, member),
-                None => {
-                    ordered.push((member.key.clone(), UnionMemberAccum::new()));
-                    let last = ordered.len() - 1;
-                    ordered[last].1.absorb(arm_index, member);
+        // Per-name aggregation emitting in first-seen order across all arms.
+        // JS property identity: dual spellings of one property
+        // (`{1: x} | {"1": y}`) aggregate into ONE entry — the fold's
+        // `member_position` already collides them, so the macro merge matches
+        // (surfaces are one-level and small, so a linear collides scan
+        // replaces the strict-key map).
+        let mut ordered: Vec<(crate::semantic_query::AuthoredPropertyKey, UnionMemberAccum)> =
+            Vec::new();
+        for (arm_index, arm) in live.iter().enumerate() {
+            for member in &arm.members {
+                let position = ordered
+                    .iter()
+                    .position(|(key, _)| authored_keys_collide(key, &member.key));
+                match position {
+                    Some(index) => ordered[index].1.absorb(arm_index, member),
+                    None => {
+                        ordered.push((member.key.clone(), UnionMemberAccum::new()));
+                        let last = ordered.len() - 1;
+                        ordered[last].1.absorb(arm_index, member);
+                    }
                 }
             }
         }
-    }
 
-    let mut members: Vec<ShallowSurfaceMember> = Vec::with_capacity(ordered.len());
-    for (key, accum) in &ordered {
-        // Absent from at least one arm (a live arm without it, or a
-        // non-Object arm) ⇒ optional on the merged surface.
-        let optional =
-            accum.optional_in_any || accum.declaring_arms < arm_count || has_non_object_arm;
-        members.push(ShallowSurfaceMember {
-            key: key.clone(),
-            value: accum.value_node(graph, evidence),
-            optional,
-            readonly: accum.readonly_in_all,
-            method_kind: None,
-            has_implementation_body: false,
-            // Union-arm merge synthesis is never a literal origin.
-            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-            // Most-restrictive accessibility across all DECLARING arms via
-            // the shared fold: `Public` only when Public in every declaring
-            // arm; a member non-public in any arm stays non-public (never
-            // synthesized Public). For a member declared by exactly one arm
-            // the fold returns that arm's accessibility.
-            visibility: accum.visibility,
-            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
-            // Union arm-member: reached THROUGH the union, no single source
-            // declaration site — genuinely synthetic (multi-origin).
-            spans: verter_type_expr::MemberSpans::default(),
-            declaration_origin: None,
-        });
+        let mut members: Vec<ShallowSurfaceMember> = Vec::with_capacity(ordered.len());
+        for (key, accum) in &ordered {
+            // Absent from at least one arm (a live arm without it, or a
+            // non-Object arm) ⇒ optional on the merged surface.
+            let optional =
+                accum.optional_in_any || accum.declaring_arms < arm_count || has_non_object_arm;
+            members.push(ShallowSurfaceMember {
+                key: key.clone(),
+                value: accum.value_node(graph, evidence),
+                optional,
+                readonly: accum.readonly_in_all,
+                method_kind: None,
+                has_implementation_body: false,
+                // Union-arm merge synthesis is never a literal origin.
+                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                // Most-restrictive accessibility across all DECLARING arms via
+                // the shared fold: `Public` only when Public in every declaring
+                // arm; a member non-public in any arm stays non-public (never
+                // synthesized Public). For a member declared by exactly one arm
+                // the fold returns that arm's accessibility.
+                visibility: accum.visibility,
+                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                // Union arm-member: reached THROUGH the union, no single source
+                // declaration site — genuinely synthetic (multi-origin).
+                spans: verter_type_expr::MemberSpans::default(),
+                declaration_origin: None,
+            });
+        }
+        Some(ShallowSurface::from_entries(
+            members
+                .into_iter()
+                .map(ShallowSurfaceEntry::Member)
+                .collect(),
+            None,
+        ))
     }
-    Some(ShallowSurface::from_entries(
-        members
-            .into_iter()
-            .map(ShallowSurfaceEntry::Member)
-            .collect(),
-        None,
-    ))
 }
 
 fn surface_member_from_shallow(member: &ShallowSurfaceMember) -> SurfaceMember {
@@ -10666,46 +10672,48 @@ fn surface_member_from_shallow(member: &ShallowSurfaceMember) -> SurfaceMember {
     }
 }
 
-/// Positive member evidence of an open / multi-alternative spread
-/// formula for MACRO surface consumers (props / emits branch merge):
-/// the union of per-alternative positive facts under the
-/// `MacroObjectSurface` enumeration rule. This is publication-only
-/// evidence — it never interns a closed `Object` and never claims
-/// completeness; the consumer carries incompleteness in its own channel
-/// (the walker's `OpenSpreadProgram` diagnostic / `cache_suppress`).
-/// A single alternative bypasses the union merge so member fidelity
-/// (method kind, spans, origins) survives verbatim.
-#[must_use]
-pub fn spread_formula_positive_members_for_macro(
-    graph: &SemanticGraphStore,
-    formula: &crate::semantic_query::ObjectProjectionFormula,
-    evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
-) -> Vec<crate::semantic_query::SurfaceMember> {
-    if let [only] = formula.alternatives() {
-        let surface = shallow_surface_from_projection_alternative(graph, only);
-        return surface_view_from_shallow(&surface)
-            .positive_members()
+construction_ordinal_seam! {
+    /// Positive member evidence of an open / multi-alternative spread
+    /// formula for MACRO surface consumers (props / emits branch merge):
+    /// the union of per-alternative positive facts under the
+    /// `MacroObjectSurface` enumeration rule. This is publication-only
+    /// evidence — it never interns a closed `Object` and never claims
+    /// completeness; the consumer carries incompleteness in its own channel
+    /// (the walker's `OpenSpreadProgram` diagnostic / `cache_suppress`).
+    /// A single alternative bypasses the union merge so member fidelity
+    /// (method kind, spans, origins) survives verbatim.
+    #[must_use]
+    fn spread_formula_positive_members_for_macro(
+        graph: &SemanticGraphStore,
+        formula: &crate::semantic_query::ObjectProjectionFormula,
+        evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
+    ) -> Vec<crate::semantic_query::SurfaceMember> {
+        if let [only] = formula.alternatives() {
+            let surface = shallow_surface_from_projection_alternative(graph, only);
+            return surface_view_from_shallow(&surface)
+                .positive_members()
+                .iter()
+                .map(crate::semantic_query::SurfaceMember::clone)
+                .collect();
+        }
+        let arm_surfaces: Vec<Option<ShallowSurface>> = formula
+            .alternatives()
             .iter()
-            .map(crate::semantic_query::SurfaceMember::clone)
+            .map(|alternative| {
+                Some(shallow_surface_from_projection_alternative(
+                    graph,
+                    alternative,
+                ))
+            })
             .collect();
-    }
-    let arm_surfaces: Vec<Option<ShallowSurface>> = formula
-        .alternatives()
-        .iter()
-        .map(|alternative| {
-            Some(shallow_surface_from_projection_alternative(
-                graph,
-                alternative,
-            ))
-        })
-        .collect();
-    match merge_union_surfaces_for_macro(graph, &arm_surfaces, evidence) {
-        Some(merged) => surface_view_from_shallow(&merged)
-            .positive_members()
-            .iter()
-            .map(crate::semantic_query::SurfaceMember::clone)
-            .collect(),
-        None => Vec::new(),
+        match merge_union_surfaces_for_macro(graph, &arm_surfaces, evidence) {
+            Some(merged) => surface_view_from_shallow(&merged)
+                .positive_members()
+                .iter()
+                .map(crate::semantic_query::SurfaceMember::clone)
+                .collect(),
+            None => Vec::new(),
+        }
     }
 }
 
@@ -10940,6 +10948,26 @@ enum ExpansionCombineKind {
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    /// Positive member evidence of an object-projection formula for macro
+    /// surface consumers (see [`spread_formula_positive_members_for_macro`]),
+    /// computed in this dispatcher's construction lane. The members' value
+    /// operands are this graph's; the canonical evidence the union merge
+    /// gathers is deposited on this dispatcher.
+    #[must_use]
+    pub fn spread_formula_positive_members_for_macro(
+        &self,
+        formula: &crate::semantic_query::ObjectProjectionFormula,
+    ) -> Vec<crate::semantic_query::SurfaceMember> {
+        let mut canonical_evidence = super::canonical_algebra::CanonicalEvidence::default();
+        let members = spread_formula_positive_members_for_macro(
+            self.graph(),
+            formula,
+            &mut canonical_evidence,
+        );
+        self.deposit_canonical_evidence(canonical_evidence);
+        members
+    }
+
     /// A literal index absent from an exact closed domain, including the
     /// apparent members the ordinary path reader adds. This proves absence
     /// without asking the unavailable member for a value.

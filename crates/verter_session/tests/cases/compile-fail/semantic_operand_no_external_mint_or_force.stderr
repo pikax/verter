@@ -38,7 +38,7 @@ warning: unreachable expression
 error[E0624]: associated function `node` is private
   --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:10:30
    |
-10 |       let _ = SemanticOperand::node(0, 0, todo!(), todo!(), todo!());
+10 |       let _ = SemanticOperand::node(0, 0, todo!(), todo!(), todo!(), todo!());
    |                                ^^^^ private associated function
    |
   ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query/operand.rs
@@ -47,7 +47,7 @@ error[E0624]: associated function `node` is private
    | |         store_identity: u64,
    | |         generation: u64,
    | |         node: SemanticNodeId,
-   | |         evidence: SemanticOperandEvidence,
+...  |
    | |         _authority: SemanticOperandAuthority,
    | |     ) -> Self {
    | |_____________- private associated function defined here
@@ -55,7 +55,7 @@ error[E0624]: associated function `node` is private
 warning: unreachable expression
   --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:10:50
    |
-10 |     let _ = SemanticOperand::node(0, 0, todo!(), todo!(), todo!());
+10 |     let _ = SemanticOperand::node(0, 0, todo!(), todo!(), todo!(), todo!());
    |                                         -------  ^^^^^^^ unreachable expression
    |                                         |
    |                                         any code following this expression is unreachable

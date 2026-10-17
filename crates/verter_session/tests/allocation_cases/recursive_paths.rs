@@ -1,12 +1,13 @@
-//! Allocation work per completed `Paths<Api>` demand.
+//! Allocation and fact work per completed `Paths<Api>` demand.
 //!
 //! Every instantiation, conditional and template step of a recursive
 //! mapped-index evaluation runs through the shared query frame: a fact
 //! tracer, its finalised signature, the completed carrier and the memo's
 //! admission with its reverse-index registration. This case measures what
-//! one cold demand allocates on its own thread across several layout sizes,
-//! so a frame, signature or admission step that copies per fact or per
-//! registration shows as growth per entity.
+//! one cold demand allocates, and the fact work its tracers do, on its own
+//! thread across several layout sizes, so a frame, signature or admission
+//! step that copies per fact, per registration or per enclosing scope shows
+//! as growth per entity.
 
 use std::sync::Arc;
 
@@ -70,9 +71,19 @@ fn paths_files(count: usize, groups: usize) -> Vec<(String, String)> {
     files
 }
 
-/// Allocations one cold `Paths<Api>` demand makes on this thread, and the
-/// number of dotted paths it published.
-fn cold_paths_allocations(count: usize, groups: usize) -> (u64, usize) {
+/// What one cold `Paths<Api>` demand costs on this thread.
+struct ColdPathsDemand {
+    /// Allocations it made.
+    allocations: u64,
+    /// The fact-propagation work its tracers did: every fact or run they
+    /// compared, merged or absorbed while observations propagated through
+    /// the enclosing scopes and their signatures were sealed.
+    fact_work: usize,
+    /// The dotted paths it published.
+    paths: usize,
+}
+
+fn cold_paths_demand(count: usize, groups: usize) -> ColdPathsDemand {
     let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
     let files = paths_files(count, groups);
     for (path, source) in &files {
@@ -96,6 +107,7 @@ fn cold_paths_allocations(count: usize, groups: usize) -> (u64, usize) {
         });
     }
     reset_alloc_counter();
+    let fact_work_before = verter_session_query::facts::fact_read_set::signature_work_for_tests();
     let (outcome, _) = host
         .resolve_named_symbol_wire_with_audit(
             "/paths/scenario.ts",
@@ -105,6 +117,8 @@ fn cold_paths_allocations(count: usize, groups: usize) -> (u64, usize) {
         )
         .into_parts();
     let allocations = alloc_count();
+    let fact_work =
+        verter_session_query::facts::fact_read_set::signature_work_for_tests() - fact_work_before;
     let node = outcome.expect("the demand resolves").expect("Probe exists");
     let bytes = host
         .project_node_to_type_expr_json_bytes(&node)
@@ -113,14 +127,20 @@ fn cold_paths_allocations(count: usize, groups: usize) -> (u64, usize) {
     let TypeExpr::Union(paths) = &answer else {
         panic!("{count} entities must publish a path union, got {answer:?}");
     };
-    (allocations, paths.len())
+    ColdPathsDemand {
+        allocations,
+        fact_work,
+        paths: paths.len(),
+    }
 }
 
 #[test]
 fn recursive_paths_allocations_per_entity_stay_flat() {
     let sizes = [(4, 2), (8, 4), (16, 4)];
     let measured = sizes.map(|(count, groups)| {
-        let (allocations, paths) = cold_paths_allocations(count, groups);
+        let ColdPathsDemand {
+            allocations, paths, ..
+        } = cold_paths_demand(count, groups);
         // Five members, two entity hops of five and the two meta fields.
         assert_eq!(
             paths,
@@ -152,5 +172,47 @@ fn recursive_paths_allocations_per_entity_stay_flat() {
     assert!(
         most * 4 <= least * 5,
         "allocations per entity must stay flat as the layout grows: {measured:?}"
+    );
+}
+
+/// An observation reaches the scopes that must see it once, and a completed
+/// scope hands its sealed signature to the scope that consumes it: the
+/// fact work of one cold demand is a bounded multiple of its entities, not
+/// of its entities times the depth of the scopes they nest under.
+#[test]
+fn recursive_paths_fact_work_per_entity_stays_flat() {
+    let sizes = [(4, 2), (8, 4), (16, 4)];
+    let measured = sizes.map(|(count, groups)| {
+        let demand = cold_paths_demand(count, groups);
+        assert_eq!(
+            demand.paths,
+            count * 18,
+            "{count} entities publish every dotted path"
+        );
+        let per_entity = demand.fact_work / count;
+        eprintln!(
+            "RECURSIVE_PATHS entities={count} fact_work={} per_entity={per_entity}",
+            demand.fact_work
+        );
+        per_entity
+    });
+    eprintln!("RECURSIVE_PATHS fact_work_per_entity={measured:?}");
+    // A scope that also re-absorbed every observation of every scope nested
+    // under it, or re-merged the same runs once per enclosing level, lifts
+    // every layout far above this line.
+    const PER_ENTITY_CEILING: usize = 12_000;
+    for (per_entity, (count, _)) in measured.iter().zip(sizes) {
+        assert!(
+            *per_entity <= PER_ENTITY_CEILING,
+            "{count} entities did {per_entity} fact work per entity (ceiling {PER_ENTITY_CEILING}): {measured:?}"
+        );
+    }
+    let (least, most) = (
+        measured.iter().min().copied().unwrap_or_default(),
+        measured.iter().max().copied().unwrap_or_default(),
+    );
+    assert!(
+        most * 4 <= least * 5,
+        "fact work per entity must stay flat as the layout grows: {measured:?}"
     );
 }

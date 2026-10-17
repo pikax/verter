@@ -482,6 +482,35 @@ fn clone_index_key(index: &IndexKey) -> IndexKey {
     }
 }
 
+/// Deliver a completed evaluation frame's facts to the scope that consumes
+/// it: the parent frame's tracer, or — for the root — the tracers active
+/// around the evaluation. A frame's tracer is a delivering scope, so this
+/// is the only way its observations reach them.
+fn deliver_evaluation_facts<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
+    tracers: &mut [crate::fact_signature_helpers::StepwiseFactTracer<'_, W>],
+    finalise: &FactReadSetFinalise,
+) {
+    let (FactReadSetFinalise::Ok(facts) | FactReadSetFinalise::NonCacheable(facts)) = finalise
+    else {
+        return;
+    };
+    let _scope = tracers.last_mut().map(|parent| parent.install());
+    crate::fact_tracing::tracing::observe_fan_out_canonical(facts);
+}
+
+/// Deliver the facts every unfinished frame of a stopped evaluation
+/// observed to the tracers active around it: the evaluation stopped, but
+/// what it read was still read.
+fn deliver_abandoned_evaluation_facts<
+    W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+>(
+    tracers: Vec<crate::fact_signature_helpers::StepwiseFactTracer<'_, W>>,
+) {
+    for tracer in tracers.into_iter().rev() {
+        deliver_evaluation_facts::<W>(&mut [], &tracer.finish());
+    }
+}
+
 fn aborted_evaluation_outcome(
     frames: &[DeferredEvaluationFrame],
     completed_child: Option<&EvaluateDeferredOutcome>,
@@ -2480,6 +2509,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if let Some(reasons) = initial_trip {
             return EvaluateDeferredOutcome::partial(node, reasons);
         }
+        if self.evaluates_to_itself(node, reduction_context, demand)
+            && self.admit_self_evaluation(node, reduction_context, demand)
+        {
+            return EvaluateDeferredOutcome::complete(node);
+        }
         // A completed cacheable evaluation needs no connected work beyond
         // what its receipt charges. Limited outcomes can never reach this
         // memo; one this demand cannot pay for is evaluated here.
@@ -2528,6 +2562,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         self.connected_demand.abandon_cost_scope();
                     }
                 }
+                deliver_abandoned_evaluation_facts(tracers);
                 return aborted_evaluation_outcome(&frames, completed_child.as_ref(), reasons);
             }
 
@@ -2911,6 +2946,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     self.connected_demand.abandon_cost_scope();
                                 }
                             }
+                            deliver_abandoned_evaluation_facts(tracers);
                             return aborted_evaluation_outcome(&frames, None, reasons);
                         }
                         completed_child = Some(EvaluateDeferredOutcome::complete(node));
@@ -2930,16 +2966,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let frame = frames.pop().expect("finishing an active evaluator frame");
                     let tracer = tracers.pop().expect("each evaluation owns a tracer");
                     let finalise = tracer.finish();
-                    if let Some(parent) = tracers.last_mut() {
-                        let _scope = parent.install();
-                        match &finalise {
-                            FactReadSetFinalise::Ok(facts)
-                            | FactReadSetFinalise::NonCacheable(facts) => {
-                                crate::fact_tracing::tracing::observe_fan_out_canonical(facts)
-                            }
-                            FactReadSetFinalise::MutationUnstable => {}
-                        }
-                    }
+                    deliver_evaluation_facts(&mut tracers, &finalise);
                     let outcome = self.finish_deferred_evaluation_frame(frame, result, finalise);
                     if frames.is_empty() {
                         return outcome;
@@ -2951,16 +2978,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .pop()
                         .expect("each evaluation owns a tracer")
                         .finish();
-                    if let Some(parent) = tracers.last_mut() {
-                        let _scope = parent.install();
-                        match &finalise {
-                            FactReadSetFinalise::Ok(facts)
-                            | FactReadSetFinalise::NonCacheable(facts) => {
-                                crate::fact_tracing::tracing::observe_fan_out_canonical(facts)
-                            }
-                            FactReadSetFinalise::MutationUnstable => {}
-                        }
-                    }
+                    deliver_evaluation_facts(&mut tracers, &finalise);
                     frames
                         .pop()
                         .expect("a memo hit belongs to an active evaluator frame");
@@ -2993,6 +3011,49 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
         }
+    }
+
+    /// Admit a root evaluation that finishes as itself
+    /// ([`Self::evaluates_to_itself`]) without running it: its cold run is
+    /// one step under its own identity with an empty read set, so its
+    /// receipt is known before it runs. The receipt is admitted as a stored
+    /// completion's would be — charged once per connected demand, its
+    /// request operations marked paid, and recorded as the consumer's
+    /// prerequisite in place — with no frame, tracer or memo entry of its
+    /// own. `false` is a demand that cannot pay for it: the evaluation then
+    /// runs, and reports the limit, as a cold one does.
+    fn admit_self_evaluation(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+        demand: DeferredEvaluationDemand,
+    ) -> bool {
+        let key = (node, context, demand);
+        let cached = self.self_evaluation_receipts.borrow().get(&key).cloned();
+        let receipt = match cached {
+            Some(receipt) => receipt,
+            None => {
+                let Ok(roots) = self.graph().root_existing_nodes(vec![node]) else {
+                    return false;
+                };
+                let receipt = super::cost_receipt::DemandCostReceipt::new(
+                    super::cost_receipt::CostIdentity::of_key(key).with_roots(roots),
+                    super::cost_receipt::LogicalUsage {
+                        work: 1,
+                        ..Default::default()
+                    },
+                    Vec::new(),
+                );
+                self.self_evaluation_receipts
+                    .borrow_mut()
+                    .insert(key, Arc::clone(&receipt));
+                receipt
+            }
+        };
+        matches!(
+            self.admit_served(&receipt, super::cost_receipt::Nesting::InPlace),
+            super::ServedAdmission::Admitted
+        )
     }
 
     /// Whether the evaluator finishes `node` as itself in its first step

@@ -140,7 +140,18 @@ same graph.
 Ordinal payload reads (`SemanticGraphStore::node_data`, `node_data_for`, the
 signature `type_token_node` accessors), ordinal rooting (`root_nodes`) and scope
 entry (`enter_node_root_scope`) are crate-private in production and exist
-publicly only as `test`/`test-support` fixture seams. The construction lane —
+publicly only as `test`/`test-support` fixture seams. So is every other routine
+that reads or writes graph state from a bare ordinal without a lane check —
+store methods, warm memo reads and producer claims keyed by a query identity,
+stable keys and union orderings, the canonical union / intersection builders,
+union-surface merges over caller-built surfaces, merged-declaration reduction,
+printers, classifiers and `display` — declared through the crate's
+`construction_ordinal_seam!`. A public wrapper that forwards caller ordinals
+into one of these is sealed with it. Where session code needs one in
+production it calls a lane-gated twin (`display_in_scope`,
+`intern_ordered_union_in_scope`) that answers nothing outside a lane, or a
+dispatcher method that runs it in the dispatcher's own lane
+(`spread_formula_positive_members_for_macro`). The construction lane —
 reading and rooting bare ordinals — opens only through a
 `NodeConstructionGrant`: non-forgeable, minted solely by `EngineStores::create*`
 with its graph, held privately by the host's `ProjectTypeStore` (session code
@@ -169,7 +180,8 @@ nearest remaining owner of its graph. An owner keeps each delivery once: every
 clone of a delivery shares one owner, so repeated reads and clones of a result
 under a dispatcher do not grow it. Records rooted at mint
 (`SignatureSetValue`, `OneLevelSurface`) root in the graph that produced them,
-never in whichever graph's scope is innermost.
+never in whichever graph's scope is innermost; a runtime-node `SemanticOperand`
+owns its node through the delivery lease of the forced read that produced it.
 
 Aggregate payload carriers have no public copy: `SemanticNodeData`,
 `SurfaceView`, `SurfaceMember`, `SurfaceEntry`, `IndexSignature`,

@@ -733,8 +733,9 @@ fn row_remap_dropped_value() -> MatrixRow {
             // contribute none of these substitutions.
             (Counter::SubstituteMisses, 9),
             (Counter::Instantiations, 2),
-            // One memo probe per deferred evaluation that misses.
-            (Counter::DeferredMisses, 5),
+            // One memo probe per deferred evaluation that misses; a root
+            // the evaluator finishes as itself takes none.
+            (Counter::DeferredMisses, 3),
             (Counter::ConditionalDecided, 3),
             (Counter::BranchTrue, 1),
             (Counter::BranchFalse, 2),

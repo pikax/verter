@@ -1022,6 +1022,38 @@ and a prune attempts the outer drop only when it emptied the inner map. The
 allocation canary `recursive_paths_allocations_per_entity_stay_flat` guards the
 per-entity allocation ceiling and its flat growth across layouts.
 
+Delivering tracer scopes: an observation fans out from the innermost tracer
+down to the first DELIVERING scope inclusive (`fact_tracing::tracing::
+install_delivering`), not to every level. A scope is delivering only when its
+owner hands its whole completed read set, or a carrier holding at least those
+facts, to the scopes active when it completes: the semantic-memo cold build
+(`install_delivering_fact_tracer`; `ProducerLease`/`SettledProducer::complete`
+bubbles the carrier — traced facts, fence and prelude facts, self-roots —
+whether or not the result is admitted, and a joiner receives the same carrier)
+and the stepwise continuation tracers (`OwnedFactTracer`: an evaluation frame
+replays its sealed set into its parent frame, the root frame and every frame of
+a stopped evaluation into the tracers around the evaluation; an instantiation
+frame's carrier is replayed by the consuming frame or the drive's entry).
+Every other installer stays eager. Non-cacheability marks and recorders still
+reach every level. A scope below a delivering one therefore receives that
+scope's facts once, deduplicated, instead of once per observation at every
+depth. The fact-work canary `recursive_paths_fact_work_per_entity_stays_flat`
+guards the per-entity fact work and its flat growth.
+
+Root self-evaluation: a deferred-evaluation ROOT that finishes as itself
+(`evaluates_to_itself`) is admitted without a frame, tracer or memo entry: its
+cold run is one step under its own `(node, context, demand)` identity with an
+empty read set, so the dispatcher admits a receipt of exactly that cost
+(cached per dispatcher, one per identity) — charged once per connected demand,
+request operations marked paid, recorded as the consumer's prerequisite in
+place. A demand that cannot pay runs the evaluation and reports its limit as a
+cold one does.
+
+Construction ownership: an intern records its construction count on the
+innermost construction owner of its arena as a bare ordinal, released in one
+batch when that owner closes; a closing owner hands its delivery leases to its
+heir by merging the smaller holding into the larger.
+
 Paged signature evidence: a `fact_dep_signature` is never refused for its
 width. `FactReadSet::finalise` (and `seal_canonical_signature` for a signature
 a producer assembles by hand) cuts a canonical set wider than

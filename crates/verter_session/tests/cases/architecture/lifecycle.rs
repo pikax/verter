@@ -322,6 +322,25 @@ fn audit_no_hot_loop_instrumentation() {
             syn::visit::visit_impl_item_fn(self, item);
             self.path_stack.pop();
         }
+        // A method an impl declares through an item-position macro (a
+        // visibility seam) is still a method of that impl: scan every
+        // method the macro body declares.
+        fn visit_impl_item_macro(&mut self, item: &'ast syn::ImplItemMacro) {
+            let methods = item.mac.parse_body_with(|input: syn::parse::ParseStream| {
+                let mut items = Vec::new();
+                while !input.is_empty() {
+                    items.push(input.parse::<syn::ImplItem>()?);
+                }
+                Ok(items)
+            });
+            for method in methods.iter().flatten() {
+                if let syn::ImplItem::Fn(method) = method {
+                    self.path_stack.push(method.sig.ident.to_string());
+                    self.check(&method.block);
+                    self.path_stack.pop();
+                }
+            }
+        }
     }
     impl<'a> DenyVisitor<'a> {
         fn check(&mut self, block: &syn::Block) {
