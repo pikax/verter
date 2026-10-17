@@ -10385,6 +10385,15 @@ pub(super) trait FlowDemandDriver {
         source: SemanticNodeId,
         target: SemanticNodeId,
     ) -> (String, String);
+    /// One type as a diagnostic message prints it.
+    fn print_diagnostic_type(&self, node: SemanticNodeId) -> String;
+    /// The properties `target` requires that `source` lacks, as a
+    /// missing-properties message names them.
+    fn missing_required_properties(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> Option<Vec<String>>;
     fn resolve_closed_signature_utility(
         &self,
         node: SemanticNodeId,
@@ -10979,6 +10988,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     ) -> (String, String) {
         ProjectSemanticDispatch::print_relation_operands(self, source, target)
     }
+    fn print_diagnostic_type(&self, node: SemanticNodeId) -> String {
+        ProjectSemanticDispatch::print_diagnostic_type(self, node)
+    }
+    fn missing_required_properties(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> Option<Vec<String>> {
+        ProjectSemanticDispatch::missing_required_properties(self, source, target)
+    }
     fn resolve_closed_signature_utility(
         &self,
         node: SemanticNodeId,
@@ -11149,6 +11168,32 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
 /// A frame sees only its static arena, selected input ports, observations,
 /// and finite semantic demands. It cannot acquire query leases or borrow the
 /// driver's transaction or resolver context.
+/// A flow frame's driver read as the printer a diagnostic recipe is bound
+/// with.
+struct FlowDiagnosticPrinter<'p, D>(&'p D);
+
+impl<D: FlowDemandDriver> crate::semantic_query::CheckerDiagnosticPrinter
+    for FlowDiagnosticPrinter<'_, D>
+{
+    fn diagnostic_type(&self, node: SemanticNodeId) -> String {
+        self.0.print_diagnostic_type(node)
+    }
+    fn relation_operands(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> (String, String) {
+        self.0.print_relation_operands(source, target)
+    }
+    fn missing_properties(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> Option<Vec<String>> {
+        self.0.missing_required_properties(source, target)
+    }
+}
+
 pub(super) struct FlowCx<'a, D: FlowDemandDriver> {
     driver: &'a D,
     arena: super::arena_ops::ArenaOps<'a>,
@@ -11659,6 +11704,16 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         target: SemanticNodeId,
     ) -> (String, String) {
         self.driver.print_relation_operands(source, target)
+    }
+    fn print_diagnostic_type(&self, node: SemanticNodeId) -> String {
+        self.driver.print_diagnostic_type(node)
+    }
+    fn missing_required_properties(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> Option<Vec<String>> {
+        self.driver.missing_required_properties(source, target)
     }
     fn resolve_closed_signature_utility(
         &self,
@@ -23758,13 +23813,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             .call_diagnostic_sites
             .get(&site.span())
             .unwrap_or(&fallback);
-        let print = |source, target| self.dispatch.print_relation_operands(source, target);
-        let occurrence = recipe.bind(positions, print).or_else(|| {
+        let printer = FlowDiagnosticPrinter(self.dispatch);
+        let occurrence = recipe.bind(positions, &printer).or_else(|| {
             crate::semantic_query::CheckerDiagnosticRecipe {
                 subject: crate::semantic_query::CheckerDiagnosticSubject::Operation,
                 ..*recipe
             }
-            .bind(&fallback, print)
+            .bind(&fallback, &printer)
         });
         if let Some(occurrence) = occurrence {
             self.record_checker_diagnostic(occurrence);
@@ -28160,6 +28215,18 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             })
     }
 
+    /// Whether `callee`'s one signature is a lone non-generic one with a
+    /// DECLARED return ([`Self::lone_declared_signature`]): a refusal of
+    /// its call leaves that declared return, read by the caller's own
+    /// rail, as the answer.
+    fn callee_is_lone_declared(&self, callee: SemanticNodeId) -> bool {
+        self.dispatch
+            .shared_signature_buckets(callee)
+            .is_ok_and(|(call_sigs, construct_sigs)| {
+                self.lone_declared_signature(&call_sigs, &construct_sigs)
+            })
+    }
+
     /// Whether one bucket holds exactly one signature, non-generic, whose
     /// return is DECLARED: its answer does not depend on the arguments, so
     /// resolving the call through the executor changes no value and only
@@ -28393,7 +28460,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 crate::semantic_query::ResolveCallFailure::Diagnosed(recipe),
             ) => {
                 self.record_call_diagnostic(&recipe, site);
-                Some(self.degraded_unrepresentable_callee())
+                (!self.callee_is_lone_declared(callee))
+                    .then(|| self.degraded_unrepresentable_callee())
             }
             // A PROVEN refusal — the callee is not callable, or no
             // overload accepts the authored arguments — is the typed
@@ -28407,7 +28475,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 crate::semantic_query::ResolveCallFailure::NotCallable
                 | crate::semantic_query::ResolveCallFailure::NoApplicableOverload
                 | crate::semantic_query::ResolveCallFailure::ContextSensitiveInference { .. },
-            ) => Some(self.degraded_unrepresentable_callee()),
+            ) => (!self.callee_is_lone_declared(callee))
+                .then(|| self.degraded_unrepresentable_callee()),
             // An UNDECIDED executor (the machinery cannot decide this
             // shape, or a budget edge) is NOT a refusal: the caller
             // falls back to this rail's own read of the same call. That

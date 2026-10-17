@@ -195,6 +195,20 @@ pub(crate) const fn circular_type_alias() -> CheckerDiagnostic {
     }
 }
 
+/// The checker's error type after its TS2456 for the type alias `alias`
+/// (its `DeclRef`): the typed recovery carrier, a complete answer, whose
+/// origin names the alias its message is about.
+pub(crate) fn circular_type_alias_recovery(
+    graph: &SemanticGraphStore,
+    alias: SemanticNodeId,
+) -> SemanticNodeId {
+    graph.intern_node(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+        diagnostic: circular_type_alias(),
+        basis: RecoveryBasis::Certified,
+        origin: Some(alias),
+    }))
+}
+
 /// The checker's error type after `diagnostic`, a diagnostic the types
 /// themselves decide (never a resource limit): the typed recovery carrier,
 /// a complete answer.

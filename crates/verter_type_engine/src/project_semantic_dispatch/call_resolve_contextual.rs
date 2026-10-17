@@ -358,12 +358,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .0
     }
 
-    /// The diagnostic the checker reports for the function argument at
-    /// `position`, typed as `source`, that its parameter's `target` does
-    /// not accept: its return's TS2322 elaborated onto the returned
-    /// expression where the two returns are what fails
-    /// (`elaborateArrowFunction`), the argument's TS2345 otherwise.
-    pub(super) fn contextual_argument_failure(
+    /// The diagnostic the checker reports for the argument at `position`,
+    /// typed as `source`, that its parameter's `target` does not accept:
+    /// the argument's TS2345, carrying the two returns as well where both
+    /// are functions of one call signature whose returns are what fails, so
+    /// an authored arrow returning one expression reports the returns'
+    /// TS2322 there instead (`elaborateArrowFunction`).
+    pub(super) fn argument_failure(
         &self,
         position: usize,
         source: SemanticNodeId,
@@ -394,16 +395,29 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 RelationStep::NotAssignable
             ) {
                 return CheckerDiagnosticRecipe::call(
-                    CheckerDiagnosticCode::TypeNotAssignable,
-                    CheckerDiagnosticArguments::Types {
-                        source: from,
-                        target: into,
+                    CheckerDiagnosticCode::ArgumentNotAssignable,
+                    CheckerDiagnosticArguments::ElaboratedReturn {
+                        source,
+                        target,
+                        returned_source: from,
+                        returned_target: into,
                     },
-                    CheckerDiagnosticSubject::ArgumentReturn(
-                        u32::try_from(position).unwrap_or(u32::MAX),
-                    ),
+                    CheckerDiagnosticSubject::Argument(u32::try_from(position).unwrap_or(u32::MAX)),
                 );
             }
+        }
+        // An object argument lacking properties its parameter requires is
+        // reported as that elaboration, not as the argument's TS2345
+        // (`reportUnmatchedProperty`).
+        if self
+            .missing_required_properties(source, target)
+            .is_some_and(|missing| !missing.is_empty())
+        {
+            return CheckerDiagnosticRecipe::call(
+                CheckerDiagnosticCode::PropertyMissing,
+                CheckerDiagnosticArguments::MissingProperties { source, target },
+                CheckerDiagnosticSubject::Argument(u32::try_from(position).unwrap_or(u32::MAX)),
+            );
         }
         super::argument_not_assignable(position, source, target)
     }
@@ -707,9 +721,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 let target = progress.pending_target.take().expect("pending callback");
                 state.typed_arguments.insert(position, typed);
                 if !self.collect_contextual_argument(&typed, target, budget, &declared)? {
-                    state.diagnostic = Some(
-                        self.contextual_argument_failure(position, typed.node, target, budget),
-                    );
+                    state.diagnostic =
+                        Some(self.argument_failure(position, typed.node, target, budget));
                     state.resume_at = None;
                     return Err(ContextualCandidateFailure::Mismatch);
                 }
@@ -876,7 +889,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         budget,
                         &declared,
                     )? {
-                        state.diagnostic = Some(self.contextual_argument_failure(
+                        state.diagnostic = Some(self.argument_failure(
                             position,
                             typed.node,
                             inference_target,

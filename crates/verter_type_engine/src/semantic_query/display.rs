@@ -444,6 +444,12 @@ fn display_resolved_type_node(
                     s.push_str("readonly ");
                 }
                 s.push_str(&match &member.key {
+                    crate::semantic_query::AuthoredPropertyKey::String(name)
+                        if needs.contains(DisplayFacet::CheckerSpelling)
+                            && !is_bare_member_name(name) =>
+                    {
+                        double_quoted(name)
+                    }
                     crate::semantic_query::AuthoredPropertyKey::String(name) => {
                         member_name_token(name)
                     }

@@ -30546,7 +30546,8 @@ fn build_enclosed_demand_partial_taints_enclosing_frame() {
 /// `Grow<string>` over `source`'s `Grow`, demanded at `Navigate` under a
 /// connected-work budget of `work` (the production caps when `None`)
 /// inside an enclosing taint frame: the demand's outcome, the frame's
-/// partial and suppression rails, and the node its instantiation answers.
+/// partial and suppression rails, the node its instantiation answers, and
+/// the checker's formatted diagnostic that node carries.
 fn grow_string_demand(
     source: &str,
     work: Option<usize>,
@@ -30555,6 +30556,7 @@ fn grow_string_demand(
     bool,
     bool,
     Option<SemanticNodeData>,
+    Option<String>,
 ) {
     let host = host();
     upsert_ts(&host, "/grow.ts", source);
@@ -30599,23 +30601,27 @@ fn grow_string_demand(
         base.decl_name.clone(),
     );
     let context = dispatch.instantiate_context_for(&base.canonical_id, navigate);
-    let instantiated = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+    let (instantiated, message) = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
         verter_type_engine::semantic_query::InstantiateKey::new(slot, args, context),
     )) {
         QueryResult::Value(verter_type_engine::semantic_query::SemanticQueryOutput {
             value,
             ..
-        }) => graph
-            .node_data(value)
-            .as_deref()
-            .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests),
-        _ => None,
+        }) => (
+            graph
+                .node_data(value)
+                .as_deref()
+                .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests),
+            dispatch.checker_recovery_message(value),
+        ),
+        _ => (None, None),
     };
     (
         outcome,
         frame.result_is_partial,
         frame.cache_suppress,
         instantiated,
+        message,
     )
 }
 
@@ -30641,8 +30647,13 @@ fn a_directly_circular_generic_alias_is_the_checkers_ts2456_under_any_budget() {
         )
     };
     for work in [Some(256), None] {
-        let (outcome, partial, suppressed, instantiated) =
+        let (outcome, partial, suppressed, instantiated, message) =
             grow_string_demand("export type Grow<T> = Grow<[T]>;\n", work);
+        assert_eq!(
+            message.as_deref(),
+            Some("TS2456: Type alias 'Grow' circularly references itself."),
+            "the recovery carries the checker's formatted TS2456 (work {work:?})"
+        );
         assert!(
             matches!(outcome, StructuralFactDemandOutcome::Complete(_)),
             "a circular alias is a checker error, never a budget partial (work {work:?})"
@@ -30679,7 +30690,7 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
     // Measured on TypeScript 7.0.2 (all four settings agree): `Grow<string>`
     // is `any` under TS2589.
     const GROW: &str = "export type Grow<T> = T extends never ? never : Grow<[T]>;\n";
-    let (outcome, partial, suppressed, _) = grow_string_demand(GROW, Some(256));
+    let (outcome, partial, suppressed, _, _) = grow_string_demand(GROW, Some(256));
     let reasons = match outcome {
         StructuralFactDemandOutcome::Recovered { reasons, .. }
         | StructuralFactDemandOutcome::Partial(reasons) => reasons,
@@ -30707,7 +30718,7 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
     );
 
     let _budget = super::connected_demand::TailBudgetForTests::install(200);
-    let (_, _, _, instantiated) = grow_string_demand(GROW, None);
+    let (_, _, _, instantiated, _) = grow_string_demand(GROW, None);
     assert!(
         matches!(
             &instantiated,

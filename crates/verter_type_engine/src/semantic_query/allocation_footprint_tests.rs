@@ -127,6 +127,21 @@ fn slice_growth<T>(count: usize) -> usize {
     heap_block_bytes(count * std::mem::size_of::<T>())
 }
 
+/// A printer for a message that prints no type.
+struct NoTypes;
+
+impl crate::semantic_query::CheckerDiagnosticPrinter for NoTypes {
+    fn diagnostic_type(&self, _: SemanticNodeId) -> String {
+        unreachable!("the message has no type argument")
+    }
+    fn relation_operands(&self, _: SemanticNodeId, _: SemanticNodeId) -> (String, String) {
+        unreachable!("the message has no type argument")
+    }
+    fn missing_properties(&self, _: SemanticNodeId, _: SemanticNodeId) -> Option<Vec<String>> {
+        unreachable!("the message lists no property")
+    }
+}
+
 #[test]
 fn a_flow_return_is_charged_for_its_nested_backing() {
     use crate::project_semantic_dispatch::flow_return::{ExactMemberValue, ExactReturnKeyDomain};
@@ -151,9 +166,7 @@ fn a_flow_return_is_charged_for_its_nested_backing() {
                 ..Default::default()
             };
             recipe
-                .bind(&site, |_, _| {
-                    unreachable!("the message has no type argument")
-                })
+                .bind(&site, &NoTypes)
                 .expect("the site names the call")
         })
         .collect();

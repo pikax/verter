@@ -1358,6 +1358,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .and_then(|state| state.resume_at);
         let mut resuming = resume_at.is_some();
         let mut only_candidate = None;
+        // With explicit type arguments every candidate is instantiated, and
+        // the checker reports the argument error of the ONE candidate whose
+        // arity fits rather than TS2769 — continuing with it when it is also
+        // the candidate it recovers with (`getLongestCandidateIndex`: the
+        // first that takes as many parameters as the call has arguments).
+        let mut explicit_recovery = (visible.len() > 1 && !key.explicit_type_args.is_empty())
+            .then(|| self.sole_arity_fitting_candidate(&visible, &arguments))
+            .flatten();
         for &applicability in passes {
             for (position, candidate) in visible.iter().enumerate() {
                 if resuming {
@@ -1427,7 +1435,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         return CandidateVerdict::Degraded(failure);
                     }
                 }
-                if visible.len() == 1 {
+                if visible.len() == 1 || explicit_recovery == Some(position) {
+                    explicit_recovery = None;
                     only_candidate = Some((candidate, raw_candidate));
                 }
             }
@@ -2319,7 +2328,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     if recovery
                         && (visible_type_params.is_empty() || contextual_diagnostic.is_some()) =>
                 {
-                    failure.get_or_insert(argument_not_assignable(index, source, target));
+                    if failure.is_none() {
+                        failure = Some(self.argument_failure(index, source, target, budget));
+                    }
                 }
                 RelationStep::NotAssignable => {
                     return self.reject_call_candidate(session_id, &checkpoint)
@@ -2722,7 +2733,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ) {
                 Ok(Some(true)) => {}
                 Ok(Some(false)) if recovery => {
-                    failure.get_or_insert(argument_not_assignable(index, source, target));
+                    if failure.is_none() {
+                        failure = Some(self.argument_failure(index, source, target, budget));
+                    }
                 }
                 Ok(Some(false)) => {
                     if self
@@ -2733,8 +2746,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .as_ref()
                         .is_some_and(|state| state.was_context_sensitive(index))
                     {
-                        let recipe =
-                            self.contextual_argument_failure(index, source, target, budget);
+                        let recipe = self.argument_failure(index, source, target, budget);
                         if let Some(state) = self.dispatch_txn.borrow_mut().call.contextual.as_mut()
                         {
                             state.diagnostic = Some(recipe);
@@ -3240,7 +3252,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 selected_signature,
                 substitution,
                 fresh_literal_returns,
-                recovery_diagnostic: failure,
+                recovery_diagnostic: failure.map(Box::new),
             },
             concrete_seeds,
             holds,
@@ -4314,6 +4326,55 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// constraint. Only a genuinely unresolvable shape (a carrier cycle,
     /// an unresolved reference) is `Unresolved` — which caps no arity but
     /// supplies no per-argument target either.
+    /// The position of the one candidate of `visible` whose arity fits the
+    /// call's `arguments`, when it is also the first that takes at least
+    /// as many parameters as there are arguments (or has a rest). `None`
+    /// when no candidate, or several, fit, or the call spreads an argument
+    /// of unknown length.
+    fn sole_arity_fitting_candidate(
+        &self,
+        visible: &[SignatureRef],
+        arguments: &[CallArgument],
+    ) -> Option<usize> {
+        if arguments.iter().any(|argument| argument.indefinite_spread) {
+            return None;
+        }
+        let consumer = crate::semantic_query::ResolveCallConsumer::witness();
+        let mut fitting = None;
+        let mut longest = None;
+        for (position, candidate) in visible.iter().enumerate() {
+            let data = self.graph().node_data(candidate.node)?;
+            let params = match data.as_ref() {
+                SemanticNodeData::Signature { params, .. } => Arc::clone(params.as_arc()),
+                SemanticNodeData::DeferredCallable(callable) => {
+                    Arc::clone(callable.parts(&consumer).params)
+                }
+                _ => return None,
+            };
+            let (_, ordinary) = crate::semantic_query::split_this_receiver(&params);
+            let rest = ordinary
+                .last()
+                .filter(|param| param.rest)
+                .map(|param| RestParam {
+                    param,
+                    shape: self.rest_shape(param.ty),
+                });
+            let (required, maximum, _) = call_candidate_arity(ordinary, rest.as_ref());
+            if longest.is_none() && maximum.is_none_or(|maximum| maximum >= arguments.len()) {
+                longest = Some(position);
+            }
+            if arguments.len() >= required
+                && maximum.is_none_or(|maximum| arguments.len() <= maximum)
+            {
+                if fitting.is_some() {
+                    return None;
+                }
+                fitting = Some(position);
+            }
+        }
+        fitting.filter(|&position| longest == Some(position))
+    }
+
     fn rest_shape(&self, ty: SemanticNodeId) -> RestShape {
         let graph = self.graph();
         let resolved = match self.unwrap_identity_carrier_for_relation(ty) {

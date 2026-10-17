@@ -1090,7 +1090,9 @@ export function om() { return o.m(); }
 /// is `A`; `two(x, y)` over `{ a: 1 }` and `{ b: 1 }` is `{ a: 1 }` — the
 /// candidates' common supertype, which `y` then fails; `con(1)` is
 /// `string` — the inference violating `T extends string` takes the
-/// constraint; `ctx(1, (v: string) => {})` is `string`.
+/// constraint; `ctx(1, (v: string) => {})` is `string`. With explicit
+/// type arguments over overloads, the one candidate whose arity fits the
+/// call recovers it: `g2<string>(1)` is `string`.
 ///
 /// A call to a lone NON-generic signature is answered from its declared
 /// return whatever the arguments: `one(x)`, `one()`, `one("a", "b")`,
@@ -1108,6 +1110,7 @@ fn a_call_its_only_candidate_rejects_answers_the_checkers_recovery() {
         ("tab", "{ a: 1; }"),
         ("c1", "string"),
         ("x1", "string"),
+        ("eg", "string"),
     ];
     let host = host_with(CALL_RECOVERY);
     for root in [STRICT_ROOT, LOOSE_ROOT] {
@@ -1143,6 +1146,8 @@ fn a_call_its_only_candidate_rejects_answers_the_checkers_recovery() {
 #[test]
 fn call_diagnostics_carry_the_checkers_code_message_position_and_order() {
     let rows: &[(&str, &[&str])] = &[
+        ("tu", &["(19,37): error TS2345: Argument of type '((x: unknown) => x is A) | ((x: unknown) => x is B)' is not assignable to parameter of type '(x: unknown) => x is A'."]),
+        ("tab", &["(20,63): error TS2741: Property 'a' is missing in type '{ b: 1; }' but required in type '{ a: 1; }'."]),
         ("o1", &["(21,44): error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'."]),
         ("o2", &["(22,31): error TS2554: Expected 1 arguments, but got 0."]),
         ("o3", &["(23,40): error TS2554: Expected 1 arguments, but got 2."]),

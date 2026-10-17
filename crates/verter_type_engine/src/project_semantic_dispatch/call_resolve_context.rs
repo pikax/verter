@@ -649,6 +649,15 @@ fn literal_members(
     }
 }
 
+/// Whether `name` is written bare as a property name: an identifier.
+fn is_identifier_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|first| first.is_alphabetic() || first == '_' || first == '$')
+        && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+}
+
 /// How many levels of unions, intersections and constraints a relation's
 /// target is read through to decide whether it could hold a literal.
 const SINGLETON_SCAN_DEPTH: u32 = 16;
@@ -674,6 +683,63 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         )
     }
 
+    /// The checker's diagnostic for one walker diagnostic the checker
+    /// itself reports, fully formatted as `TS<code>: <message>`: a relation
+    /// refused at its comparison allowance is TS2859 naming its two types.
+    /// `None` for a walker diagnostic the checker has no code for.
+    pub fn checker_message(
+        &self,
+        diagnostic: &super::super::walk::ShallowDiagnostic,
+    ) -> Option<String> {
+        match diagnostic {
+            super::super::walk::ShallowDiagnostic::RelationTooComplex { source, target } => {
+                let code = crate::semantic_query::CheckerDiagnosticCode::RelationTooComplex;
+                Some(format!(
+                    "TS{}: {}",
+                    code.code(),
+                    code.format(&[
+                        self.print_diagnostic_type(*source),
+                        self.print_diagnostic_type(*target),
+                    ])
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// The checker's diagnostic a recovery node carries, fully formatted as
+    /// `TS<code>: <message>`: the error type the checker continues with
+    /// after a diagnostic it recovers from
+    /// ([`QueryError::CheckerRecovery`](crate::semantic_query::QueryError::CheckerRecovery)).
+    /// TS2456 names the alias its origin refers to. `None` for any other
+    /// node, and for a recovery whose message needs an argument it does not
+    /// carry.
+    pub fn checker_recovery_message(&self, node: SemanticNodeId) -> Option<String> {
+        let data = self.graph().node_data(node)?;
+        let SemanticNodeData::Opaque(crate::semantic_query::QueryError::CheckerRecovery {
+            diagnostic,
+            origin,
+            ..
+        }) = data.as_ref()
+        else {
+            return None;
+        };
+        let code = diagnostic.code;
+        let arguments: Vec<String> = match code {
+            crate::semantic_query::CheckerDiagnosticCode::CircularTypeAlias => {
+                match self.graph().node_data((*origin)?)?.as_ref() {
+                    SemanticNodeData::DeclRef { identity } => {
+                        vec![identity.decl_name.to_string()]
+                    }
+                    _ => return None,
+                }
+            }
+            _ if !code.message().contains('{') => Vec::new(),
+            _ => return None,
+        };
+        Some(format!("TS{}: {}", code.code(), code.format(&arguments)))
+    }
+
     /// One type as a diagnostic message prints it.
     pub(in crate::project_semantic_dispatch) fn print_diagnostic_type(
         &self,
@@ -692,6 +758,53 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             &mut crate::semantic_query::display::DisplayContext::default(),
         )
         .0
+    }
+
+    /// The properties `target` requires that `source` lacks, named as the
+    /// checker's missing-properties elaboration names them
+    /// (`getUnmatchedProperties`), in the target's member order: an
+    /// identifier name bare, any other string name double-quoted. `None`
+    /// unless both resolve to object surfaces and the target names every
+    /// missing member by a string or number key.
+    pub(in crate::project_semantic_dispatch) fn missing_required_properties(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> Option<Vec<String>> {
+        let transit =
+            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                crate::semantic_query::ProjectionMode::Navigate,
+            );
+        let surface = |node| match self.normalize_node_for_structural_fact_demand(node, transit) {
+            super::super::evaluate::StructuralFactDemandOutcome::Complete(node) => {
+                match self.graph().node_data(node)?.as_ref() {
+                    SemanticNodeData::Object(view) => Some(view.clone()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let (source, target) = (surface(source)?, surface(target)?);
+        let mut missing = Vec::new();
+        for member in target.positive_members() {
+            if member.optional
+                || source
+                    .positive_members()
+                    .iter()
+                    .any(|present| present.key == member.key)
+            {
+                continue;
+            }
+            missing.push(match &member.key {
+                AuthoredPropertyKey::String(name) if is_identifier_name(name) => name.to_string(),
+                AuthoredPropertyKey::String(name) => format!("{name:?}"),
+                AuthoredPropertyKey::Number(number) => number.to_string(),
+                AuthoredPropertyKey::UniqueSymbol(_) | AuthoredPropertyKey::Computed(_) => {
+                    return None
+                }
+            });
+        }
+        Some(missing)
     }
 
     /// Whether `target` could hold a literal or other unit type at its top

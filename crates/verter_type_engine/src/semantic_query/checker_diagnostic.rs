@@ -55,6 +55,9 @@ impl CheckerDiagnostic {
             | CheckerDiagnosticCode::ArgumentNotAssignable
             | CheckerDiagnosticCode::ArgumentCount
             | CheckerDiagnosticCode::ArgumentCountAtLeast
+            | CheckerDiagnosticCode::PropertyMissing
+            | CheckerDiagnosticCode::PropertiesMissing
+            | CheckerDiagnosticCode::ManyPropertiesMissing
             | CheckerDiagnosticCode::RelationTooComplex => None,
         }
     }
@@ -110,6 +113,14 @@ pub enum CheckerDiagnosticCode {
     /// TS2555: a call supplies fewer arguments than its only candidate,
     /// which has a rest parameter, requires.
     ArgumentCountAtLeast,
+    /// TS2741: the elaboration of a relation an object source fails for
+    /// lacking exactly one property its object target requires.
+    PropertyMissing,
+    /// TS2739: as [`Self::PropertyMissing`], lacking two to five.
+    PropertiesMissing,
+    /// TS2740: as [`Self::PropertyMissing`], lacking more than five; the
+    /// message names the first four.
+    ManyPropertiesMissing,
 }
 
 // Diagnostic codes and message templates, including TS2769 and TS2322:
@@ -133,7 +144,10 @@ impl CheckerDiagnosticCode {
             | Self::RecursiveFulfillmentCallback
             | Self::ArgumentNotAssignable
             | Self::ArgumentCount
-            | Self::ArgumentCountAtLeast => false,
+            | Self::ArgumentCountAtLeast
+            | Self::PropertyMissing
+            | Self::PropertiesMissing
+            | Self::ManyPropertiesMissing => false,
         }
     }
 
@@ -152,7 +166,40 @@ impl CheckerDiagnosticCode {
             Self::ArgumentNotAssignable => 2345,
             Self::ArgumentCount => 2554,
             Self::ArgumentCountAtLeast => 2555,
+            Self::PropertyMissing => 2741,
+            Self::PropertiesMissing => 2739,
+            Self::ManyPropertiesMissing => 2740,
         }
+    }
+
+    /// The code's message with each `{n}` placeholder replaced by
+    /// `arguments[n]`, as the checker formats it
+    /// (`formatStringFromArgs`).
+    #[must_use]
+    pub fn format(self, arguments: &[impl AsRef<str>]) -> String {
+        let template = self.message();
+        let mut message = String::with_capacity(template.len());
+        let mut rest = template;
+        while let Some(open) = rest.find('{') {
+            message.push_str(&rest[..open]);
+            let after = &rest[open + 1..];
+            let filled = after.find('}').and_then(|close| {
+                let index: usize = after[..close].parse().ok()?;
+                Some((arguments.get(index)?.as_ref(), close))
+            });
+            match filled {
+                Some((argument, close)) => {
+                    message.push_str(argument);
+                    rest = &after[close + 1..];
+                }
+                None => {
+                    message.push('{');
+                    rest = after;
+                }
+            }
+        }
+        message.push_str(rest);
+        message
     }
 
     /// The checker's message text for the code.
@@ -179,6 +226,16 @@ impl CheckerDiagnosticCode {
             }
             Self::ArgumentCount => "Expected {0} arguments, but got {1}.",
             Self::ArgumentCountAtLeast => "Expected at least {0} arguments, but got {1}.",
+            Self::PropertyMissing => {
+                "Property '{0}' is missing in type '{1}' but required in type '{2}'."
+            }
+            Self::PropertiesMissing => {
+                "Type '{0}' is missing the following properties from type '{1}': {2}"
+            }
+            Self::ManyPropertiesMissing => {
+                "Type '{0}' is missing the following properties from type '{1}': {2}, and {3} \
+                 more."
+            }
         }
     }
 }
@@ -255,6 +312,29 @@ pub enum CheckerDiagnosticArguments {
         max: Option<u32>,
         got: u32,
     },
+    /// A function argument whose RETURN is what fails its parameter: the
+    /// argument's `source` and its parameter's `target`, and the returns
+    /// `returned_source` and `returned_target` (the union of the target's
+    /// call-signature returns). Where the argument is an arrow function
+    /// returning one expression and annotating no parameter, the checker
+    /// elaborates the failure onto that expression as the returns' TS2322
+    /// (`elaborateArrowFunction`); anywhere else it is the argument's
+    /// TS2345. Which one is the authored argument's to say, so a recipe
+    /// carries both and its occurrence picks
+    /// ([`CheckerDiagnosticRecipe::bind`]).
+    ElaboratedReturn {
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        returned_source: SemanticNodeId,
+        returned_target: SemanticNodeId,
+    },
+    /// An object `source` lacking properties its object `target` requires
+    /// (TS2741, TS2739, TS2740): the names are read off the two types when
+    /// the recipe is bound, in the target's member order.
+    MissingProperties {
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    },
 }
 
 impl CheckerDiagnosticArguments {
@@ -262,9 +342,20 @@ impl CheckerDiagnosticArguments {
     pub(crate) fn for_each_node(self, mut visit: impl FnMut(SemanticNodeId)) {
         match self {
             Self::None | Self::ArgumentCount { .. } => {}
-            Self::Types { source, target } => {
+            Self::Types { source, target } | Self::MissingProperties { source, target } => {
                 visit(source);
                 visit(target);
+            }
+            Self::ElaboratedReturn {
+                source,
+                target,
+                returned_source,
+                returned_target,
+            } => {
+                visit(source);
+                visit(target);
+                visit(returned_source);
+                visit(returned_target);
             }
         }
     }
@@ -284,10 +375,6 @@ pub enum CheckerDiagnosticSubject {
     /// The call's arguments from this ordinal on — the ones its only
     /// candidate does not accept (`getArgumentArityError`).
     ExcessArguments(u32),
-    /// The returned expression of the function argument at this ordinal,
-    /// where the checker elaborates an argument failure onto the callback's
-    /// return (`elaborateArrowFunction`).
-    ArgumentReturn(u32),
 }
 
 /// A REUSABLE diagnostic: what the checker reports, with its typed
@@ -330,29 +417,80 @@ impl CheckerDiagnosticRecipe {
     }
 
     /// Bind the recipe to one authored occurrence: its subject read off
-    /// `site` and its type arguments printed by `print` — the occurrence's
-    /// location and message, fixed for good. `None` when the site does not
-    /// know the subject's position.
+    /// `site` and its type arguments printed by `printer` — the
+    /// occurrence's location and message, fixed for good. `None` when the
+    /// site does not know the subject's position, or the printer cannot
+    /// read the names the message lists.
     pub(crate) fn bind(
         &self,
         site: &CheckerDiagnosticSite,
-        print: impl Fn(SemanticNodeId, SemanticNodeId) -> (String, String),
+        printer: &dyn CheckerDiagnosticPrinter,
     ) -> Option<CheckerDiagnosticOccurrence> {
-        let start = match self.subject {
+        let mut diagnostic = self.diagnostic;
+        let mut start = match self.subject {
             CheckerDiagnosticSubject::Operation => site.operation_start?,
             CheckerDiagnosticSubject::Argument(ordinal)
             | CheckerDiagnosticSubject::ExcessArguments(ordinal) => {
                 *site.argument_starts.get(ordinal as usize)?
             }
-            CheckerDiagnosticSubject::ArgumentReturn(ordinal) => {
-                (*site.argument_return_starts.get(ordinal as usize)?)?
-            }
+        };
+        let pair = |source, target| {
+            let (source, target) = printer.relation_operands(source, target);
+            Box::new([source.into_boxed_str(), target.into_boxed_str()]) as Box<[Box<str>]>
         };
         let arguments: Box<[Box<str>]> = match self.arguments {
             CheckerDiagnosticArguments::None => Box::new([]),
-            CheckerDiagnosticArguments::Types { source, target } => {
-                let (source, target) = print(source, target);
-                Box::new([source.into_boxed_str(), target.into_boxed_str()])
+            CheckerDiagnosticArguments::Types { source, target } => pair(source, target),
+            CheckerDiagnosticArguments::ElaboratedReturn {
+                source,
+                target,
+                returned_source,
+                returned_target,
+            } => match self.subject {
+                CheckerDiagnosticSubject::Argument(ordinal) => {
+                    match site
+                        .argument_return_starts
+                        .get(ordinal as usize)
+                        .copied()
+                        .flatten()
+                    {
+                        Some(returned) => {
+                            start = returned;
+                            diagnostic.code = CheckerDiagnosticCode::TypeNotAssignable;
+                            pair(returned_source, returned_target)
+                        }
+                        None => pair(source, target),
+                    }
+                }
+                CheckerDiagnosticSubject::Operation
+                | CheckerDiagnosticSubject::ExcessArguments(_) => pair(source, target),
+            },
+            CheckerDiagnosticArguments::MissingProperties { source, target } => {
+                let names = printer.missing_properties(source, target)?;
+                let (source, target) = (
+                    printer.diagnostic_type(source).into_boxed_str(),
+                    printer.diagnostic_type(target).into_boxed_str(),
+                );
+                match names.as_slice() {
+                    [] => return None,
+                    [name] => {
+                        diagnostic.code = CheckerDiagnosticCode::PropertyMissing;
+                        Box::new([name.clone().into_boxed_str(), source, target])
+                    }
+                    listed if listed.len() <= 5 => {
+                        diagnostic.code = CheckerDiagnosticCode::PropertiesMissing;
+                        Box::new([source, target, listed.join(", ").into_boxed_str()])
+                    }
+                    many => {
+                        diagnostic.code = CheckerDiagnosticCode::ManyPropertiesMissing;
+                        Box::new([
+                            source,
+                            target,
+                            many[..4].join(", ").into_boxed_str(),
+                            (many.len() - 4).to_string().into_boxed_str(),
+                        ])
+                    }
+                }
             }
             CheckerDiagnosticArguments::ArgumentCount { min, max, got } => {
                 let expected = match max {
@@ -364,10 +502,29 @@ impl CheckerDiagnosticRecipe {
         };
         Some(CheckerDiagnosticOccurrence {
             start,
-            diagnostic: self.diagnostic,
+            diagnostic,
             arguments,
         })
     }
+}
+
+/// What binding a recipe reads off the graph: its types as the checker
+/// prints them in a message, and the names a missing-properties message
+/// lists.
+pub(crate) trait CheckerDiagnosticPrinter {
+    /// One type as a message prints it.
+    fn diagnostic_type(&self, node: SemanticNodeId) -> String;
+    /// A failed relation's two types as its message prints them.
+    fn relation_operands(&self, source: SemanticNodeId, target: SemanticNodeId)
+        -> (String, String);
+    /// The properties `target` requires that `source` lacks, as the
+    /// message names them, in the target's order. `None` when either is
+    /// not an object surface.
+    fn missing_properties(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> Option<Vec<String>>;
 }
 
 /// The authored positions of one operation's occurrence that a recipe's
@@ -379,8 +536,10 @@ pub(crate) struct CheckerDiagnosticSite {
     pub(crate) operation_start: Option<u32>,
     /// Each call argument's start, in argument order.
     pub(crate) argument_starts: Arc<[u32]>,
-    /// Each function argument's returned expression's start, where the
-    /// argument is a function returning one expression.
+    /// Each argument's returned expression's start, where the argument is
+    /// an arrow function returning one expression and annotating no
+    /// parameter — the authored form the checker elaborates a return
+    /// failure onto.
     pub(crate) argument_return_starts: Arc<[Option<u32>]>,
 }
 
@@ -441,29 +600,7 @@ impl CheckerDiagnosticOccurrence {
     /// its argument.
     #[must_use]
     pub fn message(&self) -> String {
-        let template = self.diagnostic.code.message();
-        let mut message = String::with_capacity(template.len());
-        let mut rest = template;
-        while let Some(open) = rest.find('{') {
-            message.push_str(&rest[..open]);
-            let after = &rest[open + 1..];
-            let filled = after.find('}').and_then(|close| {
-                let index: usize = after[..close].parse().ok()?;
-                Some((self.arguments.get(index)?, close))
-            });
-            match filled {
-                Some((argument, close)) => {
-                    message.push_str(argument);
-                    rest = &after[close + 1..];
-                }
-                None => {
-                    message.push('{');
-                    rest = after;
-                }
-            }
-        }
-        message.push_str(rest);
-        message
+        self.diagnostic.code.format(&self.arguments)
     }
 
     /// The heap bytes this occurrence keeps reachable beyond its inline size.

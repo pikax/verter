@@ -3925,6 +3925,32 @@ fn union_partial_applicability_answers_the_synthesized_signatures_recovery() {
     );
 }
 
+/// A relation refused at its comparison allowance reaches a consumer as the
+/// checker's own diagnostic, TS2859, naming both types as the checker
+/// prints them. Message: TypeScript 7.0.2 `diagnosticMessages.json`,
+/// "Excessive complexity comparing types '{0}' and '{1}'." A walker
+/// diagnostic the checker has no code for carries no checker message.
+#[test]
+fn a_relation_refusal_reports_the_checkers_formatted_ts2859() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let graph = dispatch.graph();
+    let source = graph.intern_node(SemanticNodeData::Literal(
+        verter_type_engine::semantic_query::LiteralValue::String("a".to_owned()),
+    ));
+    let target = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    assert_eq!(
+        dispatch
+            .checker_message(&super::walk::ShallowDiagnostic::RelationTooComplex { source, target })
+            .as_deref(),
+        Some("TS2859: Excessive complexity comparing types '\"a\"' and 'number'.")
+    );
+    assert_eq!(
+        dispatch.checker_message(&super::walk::ShallowDiagnostic::OpenConditional { node: source }),
+        None
+    );
+}
+
 /// A non-callable arm empties the union's shared signature list, so the
 /// whole union is `NotCallable` (`tsc --strict` TS2349). Mutation recipe:
 /// skip arms with no signature instead of emptying the list and the call

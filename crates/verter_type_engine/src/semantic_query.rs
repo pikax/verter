@@ -164,12 +164,12 @@ pub use flow_return_result::{FlowReturnResult, FlowReturnWrap};
 mod signature_predicate;
 pub use signature_predicate::{PredicateSubject, SignaturePredicate};
 mod checker_diagnostic;
-pub(crate) use checker_diagnostic::CheckerDiagnosticSite;
 pub use checker_diagnostic::{
     CheckerDiagnostic, CheckerDiagnosticArguments, CheckerDiagnosticCode,
     CheckerDiagnosticOccurrence, CheckerDiagnosticOperation, CheckerDiagnosticRecipe,
     CheckerDiagnosticSubject, RecoveryBasis,
 };
+pub(crate) use checker_diagnostic::{CheckerDiagnosticPrinter, CheckerDiagnosticSite};
 /// The checker compatibility policy: the limits at which the checker gives up
 /// on a type operation, and the diagnostic it reports there.
 pub mod checker_policy;

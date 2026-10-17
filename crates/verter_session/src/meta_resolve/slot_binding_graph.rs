@@ -660,6 +660,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
                 macro_index,
                 MacroExpansionKind::DefineSlots,
                 macro_payload_read.cache_suppress(),
+                &|diagnostic| dispatch.checker_message(diagnostic),
             ));
         }
         // A2 signal split: the component-meta warm gate keys on the
@@ -850,6 +851,7 @@ pub(crate) fn compute_bindings_via_graph(
             owner_macro.macro_index,
             MacroExpansionKind::DefineSlots,
             slot_surface_read.cache_suppress(),
+            &|diagnostic| dispatch.checker_message(diagnostic),
         ));
     }
     // A2 signal split: key the warm gate on the PARTIAL signal only.
@@ -1043,6 +1045,7 @@ pub(crate) fn compute_bindings_via_graph(
                 owner_macro.macro_index,
                 MacroExpansionKind::DefineSlots,
                 param_surface_read.cache_suppress(),
+                &|diagnostic| dispatch.checker_message(diagnostic),
             ));
         }
         // A2 signal split: key the warm gate on the PARTIAL signal only.
