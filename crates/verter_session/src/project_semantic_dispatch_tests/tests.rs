@@ -25156,7 +25156,7 @@ fn multi_segment_import_type_with_generic_args_fails_loud_not_silent_drop() {
     );
 
     // Lower one `ImportType` shape and return its interned node data.
-    let lower = |expr: &TypeExpr| -> Arc<SemanticNodeData> {
+    let lower = |expr: &TypeExpr| -> verter_type_engine::semantic_query_memo::NodeData {
         let mut subs: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
         let id = dispatch.shallow_lower_type_expr_with_context_for_tests(
             expr,
@@ -25306,7 +25306,7 @@ fn typeof_import_value_member_applies_generic_instantiation_args() {
     );
 
     // Lower one `ImportType` shape and return its interned node data.
-    let lower = |expr: &TypeExpr| -> Arc<SemanticNodeData> {
+    let lower = |expr: &TypeExpr| -> verter_type_engine::semantic_query_memo::NodeData {
         let mut subs: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
         let id = dispatch.shallow_lower_type_expr_with_context_for_tests(
             expr,
@@ -25325,20 +25325,22 @@ fn typeof_import_value_member_applies_generic_instantiation_args() {
 
     // For a `Function` node return `(type_parameter_count, param0_ty_data)`.
     // `None` when the node is not a Function (an honest miss / wrong carrier).
-    let function_shape =
-        |data: &SemanticNodeData| -> Option<(usize, Option<Arc<SemanticNodeData>>)> {
-            match data {
-                SemanticNodeData::Signature {
-                    params,
-                    type_parameters,
-                    ..
-                } => {
-                    let param0 = params.first().and_then(|p| graph.node_data(p.ty));
-                    Some((type_parameters.len(), param0))
-                }
-                _ => None,
+    let function_shape = |data: &SemanticNodeData| -> Option<(
+        usize,
+        Option<verter_type_engine::semantic_query_memo::NodeData>,
+    )> {
+        match data {
+            SemanticNodeData::Signature {
+                params,
+                type_parameters,
+                ..
+            } => {
+                let param0 = params.first().and_then(|p| graph.node_data(p.ty));
+                Some((type_parameters.len(), param0))
             }
-        };
+            _ => None,
+        }
+    };
 
     // CONTROL — the bare `typeof import("./m").make` (no type args) stays a
     // GENERIC Function. Unchanged by the fix (empty `type_arguments` is a

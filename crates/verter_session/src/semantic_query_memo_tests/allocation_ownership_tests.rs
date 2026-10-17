@@ -338,7 +338,8 @@ fn a_cloned_delivered_name_alone_keeps_its_charge_until_its_own_drop() {
 }
 
 /// A declaration identity a delivered value names — inside a graph node the
-/// value roots, or inside the value's own error — is an owned name shared
+/// value roots, a type-parameter name a rooted payload lends by borrow, or
+/// inside the value's own error — is an owned name shared
 /// with the arena or the cache. An owning clone of it that outlives the
 /// read, the cache and the whole store keeps exactly that name charged, and
 /// its own drop restores the baseline at once. Holds in both release orders
@@ -349,7 +350,7 @@ fn a_cloned_identity_from_a_delivered_value_keeps_its_charge_until_its_own_drop(
     let long = format!("/{}.ts", "i".repeat(NAME_LEN));
     type Deliver = fn(&SemanticGraphStore, &str) -> QueryResult<SemanticNodeId>;
     type Extract = fn(&CacheRead<QueryResult<SemanticNodeId>>) -> OwnedStr;
-    let cases: [(&str, Deliver, Extract); 2] = [
+    let cases: [(&str, Deliver, Extract); 3] = [
         (
             "a rooted node's identity",
             |store, canonical| {
@@ -374,6 +375,32 @@ fn a_cloned_identity_from_a_delivered_value_keeps_its_charge_until_its_own_drop(
                 match &*payload {
                     SemanticNodeData::DeclRef { identity } => identity.canonical_id.clone(),
                     other => panic!("the delivered declaration reference, got {other:?}"),
+                }
+            },
+        ),
+        (
+            "a rooted node's type-parameter name",
+            |store, name| {
+                QueryResult::Value(store.intern_node(SemanticNodeData::TypeParam {
+                    decl: DeclIdentity::synthetic("T"),
+                    param_index: 0,
+                    constraint: None,
+                    default: None,
+                    display_name: OwnedStr::from(name),
+                }))
+            },
+            |read| {
+                let QueryResult::Value(node) = read.value() else {
+                    panic!("a node-valued delivery");
+                };
+                let payload = read
+                    .lease()
+                    .node_ref(*node)
+                    .and_then(|node| node.read())
+                    .expect("the delivery roots its node");
+                match &*payload {
+                    SemanticNodeData::TypeParam { display_name, .. } => display_name.clone(),
+                    other => panic!("the delivered type parameter, got {other:?}"),
                 }
             },
         ),

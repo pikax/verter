@@ -298,7 +298,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     ) -> SemanticNodeId {
         struct Frame {
             node: SemanticNodeId,
-            data: Option<Arc<SemanticNodeData>>,
+            data: Option<crate::semantic_query_memo::NodeData>,
             parts: Vec<SemanticNodeId>,
             next: usize,
         }

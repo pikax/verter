@@ -11801,7 +11801,7 @@ pub trait TypeNavigator {
 /// missing-id fabrication fixture reads through it.
 #[cfg(test)]
 pub(crate) trait SemanticGraphRead {
-    fn node_data(&self, node: SemanticNodeId) -> Arc<SemanticNodeData>;
+    fn node_data(&self, node: SemanticNodeId) -> crate::semantic_query_memo::NodeData;
 }
 
 /// Authoritative dispatch for every reusable semantic operation.
@@ -12588,16 +12588,16 @@ mod tests {
 /// A static node reader for pure consumers. Missing IDs retain their typed
 /// absence; the capability carries no query acquisition or publication API.
 pub(crate) trait NodeRead {
-    fn node_data(&self, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>>;
+    fn node_data(&self, node: SemanticNodeId) -> Option<crate::semantic_query_memo::NodeData>;
 }
 impl<T: NodeRead + ?Sized> NodeRead for Arc<T> {
-    fn node_data(&self, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
+    fn node_data(&self, node: SemanticNodeId) -> Option<crate::semantic_query_memo::NodeData> {
         self.as_ref().node_data(node)
     }
 }
 
 impl<T: NodeRead + ?Sized> NodeRead for &T {
-    fn node_data(&self, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
+    fn node_data(&self, node: SemanticNodeId) -> Option<crate::semantic_query_memo::NodeData> {
         (**self).node_data(node)
     }
 }

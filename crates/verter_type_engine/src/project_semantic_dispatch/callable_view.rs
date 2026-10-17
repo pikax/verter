@@ -181,7 +181,7 @@ impl<'a, 'ctx, C: crate::resolver_core::ResolverCapabilities> CallableNodeView<'
         Self { dispatch, root }
     }
 
-    fn data(&self, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
+    fn data(&self, node: SemanticNodeId) -> Option<crate::semantic_query_memo::NodeData> {
         node_data_for(self.dispatch.graph(), node)
     }
 
@@ -1038,7 +1038,7 @@ impl<'a, 'ctx, C: crate::resolver_core::ResolverCapabilities> CallableNodeView<'
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> SignatureNodeView<'_, '_, C> {
-    fn data(&self, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
+    fn data(&self, node: SemanticNodeId) -> Option<crate::semantic_query_memo::NodeData> {
         node_data_for(self.dispatch.graph(), node)
     }
 

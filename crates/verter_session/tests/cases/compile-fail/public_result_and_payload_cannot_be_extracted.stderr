@@ -10,7 +10,7 @@ note: the function `node_data_for` is defined here
   | / pub(crate) fn node_data_for(
   | |     graph: &crate::semantic_query_memo::SemanticGraphStore,
   | |     node: SemanticNodeId,
-  | | ) -> Option<Arc<SemanticNodeData>> {
+  | | ) -> Option<verter_type_engine::semantic_query_memo::NodeData> {
   | |__________________________________^
 
 error[E0616]: field `value` of struct `CacheRead` is private
@@ -38,12 +38,12 @@ help: a method `walker_diagnostics` also exists, call it with parentheses
 error[E0308]: mismatched types
   --> tests/cases/compile-fail/public_result_and_payload_cannot_be_extracted.rs:22:5
    |
-21 | fn extract_payload(lease: NodeDataLease) -> Arc<SemanticNodeData> {
-   |                                             --------------------- expected `Arc<SemanticNodeData>` because of return type
+21 | fn extract_payload(lease: NodeDataLease) -> verter_type_engine::semantic_query_memo::NodeData {
+   |                                             --------------------- expected `verter_type_engine::semantic_query_memo::NodeData` because of return type
 22 |     lease
-   |     ^^^^^ expected `Arc<SemanticNodeData>`, found `NodeDataLease`
+   |     ^^^^^ expected `verter_type_engine::semantic_query_memo::NodeData`, found `NodeDataLease`
    |
-   = note: expected struct `Arc<SemanticNodeData>`
+   = note: expected struct `verter_type_engine::semantic_query_memo::NodeData`
               found struct `NodeDataLease`
 
 error[E0308]: mismatched types
@@ -68,5 +68,5 @@ error[E0624]: method `node_data` is private
    |
   ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query_memo/nodes.rs
    |
-   |     pub(crate) fn node_data(&self, id: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
+   |     pub(crate) fn node_data(&self, id: SemanticNodeId) -> Option<verter_type_engine::semantic_query_memo::NodeData> {
    |     ----------------------------------------------------------------------------------- private method defined here

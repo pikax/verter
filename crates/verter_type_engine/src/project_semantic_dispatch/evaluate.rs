@@ -389,7 +389,7 @@ enum DeferredEvaluationStage {
         object: SemanticNodeId,
     },
     AwaitValueChildren {
-        data: Arc<SemanticNodeData>,
+        data: crate::semantic_query_memo::NodeData,
         children: Vec<SemanticNodeId>,
         values: Vec<SemanticNodeId>,
     },
@@ -2753,7 +2753,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 if let Some(&first) = children.first() {
                                     let frame = frames.last_mut().expect("active evaluator frame");
                                     frame.stage = DeferredEvaluationStage::AwaitValueChildren {
-                                        data: Arc::clone(&data),
+                                        data: data.clone(),
                                         children,
                                         values: Vec::new(),
                                     };

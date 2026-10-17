@@ -896,7 +896,7 @@ fn a_close_during_a_computation_defers_the_node_release_until_it_ends() {
         );
         let now = graph.node_data(*id).expect("still readable");
         assert!(
-            Arc::ptr_eq(&now, payload),
+            verter_type_engine::semantic_query_memo::NodeData::ptr_eq(&now, payload),
             "node {id:?} reads the same payload it read before the close"
         );
     }

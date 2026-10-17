@@ -54,7 +54,10 @@ fn lower_root(host: &VerterHost, expr: &TypeExpr) -> (Arc<SemanticGraphStore>, S
 }
 
 /// Read an interned node's payload.
-fn node(graph: &SemanticGraphStore, id: SemanticNodeId) -> Arc<SemanticNodeData> {
+fn node(
+    graph: &SemanticGraphStore,
+    id: SemanticNodeId,
+) -> verter_type_engine::semantic_query_memo::NodeData {
     graph.node_data(id).expect("interned node must exist")
 }
 

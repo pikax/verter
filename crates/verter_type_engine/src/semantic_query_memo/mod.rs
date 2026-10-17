@@ -85,7 +85,7 @@ mod signature_epoch;
 pub mod union_views;
 pub mod unresolved_reach;
 
-pub use arena::UNALLOCATABLE_ID_FLOOR;
+pub use arena::{NodeData, UNALLOCATABLE_ID_FLOOR};
 pub(crate) use inflight::InlineMemberFlight;
 pub use intern_table::{IdentityIndexSnapshot, InternIndexOccupancy};
 pub use producer::{

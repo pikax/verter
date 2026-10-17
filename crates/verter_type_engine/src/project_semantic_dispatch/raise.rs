@@ -3975,7 +3975,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
         &mut self,
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
         node: SemanticNodeId,
-        data: Arc<SemanticNodeData>,
+        data: crate::semantic_query_memo::NodeData,
     ) -> bool {
         let Some(_nesting) = OpennessNesting::enter() else {
             return self.role.question().undecidable_is_open();
@@ -4423,7 +4423,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
         &mut self,
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
         node: SemanticNodeId,
-        data: Arc<SemanticNodeData>,
+        data: crate::semantic_query_memo::NodeData,
     ) -> bool {
         // Own the carrier args so the `data` borrow can be released
         // before the `&mut self` recursion / the dispatch re-entry.

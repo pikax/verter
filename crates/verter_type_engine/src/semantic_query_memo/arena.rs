@@ -111,6 +111,87 @@ use crate::semantic_query::{NodeScopeId, SemanticNodeData, SemanticNodeId};
 /// so a payload naming one can dangle but never close a cycle.
 pub const UNALLOCATABLE_ID_FLOOR: u64 = 1 << 62;
 
+/// One interned graph payload: the allocation every read of the node shares.
+///
+/// While its slot is live the payload's block and heap are charged with the
+/// arena's storage. When the slot is released while a reader still holds the
+/// payload, that charge passes to the payload itself ([`HeldRelease`]): the
+/// drop of its last holder gives it back, in the same step that frees the
+/// allocation, so a reader that outlives the slot — or the whole store —
+/// keeps the payload charged exactly as long as it keeps it alive.
+pub struct NodePayload {
+    data: SemanticNodeData,
+    release: OnceLock<Box<HeldRelease>>,
+}
+
+/// What the last holder of a released payload gives back: its block and
+/// heap, and its ownership of the shared allocations it reaches.
+struct HeldRelease {
+    charges: Arc<parking_lot::Mutex<ArenaCharges>>,
+    scope: NodeScopeId,
+}
+
+impl Drop for NodePayload {
+    fn drop(&mut self) {
+        if let Some(held) = self.release.take() {
+            held.charges.lock().release_payload(&self.data, &held.scope);
+        }
+    }
+}
+
+/// A shared read of an interned payload: derefs to the payload, and every
+/// clone shares the one allocation and its charge.
+#[derive(Clone)]
+pub struct NodeData(Arc<NodePayload>);
+
+impl NodeData {
+    /// A payload allocation no slot holds yet.
+    pub(crate) fn new(data: SemanticNodeData) -> Self {
+        Self(Arc::new(NodePayload {
+            data,
+            release: OnceLock::new(),
+        }))
+    }
+
+    /// Whether both reads share one payload allocation.
+    #[must_use]
+    pub fn ptr_eq(left: &Self, right: &Self) -> bool {
+        Arc::ptr_eq(&left.0, &right.0)
+    }
+
+    fn downgrade(&self) -> Weak<NodePayload> {
+        Arc::downgrade(&self.0)
+    }
+}
+
+impl std::ops::Deref for NodeData {
+    type Target = SemanticNodeData;
+    fn deref(&self) -> &SemanticNodeData {
+        &self.0.data
+    }
+}
+
+impl AsRef<SemanticNodeData> for NodeData {
+    fn as_ref(&self) -> &SemanticNodeData {
+        &self.0.data
+    }
+}
+
+impl PartialEq for NodeData {
+    /// Payload equality, as for the `Arc` it wraps.
+    fn eq(&self, other: &Self) -> bool {
+        Self::ptr_eq(self, other) || self.0.data == other.0.data
+    }
+}
+
+impl Eq for NodeData {}
+
+impl std::fmt::Debug for NodeData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.data.fmt(f)
+    }
+}
+
 /// Whether `data`, interned at `id`, names a child the arena could allocate
 /// at or after `id`: a forward reference, the only way to close a cycle.
 fn names_forward_child(data: &SemanticNodeData, id: SemanticNodeId) -> bool {
@@ -236,7 +317,7 @@ pub(super) const SHARD_MASK: u64 = (NUM_SHARDS as u64) - 1;
 /// allocation stored in [`ArenaInner::nodes`]), its origin scope, and the
 /// interned id. The payload and scope are retained so the bucket scan can
 /// content-`Eq` a query against candidates without touching `inner`.
-type NodeCandidate = (Weak<SemanticNodeData>, NodeScopeId, SemanticNodeId);
+type NodeCandidate = (Weak<NodePayload>, NodeScopeId, SemanticNodeId);
 
 /// Per-shard dedup index. Keyed by the structural fingerprint of
 /// `(payload, scope)`; each bucket holds the candidate nodes whose
@@ -281,7 +362,7 @@ fn bucket_heap_bytes(bucket: &SmallVec<[NodeCandidate; 1]>) -> usize {
 fn chunk_storage_bytes() -> usize {
     use verter_session_query::retention::allocation::{box_bytes, heap_block_bytes};
     box_bytes::<Chunk>()
-        + heap_block_bytes(CHUNK_LEN * std::mem::size_of::<Option<Arc<SemanticNodeData>>>())
+        + heap_block_bytes(CHUNK_LEN * std::mem::size_of::<Option<NodeData>>())
         + heap_block_bytes(CHUNK_LEN * std::mem::size_of::<Option<NodeScopeId>>())
         + heap_block_bytes(CHUNK_LEN * std::mem::size_of::<usize>())
         + heap_block_bytes(CHUNK_LEN * std::mem::size_of::<bool>())
@@ -293,9 +374,7 @@ fn chunk_storage_bytes() -> usize {
 /// between payloads (`PayloadArray::share`) — is charged through the
 /// arena's shared-heap table ([`ArenaInner::charge_payload_heap`]).
 fn payload_block_bytes() -> usize {
-    verter_session_query::retention::allocation::arc_block_bytes(std::mem::size_of::<
-        SemanticNodeData,
-    >())
+    verter_session_query::retention::allocation::arc_block_bytes(std::mem::size_of::<NodePayload>())
 }
 
 /// Builds [`FingerprintKeyHasher`]s for the dedup index.
@@ -412,9 +491,7 @@ impl ShardIndex {
         bucket.iter().find_map(|(cand_data, cand_scope, cand_id)| {
             (cand_scope == scope
                 && is_live(*cand_id)
-                && cand_data
-                    .upgrade()
-                    .is_some_and(|value| value.as_ref() == data))
+                && cand_data.upgrade().is_some_and(|value| value.data == *data))
             .then_some(*cand_id)
         })
     }
@@ -430,7 +507,7 @@ const CHUNK_MASK: u64 = (CHUNK_LEN as u64) - 1;
 /// `Some` is a live slot, `None` a released one (or, in the chunk still
 /// receiving ids, one not handed out yet — [`ArenaInner::next_id`] tells).
 struct Chunk {
-    nodes: Box<[Option<Arc<SemanticNodeData>>]>,
+    nodes: Box<[Option<NodeData>]>,
     scopes: Box<[Option<NodeScopeId>]>,
     owners: Box<[usize]>,
     permanent: Box<[bool]>,
@@ -457,7 +534,7 @@ enum Slot<'a> {
     Unallocated,
     /// Handed out and released (its chunk may be gone).
     Released,
-    Live(&'a Arc<SemanticNodeData>, &'a NodeScopeId),
+    Live(&'a NodeData, &'a NodeScopeId),
 }
 
 /// Empty window entries tolerated beyond the window's live chunks before
@@ -616,19 +693,23 @@ pub(super) struct ArenaInner {
     /// Live slots across every chunk, maintained on every allocation and
     /// release so the live count is O(1).
     live: usize,
-    /// The live chunks' slot storage, the live payloads' blocks and the heap
-    /// they reach, pinned while they live.
+    /// The arena's charges. A leaf lock: taken under `inner`, or alone by
+    /// the last holder of a released payload, never the other way round.
+    charges: Arc<parking_lot::Mutex<ArenaCharges>>,
+}
+
+/// The charges of the arena's storage: the live chunks' slot storage, the
+/// blocks of the payloads it keeps or a reader still holds, and the heap
+/// they reach.
+#[derive(Default)]
+struct ArenaCharges {
     storage: Option<verter_session_query::retention::granular::GranularPin>,
-    /// Owners of every shared allocation a live payload or scope reaches,
-    /// keyed by address: a payload, or an enclosing shared allocation. An
-    /// allocation is charged when it gains its first owner and released
-    /// with its last, so one shared between many payloads
-    /// (`PayloadArray::share`, an interned name) is charged once.
+    /// Owners of every shared allocation a charged payload or scope
+    /// reaches, keyed by address: a payload, or an enclosing shared
+    /// allocation. An allocation is charged when it gains its first owner
+    /// and released with its last, so one shared between many payloads
+    /// (`PayloadArray::share`) is charged once.
     shared_heap: rustc_hash::FxHashMap<usize, usize>,
-    /// Payloads of released slots a reader still holds: their blocks and
-    /// heap stay charged with graph storage, and their shared allocations
-    /// keep their owner, until the arena next finds the reader gone.
-    held: Vec<(Arc<SemanticNodeData>, NodeScopeId)>,
 }
 
 /// Bytes one bucket of the arena's shared-heap table holds: its key, its
@@ -703,14 +784,45 @@ impl crate::semantic_query::node_payload_footprint::PayloadHeapVisitor for Relea
     }
 }
 
-impl ArenaInner {
+impl ArenaCharges {
+    fn add(
+        &mut self,
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+        bytes: usize,
+    ) {
+        self.storage
+            .get_or_insert_with(|| {
+                verter_session_query::retention::granular::GranularPin::new(
+                    account,
+                    ARENA_STORAGE_GRANULE,
+                )
+            })
+            .add(bytes);
+    }
+
+    fn sub(&mut self, bytes: usize) {
+        if let Some(storage) = self.storage.as_mut() {
+            storage.sub(bytes);
+        }
+    }
+
+    fn charged(&self) -> usize {
+        self.storage.as_ref().map_or(0, |storage| storage.charged())
+    }
+
+    /// Give back a payload no slot keeps any more and no reader holds.
+    fn release_payload(&mut self, payload: &SemanticNodeData, scope: &NodeScopeId) {
+        let freed = payload_block_bytes() + self.release_payload_heap(payload, scope);
+        self.sub(freed);
+    }
+
     /// The shared-heap table's bucket bytes.
     fn shared_heap_table_bytes(&self) -> usize {
         self.shared_heap.capacity() * SHARED_HEAP_BUCKET_BYTES
     }
 
     /// The heap `payload` and `scope` reach that is not charged yet, now
-    /// owned by one more live slot, plus the table growth recording it.
+    /// owned by one more charged payload, plus the table growth recording it.
     fn charge_payload_heap(
         &mut self,
         payload: &SemanticNodeData,
@@ -739,8 +851,8 @@ impl ArenaInner {
         bytes + (self.shared_heap_table_bytes() - table_before)
     }
 
-    /// The heap a freed slot's `payload` and `scope` held that no other
-    /// live slot reaches, and the table backing given back with it.
+    /// The heap a freed `payload` and `scope` held that no other charged
+    /// payload reaches, and the table backing given back with it.
     fn release_payload_heap(&mut self, payload: &SemanticNodeData, scope: &NodeScopeId) -> usize {
         use crate::semantic_query::node_payload_footprint::PayloadHeap as _;
         let table_before = self.shared_heap_table_bytes();
@@ -759,7 +871,28 @@ impl ArenaInner {
         }
         bytes + (table_before - self.shared_heap_table_bytes())
     }
+}
 
+impl Drop for ArenaInner {
+    /// A store's teardown keeps charged exactly the payloads a reader still
+    /// holds: when one does, every slot is released as a close would release
+    /// it, so the rest of the storage goes now and each held payload with its
+    /// last holder. Without one, every charge goes with the storage.
+    fn drop(&mut self) {
+        if !self
+            .live_slots()
+            .any(|(_, payload, _)| Arc::strong_count(&payload.0) > 1)
+        {
+            return;
+        }
+        let ids: Vec<u64> = self.live_slots().map(|(id, _, _)| id).collect();
+        for id in ids {
+            self.release(SemanticNodeId(id));
+        }
+    }
+}
+
+impl ArenaInner {
     fn slot(&self, id: SemanticNodeId) -> Slot<'_> {
         if id.0 >= self.next_id {
             return Slot::Unallocated;
@@ -778,28 +911,21 @@ impl ArenaInner {
     /// to `account`.
     fn allocate(
         &mut self,
-        payload: Arc<SemanticNodeData>,
+        payload: NodeData,
         scope: NodeScopeId,
         account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) -> SemanticNodeId {
-        self.release_unheld();
         let id = SemanticNodeId(self.next_id);
         self.next_id += 1;
-        let storage = self.storage.get_or_insert_with(|| {
-            verter_session_query::retention::granular::GranularPin::new(
-                account,
-                ARENA_STORAGE_GRANULE,
-            )
-        });
-        if self.chunks.get(&(id.0 >> CHUNK_BITS)).is_none() {
-            storage.add(chunk_storage_bytes());
+        {
+            let mut charges = self.charges.lock();
+            if self.chunks.get(&(id.0 >> CHUNK_BITS)).is_none() {
+                charges.add(account, chunk_storage_bytes());
+            }
+            charges.add(account, payload_block_bytes());
+            let heap = charges.charge_payload_heap(&payload, &scope, account);
+            charges.add(account, heap);
         }
-        storage.add(payload_block_bytes());
-        let heap = self.charge_payload_heap(&payload, &scope, account);
-        self.storage
-            .as_mut()
-            .expect("the storage pin was created above")
-            .add(heap);
         let chunk = self.chunks.get_or_insert_empty(id.0 >> CHUNK_BITS);
         let index = (id.0 & CHUNK_MASK) as usize;
         chunk.nodes[index] = Some(payload);
@@ -827,50 +953,27 @@ impl ArenaInner {
         chunk.permanent[index] = false;
         chunk.live -= 1;
         self.live -= 1;
-        let mut freed = if chunk.live == 0 {
+        if chunk.live == 0 {
             self.chunks.remove(&key);
-            chunk_storage_bytes()
-        } else {
-            0
-        };
-        if Arc::strong_count(&payload) == 1 {
-            freed += payload_block_bytes() + self.release_payload_heap(&payload, &scope);
-        } else {
+            self.charges.lock().sub(chunk_storage_bytes());
+        }
+        match Arc::try_unwrap(payload.0) {
+            // The slot held the last handle: the payload goes now.
+            Ok(payload) => self.charges.lock().release_payload(&payload.data, &scope),
             // A reader still holds the payload: it stays allocated, so it
-            // stays charged until the reader lets go.
-            self.held.push((payload, scope));
+            // stays charged until its last holder lets go.
+            Err(payload) => {
+                let _ = payload.release.set(Box::new(HeldRelease {
+                    charges: Arc::clone(&self.charges),
+                    scope,
+                }));
+            }
         }
-        if let Some(storage) = self.storage.as_mut() {
-            storage.sub(freed);
-        }
-        self.release_unheld();
         true
     }
 
-    /// Release every held payload its readers have let go of. Under the
-    /// writer lock an unreferenced payload cannot gain a reader: the arena
-    /// holds its last handle.
-    fn release_unheld(&mut self) {
-        if self.held.is_empty() {
-            return;
-        }
-        let mut freed = 0;
-        let mut held = std::mem::take(&mut self.held);
-        held.retain(|(payload, scope)| {
-            if Arc::strong_count(payload) > 1 {
-                return true;
-            }
-            freed += payload_block_bytes() + self.release_payload_heap(payload, scope);
-            false
-        });
-        self.held = held;
-        if let Some(storage) = self.storage.as_mut() {
-            storage.sub(freed);
-        }
-    }
-
     /// Every live `(id, payload, scope)` in ascending id order.
-    fn live_slots(&self) -> impl Iterator<Item = (u64, &Arc<SemanticNodeData>, &NodeScopeId)> {
+    fn live_slots(&self) -> impl Iterator<Item = (u64, &NodeData, &NodeScopeId)> {
         let keys: Vec<u64> = self.chunks.keys().collect();
         keys.into_iter().flat_map(move |key| {
             let chunk = self.chunks.get(&key).expect("listed chunk is live");
@@ -1132,7 +1235,7 @@ pub(crate) struct NodeArenaCore {
     /// nothing"), never in the dedup index. Mirrors the
     /// `SemanticGraphRead::node_data` fabrication for an unknown id, so a
     /// consumer still holding a released id reads an unresolved value.
-    released_placeholder: Arc<SemanticNodeData>,
+    released_placeholder: NodeData,
     /// The account the arena's storage is pinned against: the owning
     /// store's, bound before the first allocation, or the process-local one.
     retention: OnceLock<Arc<verter_session_query::retention::SemanticRetentionAccount>>,
@@ -1162,7 +1265,7 @@ impl Default for NodeArena {
                 counted: false,
                 #[cfg(test)]
                 race_hook: Default::default(),
-                released_placeholder: Arc::new(SemanticNodeData::Opaque(
+                released_placeholder: NodeData::new(SemanticNodeData::Opaque(
                     crate::semantic_query::QueryError::Miss,
                 )),
                 retention: OnceLock::new(),
@@ -1203,12 +1306,7 @@ impl NodeArenaCore {
     /// in its own statement: its `inner` guard is gone before any shard is
     /// locked, and a snapshot never holds `inner` while waiting on a shard.
     pub(super) fn storage_charge_bytes(&self) -> usize {
-        let slots = self
-            .inner
-            .read()
-            .storage
-            .as_ref()
-            .map_or(0, |storage| storage.charged());
+        let slots = self.inner.read().charges.lock().charged();
         #[cfg(test)]
         self.race_event(ArenaRaceEvent::BeforeShardStorageSnapshot);
         slots
@@ -1228,11 +1326,7 @@ impl NodeArenaCore {
     /// Bytes the slot storage and payload blocks alone are charged.
     #[cfg(test)]
     pub(super) fn slot_storage_charge_bytes(&self) -> usize {
-        self.inner
-            .read()
-            .storage
-            .as_ref()
-            .map_or(0, |storage| storage.charged())
+        self.inner.read().charges.lock().charged()
     }
 
     #[cfg(test)]
@@ -1272,9 +1366,9 @@ impl NodeArenaCore {
         matches!(self.inner.read().slot(id), Slot::Live(..))
     }
     /// The payload of a live slot only; a released slot has none.
-    pub(super) fn live_payload(&self, id: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
+    pub(super) fn live_payload(&self, id: SemanticNodeId) -> Option<NodeData> {
         match self.inner.read().slot(id) {
-            Slot::Live(payload, _) => Some(Arc::clone(payload)),
+            Slot::Live(payload, _) => Some(payload.clone()),
             _ => None,
         }
     }
@@ -1550,7 +1644,7 @@ impl NodeArena {
                     // ONE payload allocation, shared by refcount between the
                     // arena's slot storage and the dedup bucket — the payload
                     // is never deep-cloned into the index.
-                    let payload = Arc::new(data);
+                    let payload = NodeData::new(data);
                     for child in children {
                         inner
                             .chunks
@@ -1558,11 +1652,8 @@ impl NodeArena {
                             .unwrap()
                             .owners[(child.0 & CHUNK_MASK) as usize] += 1;
                     }
-                    let id = inner.allocate(
-                        Arc::clone(&payload),
-                        scope.clone(),
-                        self.retention_account(),
-                    );
+                    let id =
+                        inner.allocate(payload.clone(), scope.clone(), self.retention_account());
                     let chunk = inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)).unwrap();
                     let index = (id.0 & CHUNK_MASK) as usize;
                     chunk.owners[index] = 1;
@@ -1572,7 +1663,7 @@ impl NodeArena {
                     shard.insert_candidate(
                         self.retention_account(),
                         fingerprint,
-                        (Arc::downgrade(&payload), scope, id),
+                        (payload.downgrade(), scope, id),
                     );
                     (id, true)
                 }
@@ -1658,11 +1749,11 @@ impl NodeArena {
     /// Read the payload for `id`. `None` for an id this arena never handed
     /// out; the shared `Opaque(Miss)` placeholder for a RELEASED id (see
     /// [`Self::release_canonical`]); the interned payload otherwise.
-    pub(super) fn get(&self, id: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
+    pub(super) fn get(&self, id: SemanticNodeId) -> Option<NodeData> {
         let inner = self.inner.read();
         match inner.slot(id) {
-            Slot::Live(payload, _) => Some(Arc::clone(payload)),
-            Slot::Released => Some(Arc::clone(&self.released_placeholder)),
+            Slot::Live(payload, _) => Some(payload.clone()),
+            Slot::Released => Some(self.released_placeholder.clone()),
             Slot::Unallocated => None,
         }
     }
@@ -1912,7 +2003,7 @@ impl NodeArena {
     #[cfg(test)]
     pub(super) fn debug_bucket_shares_arena_arc(&self, id: SemanticNodeId) -> bool {
         let arena_arc = match self.inner.read().slot(id) {
-            Slot::Live(arc, _) => Arc::clone(arc),
+            Slot::Live(arc, _) => arc.clone(),
             _ => return false,
         };
         for shard in self.shards.iter() {
@@ -1922,7 +2013,7 @@ impl NodeArena {
                     if *cand_id == id {
                         return cand_arc
                             .upgrade()
-                            .is_some_and(|candidate| Arc::ptr_eq(&candidate, &arena_arc));
+                            .is_some_and(|candidate| Arc::ptr_eq(&candidate, &arena_arc.0));
                     }
                 }
             }
@@ -2385,7 +2476,7 @@ mod arena_intern_tests {
             }
             last = minted.last().copied();
             assert!(
-                Arc::ptr_eq(&arena.get(minted[0]).unwrap(), &arena.released_placeholder),
+                NodeData::ptr_eq(&arena.get(minted[0]).unwrap(), &arena.released_placeholder),
                 "cycle {cycle}: a released id reads as the placeholder even after its chunk is gone"
             );
             assert!(!arena.is_live(minted[0]));
