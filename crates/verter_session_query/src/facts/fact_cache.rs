@@ -13,7 +13,9 @@ use crate::facts::resolution::ResolutionFactKey;
 #[cfg(test)]
 use crate::resolution::ResolutionPopulation;
 
-pub use crate::facts::receipt::{drop_subsumed_receipts, EvidenceKind, ReceiptWalk, ResultReceipt};
+pub use crate::facts::receipt::{
+    drop_subsumed_receipts, EvidenceKind, ReceiptVerdict, ReceiptWalk, ResultReceipt,
+};
 pub use crate::facts::version::{
     compaction_domain, AggregatePopulation, AggregateStamp, CompactionDomain,
     CompletionOverlayState, DerivedFactKind, DomainGenerationFact, FactAttribution, FactHash16,

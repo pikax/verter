@@ -515,44 +515,94 @@ impl ReceiptWalk {
     pub fn leaves(
         &mut self,
         receipt: &ResultReceipt,
-        visit: impl FnMut(&FactVersionRef) -> bool,
-    ) -> bool {
-        self.leaves_unless(receipt, |_| false, visit)
-    }
-
-    /// [`Self::leaves`], except that a receipt `settled` answers `true` for
-    /// is taken as already validated: neither its facts nor anything only
-    /// it reaches are visited. `settled` is asked once per distinct receipt
-    /// the walk meets, so a caller can also learn every receipt it walked.
-    pub fn leaves_unless(
-        &mut self,
-        receipt: &ResultReceipt,
-        mut settled: impl FnMut(&ResultReceipt) -> bool,
         mut visit: impl FnMut(&FactVersionRef) -> bool,
     ) -> bool {
-        if !self.walked.insert(Arc::as_ptr(&receipt.0)) || settled(receipt) {
-            return true;
+        self.leaves_with_verdicts(receipt, |_| ReceiptVerdict::Unknown, |fact| visit(fact))
+            .is_ok()
+    }
+
+    /// [`Self::leaves`], with what the caller already knows about each
+    /// receipt the walk meets: a receipt `known` answers
+    /// [`ReceiptVerdict::Valid`] for is taken as validated, so neither its
+    /// facts nor anything only it reaches are visited; one it answers
+    /// [`ReceiptVerdict::Stale`] for fails the walk without being read.
+    /// `known` is asked once per distinct receipt the walk meets, so a
+    /// caller can also learn every receipt it walked.
+    ///
+    /// On failure answers the receipts PROVEN to reach the failure,
+    /// innermost first: the receipt whose own facts hold the failing fact
+    /// or the known-stale receipt, then the receipt the walk first met that
+    /// one through, and so on up to `receipt`. A known-stale receipt itself
+    /// is not in the chain (its verdict is already known), and neither is
+    /// anything else the walk met: a receipt it had not finished, or never
+    /// reached, is proven neither way.
+    pub fn leaves_with_verdicts<'r>(
+        &mut self,
+        receipt: &'r ResultReceipt,
+        mut known: impl FnMut(&ResultReceipt) -> ReceiptVerdict,
+        mut visit: impl FnMut(&FactVersionRef) -> bool,
+    ) -> Result<(), Vec<&'r ResultReceipt>> {
+        if !self.walked.insert(Arc::as_ptr(&receipt.0)) {
+            return Ok(());
         }
-        let mut stack: Vec<&ResultEvidence> = vec![&receipt.0];
-        while let Some(evidence) = stack.pop() {
-            for fact in evidence.facts.iter() {
+        match known(receipt) {
+            ReceiptVerdict::Valid => return Ok(()),
+            ReceiptVerdict::Stale => return Err(Vec::new()),
+            ReceiptVerdict::Unknown => {}
+        }
+        // Each receipt to read, in the order the walk met them, with the
+        // index of the one it was first met through, so a failure names
+        // its proven ancestors. Read front to back: the list is its own
+        // queue.
+        let mut met: Vec<(&'r ResultReceipt, usize)> = vec![(receipt, usize::MAX)];
+        let mut next = 0;
+        let chain = |met: &[(&'r ResultReceipt, usize)], mut at: usize| {
+            let mut chain = Vec::new();
+            while at != usize::MAX {
+                let (receipt, parent) = met[at];
+                chain.push(receipt);
+                at = parent;
+            }
+            chain
+        };
+        while let Some(&(current, _)) = met.get(next) {
+            let at = next;
+            next += 1;
+            for fact in current.0.facts.iter() {
                 super::fact_read_set::record_signature_work(1);
                 match fact {
                     FactVersionRef::Receipt(child) => {
-                        if self.walked.insert(Arc::as_ptr(&child.0)) && !settled(child) {
-                            stack.push(&child.0);
+                        if !self.walked.insert(Arc::as_ptr(&child.0)) {
+                            continue;
+                        }
+                        match known(child) {
+                            ReceiptVerdict::Valid => {}
+                            ReceiptVerdict::Stale => return Err(chain(&met, at)),
+                            ReceiptVerdict::Unknown => met.push((child, at)),
                         }
                     }
                     leaf => {
                         if !visit(leaf) {
-                            return false;
+                            return Err(chain(&met, at));
                         }
                     }
                 }
             }
         }
-        true
+        Ok(())
     }
+}
+
+/// What a walk's caller already knows about one receipt
+/// ([`ReceiptWalk::leaves_with_verdicts`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiptVerdict {
+    /// Not known: the walk reads it.
+    Unknown,
+    /// Every fact it reaches validates.
+    Valid,
+    /// A fact it reaches does not validate.
+    Stale,
 }
 
 /// Reserve a cache candidate's retained bytes against `account`: its own

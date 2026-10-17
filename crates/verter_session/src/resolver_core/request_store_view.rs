@@ -923,11 +923,12 @@ pub(crate) struct RequestStoreView<'a> {
     /// (`promote_route_completion`) are NOT validation-promotion
     /// and stay live so the cold compute can still observe additive loads.
     base_is_current: bool,
-    /// The receipts this view has validated (see [`ValidatedReceipts`]).
-    validated_receipts: ValidatedReceipts,
-    /// The retained signatures this view has validated (see
-    /// [`ValidatedSignatures`]).
-    validated_signatures: ValidatedSignatures,
+    /// The settled verdicts of the receipts this view validated (see
+    /// [`ReceiptVerdicts`]).
+    receipt_verdicts: ReceiptVerdicts,
+    /// The settled verdicts of the retained signatures this view validated
+    /// (see [`SignatureVerdicts`]).
+    signature_verdicts: SignatureVerdicts,
     /// The project environment this request read per canonical (see
     /// [`RequestProjectEnv`]).
     project_env: RequestProjectEnv,
@@ -946,55 +947,122 @@ pub(crate) struct RequestStoreView<'a> {
     leaf_validations: AtomicUsize,
 }
 
-/// One retained signature a request view validated: the signature itself
-/// (held alive, so its address names it alone), the strict self-roots it
-/// was validated under, and the completion state it was validated at.
-struct ValidatedSignature {
+/// A settled validation answer: the answer itself, given at one exact
+/// completion state that held across the whole validation.
+///
+/// Only an answer that is a function of what this view captured is
+/// settled. A refused validation (a base not proven current, a completion
+/// writer in flight, a state that moved while the facts were read) has no
+/// verdict, and neither has a failure read from a store the request shares
+/// with live writers (see [`failure_is_settled`]): either can answer
+/// differently on the next read, so neither is negative validity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    /// Every fact reached validates.
+    Valid,
+    /// A fact reached does not validate, and will not at this state.
+    Stale,
+}
+
+/// Whether a fact that fails validation fails for as long as the
+/// completion state and strict roots it was read under hold.
+///
+/// Every arm reads the base this view captured or the completion overlay
+/// at its exact state, except two that consult stores shared with live
+/// writers: a per-canonical resolved-import fact reads the shared
+/// resolved-import store, whose missing slot a concurrent cold compute can
+/// fill, and a route-surface fact reads the augmentation index and program
+/// file order, which can gain entries the view never captured. Their
+/// failures are uncertainty, not staleness.
+fn failure_is_settled(fact: &FactVersionRef) -> bool {
+    match fact {
+        FactVersionRef::ResolveImports(fact) => fact.resolution_fact().is_some(),
+        FactVersionRef::RouteSurface(_) => false,
+        _ => true,
+    }
+}
+
+/// What one fact's validation proved, read at one completion state.
+enum FactOutcome<'r> {
+    /// It validates.
+    Valid,
+    /// It does not validate, and will not at this state; `chain` names the
+    /// receipts the walk proved reach the failure, innermost first.
+    Stale(Vec<&'r verter_session_query::facts::fact_cache::ResultReceipt>),
+    /// It failed against a live store: no verdict.
+    Uncertain,
+}
+
+/// What one signature's validation proved.
+enum SignatureOutcome {
+    /// Every fact validates at this state, which held throughout.
+    Valid(CompletionOverlayState),
+    /// The fact at this index does not validate at this state, which held
+    /// throughout.
+    Stale(usize, CompletionOverlayState),
+    /// Failed at this index with no verdict: refused, torn or uncertain.
+    Refused(usize),
+}
+
+impl SignatureOutcome {
+    fn into_result(self) -> Result<(), usize> {
+        match self {
+            Self::Valid(_) => Ok(()),
+            Self::Stale(index, _) | Self::Refused(index) => Err(index),
+        }
+    }
+}
+
+/// One retained signature a request view settled: the signature itself
+/// (held alive, so its address names it alone), the strict self-roots and
+/// the completion state it was validated under, and its verdict.
+struct SettledSignature {
     signature: Arc<[FactVersionRef]>,
     strict: Box<[Box<str>]>,
     state: CompletionOverlayState,
+    verdict: Verdict,
 }
 
-/// The retained signatures one request view validated, so a warm read that
-/// meets a signature again in the same request answers without walking it.
+/// The retained signatures one request view settled, so a warm read that
+/// meets a signature again in the same request answers without walking it,
+/// whichever way it was answered.
 ///
-/// Sound for the reasons [`ValidatedReceipts`] is: a validation's answer is
-/// a function of the base (proven current at construction and never
+/// Sound for the reasons [`ReceiptVerdicts`] is: a settled answer is a
+/// function of the base (proven current at construction and never
 /// replaced), the completion overlay's exact state and the strict
-/// self-roots, and the last two are part of the key. Only positive answers
-/// are kept, each recorded after the state was confirmed unchanged across
-/// the whole validation. Request-scoped, dropped with the view.
+/// self-roots, and the last two are part of the key. Request-scoped,
+/// dropped with the view.
 #[derive(Default)]
-struct ValidatedSignatures(
-    parking_lot::Mutex<rustc_hash::FxHashMap<usize, smallvec::SmallVec<[ValidatedSignature; 1]>>>,
+struct SignatureVerdicts(
+    parking_lot::Mutex<rustc_hash::FxHashMap<usize, smallvec::SmallVec<[SettledSignature; 1]>>>,
 );
 
-impl ValidatedSignatures {
+impl SignatureVerdicts {
     fn address(signature: &Arc<[FactVersionRef]>) -> usize {
         Arc::as_ptr(signature).cast::<FactVersionRef>() as usize
     }
 
-    fn contains(
+    fn get(
         &self,
         signature: &Arc<[FactVersionRef]>,
         strict: &[&str],
         state: CompletionOverlayState,
-    ) -> bool {
+    ) -> Option<Verdict> {
         self.0
             .lock()
-            .get(&Self::address(signature))
-            .is_some_and(|validated| {
-                validated.iter().any(|entry| {
-                    Arc::ptr_eq(&entry.signature, signature)
-                        && entry.state == state
-                        && entry.strict.len() == strict.len()
-                        && entry
-                            .strict
-                            .iter()
-                            .zip(strict)
-                            .all(|(held, root)| held.as_ref() == *root)
-                })
+            .get(&Self::address(signature))?
+            .iter()
+            .find(|entry| {
+                Arc::ptr_eq(&entry.signature, signature)
+                    && entry.state == state
+                    && entry.strict.len() == strict.len()
+                    && entry
+                        .strict
+                        .iter()
+                        .zip(strict)
+                        .all(|(held, root)| held.as_ref() == *root)
             })
+            .map(|entry| entry.verdict)
     }
 
     fn insert(
@@ -1002,16 +1070,23 @@ impl ValidatedSignatures {
         signature: &Arc<[FactVersionRef]>,
         strict: &[&str],
         state: CompletionOverlayState,
+        verdict: Verdict,
     ) {
         self.0
             .lock()
             .entry(Self::address(signature))
             .or_default()
-            .push(ValidatedSignature {
+            .push(SettledSignature {
                 signature: Arc::clone(signature),
                 strict: strict.iter().map(|root| Box::from(*root)).collect(),
                 state,
+                verdict,
             });
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.0.lock().values().map(smallvec::SmallVec::len).sum()
     }
 }
 
@@ -1051,38 +1126,42 @@ fn read_once<V: Clone>(
         .clone()
 }
 
-/// One receipt a request view validated: the receipt, the strict
-/// self-roots among the canonicals it reaches that it was validated under,
-/// and the completion state it was validated at.
+/// The context a receipt's verdict holds in: the receipt, the strict
+/// self-roots among the canonicals it reaches, and the completion state.
 #[derive(PartialEq, Eq, Hash)]
-struct ValidatedReceipt {
+struct ReceiptContext {
     receipt: verter_session_query::facts::fact_cache::ResultReceipt,
     strict: Box<[Arc<str>]>,
     state: CompletionOverlayState,
 }
 
-/// The receipts one request view validated, so the request validates each
-/// distinct receipt once, not once per signature that reaches it.
+/// The receipts one request view settled, so the request validates each
+/// distinct receipt once per context, not once per signature that reaches
+/// it: a receipt that validated is not walked again, and neither is one
+/// that reaches a fact that will not validate — however deep that fact
+/// sits, the receipts proven to reach it answer from here.
 ///
-/// Sound because a validation's answer is a function of the base (proven
+/// Sound because a settled answer is a function of the base (proven
 /// current at construction and never replaced), the completion overlay's
 /// exact state (part of the key: a completion that changes what a fact
 /// validates against moves the overlay's revision), and the strict
 /// self-roots a caller applies (part of the key, restricted to the
-/// canonicals the receipt reaches). Only positive answers are kept, each
-/// recorded after the state was confirmed unchanged across the whole
-/// validation, and each holds its receipt alive, so an address is never
-/// mistaken for another receipt. Bounded by the distinct receipts the
-/// request's signatures reach; request-scoped, dropped with the view.
+/// canonicals the receipt reaches). Each verdict is recorded only after
+/// the state was confirmed unchanged across the whole validation; a
+/// negative one only for the receipts the failing walk proved reach a
+/// settled failure, never a sibling it met without finishing. Each entry
+/// holds its receipt alive, so an address is never mistaken for another
+/// receipt. Bounded by the distinct receipts the request's signatures
+/// reach; request-scoped, dropped with the view.
 #[derive(Default)]
-struct ValidatedReceipts(parking_lot::Mutex<rustc_hash::FxHashSet<ValidatedReceipt>>);
+struct ReceiptVerdicts(parking_lot::Mutex<rustc_hash::FxHashMap<ReceiptContext, Verdict>>);
 
-impl ValidatedReceipts {
-    fn key(
+impl ReceiptVerdicts {
+    fn context(
         receipt: &verter_session_query::facts::fact_cache::ResultReceipt,
         self_root_canonicals: &[&str],
         state: CompletionOverlayState,
-    ) -> ValidatedReceipt {
+    ) -> ReceiptContext {
         let canonicals = receipt.canonicals();
         let mut strict: Vec<Arc<str>> = self_root_canonicals
             .iter()
@@ -1091,34 +1170,47 @@ impl ValidatedReceipts {
         strict.sort_unstable();
         strict.dedup();
         let strict = strict.into_boxed_slice();
-        ValidatedReceipt {
+        ReceiptContext {
             receipt: receipt.clone(),
             strict,
             state,
         }
     }
 
-    fn contains(
+    fn get(
         &self,
         receipt: &verter_session_query::facts::fact_cache::ResultReceipt,
         self_root_canonicals: &[&str],
         state: CompletionOverlayState,
-    ) -> bool {
+    ) -> Option<Verdict> {
         self.0
             .lock()
-            .contains(&Self::key(receipt, self_root_canonicals, state))
+            .get(&Self::context(receipt, self_root_canonicals, state))
+            .copied()
     }
 
-    fn insert_all(
+    fn insert_all<'r>(
         &self,
-        receipts: Vec<verter_session_query::facts::fact_cache::ResultReceipt>,
+        receipts: impl IntoIterator<Item = &'r verter_session_query::facts::fact_cache::ResultReceipt>,
         self_root_canonicals: &[&str],
         state: CompletionOverlayState,
+        verdict: Verdict,
     ) {
-        let mut validated = self.0.lock();
+        let mut settled = self.0.lock();
         for receipt in receipts {
-            validated.insert(Self::key(&receipt, self_root_canonicals, state));
+            settled
+                .entry(Self::context(receipt, self_root_canonicals, state))
+                .or_insert(verdict);
         }
+    }
+
+    #[cfg(test)]
+    fn count(&self, verdict: Verdict) -> usize {
+        self.0
+            .lock()
+            .values()
+            .filter(|held| **held == verdict)
+            .count()
     }
 }
 
@@ -1132,8 +1224,8 @@ impl<'a> RequestStoreView<'a> {
             base,
             overlay,
             base_is_current: true,
-            validated_receipts: ValidatedReceipts::default(),
-            validated_signatures: ValidatedSignatures::default(),
+            receipt_verdicts: ReceiptVerdicts::default(),
+            signature_verdicts: SignatureVerdicts::default(),
             project_env: RequestProjectEnv::default(),
             _freshness: base.lease_freshness(),
             #[cfg(test)]
@@ -1163,8 +1255,8 @@ impl<'a> RequestStoreView<'a> {
             base,
             overlay,
             base_is_current,
-            validated_receipts: ValidatedReceipts::default(),
-            validated_signatures: ValidatedSignatures::default(),
+            receipt_verdicts: ReceiptVerdicts::default(),
+            signature_verdicts: SignatureVerdicts::default(),
             project_env: RequestProjectEnv::default(),
             _freshness: base.lease_freshness(),
             #[cfg(test)]
@@ -1177,9 +1269,9 @@ impl<'a> RequestStoreView<'a> {
     }
 
     /// [`StoreView::validate_fact_signature`] for a signature a cache
-    /// retains, answered without a walk when this view already validated it
-    /// under the same strict roots and completion state (see
-    /// [`ValidatedSignatures`]).
+    /// retains, answered without a walk when this view already settled it
+    /// under the same strict roots and completion state, valid or stale
+    /// (see [`SignatureVerdicts`]).
     pub(crate) fn validates_retained_signature(
         &self,
         sig: &Arc<[FactVersionRef]>,
@@ -1192,21 +1284,22 @@ impl<'a> RequestStoreView<'a> {
             return false;
         }
         let state = self.overlay.completion_state();
-        if state != CompletionOverlayState::InFlight
-            && self
-                .validated_signatures
-                .contains(sig, self_root_canonicals, state)
-        {
-            return true;
+        if state != CompletionOverlayState::InFlight {
+            if let Some(verdict) = self
+                .signature_verdicts
+                .get(sig, self_root_canonicals, state)
+            {
+                return verdict == Verdict::Valid;
+            }
         }
-        let valid = self
-            .validate_fact_signature(sig, self_root_canonicals)
-            .is_ok();
-        if valid && self.overlay.completion_state() == state {
-            self.validated_signatures
-                .insert(sig, self_root_canonicals, state);
-        }
-        valid
+        let (verdict, state) = match self.signature_outcome(sig, self_root_canonicals) {
+            SignatureOutcome::Valid(state) => (Verdict::Valid, state),
+            SignatureOutcome::Stale(_, state) => (Verdict::Stale, state),
+            SignatureOutcome::Refused(_) => return false,
+        };
+        self.signature_verdicts
+            .insert(sig, self_root_canonicals, state, verdict);
+        verdict == Verdict::Valid
     }
 
     /// The env hashes of `canonical`'s owning project, read with `read` the
@@ -1305,35 +1398,170 @@ impl<'a> RequestStoreView<'a> {
 
     /// Validate `fact` at `state`, reading a receipt through to the facts
     /// it reaches, the ones listed in `self_root_canonicals` as strict
-    /// self-roots. A receipt this view already validated under the same
-    /// strict roots and state is not walked again; every receipt this walk
-    /// read through is pushed onto `walked`, for the caller to remember
-    /// once the state is confirmed unchanged.
-    fn validates_with_receipts_at_completion_state(
+    /// self-roots. A receipt this view already settled under the same
+    /// strict roots and state is not walked again, whichever way it was
+    /// settled; every receipt this walk read through is pushed onto
+    /// `walked`, for the caller to settle valid once the state is confirmed
+    /// unchanged.
+    fn validate_at_completion_state<'r>(
         &self,
-        fact: &FactVersionRef,
+        fact: &'r FactVersionRef,
         walk: &mut verter_session_query::facts::fact_cache::ReceiptWalk,
         self_root_canonicals: &[&str],
         state: CompletionOverlayState,
         walked: &mut Vec<verter_session_query::facts::fact_cache::ResultReceipt>,
-    ) -> bool {
+    ) -> FactOutcome<'r> {
+        use verter_session_query::facts::fact_cache::ReceiptVerdict;
+
         let FactVersionRef::Receipt(receipt) = fact else {
-            return self.validates_leaf_or_self_root(fact, self_root_canonicals, state);
+            return if self.validates_leaf_or_self_root(fact, self_root_canonicals, state) {
+                FactOutcome::Valid
+            } else if failure_is_settled(fact) {
+                FactOutcome::Stale(Vec::new())
+            } else {
+                FactOutcome::Uncertain
+            };
         };
-        walk.leaves_unless(
+        let mut settled_failure = true;
+        let outcome = walk.leaves_with_verdicts(
             receipt,
-            |met| {
-                if self
-                    .validated_receipts
-                    .contains(met, self_root_canonicals, state)
-                {
-                    return true;
+            |met| match self.receipt_verdicts.get(met, self_root_canonicals, state) {
+                Some(Verdict::Valid) => ReceiptVerdict::Valid,
+                Some(Verdict::Stale) => ReceiptVerdict::Stale,
+                None => {
+                    walked.push(met.clone());
+                    ReceiptVerdict::Unknown
                 }
-                walked.push(met.clone());
-                false
             },
-            |leaf| self.validates_leaf_or_self_root(leaf, self_root_canonicals, state),
-        )
+            |leaf| {
+                let valid = self.validates_leaf_or_self_root(leaf, self_root_canonicals, state);
+                if !valid {
+                    settled_failure = failure_is_settled(leaf);
+                }
+                valid
+            },
+        );
+        match outcome {
+            Ok(()) => FactOutcome::Valid,
+            Err(chain) if settled_failure => FactOutcome::Stale(chain),
+            Err(_) => FactOutcome::Uncertain,
+        }
+    }
+
+    /// Validate `sig` under `self_root_canonicals` as one completion state,
+    /// settling every receipt the answer proves something about.
+    fn signature_outcome(
+        &self,
+        sig: &[FactVersionRef],
+        self_root_canonicals: &[&str],
+    ) -> SignatureOutcome {
+        if !self.base_is_current {
+            return SignatureOutcome::Refused(0);
+        }
+
+        // Whether one entry aggregates a domain `matches`, a consumed
+        // result's receipt answering for every aggregate its evidence
+        // reaches.
+        let aggregates_any = |fact: &FactVersionRef,
+                              matches: &dyn Fn(
+            verter_session_query::facts::fact_cache::CompactionDomain,
+        ) -> bool|
+         -> bool {
+            match fact {
+                FactVersionRef::Receipt(receipt) => receipt
+                    .aggregated_domains()
+                    .iter()
+                    .any(|domain| matches(*domain)),
+                other => match other.attribution() {
+                    verter_session_query::facts::fact_cache::FactAttribution::DomainAggregate(
+                        domain,
+                    ) => matches(domain),
+                    _ => false,
+                },
+            }
+        };
+        let carries_resolution_aggregate = sig.iter().any(|fact| {
+            aggregates_any(fact, &|domain| {
+                domain == verter_session_query::facts::fact_cache::CompactionDomain::Resolution
+            })
+        });
+        let mixed_aggregate = carries_resolution_aggregate
+            .then(|| {
+                sig.iter().position(|fact| {
+                    aggregates_any(fact, &|domain| {
+                        matches!(
+                            domain,
+                            verter_session_query::facts::fact_cache::CompactionDomain::Content
+                                | verter_session_query::facts::fact_cache::CompactionDomain::SourceEnv
+                                | verter_session_query::facts::fact_cache::CompactionDomain::SemanticImports
+                                | verter_session_query::facts::fact_cache::CompactionDomain::RouteSurface
+                        )
+                    })
+                })
+            })
+            .flatten();
+
+        let state = self.overlay.completion_state();
+        if state == CompletionOverlayState::InFlight {
+            return SignatureOutcome::Refused(mixed_aggregate.unwrap_or(0));
+        }
+        // A signature mixing the two aggregate families never validates,
+        // whatever the state: its own shape is the verdict.
+        if let Some(index) = mixed_aggregate {
+            return SignatureOutcome::Stale(index, state);
+        }
+
+        let mut walk = verter_session_query::facts::fact_cache::ReceiptWalk::default();
+        let mut walked = Vec::new();
+        for (index, fact) in sig.iter().enumerate() {
+            self.note_validation_step();
+            match self.validate_at_completion_state(
+                fact,
+                &mut walk,
+                self_root_canonicals,
+                state,
+                &mut walked,
+            ) {
+                FactOutcome::Valid => {}
+                FactOutcome::Stale(chain) => {
+                    if self.overlay.completion_state() != state {
+                        return SignatureOutcome::Refused(index);
+                    }
+                    self.receipt_verdicts.insert_all(
+                        chain,
+                        self_root_canonicals,
+                        state,
+                        Verdict::Stale,
+                    );
+                    return SignatureOutcome::Stale(index, state);
+                }
+                FactOutcome::Uncertain => return SignatureOutcome::Refused(index),
+            }
+        }
+
+        if self.overlay.completion_state() != state {
+            return SignatureOutcome::Refused(0);
+        }
+        self.receipt_verdicts
+            .insert_all(&walked, self_root_canonicals, state, Verdict::Valid);
+        SignatureOutcome::Valid(state)
+    }
+
+    /// Test-only: how many receipts this view settled with `stale` as their
+    /// verdict when true, valid when false.
+    #[cfg(test)]
+    pub(crate) fn settled_receipts_for_tests(&self, stale: bool) -> usize {
+        self.receipt_verdicts.count(if stale {
+            Verdict::Stale
+        } else {
+            Verdict::Valid
+        })
+    }
+
+    /// Test-only: how many retained signatures this view settled.
+    #[cfg(test)]
+    pub(crate) fn settled_signatures_for_tests(&self) -> usize {
+        self.signature_verdicts.len()
     }
 
     /// One fact that is not a receipt: a strict self-root when its file is
@@ -1532,17 +1760,23 @@ impl<'a> StoreView for RequestStoreView<'a> {
         }
         let mut walk = verter_session_query::facts::fact_cache::ReceiptWalk::default();
         let mut walked = Vec::new();
-        let valid = self.validates_with_receipts_at_completion_state(
-            fact,
-            &mut walk,
-            &[],
-            state,
-            &mut walked,
-        ) && self.overlay.completion_state() == state;
-        if valid {
-            self.validated_receipts.insert_all(walked, &[], state);
+        let outcome = self.validate_at_completion_state(fact, &mut walk, &[], state, &mut walked);
+        if self.overlay.completion_state() != state {
+            return false;
         }
-        valid
+        match outcome {
+            FactOutcome::Valid => {
+                self.receipt_verdicts
+                    .insert_all(&walked, &[], state, Verdict::Valid);
+                true
+            }
+            FactOutcome::Stale(chain) => {
+                self.receipt_verdicts
+                    .insert_all(chain, &[], state, Verdict::Stale);
+                false
+            }
+            FactOutcome::Uncertain => false,
+        }
     }
 
     fn validate_fact_signature(
@@ -1553,79 +1787,8 @@ impl<'a> StoreView for RequestStoreView<'a> {
         if sig.is_empty() {
             return Ok(());
         }
-        if !self.base_is_current {
-            return Err(0);
-        }
-
-        // Whether one entry aggregates a domain `matches`, a consumed
-        // result's receipt answering for every aggregate its evidence
-        // reaches.
-        let aggregates_any = |fact: &FactVersionRef,
-                              matches: &dyn Fn(
-            verter_session_query::facts::fact_cache::CompactionDomain,
-        ) -> bool|
-         -> bool {
-            match fact {
-                FactVersionRef::Receipt(receipt) => receipt
-                    .aggregated_domains()
-                    .iter()
-                    .any(|domain| matches(*domain)),
-                other => match other.attribution() {
-                    verter_session_query::facts::fact_cache::FactAttribution::DomainAggregate(
-                        domain,
-                    ) => matches(domain),
-                    _ => false,
-                },
-            }
-        };
-        let carries_resolution_aggregate = sig.iter().any(|fact| {
-            aggregates_any(fact, &|domain| {
-                domain == verter_session_query::facts::fact_cache::CompactionDomain::Resolution
-            })
-        });
-        if carries_resolution_aggregate {
-            if let Some(index) = sig.iter().position(|fact| {
-                aggregates_any(fact, &|domain| {
-                    matches!(
-                        domain,
-                        verter_session_query::facts::fact_cache::CompactionDomain::Content
-                            | verter_session_query::facts::fact_cache::CompactionDomain::SourceEnv
-                            | verter_session_query::facts::fact_cache::CompactionDomain::SemanticImports
-                            | verter_session_query::facts::fact_cache::CompactionDomain::RouteSurface
-                    )
-                })
-            }) {
-                return Err(index);
-            }
-        }
-
-        let state = self.overlay.completion_state();
-        if state == CompletionOverlayState::InFlight {
-            return Err(0);
-        }
-
-        let mut walk = verter_session_query::facts::fact_cache::ReceiptWalk::default();
-        let mut walked = Vec::new();
-        for (index, fact) in sig.iter().enumerate() {
-            self.note_validation_step();
-            let valid = self.validates_with_receipts_at_completion_state(
-                fact,
-                &mut walk,
-                self_root_canonicals,
-                state,
-                &mut walked,
-            );
-            if !valid {
-                return Err(index);
-            }
-        }
-
-        if self.overlay.completion_state() != state {
-            return Err(0);
-        }
-        self.validated_receipts
-            .insert_all(walked, self_root_canonicals, state);
-        Ok(())
+        self.signature_outcome(sig, self_root_canonicals)
+            .into_result()
     }
 
     #[inline]
