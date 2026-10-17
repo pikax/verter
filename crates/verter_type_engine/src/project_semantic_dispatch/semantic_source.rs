@@ -634,7 +634,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
         };
         let product = self.macro_type_arg_hot_ref(canonical, payload.macro_index as usize)?;
-        let path: Arc<[PathSegment]> = std::iter::once(PathSegment::Member(
+        let path: verter_type_expr::OwnedSlice<PathSegment> = std::iter::once(PathSegment::Member(
             crate::semantic_query::PropertyKey::identifier(member_name),
         ))
         .collect();
@@ -748,7 +748,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             ctx.check_raised_unknown_materializing(self, Some(&hot));
             return SourceRaiseOutcome::Raised(hot);
         }
-        let segments: Arc<[PathSegment]> = path.iter().cloned().map(PathSegment::Member).collect();
+        let segments: verter_type_expr::OwnedSlice<PathSegment> = path.iter().cloned().map(PathSegment::Member).collect();
         let read = self.execute_read(SemanticQueryKey::ProjectPath {
             base,
             path: segments,
@@ -1299,7 +1299,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             // self — both routes converge on the same `ProjectPath`
             // projection when a path is present.
             SessionDemandRoute::MacroHotMirror | SessionDemandRoute::ProjectPath => {
-                let path: Arc<[PathSegment]> = demand
+                let path: verter_type_expr::OwnedSlice<PathSegment> = demand
                     .member_role_path
                     .iter()
                     .map(|segment| {

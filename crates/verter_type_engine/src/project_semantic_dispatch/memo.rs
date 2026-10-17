@@ -570,7 +570,7 @@ impl MemoRead<'_, ImportedRegistryDb> {
         let storage = self.db.attach_output();
         let ctx = self.facts;
 
-        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&key.0)]);
+        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(&key.0)]);
         let generation = self.flags.current_project_generation();
         crate::project_semantic_dispatch::memo::read_candidate(storage.store, key, |candidate| {
             // The carrier validates only file-content whole-hashes; a
@@ -729,7 +729,7 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
         // The keyed canonical is the candidate's self-root — validated
         // strictly on warm read (same-canonical edit / untracked keyed
         // canonical → miss).
-        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&key.0)]);
+        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(&key.0)]);
         // Unpack the producer's domain `ComputeAdmission<V, Entry>` into a
         // node-level `CacheAdmission<V>` — the cold-build closure the
         // `QueryCandidateNode` adapter runs. The producer keeps its
@@ -864,7 +864,7 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
         // a same-canonical content edit (or a keyed canonical that
         // became untracked) rejects the entry instead of riding the
         // lazy "untracked → accept" rule.
-        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&key.0)]);
+        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(&key.0)]);
         let node = SingleEntryArtifactNode {
             entries: storage.entries,
             inflight: storage.inflight,
@@ -957,7 +957,7 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
         // The keyed source canonical is the entry's self-root — strict
         // warm-read validation rejects a same-canonical edit or an
         // untracked keyed canonical.
-        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&key.0)]);
+        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(&key.0)]);
         let node = SingleEntryArtifactNode {
             entries: storage.entries,
             inflight: storage.inflight,
@@ -1051,7 +1051,7 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
         // against the owner content version the producer observed, so
         // strict self-root validation remains the correctness floor — a
         // content edit to the owner file invalidates the cached locator.
-        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&key.0)]);
+        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(&key.0)]);
         let node = SingleEntryArtifactNode {
             entries: storage.entries,
             inflight: storage.inflight,
@@ -1155,7 +1155,7 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
 
         // The subject's scope canonical is the entry's self-root —
         // strict warm-read validation rejects a same-scope content edit.
-        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(key.scope_canonical())]);
+        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(key.scope_canonical())]);
         let node = SingleEntryArtifactNode {
             entries: storage.entries,
             inflight: storage.inflight,
@@ -1708,7 +1708,7 @@ fn release_shape_entries(
         .iter()
         .filter_map(|entry| {
             let key = entry.key();
-            let rooted_here = key.scope_canonical().as_ref() == canonical_id;
+            let rooted_here = key.scope_canonical() == canonical_id;
             let subject_released = match key.member_value_subject_node() {
                 Some(node) => !node_is_live(node),
                 None => false,

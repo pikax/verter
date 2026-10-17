@@ -942,19 +942,29 @@ impl MapperBinderRegistry {
     /// give parallel access.
     pub fn ordinal_for(
         &self,
-        canonical_id: &Arc<str>,
-        display_name: &Arc<str>,
+        canonical_id: &str,
+        display_name: &str,
         fingerprint: MapperFingerprint,
     ) -> u16 {
-        let slot = self
-            .per_canonical
-            .entry(Arc::clone(canonical_id))
-            .or_default();
+        // A warm canonical and display name are found by borrow: only a
+        // first sighting copies its key.
+        let slot = match self.per_canonical.get(canonical_id) {
+            Some(slot) => slot,
+            None => self
+                .per_canonical
+                .entry(Arc::from(canonical_id))
+                .or_default()
+                .downgrade(),
+        };
         let mut slot = slot.lock();
+        if !slot.by_display_name.contains_key(display_name) {
+            slot.by_display_name
+                .insert(Arc::from(display_name), Default::default());
+        }
         let entries = slot
             .by_display_name
-            .entry(Arc::clone(display_name))
-            .or_default();
+            .get_mut(display_name)
+            .expect("inserted above");
         // Linear search for an existing match. Per-canonical
         // tables are small (1-50 mappers / display name) so the
         // scan stays cache-warm.

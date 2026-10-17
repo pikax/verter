@@ -89,7 +89,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // type's own `<T>` binders intern, so applying an argument to
             // the declaration's `T` can never rewrite a shadowing inner `T`.
             BinderIdentityMode::DeclHeader { owner_symbol } => (
-                DeclIdentity::from_scope(scope, Arc::clone(owner_symbol)),
+                DeclIdentity::from_scope(scope, verter_type_expr::OwnedStr::clone(owner_symbol)),
                 index as u16,
             ),
             BinderIdentityMode::Signature => (DeclIdentity::from_scope(scope, Arc::clone(name)), 0),
@@ -947,7 +947,7 @@ fn locator_with_path_step(
         let mut next = Vec::with_capacity(path.len() + 1);
         next.extend_from_slice(path);
         next.push(step);
-        Arc::from(next.into_boxed_slice())
+        verter_type_expr::OwnedSlice::from(next)
     };
     match locator {
         AuthoredBodyLocator::DeclBody(slot) => {

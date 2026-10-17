@@ -433,7 +433,7 @@ pub fn project_one_level_surface<C: crate::resolver_core::ResolverCapabilities>(
     ctx: &dyn crate::resolver_core::ResolverContext<C>,
     dispatch: &ProjectSemanticDispatch<'_, C>,
     base: SemanticNodeId,
-    path: Arc<[PathSegment]>,
+    path: verter_type_expr::OwnedSlice<PathSegment>,
     context: ProjectionReductionContext,
     walker_diagnostics: Option<&mut Vec<super::walk::ShallowDiagnostic>>,
 ) -> SurfaceResolution<OneLevelSurface> {
@@ -483,7 +483,7 @@ pub fn project_one_level_surface<C: crate::resolver_core::ResolverCapabilities>(
                     ctx,
                     dispatch,
                     constraint,
-                    Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                    verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
                     context,
                     walker_diagnostics,
                 )
@@ -613,7 +613,7 @@ pub fn project_one_level_surface<C: crate::resolver_core::ResolverCapabilities>(
                     ctx,
                     dispatch,
                     constraint,
-                    Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                    verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
                     context,
                     None,
                 )
@@ -1121,7 +1121,7 @@ fn runtime_object_macro_surface<C: crate::resolver_core::ResolverCapabilities>(
 ) -> Option<MacroArgumentSurface> {
     use crate::semantic_query::{AuthoredPropertyKey, MacroOwnBodyStamp, MergeRoleStamp};
 
-    let declaration_origin = Some(Arc::clone(owner_canonical));
+    let declaration_origin = Some(verter_type_expr::OwnedStr::from(owner_canonical));
     let mut entries: Vec<SurfaceEntry> = Vec::new();
     match macro_kind {
         AnalyzedMacroKind::DefineExpose => {
@@ -1187,7 +1187,7 @@ fn runtime_object_macro_surface<C: crate::resolver_core::ResolverCapabilities>(
         ctx,
         dispatch,
         base,
-        Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
         ProjectionReductionContext::published(ProjectionMode::Shallow),
         None,
     )
@@ -1216,7 +1216,7 @@ fn decompose_indexed_access_chain_node<C: crate::resolver_core::ResolverCapabili
     node: crate::semantic_query::SemanticNodeId,
 ) -> (
     crate::semantic_query::SemanticNodeId,
-    Arc<[crate::semantic_query::PathSegment]>,
+    verter_type_expr::OwnedSlice<PathSegment>,
 ) {
     use crate::semantic_query::{IndexKey, PathSegment, SemanticNodeData};
 
@@ -1244,5 +1244,5 @@ fn decompose_indexed_access_chain_node<C: crate::resolver_core::ResolverCapabili
         }
     }
     rev_path.reverse();
-    (current, Arc::from(rev_path.into_boxed_slice()))
+    (current, verter_type_expr::OwnedSlice::from(rev_path.into_boxed_slice()))
 }

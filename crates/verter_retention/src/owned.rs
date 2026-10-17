@@ -160,6 +160,12 @@ struct Cell<T> {
     value: T,
 }
 
+// A cell's charge state stays consistent across an unwind: every slot
+// transition completes under its lock before anything can panic, and a
+// parking_lot lock never poisons. The value is shared only by borrow.
+impl<T: std::panic::RefUnwindSafe> std::panic::RefUnwindSafe for Cell<T> {}
+impl<T: std::panic::RefUnwindSafe> std::panic::UnwindSafe for Cell<T> {}
+
 /// The type-erased cell interface the charge lifecycle runs over.
 pub(crate) trait Node: Send + Sync {
     fn slot(&self) -> &Mutex<Slot>;
@@ -675,6 +681,39 @@ impl<T: Measured + Clone> From<std::sync::Arc<[T]>> for OwnedSlice<T> {
     }
 }
 
+impl From<std::sync::Arc<[Arc<str>]>> for OwnedSlice<OwnedStr> {
+    /// Owned copies of a raw shared name list: new allocations, each
+    /// charged by its own cell.
+    fn from(names: std::sync::Arc<[Arc<str>]>) -> Self {
+        names.iter().map(OwnedStr::from).collect()
+    }
+}
+
+impl From<&[Arc<str>]> for OwnedSlice<OwnedStr> {
+    fn from(names: &[Arc<str>]) -> Self {
+        names.iter().map(OwnedStr::from).collect()
+    }
+}
+
+impl From<Vec<Arc<str>>> for OwnedSlice<OwnedStr> {
+    fn from(names: Vec<Arc<str>>) -> Self {
+        names.iter().map(OwnedStr::from).collect()
+    }
+}
+
+impl From<&OwnedSlice<OwnedStr>> for std::sync::Arc<[Arc<str>]> {
+    /// A raw shared copy of the names for a layer that keeps raw strings.
+    fn from(names: &OwnedSlice<OwnedStr>) -> Self {
+        names.iter().map(Arc::<str>::from).collect()
+    }
+}
+
+impl From<OwnedSlice<OwnedStr>> for std::sync::Arc<[Arc<str>]> {
+    fn from(names: OwnedSlice<OwnedStr>) -> Self {
+        names.iter().map(Arc::<str>::from).collect()
+    }
+}
+
 impl<T: Measured> FromIterator<T> for OwnedSlice<T> {
     fn from_iter<I: IntoIterator<Item = T>>(items: I) -> Self {
         Self::new(items.into_iter().collect())
@@ -1009,6 +1048,27 @@ impl PartialEq<String> for OwnedStr {
 impl PartialEq<Arc<str>> for OwnedStr {
     fn eq(&self, other: &Arc<str>) -> bool {
         self.as_str() == &**other
+    }
+}
+
+impl PartialEq<OwnedStr> for Arc<str> {
+    fn eq(&self, other: &OwnedStr) -> bool {
+        &**self == other.as_str()
+    }
+}
+
+impl From<OwnedStr> for Arc<str> {
+    /// A raw shared copy of the text for a layer that keeps raw strings: a
+    /// new allocation, owned and charged by whoever keeps it.
+    fn from(text: OwnedStr) -> Self {
+        Arc::from(text.as_str())
+    }
+}
+
+impl From<&OwnedStr> for Arc<str> {
+    /// See the by-value conversion.
+    fn from(text: &OwnedStr) -> Self {
+        Arc::from(text.as_str())
     }
 }
 

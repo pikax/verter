@@ -554,7 +554,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let terminal_read =
             self.execute_read(crate::semantic_query::SemanticQueryKey::ProjectPath {
                 base,
-                path: Arc::from(
+                path: verter_type_expr::OwnedSlice::from(
                     Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice(),
                 ),
                 context,
@@ -1170,9 +1170,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let read = self.execute_read(crate::semantic_query::SemanticQueryKey::Instantiate(
                     crate::semantic_query::InstantiateKey::new(
                         self.type_slot_for(
-                            Arc::clone(&identity.canonical_id),
+                            identity.canonical_id.clone(),
                             identity.owner,
-                            Arc::clone(&identity.decl_name),
+                            identity.decl_name.clone(),
                         ),
                         Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                         self.instantiate_context_for(
@@ -1210,9 +1210,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let read = self.execute_read(crate::semantic_query::SemanticQueryKey::Instantiate(
                     crate::semantic_query::InstantiateKey::new(
                         self.type_slot_for(
-                            Arc::clone(&base.canonical_id),
+                            base.canonical_id.clone(),
                             base.owner,
-                            Arc::clone(&base.decl_name),
+                            base.decl_name.clone(),
                         ),
                         Arc::clone(args.as_arc()),
                         self.instantiate_context_for(

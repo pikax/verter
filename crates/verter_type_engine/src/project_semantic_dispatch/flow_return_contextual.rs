@@ -27,9 +27,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::super::ProjectSemanti
         match self.execute_type_node(crate::semantic_query::SemanticQueryKey::Instantiate(
             crate::semantic_query::InstantiateKey::new(
                 self.type_slot_for(
-                    std::sync::Arc::clone(&base.canonical_id),
+                    base.canonical_id.clone(),
                     base.owner,
-                    std::sync::Arc::clone(&base.decl_name),
+                    base.decl_name.clone(),
                 ),
                 std::sync::Arc::clone(args.as_arc()),
                 self.instantiate_context_for(&base.canonical_id, context),

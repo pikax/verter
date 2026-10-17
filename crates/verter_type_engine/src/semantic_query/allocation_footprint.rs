@@ -206,7 +206,7 @@ impl OwnedHeap for PathSegment {
 
 impl OwnedHeap for ProjectionPath {
     fn owned_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
-        self.as_arc().owned_heap_bytes(aliases)
+        self.as_owned().owned_heap_bytes(aliases)
     }
 }
 

@@ -308,7 +308,7 @@ pub enum FamilyKey {
         /// `FamilyKey → FamilySlots` keyspace for every other family. The
         /// box delegates `Hash`/`Eq`/`Clone` to the `Arc`, so the family
         /// IDENTITY is unchanged.
-        path: Box<Arc<[Arc<str>]>>,
+        path: Box<verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>>,
         resolve_env_hash: crate::semantic_query::HashValue,
         /// Surface-provenance dimension. `build_typeof` lowers the value's
         /// annotation / shape under the full projection-reduction context,
@@ -343,7 +343,7 @@ pub enum FamilyKey {
     },
     ProjectPath {
         base: SemanticNodeId,
-        path: Arc<[PathSegment]>,
+        path: verter_type_expr::OwnedSlice<PathSegment>,
         /// Surface-provenance dimension. A
         /// macro-type-argument own-body path projection (the empty-path
         /// macro-payload surface read) and a plain structural path
@@ -1036,7 +1036,7 @@ impl FamilyKey {
     /// carrier sweep cover them). No wildcard: a new variant must be
     /// dispositioned here.
     pub(super) fn binds_canonical(&self, canonical_id: &str) -> bool {
-        let names = |canonical: &Arc<str>| canonical.as_ref() == canonical_id;
+        let names = |canonical: &str| canonical == canonical_id;
         match self {
             FamilyKey::ResolveDecl(key) => names(&key.scope.canonical_id),
             FamilyKey::Instantiate { base, .. }
@@ -2122,7 +2122,7 @@ pub(crate) fn family_and_slot_in(
         SemanticQueryKey::ProjectMember { base, member, mode } => (
             FamilyKey::ProjectMember {
                 base: *base,
-                member: member.clone(),
+                member: std::sync::Arc::<str>::from(member.as_str()),
             },
             mode_to_slot(*mode),
         ),

@@ -764,9 +764,9 @@ pub struct ScopeId {
 
 impl ScopeId {
     /// A file top-level scope rooted in an exact authored owner.
-    pub fn file(canonical_id: Arc<str>, owner: verter_type_expr::TopLevelOwnerId) -> Self {
+    pub fn file(canonical_id: impl Into<OwnedStr>, owner: verter_type_expr::TopLevelOwnerId) -> Self {
         Self {
-            OwnedStr::from(canonical_id),
+            canonical_id: canonical_id.into(),
             owner,
             local_scope: None,
             binder_scope_id: BinderScopeId::file_scope(owner),
@@ -933,7 +933,7 @@ impl NodeScopeId {
     /// of where the member's VALUE type resolves (a member whose value is an
     /// unresolved / scope-less node still has a real declaration file).
     #[must_use]
-    pub fn canonical_file(&self) -> Option<Arc<str>> {
+    pub fn canonical_file(&self) -> Option<OwnedStr> {
         match self {
             Self::Global => None,
             Self::File { canonical_id, .. } => Some(canonical_id.clone()),
@@ -1044,10 +1044,10 @@ pub struct ResolveDeclKey {
 /// `TypeParam` nodes without a real declaration context.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DeclIdentity {
-    pub canonical_id: Arc<str>,
+    pub canonical_id: OwnedStr,
     pub owner: verter_type_expr::TopLevelOwnerId,
     pub whole_hash: HashValue,
-    pub decl_name: Arc<str>,
+    pub decl_name: OwnedStr,
 }
 
 impl DeclIdentity {
@@ -1057,10 +1057,11 @@ impl DeclIdentity {
     /// `whole_hash == 0`; non-global scopes carry their file identity
     /// forward.
     #[must_use]
-    pub fn from_scope(scope: &NodeScopeId, decl_name: Arc<str>) -> Self {
+    pub fn from_scope(scope: &NodeScopeId, decl_name: impl Into<OwnedStr>) -> Self {
+        let decl_name = decl_name.into();
         match scope {
             NodeScopeId::Global => Self {
-                canonical_id: Arc::from(""),
+                canonical_id: OwnedStr::from(""),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: HashValue::default(),
                 decl_name,
@@ -1086,10 +1087,10 @@ impl DeclIdentity {
     #[must_use]
     pub fn synthetic(display_name: &str) -> Self {
         Self {
-            canonical_id: Arc::from("<synthetic>"),
+            canonical_id: OwnedStr::from("<synthetic>"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
-            decl_name: Arc::from(display_name),
+            decl_name: OwnedStr::from(display_name),
         }
     }
 
@@ -1109,9 +1110,9 @@ impl DeclIdentity {
     #[must_use]
     pub fn to_type_slot_unscoped(&self) -> ResolvedDeclSlotIdentity {
         ResolvedDeclSlotIdentity::type_slot_unscoped(
-            Arc::clone(&self.canonical_id),
+            self.canonical_id.clone(),
             self.owner,
-            Arc::clone(&self.decl_name),
+            self.decl_name.clone(),
         )
     }
 }
@@ -1369,7 +1370,7 @@ impl SyntheticBindingId {
         Self {
             scope_canonical_id: OwnedStr::from(key.scope_canonical_id.clone()),
             surface_kind: key.surface_kind,
-            slot_name: key.slot_name.clone(),
+            slot_name: key.slot_name.as_ref().map(OwnedStr::from),
             binding_name: OwnedStr::from(key.binding_name.clone()),
         }
     }
@@ -1381,10 +1382,10 @@ impl SyntheticBindingId {
     #[must_use]
     pub fn to_carrier_key(&self, value_node: u64) -> verter_type_expr::SyntheticCarrierKey {
         verter_type_expr::SyntheticCarrierKey {
-            scope_canonical_id: self.scope_canonical_id.clone(),
+            scope_canonical_id: std::sync::Arc::<str>::from(self.scope_canonical_id.as_str()),
             surface_kind: self.surface_kind,
-            slot_name: self.slot_name.clone(),
-            binding_name: self.binding_name.clone(),
+            slot_name: self.slot_name.as_ref().map(std::sync::Arc::<str>::from),
+            binding_name: std::sync::Arc::<str>::from(self.binding_name.as_str()),
             value_node,
         }
     }
@@ -1482,17 +1483,17 @@ impl ResolvedDeclSlotIdentity {
     /// Build a slot identity for a type-space declaration.
     #[must_use]
     pub fn type_slot(
-        defining_canonical: OwnedStr,
+        defining_canonical: impl Into<OwnedStr>,
         owner: verter_type_expr::TopLevelOwnerId,
-        merged_symbol_name: Arc<str>,
+        merged_symbol_name: impl Into<OwnedStr>,
         project_identity: u32,
         type_env_hash: HashValue,
         lib_env_hash: HashValue,
     ) -> Self {
         Self {
-            defining_canonical,
+            defining_canonical: defining_canonical.into(),
             owner,
-            OwnedStr::from(merged_symbol_name),
+            merged_symbol_name: merged_symbol_name.into(),
             symbol_space: SemanticSymbolSpace::Type,
             env: SlotEnvIdentity::from_raw(project_identity, type_env_hash, lib_env_hash),
         }
@@ -1501,17 +1502,17 @@ impl ResolvedDeclSlotIdentity {
     /// Build a slot identity for a value-space declaration.
     #[must_use]
     pub fn value_slot(
-        defining_canonical: OwnedStr,
+        defining_canonical: impl Into<OwnedStr>,
         owner: verter_type_expr::TopLevelOwnerId,
-        merged_symbol_name: Arc<str>,
+        merged_symbol_name: impl Into<OwnedStr>,
         project_identity: u32,
         type_env_hash: HashValue,
         lib_env_hash: HashValue,
     ) -> Self {
         Self {
-            defining_canonical,
+            defining_canonical: defining_canonical.into(),
             owner,
-            OwnedStr::from(merged_symbol_name),
+            merged_symbol_name: merged_symbol_name.into(),
             symbol_space: SemanticSymbolSpace::Value,
             env: SlotEnvIdentity::from_raw(project_identity, type_env_hash, lib_env_hash),
         }
@@ -1532,9 +1533,9 @@ impl ResolvedDeclSlotIdentity {
     /// the arch guard `no_production_caller_of_zero_env_slot_constructors`.
     #[must_use]
     pub fn type_slot_unscoped(
-        canonical: OwnedStr,
+        canonical: impl Into<OwnedStr>,
         owner: verter_type_expr::TopLevelOwnerId,
-        name: OwnedStr,
+        name: impl Into<OwnedStr>,
     ) -> Self {
         Self::type_slot(
             canonical,
@@ -1554,9 +1555,9 @@ impl ResolvedDeclSlotIdentity {
     #[must_use]
     pub fn builtin_unscoped(name: &str) -> Self {
         Self::type_slot_unscoped(
-            Arc::from("__builtin__"),
+            "__builtin__",
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(name),
+            name,
         )
     }
 
@@ -1664,9 +1665,9 @@ impl FlowFunctionSlotIdentity {
         &self,
     ) -> verter_session_query::facts::fact_cache::ProgramAnalysisFunctionRef {
         verter_session_query::facts::fact_cache::ProgramAnalysisFunctionRef {
-            canonical_id: self.declaration_slot.defining_canonical.clone(),
+            canonical_id: std::sync::Arc::<str>::from(self.declaration_slot.defining_canonical.as_str()),
             owner: self.declaration_slot.owner,
-            merged_symbol_name: self.declaration_slot.merged_symbol_name.clone(),
+            merged_symbol_name: std::sync::Arc::<str>::from(self.declaration_slot.merged_symbol_name.as_str()),
             symbol_space: match self.declaration_slot.symbol_space {
                 SemanticSymbolSpace::Type => verter_session_query::facts::SymbolSpace::Type,
                 SemanticSymbolSpace::Value => verter_session_query::facts::SymbolSpace::Value,
@@ -2510,16 +2511,16 @@ pub struct DeclarationSlotSeed {
 impl DeclarationSlotSeed {
     /// Build a seed from its four identity fields.
     #[must_use]
-    pub const fn new(
-        defining_canonical: OwnedStr,
+    pub fn new(
+        defining_canonical: impl Into<OwnedStr>,
         owner: verter_type_expr::TopLevelOwnerId,
-        merged_symbol_name: Arc<str>,
+        merged_symbol_name: impl Into<OwnedStr>,
         symbol_space: SemanticSymbolSpace,
     ) -> Self {
         Self {
-            defining_canonical,
+            defining_canonical: defining_canonical.into(),
             owner,
-            OwnedStr::from(merged_symbol_name),
+            merged_symbol_name: merged_symbol_name.into(),
             symbol_space,
         }
     }
@@ -4301,7 +4302,7 @@ impl SurfaceMember {
     /// The admission gate and the terminal sink both read this — never a
     /// site-local derivation.
     #[must_use]
-    pub fn published_name(&self) -> Option<Arc<str>> {
+    pub fn published_name(&self) -> Option<OwnedStr> {
         self.key.published_name()
     }
 }
@@ -10179,7 +10180,7 @@ pub struct AuthoredPropertyEffect {
     pub readonly: bool,
     pub visibility: verter_type_expr::MemberVisibility,
     pub spans: verter_type_expr::MemberSpans,
-    pub declaration_origin: Option<Arc<str>>,
+    pub declaration_origin: Option<verter_type_expr::OwnedStr>,
     pub declared_in_macro_type_arg: MacroOwnBodyStamp,
     pub merge_role: MergeRoleStamp,
     pub excess_origin: verter_type_expr::ExcessPropertyOrigin,
@@ -10194,7 +10195,7 @@ pub struct AuthoredMethodEffect {
     pub has_implementation_body: bool,
     pub visibility: verter_type_expr::MemberVisibility,
     pub spans: verter_type_expr::MemberSpans,
-    pub declaration_origin: Option<Arc<str>>,
+    pub declaration_origin: Option<verter_type_expr::OwnedStr>,
     pub declared_in_macro_type_arg: MacroOwnBodyStamp,
     pub merge_role: MergeRoleStamp,
     pub excess_origin: verter_type_expr::ExcessPropertyOrigin,
@@ -10210,7 +10211,7 @@ pub struct AuthoredAccessorEffect {
     pub has_implementation_body: bool,
     pub visibility: verter_type_expr::MemberVisibility,
     pub spans: verter_type_expr::MemberSpans,
-    pub declaration_origin: Option<Arc<str>>,
+    pub declaration_origin: Option<verter_type_expr::OwnedStr>,
     pub declared_in_macro_type_arg: MacroOwnBodyStamp,
     pub merge_role: MergeRoleStamp,
     pub excess_origin: verter_type_expr::ExcessPropertyOrigin,
@@ -10223,7 +10224,7 @@ pub struct AuthoredIndexEffect {
     pub value_type: SemanticNodeId,
     pub readonly: bool,
     pub spans: verter_type_expr::IndexSignatureSpans,
-    pub declaration_origin: Option<Arc<str>>,
+    pub declaration_origin: Option<verter_type_expr::OwnedStr>,
 }
 
 /// One source-ordered effect in a spread-bearing object construction.
@@ -11828,7 +11829,7 @@ pub trait SemanticQueryApi {
     ) -> QueryResult<SemanticNodeId> {
         strip_output_provenance(self.execute_type_node(SemanticQueryKey::ProjectMember {
             base,
-            OwnedStr::from(member),
+            member: member.into(),
             mode,
         }))
     }
@@ -11847,7 +11848,7 @@ pub trait SemanticQueryApi {
     fn project_path(
         &self,
         base: SemanticNodeId,
-        path: Arc<[PathSegment]>,
+        path: verter_type_expr::OwnedSlice<PathSegment>,
         mode: ProjectionMode,
     ) -> QueryResult<SemanticNodeId> {
         strip_output_provenance(self.execute_type_node(SemanticQueryKey::ProjectPath {
@@ -12575,5 +12576,5 @@ pub fn new_nominal_typeof_for_tests(
     path: std::sync::Arc<[std::sync::Arc<str>]>,
     nominal_identity: verter_type_expr::facts::ValueDeclIdentityPart,
 ) -> SemanticNodeData {
-    SemanticNodeData::new_nominal_typeof(value_root, path, nominal_identity)
+    SemanticNodeData::new_nominal_typeof(value_root, verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(path), nominal_identity)
 }

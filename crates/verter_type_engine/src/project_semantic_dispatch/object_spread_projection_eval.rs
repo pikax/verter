@@ -192,7 +192,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .graph()
             .node_scope(program)
             .and_then(|scope| scope.canonical_file())
-            .unwrap_or_else(|| Arc::from(""));
+            .unwrap_or_else(|| verter_type_expr::OwnedStr::from(""));
         let policy = if self.relation_strict_config().exact_optional_property_types {
             ExactOptionalPropertyPolicy::Enabled
         } else {

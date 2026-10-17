@@ -993,10 +993,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 /// Map a fact-side declaration origin onto the graph member's origin file.
 fn declaration_origin_file(
     origin: &verter_type_expr::facts::DeclarationOrigin,
-) -> Option<Arc<str>> {
+) -> Option<verter_type_expr::OwnedStr> {
     match origin {
         verter_type_expr::facts::DeclarationOrigin::Declared(canonical) => {
-            Some(Arc::clone(canonical))
+            Some(verter_type_expr::OwnedStr::from(canonical))
         }
         verter_type_expr::facts::DeclarationOrigin::Synthetic => None,
     }

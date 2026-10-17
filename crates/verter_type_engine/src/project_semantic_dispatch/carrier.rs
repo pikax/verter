@@ -493,9 +493,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 CarrierFinish::Instantiate(SemanticQueryKey::Instantiate(
                     crate::semantic_query::InstantiateKey::new(
                         self.type_slot_for(
-                            Arc::clone(&identity.canonical_id),
+                            identity.canonical_id.clone(),
                             identity.owner,
-                            Arc::clone(&identity.decl_name),
+                            identity.decl_name.clone(),
                         ),
                         type_args,
                         self.instantiate_context_for(&identity.canonical_id, context),
@@ -525,9 +525,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 CarrierFinish::Instantiate(SemanticQueryKey::Instantiate(
                     crate::semantic_query::InstantiateKey::new(
                         self.type_slot_for(
-                            Arc::clone(&identity.canonical_id),
+                            identity.canonical_id.clone(),
                             identity.owner,
-                            Arc::clone(&identity.decl_name),
+                            identity.decl_name.clone(),
                         ),
                         type_args,
                         self.instantiate_context_for(&identity.canonical_id, context),
@@ -712,10 +712,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             local_scope: None,
         };
         let identity = DeclIdentity {
-            canonical_id: Arc::from("__builtin__"),
+            canonical_id: verter_type_expr::OwnedStr::from("__builtin__"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
-            decl_name: Arc::clone(name),
+            decl_name: verter_type_expr::OwnedStr::from(name),
         };
         if self.runtime_nominal_global_name(name.as_ref()).is_some() {
             return Some(self.intern_ref_head_carrier(
@@ -838,10 +838,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         {
             return CarrierResolutionPlan::NeedsArgs(CarrierArgsContinuation::Intern {
                 head: RefHeadResolution::Builtin(DeclIdentity {
-                    canonical_id: Arc::from("__builtin__"),
+                    canonical_id: verter_type_expr::OwnedStr::from("__builtin__"),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     whole_hash: HashValue::default(),
-                    decl_name: Arc::clone(name),
+                    decl_name: verter_type_expr::OwnedStr::from(name),
                 }),
                 name: Arc::clone(name),
                 scope: scope.clone(),
@@ -861,10 +861,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .is_some()
         {
             let builtin_identity = DeclIdentity {
-                canonical_id: Arc::from("__builtin__"),
+                canonical_id: verter_type_expr::OwnedStr::from("__builtin__"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: HashValue::default(),
-                decl_name: Arc::clone(name),
+                decl_name: verter_type_expr::OwnedStr::from(name),
             };
             return CarrierResolutionPlan::NeedsArgs(CarrierArgsContinuation::Builtin {
                 identity: builtin_identity,
@@ -1066,10 +1066,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .map_or(HashValue::default(), |s| s.whole_hash);
             return CarrierResolutionPlan::complete(self.recursive_ref_sentinel(
                 &DeclIdentity {
-                    canonical_id: Arc::clone(&resolved_root.canonical_id),
+                    canonical_id: verter_type_expr::OwnedStr::from(resolved_root.canonical_id.clone()),
                     owner: resolved_root.owner,
                     whole_hash,
-                    decl_name: Arc::clone(&resolved_root.symbol_name),
+                    decl_name: verter_type_expr::OwnedStr::from(resolved_root.symbol_name.clone()),
                 },
                 Arc::from([]),
             ));
@@ -1080,10 +1080,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .shallow_file_state(resolved_root.canonical_id.as_ref())
             .map_or(HashValue::default(), |s| s.whole_hash);
         let decl_identity = DeclIdentity {
-            canonical_id: Arc::clone(&resolved_root.canonical_id),
+            canonical_id: verter_type_expr::OwnedStr::from(resolved_root.canonical_id.clone()),
             owner: resolved_root.owner,
             whole_hash,
-            decl_name: Arc::clone(&resolved_root.symbol_name),
+            decl_name: verter_type_expr::OwnedStr::from(resolved_root.symbol_name.clone()),
         };
 
         // Carrier modes (Navigate / Skeleton / Shallow) intern a transparent
@@ -1210,8 +1210,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         ctx: &CarrierResolverContext<'_>,
         owner_canonical: &str,
-        specifier: &Arc<str>,
-        qualifier: &[Arc<str>],
+        specifier: &str,
+        qualifier: &[verter_type_expr::OwnedStr],
         typeof_query: bool,
         arg_count: usize,
         lower_args: impl FnOnce() -> Arc<[SemanticNodeId]>,
@@ -1235,8 +1235,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         ctx: &CarrierResolverContext<'_>,
         owner_canonical: &str,
-        specifier: &Arc<str>,
-        qualifier: &[Arc<str>],
+        specifier: &str,
+        qualifier: &[verter_type_expr::OwnedStr],
         typeof_query: bool,
         arg_count: usize,
     ) -> CarrierResolutionPlan {
@@ -1258,12 +1258,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let result = if qualifier.is_empty() {
                 CarrierResolution::complete(namespace)
             } else {
-                let path: Arc<[PathSegment]> = Arc::from(
+                let path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(
                     qualifier
                         .iter()
                         .map(|seg| {
                             PathSegment::Member(crate::semantic_query::PropertyKey::identifier(
-                                Arc::clone(seg),
+                                seg.clone(),
                             ))
                         })
                         .collect::<Vec<_>>()
@@ -1329,7 +1329,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ctx.shadowing(),
             reduction_context,
         );
-        let head_plan = self.plan_bare_ref_head(&head_ctx, first, head_arg_count);
+        let head_plan = self.plan_bare_ref_head(&head_ctx, &Arc::<str>::from(first), head_arg_count);
         if rest.is_empty() {
             return head_plan;
         }
@@ -1339,12 +1339,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 self.finish_carrier_resolution_fact(continuation, Arc::from([]))
             }
         };
-        let path: Arc<[PathSegment]> = Arc::from(
+        let path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(
             rest.iter()
                 .map(|seg| {
-                    PathSegment::Member(crate::semantic_query::PropertyKey::identifier(Arc::clone(
-                        seg,
-                    )))
+                    PathSegment::Member(crate::semantic_query::PropertyKey::identifier(seg.clone()))
                 })
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
@@ -1654,7 +1652,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let data = graph.node_data(node).expect("ImportType carrier data");
                 let (specifier, qualifier, typeof_query) =
                     data.import_type_head().expect("ImportType head");
-                (Arc::clone(specifier), Arc::clone(qualifier), typeof_query)
+                (Arc::clone(specifier), qualifier.clone(), typeof_query)
             };
             let scope = graph.node_scope(node).unwrap_or(NodeScopeId::Global);
             let scope_payload = owner_canonical.as_ref().and_then(|c| {

@@ -550,7 +550,7 @@ fn lower_node(
             let path: Arc<[Arc<str>]> = rest.iter().map(|s| Arc::from(s.as_str())).collect();
             let type_args = lower_args(graph, &value_ref.type_args, scope, ctx)?;
             Ok(graph.intern_node_with_scope(
-                SemanticNodeData::new_typeof(value_root, path, type_args),
+                SemanticNodeData::new_typeof(value_root, verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(path), type_args),
                 scope.clone(),
             ))
         }
@@ -569,7 +569,7 @@ fn lower_node(
             Ok(graph.intern_node_with_scope(
                 SemanticNodeData::new_import_type(
                     Arc::clone(specifier),
-                    Arc::clone(qualifier),
+                    verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(Arc::clone(qualifier)),
                     type_args,
                     *typeof_query,
                 ),
@@ -1150,7 +1150,7 @@ fn build_script_setup_seed_frames(
         canonical_id: canonical_id.clone(),
         owner,
         whole_hash,
-        decl_name: Arc::from("<script-setup>"),
+        decl_name: verter_type_expr::OwnedStr::from("<script-setup>"),
     };
 
     let mut frame = BinderScope::default();

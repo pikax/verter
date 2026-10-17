@@ -519,7 +519,7 @@ pub(super) fn string_mapping(
                 )
                 && args.len() == 1 =>
         {
-            Some((Arc::clone(&base.decl_name), args[0]))
+            Some((std::sync::Arc::<str>::from(base.decl_name.as_str()), args[0]))
         }
         _ => None,
     }

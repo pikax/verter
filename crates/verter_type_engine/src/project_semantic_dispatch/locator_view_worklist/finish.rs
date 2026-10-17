@@ -66,7 +66,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> ReferenceProjectionPlan {
         let (specifier, qualifier, typeof_query) =
             data.import_type_head().expect("ImportType head");
-        let qualifier: Vec<Arc<str>> = qualifier.iter().map(Arc::clone).collect();
+        let qualifier: Vec<verter_type_expr::OwnedStr> = qualifier.to_vec();
         let type_args: Arc<[SemanticNodeId]> =
             Arc::from(data.carrier_type_args().to_vec().into_boxed_slice());
         let NodeScopeId::File {
@@ -226,9 +226,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return ProjectionFinish::Instantiate(SemanticQueryKey::Instantiate(
                 crate::semantic_query::InstantiateKey::new(
                     self.type_slot_for(
-                        Arc::clone(&base.canonical_id),
+                        base.canonical_id.clone(),
                         base.owner,
-                        Arc::clone(&base.decl_name),
+                        base.decl_name.clone(),
                     ),
                     projected_args,
                     self.instantiate_context_for(&base.canonical_id, context),
@@ -257,9 +257,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ProjectionFinish::Instantiate(SemanticQueryKey::Instantiate(
                 crate::semantic_query::InstantiateKey::new(
                     self.type_slot_for(
-                        Arc::clone(&base.canonical_id),
+                        base.canonical_id.clone(),
                         base.owner,
-                        Arc::clone(&base.decl_name),
+                        base.decl_name.clone(),
                     ),
                     projected_args,
                     self.instantiate_context_for(&base.canonical_id, context),

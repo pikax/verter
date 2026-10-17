@@ -1657,9 +1657,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     ) -> Option<SemanticNodeId> {
         let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
             self.type_slot_for(
-                Arc::clone(&base.canonical_id),
+                base.canonical_id.clone(),
                 base.owner,
-                Arc::clone(&base.decl_name),
+                base.decl_name.clone(),
             ),
             Arc::clone(args),
             self.instantiate_context_for(

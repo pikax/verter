@@ -71,54 +71,16 @@ pub(super) fn family_container_bytes(family: &super::family::FamilyKey) -> usize
         + ledger_key
 }
 
-/// Receives the one owned allocation a result's value keeps reachable
-/// outside the graph — its outermost allocation, which carries the value's
-/// charge and every nested owned allocation's.
-pub(super) trait ValueAllocation {
-    type Output;
-    fn allocation<T: verter_session_query::retention::owned::Measured>(
-        self,
-        allocation: &verter_session_query::retention::owned::Owned<T>,
-    ) -> Self::Output;
-}
-
-/// Offer `result`'s value allocation to `visit`; `None` for a value that
-/// keeps nothing reachable outside the graph.
-pub(super) fn with_value_allocation<V: ValueAllocation>(
+/// The owned allocations a delivered result reaches: its value's owned
+/// carriers and every owned name its error holds. A delivered result keeps
+/// nothing reachable outside the graph except through these, so each is
+/// charged by its own cell.
+pub(super) fn result_handles(
     result: &QueryResult<SemanticQueryValue>,
-    visit: V,
-) -> Option<V::Output> {
-    let QueryResult::Value(value) = result else {
-        return None;
-    };
-    Some(match value {
-        SemanticQueryValue::ObjectProjection(formula) => {
-            visit.allocation(formula.alternatives_owned())
-        }
-        SemanticQueryValue::DeclarationAnalysis(analysis) => {
-            visit.allocation(&analysis.contributors)
-        }
-        SemanticQueryValue::OverloadSet(signatures) => visit.allocation(signatures),
-        SemanticQueryValue::Relation(payload) => visit.allocation(&payload.bindings),
-        SemanticQueryValue::BroadRuntime(classification) => {
-            visit.allocation(classification.kinds_owned())
-        }
-        SemanticQueryValue::FlowReturn(flow) => visit.allocation(flow),
-        SemanticQueryValue::ResolveCall(call) => visit.allocation(call),
-        SemanticQueryValue::SignatureSet(set) => visit.allocation(&set.nodes),
-        SemanticQueryValue::MaterializationCycleGate(
-            crate::semantic_query::MaterializationCycleGateOutcome::LegacyFallback {
-                reasons, ..
-            },
-        ) => visit.allocation(&reasons.0),
-        SemanticQueryValue::TypeNode(_)
-        | SemanticQueryValue::ProgramAnalysis(_)
-        | SemanticQueryValue::MaterializationCycleGate(
-            crate::semantic_query::MaterializationCycleGateOutcome::Decided(_),
-        )
-        | SemanticQueryValue::TruthinessDomain(_)
-        | SemanticQueryValue::SignatureResult(_)
-        | SemanticQueryValue::DiagnosticAnalysis(_) => return None,
+) -> verter_session_query::retention::owned::OwnedHandles {
+    use crate::semantic_query::allocation_footprint::OwnedHeap as _;
+    verter_session_query::retention::owned::OwnedHandles::of(|aliases| {
+        result.owned_heap_bytes(aliases)
     })
 }
 
@@ -290,32 +252,11 @@ impl SemanticGraphStore {
         if let Some(rail) = parts.dep_signature.owned() {
             owned.push(rail.hold(self.charge_ctx())?);
         }
-        if let Some(value) = self.hold_value_allocation(parts.result) {
-            owned.push(value?);
-        }
+        owned.extend(result_handles(parts.result).hold(self.charge_ctx())?);
         Ok(SharedHolds {
             carrier: carrier.into_boxed_slice(),
             delivered: owned.into_boxed_slice(),
         })
-    }
-
-    /// A cache hold on the allocation a result's value keeps reachable
-    /// outside the graph.
-    fn hold_value_allocation(
-        &self,
-        result: &QueryResult<SemanticQueryValue>,
-    ) -> Option<Result<OwnedHold, RetentionRefusal>> {
-        struct Hold<'a>(ChargeCtx<'a>);
-        impl ValueAllocation for Hold<'_> {
-            type Output = Result<OwnedHold, RetentionRefusal>;
-            fn allocation<T: verter_session_query::retention::owned::Measured>(
-                self,
-                allocation: &verter_session_query::retention::owned::Owned<T>,
-            ) -> Self::Output {
-                allocation.hold(self.0)
-            }
-        }
-        with_value_allocation(result, Hold(self.charge_ctx()))
     }
 
     /// Charge the allocations a delivery hands its caller to that caller:
@@ -326,29 +267,19 @@ impl SemanticGraphStore {
         &self,
         delivered: &super::delivery_lease::DeliveredAllocations<'_>,
     ) {
-        struct Pin<'a>(ChargeCtx<'a>);
-        impl ValueAllocation for Pin<'_> {
-            type Output = ();
-            fn allocation<T: verter_session_query::retention::owned::Measured>(
-                self,
-                allocation: &verter_session_query::retention::owned::Owned<T>,
-            ) {
-                allocation.pin(self.0);
-            }
-        }
         if let Some(diagnostics) = delivered.diagnostics.and_then(|list| list.owned()) {
             diagnostics.pin(self.charge_ctx());
         }
         if let Some(rail) = delivered.dep_signature.and_then(|rail| rail.owned()) {
             rail.pin(self.charge_ctx());
         }
-        with_value_allocation(delivered.result, Pin(self.charge_ctx()));
+        result_handles(delivered.result).pin(self.charge_ctx());
     }
 
     /// Where this store's self-charged allocations are charged: its
-    /// account, sharing raw leaf names through its registry.
+    /// account.
     pub(super) fn charge_ctx(&self) -> ChargeCtx<'_> {
-        ChargeCtx::new(self.retention_account(), &self.alias_charges)
+        ChargeCtx::new(self.retention_account())
     }
 
     /// The slots of `family`, keyed under the held `entries` lock: an

@@ -811,8 +811,8 @@ fn payload_binds_canonical(data: &SemanticNodeData, canonical_id: &str) -> bool 
     use crate::semantic_query::{ObjectConstructionEffect, QueryError, SignatureReturnCarrier};
     use verter_type_expr::facts::FunctionReturnSource;
 
-    let names = |canonical: &Arc<str>| canonical.as_ref() == canonical_id;
-    let declared_in = |origin: &Option<Arc<str>>| origin.as_deref() == Some(canonical_id);
+    let names = |canonical: &str| canonical == canonical_id;
+    let declared_in = |origin: &Option<verter_type_expr::OwnedStr>| origin.as_deref() == Some(canonical_id);
     match data {
         SemanticNodeData::DeclRef { identity } => names(&identity.canonical_id),
         SemanticNodeData::InstantiationRef { base, .. } => names(&base.canonical_id),

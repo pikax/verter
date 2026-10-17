@@ -1000,7 +1000,7 @@ fn project_shallow_object(
             return RaisedShallowMemberOutput::Opaque;
         };
         properties.push(RaisedShallowObjectProperty {
-            name: name.clone(),
+            name: std::sync::Arc::<str>::from(name.as_str()),
             ty: project_shallow_term(interner, *ty, depth + 1),
             optional: *optional,
         });

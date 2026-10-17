@@ -5523,9 +5523,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let read = self.execute_read(SemanticQueryKey::Instantiate(
                 crate::semantic_query::InstantiateKey::new(
                     self.type_slot_for(
-                        Arc::clone(&identity.canonical_id),
+                        identity.canonical_id.clone(),
                         identity.owner,
-                        Arc::clone(&identity.decl_name),
+                        identity.decl_name.clone(),
                     ),
                     args,
                     self.instantiate_context_for(
@@ -7262,14 +7262,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let (canonical, owner, name) = match data.as_ref() {
             SemanticNodeData::DeclRef { identity } => (
-                Arc::clone(&identity.canonical_id),
+                identity.canonical_id.clone(),
                 identity.owner,
-                Arc::clone(&identity.decl_name),
+                identity.decl_name.clone(),
             ),
             SemanticNodeData::InstantiationRef { base, .. } => (
-                Arc::clone(&base.canonical_id),
+                base.canonical_id.clone(),
                 base.owner,
-                Arc::clone(&base.decl_name),
+                base.decl_name.clone(),
             ),
             SemanticNodeData::Opaque(QueryError::RecursiveRef { name, .. }) => {
                 match graph.node_scope(node) {
@@ -8437,11 +8437,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if let Some(SemanticNodeData::InstantiationRef { base, args }) =
             graph.node_data(resolved).as_deref()
         {
-            let owner_canonical = Arc::clone(&base.canonical_id);
+            let owner_canonical = base.canonical_id.clone();
             let slot = self.type_slot_for(
-                Arc::clone(&base.canonical_id),
+                base.canonical_id.clone(),
                 base.owner,
-                Arc::clone(&base.decl_name),
+                base.decl_name.clone(),
             );
             let args: Arc<[SemanticNodeId]> = Arc::from(
                 args.iter()
@@ -8937,7 +8937,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // the general path so a batch never charges the wrong entry cost.
         let default_canonical = self.wrapper_demand_canonical();
         let mut apparent_keys: FxHashMap<
-            Arc<str>,
+            verter_type_expr::OwnedStr,
             (FxHashSet<crate::semantic_query::PropertyKey>, usize),
         > = FxHashMap::default();
         let mut pair_units = None;
@@ -9663,7 +9663,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// The file whose library an apparent type is read from while relating
     /// to `target`: the demand's, else the one the target was declared in.
-    fn relation_wrapper_canonical(&self, target: SemanticNodeId) -> Option<Arc<str>> {
+    fn relation_wrapper_canonical(&self, target: SemanticNodeId) -> Option<verter_type_expr::OwnedStr> {
         self.wrapper_demand_canonical().or_else(|| {
             self.graph()
                 .node_scope(target)
@@ -9928,9 +9928,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
             self.type_slot_for(
-                Arc::clone(&identity.canonical_id),
+                identity.canonical_id.clone(),
                 identity.owner,
-                Arc::clone(&identity.decl_name),
+                identity.decl_name.clone(),
             ),
             args,
             self.instantiate_context_for(&identity.canonical_id, transit),
@@ -10192,9 +10192,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
                 self.type_slot_for(
-                    Arc::clone(&identity.canonical_id),
+                    identity.canonical_id.clone(),
                     identity.owner,
-                    Arc::clone(&identity.decl_name),
+                    identity.decl_name.clone(),
                 ),
                 args,
                 self.instantiate_context_for(&identity.canonical_id, transit),
@@ -10509,9 +10509,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(identity) => match self.execute_type_node(SemanticQueryKey::Instantiate(
                 crate::semantic_query::InstantiateKey::new(
                     self.type_slot_for(
-                        Arc::clone(&identity.canonical_id),
+                        identity.canonical_id.clone(),
                         identity.owner,
-                        Arc::clone(&identity.decl_name),
+                        identity.decl_name.clone(),
                     ),
                     Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                     self.instantiate_context_for(&identity.canonical_id, transit),
@@ -10552,11 +10552,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if let Some(SemanticNodeData::InstantiationRef { base, args }) =
             graph.node_data(normalised).as_deref()
         {
-            let owner_canonical = Arc::clone(&base.canonical_id);
+            let owner_canonical = base.canonical_id.clone();
             let slot = self.type_slot_for(
-                Arc::clone(&base.canonical_id),
+                base.canonical_id.clone(),
                 base.owner,
-                Arc::clone(&base.decl_name),
+                base.decl_name.clone(),
             );
             let args: Arc<[SemanticNodeId]> = Arc::from(
                 args.iter()
@@ -10995,7 +10995,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     fn resolve_recursive_member_value(
         &self,
         value: SemanticNodeId,
-        origin: Option<&Arc<str>>,
+        origin: Option<&verter_type_expr::OwnedStr>,
     ) -> SemanticNodeId {
         let graph = self.graph();
         let name = match graph.node_data(value).as_deref() {
@@ -11011,7 +11011,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         match self.execute_type_node(SemanticQueryKey::Instantiate(
             crate::semantic_query::InstantiateKey::new(
                 self.type_slot_for(
-                    Arc::clone(origin),
+                    origin.clone(),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     name,
                 ),
@@ -11975,9 +11975,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             _ => return Some(verter_type_expr::MemberVisibility::Public),
         };
         let mut current = (
-            Arc::clone(&class.canonical_id),
+            class.canonical_id.clone(),
             class.owner,
-            Arc::clone(&class.decl_name),
+            class.decl_name.clone(),
         );
         let mut seen = rustc_hash::FxHashSet::default();
         while seen.insert(current.clone()) {
@@ -12004,7 +12004,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .into_iter()
                 .next()
             {
-                Some((canonical, owner, name, _)) => current = (canonical, owner, name),
+                Some((canonical, owner, name, _)) => current = (verter_type_expr::OwnedStr::from(canonical), owner, verter_type_expr::OwnedStr::from(name)),
                 None => break,
             }
         }
@@ -12510,7 +12510,7 @@ impl ClassLink {
 /// the class index resolved. A chain longer than `remaining` classes (a
 /// circular `extends`) is unresolved.
 fn class_owner(
-    file: &Arc<str>,
+    file: &str,
     whole_hash: crate::semantic_query::HashValue,
     headers: &verter_session_query::declarations::header_index::DeclHeaderIndex,
     class: verter_session_query::function_program::ClassIndexMatch<'_>,
@@ -12535,13 +12535,13 @@ fn class_owner(
         let declared = file_scope.is_some();
         links.push(match file_scope {
             Some((key, _)) => ClassLink::Declared(crate::semantic_query::DeclIdentity {
-                canonical_id: Arc::clone(file),
+                canonical_id: verter_type_expr::OwnedStr::from(file),
                 owner: key.owner,
                 whole_hash,
-                decl_name: Arc::clone(&key.name),
+                decl_name: verter_type_expr::OwnedStr::from(key.name.clone()),
             }),
             None => ClassLink::Syntactic {
-                file: Arc::clone(file),
+                file: Arc::from(file),
                 span: record.span,
             },
         });

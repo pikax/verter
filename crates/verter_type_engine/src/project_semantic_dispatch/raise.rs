@@ -186,7 +186,7 @@ fn canonicalise_for_digest(
         SemanticQueryKey::ProjectMember { base, member, mode } => {
             Cow::Owned(SemanticQueryKey::ProjectPath {
                 base: *base,
-                path: Arc::from(
+                path: verter_type_expr::OwnedSlice::from(
                     vec![PathSegment::Member(
                         crate::semantic_query::PropertyKey::identifier(member.clone()),
                     )]
@@ -198,7 +198,7 @@ fn canonicalise_for_digest(
         SemanticQueryKey::IndexedAccess { base, index, mode } => {
             Cow::Owned(SemanticQueryKey::ProjectPath {
                 base: *base,
-                path: Arc::from(vec![PathSegment::Index(index.clone())].into_boxed_slice()),
+                path: verter_type_expr::OwnedSlice::from(vec![PathSegment::Index(index.clone())].into_boxed_slice()),
                 context: crate::semantic_query::ProjectionReductionContext::published(*mode),
             })
         }
@@ -554,16 +554,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     fn observation_interior_carrier_stop(
         &self,
         node: SemanticNodeId,
-        decl_canonical: &Arc<str>,
+        decl_canonical: &str,
         state: &ReduceState,
     ) -> bool {
         let Some((owner_canonical, root)) = state.observation.as_ref() else {
             return false;
         };
-        if node == *root || decl_canonical.as_ref() == "__builtin__" {
+        if node == *root || decl_canonical == "__builtin__" {
             return false;
         }
-        decl_canonical.as_ref() == owner_canonical.as_ref()
+        decl_canonical == owner_canonical.as_ref()
             || self
                 .ctx
                 .workspace_is_package_backed(decl_canonical.as_ref())
@@ -1322,7 +1322,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // reduced node is driven through the demand reducer below.
                 let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
                 let value_root = value_root.clone();
-                let path = Arc::clone(path);
+                let path = path.clone();
                 let type_args: Vec<SemanticNodeId> = data.carrier_type_args().to_vec();
 
                 let typeof_key = self.typeof_key_with_path(value_root, path, context);
@@ -1476,9 +1476,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     return node;
                 }
                 let base_key = self.type_slot_for(
-                    Arc::clone(&base.canonical_id),
+                    base.canonical_id.clone(),
                     base.owner,
-                    Arc::clone(&base.decl_name),
+                    base.decl_name.clone(),
                 );
                 // Observation passes run the Instantiate query itself
                 // CARRIER-PRESERVING (`Published(Shallow)`): the outer
@@ -2414,9 +2414,9 @@ pub fn prepared_decl_body_is_closed<C: crate::resolver_core::ResolverCapabilitie
     budget: &mut u32,
 ) -> ClosednessVerdict {
     let key = (
-        Arc::<str>::from(canonical_id),
+        verter_type_expr::OwnedStr::from(canonical_id),
         owner,
-        Arc::<str>::from(decl_name),
+        verter_type_expr::OwnedStr::from(decl_name),
     );
     // DISPATCH-WIDE in-flight cycle guard, NOT a permanent visited set:
     // the key pops on exit, so two SIBLING references to the same decl (a
@@ -2795,10 +2795,10 @@ fn type_param_shell_node<C: crate::resolver_core::ResolverCapabilities>(
 ) -> SemanticNodeId {
     dispatch.graph().intern_node(SemanticNodeData::TypeParam {
         decl: crate::semantic_query::DeclIdentity {
-            canonical_id: Arc::clone(&prepared.root_identity.canonical_id),
+            canonical_id: verter_type_expr::OwnedStr::from(prepared.root_identity.canonical_id.clone()),
             owner: prepared.root_identity.owner,
             whole_hash: crate::semantic_query::HashValue::default(),
-            decl_name: Arc::clone(&prepared.root_identity.symbol_name),
+            decl_name: verter_type_expr::OwnedStr::from(prepared.root_identity.symbol_name.clone()),
         },
         param_index: u16::try_from(param.ordinal).unwrap_or(u16::MAX),
         constraint: None,
@@ -2919,9 +2919,9 @@ pub fn prepared_instantiation_key_domain_is_closed<
     // KEY-reachable self-instantiation — including one round-tripping
     // through a recipe escape's lowering — is a genuine recursion; refuse.
     let key = (
-        Arc::clone(&base.canonical_id),
+        base.canonical_id.clone(),
         base.owner,
-        Arc::clone(&base.decl_name),
+        base.decl_name.clone(),
     );
     if !dispatch.push_closedness_active(key) {
         return ClosednessVerdict::Unavailable;
@@ -2981,10 +2981,10 @@ fn prepared_instantiation_key_domain_is_closed_unguarded<
                         || resolved.symbol_name.as_ref() != base.decl_name.as_ref()
                 }) {
                     let resolved = crate::semantic_query::DeclIdentity {
-                        canonical_id: Arc::clone(&resolved.canonical_id),
+                        canonical_id: verter_type_expr::OwnedStr::from(resolved.canonical_id.clone()),
                         owner: resolved.owner,
                         whole_hash: crate::semantic_query::HashValue::default(),
-                        decl_name: Arc::clone(&resolved.symbol_name),
+                        decl_name: verter_type_expr::OwnedStr::from(resolved.symbol_name.clone()),
                     };
                     return prepared_instantiation_key_domain_is_closed(
                         dispatch, &resolved, args, budget,

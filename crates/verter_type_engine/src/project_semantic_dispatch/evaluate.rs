@@ -1335,9 +1335,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         let read = self.execute_read(SemanticQueryKey::Instantiate(
                             crate::semantic_query::InstantiateKey::new(
                                 self.type_slot_for(
-                                    Arc::clone(&identity.canonical_id),
+                                    identity.canonical_id.clone(),
                                     identity.owner,
-                                    Arc::clone(&identity.decl_name),
+                                    identity.decl_name.clone(),
                                 ),
                                 Arc::from(args.to_vec().into_boxed_slice()),
                                 self.instantiate_context_for(
@@ -1462,11 +1462,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // stable stop above.
                 SemanticNodeData::InstantiationRef { base, args } => {
                     let slot = self.type_slot_for(
-                        Arc::clone(&base.canonical_id),
+                        base.canonical_id.clone(),
                         base.owner,
-                        Arc::clone(&base.decl_name),
+                        base.decl_name.clone(),
                     );
-                    let owner_canonical = Arc::clone(&base.canonical_id);
+                    let owner_canonical = base.canonical_id.clone();
                     let arguments = self.evaluate_carrier_arguments(base, args, context);
                     completeness = completeness.merge(arguments.completeness);
                     availability = availability.join(arguments.availability);
@@ -2200,7 +2200,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // including whole-file facts retained on evidence pages.
                 roots.extend(signature_entries(&facts).filter_map(|fact| match fact {
                     FactVersionRef::FileWholeHash { canonical_id, hash } => {
-                        Some((Arc::from(canonical_id.as_str()), *hash))
+                        Some((verter_type_expr::OwnedStr::from(canonical_id.as_str()), *hash))
                     }
                     _ => None,
                 }));
@@ -2450,9 +2450,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return evaluated;
         };
         let slot = self.type_slot_for(
-            Arc::clone(&base.canonical_id),
+            base.canonical_id.clone(),
             base.owner,
-            Arc::clone(&base.decl_name),
+            base.decl_name.clone(),
         );
         let read = self.execute_read(SemanticQueryKey::Instantiate(
             crate::semantic_query::InstantiateKey::new(
@@ -2777,7 +2777,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 let (value_root, path) =
                                     data.typeof_head().expect("TypeOf carrier head");
                                 let value_root = value_root.clone();
-                                let path = Arc::clone(path);
+                                let path = path.clone();
                                 let type_args: Vec<SemanticNodeId> =
                                     data.carrier_type_args().to_vec();
                                 let context =
@@ -2852,9 +2852,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     ) =>
                             {
                                 let slot = self.type_slot_for(
-                                    Arc::clone(&base.canonical_id),
+                                    base.canonical_id.clone(),
                                     base.owner,
-                                    Arc::clone(&base.decl_name),
+                                    base.decl_name.clone(),
                                 );
                                 let read = self.execute_read(SemanticQueryKey::Instantiate(
                                     crate::semantic_query::InstantiateKey::new(
@@ -4033,7 +4033,7 @@ pub mod forwarding_tests {
         // no dependency on the source whose execution was superseded.
         let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
             base: number,
-            path: Arc::from([]),
+            path: verter_type_expr::OwnedSlice::from([]),
             context: ProjectionReductionContext::published(ProjectionMode::Expanded),
         });
         if moved {

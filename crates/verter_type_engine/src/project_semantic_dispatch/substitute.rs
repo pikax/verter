@@ -136,10 +136,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> SemanticNodeId {
         self.graph().intern_node(SemanticNodeData::TypeParam {
             decl: crate::semantic_query::DeclIdentity {
-                canonical_id: Arc::from(canonical),
+                canonical_id: verter_type_expr::OwnedStr::from(canonical),
                 owner,
                 whole_hash: crate::semantic_query::HashValue::default(),
-                decl_name: Arc::clone(class),
+                decl_name: verter_type_expr::OwnedStr::from(class),
             },
             param_index: THIS_BINDER_INDEX,
             constraint: instance,
@@ -555,10 +555,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let name: Arc<str> = Arc::from(format!("\u{1}{ordinal}").as_str());
         self.graph().intern_node(SemanticNodeData::TypeParam {
             decl: crate::semantic_query::DeclIdentity {
-                canonical_id: Arc::from(canonical),
+                canonical_id: verter_type_expr::OwnedStr::from(canonical),
                 owner,
                 whole_hash: crate::semantic_query::HashValue::default(),
-                decl_name: Arc::clone(&name),
+                decl_name: verter_type_expr::OwnedStr::from(name.clone()),
             },
             param_index: 0,
             constraint: None,

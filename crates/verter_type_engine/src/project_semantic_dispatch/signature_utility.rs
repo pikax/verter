@@ -458,10 +458,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .graph()
             .intern_node(SemanticNodeData::InstantiationRef {
                 base: crate::semantic_query::DeclIdentity {
-                    canonical_id: Arc::from("__builtin__"),
+                    canonical_id: verter_type_expr::OwnedStr::from("__builtin__"),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     whole_hash: Default::default(),
-                    decl_name: Arc::from(utility.builtin_name()),
+                    decl_name: verter_type_expr::OwnedStr::from(utility.builtin_name()),
                 },
                 args: crate::semantic_query::PayloadArray::from([subject]),
             });

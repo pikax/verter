@@ -47,10 +47,10 @@ use crate::semantic_query::{PathSegment, ProjectionMode};
 
 /// A projection path built on the existing [`PathSegment`] vocabulary.
 ///
-/// **`ProjectionPath` IS the `Arc<[PathSegment]>` representation** (§3.1) — a
+/// **`ProjectionPath` IS the `verter_type_expr::OwnedSlice<PathSegment>` representation** (§3.1) — a
 /// thin, zero-cost newtype with the prefix-order methods attached, NOT a
 /// parallel/dual path representation. `SemanticQueryKey::ProjectPath.path` is
-/// itself an `Arc<[PathSegment]>`; the [`From`] conversions below are O(1)
+/// itself an `verter_type_expr::OwnedSlice<PathSegment>`; the [`From`] conversions below are O(1)
 /// `Arc` clones/moves, so the semantic-query key shares this exact
 /// representation with zero conversion tax. There is no second path datum to
 /// keep in sync.

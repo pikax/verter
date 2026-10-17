@@ -197,7 +197,7 @@ pub struct MemberFacets {
     has_implementation_body: bool,
     visibility: verter_type_expr::MemberVisibility,
     spans: verter_type_expr::MemberSpans,
-    declaration_origin: Option<Arc<str>>,
+    declaration_origin: Option<verter_type_expr::OwnedStr>,
     declared_in_macro_type_arg: super::MacroOwnBodyStamp,
     merge_role: super::MergeRoleStamp,
     excess_origin: verter_type_expr::ExcessPropertyOrigin,
@@ -230,7 +230,7 @@ impl MemberFacets {
     }
 
     #[must_use]
-    pub fn declaration_origin(&self) -> Option<&Arc<str>> {
+    pub fn declaration_origin(&self) -> Option<&verter_type_expr::OwnedStr> {
         self.declaration_origin.as_ref()
     }
 
@@ -289,7 +289,7 @@ pub struct ObjectProjectionIndex {
     value: ProjectionEvidence<SemanticNodeId>,
     readonly: ProjectionEvidence<bool>,
     spans: verter_type_expr::IndexSignatureSpans,
-    declaration_origin: Option<Arc<str>>,
+    declaration_origin: Option<verter_type_expr::OwnedStr>,
 }
 
 impl ObjectProjectionIndex {
@@ -319,7 +319,7 @@ impl ObjectProjectionIndex {
     }
 
     #[must_use]
-    pub fn declaration_origin(&self) -> Option<&Arc<str>> {
+    pub fn declaration_origin(&self) -> Option<&verter_type_expr::OwnedStr> {
         self.declaration_origin.as_ref()
     }
 }
@@ -1218,7 +1218,7 @@ pub(crate) mod evaluator_support {
         has_implementation_body: bool,
         visibility: verter_type_expr::MemberVisibility,
         spans: verter_type_expr::MemberSpans,
-        declaration_origin: Option<Arc<str>>,
+        declaration_origin: Option<verter_type_expr::OwnedStr>,
         declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp,
         merge_role: crate::semantic_query::MergeRoleStamp,
         excess_origin: verter_type_expr::ExcessPropertyOrigin,
@@ -1243,7 +1243,7 @@ pub(crate) mod evaluator_support {
         value: ProjectionEvidence<SemanticNodeId>,
         readonly: ProjectionEvidence<bool>,
         spans: verter_type_expr::IndexSignatureSpans,
-        declaration_origin: Option<Arc<str>>,
+        declaration_origin: Option<verter_type_expr::OwnedStr>,
     ) -> ObjectProjectionIndex {
         ObjectProjectionIndex {
             domain,

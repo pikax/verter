@@ -52,8 +52,8 @@ type OperandEvidenceEntry = (SemanticQueryKey, SemanticOperandEvidence);
 
 /// The canonical empty projection path — the single spelling of
 /// "expand the whole surface" on a `ProjectPath` key.
-fn empty_projection_path() -> Arc<[PathSegment]> {
-    Arc::from(Vec::<PathSegment>::new().into_boxed_slice())
+fn empty_projection_path() -> verter_type_expr::OwnedSlice<PathSegment> {
+    verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice())
 }
 
 struct OperandEvidenceGuard<'a> {
@@ -608,7 +608,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let self_root_canonicals: Vec<Arc<str>> = evidence
             .self_roots()
             .iter()
-            .map(|(canonical, _)| Arc::clone(canonical))
+            .map(|(canonical, _)| Arc::<str>::from(canonical))
             .collect();
         if !evidence
             .read_set()
@@ -835,7 +835,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             },
             SemanticOperandForceProjection::Path(path) => SemanticQueryKey::ProjectPath {
                 base: root,
-                path: Arc::clone(path),
+                path: path.clone(),
                 context,
             },
             SemanticOperandForceProjection::KeyDomain => SemanticQueryKey::KeyOf {
@@ -1102,7 +1102,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             projection_evidence.push(index.evidence().clone());
             path.push(PathSegment::Index(IndexKey::Computed(index.node())));
         }
-        Ok(SemanticOperandForceProjection::Path(Arc::from(
+        Ok(SemanticOperandForceProjection::Path(verter_type_expr::OwnedSlice::from(
             path.into_boxed_slice(),
         )))
     }
@@ -1168,7 +1168,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     },
                     SemanticOperandForceProjection::Path(path) => SemanticQueryKey::ProjectPath {
                         base: node,
-                        path: Arc::clone(path),
+                        path: path.clone(),
                         context,
                     },
                 }

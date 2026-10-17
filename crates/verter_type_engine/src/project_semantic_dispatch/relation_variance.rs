@@ -871,9 +871,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             let key = crate::semantic_query::SemanticQueryKey::Instantiate(
                 crate::semantic_query::InstantiateKey::new(
                     self.type_slot_for(
-                        Arc::clone(&declaration.canonical_id),
+                        declaration.canonical_id.clone(),
                         declaration.owner,
-                        Arc::clone(&declaration.decl_name),
+                        declaration.decl_name.clone(),
                     ),
                     args,
                     self.instantiate_context_for(&declaration.canonical_id, transit),

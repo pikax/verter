@@ -1850,7 +1850,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .indexed_expression_source(point.canonical_id.as_ref())
                         .ok_or(ResolveCallFailure::Undecidable)?;
                     let indexed_point = verter_type_expr::facts::ProgramExpressionIdentity {
-                        canonical_id: point.canonical_id.clone(),
+                        canonical_id: std::sync::Arc::<str>::from(point.canonical_id.as_str()),
                         offset: point.offset,
                     };
                     let program_index = source_demand.function_program_index();
@@ -3867,11 +3867,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let oracle_demand = ProjectionReductionContext::structural_transit_with_mode(
             crate::semantic_query::ProjectionMode::Navigate,
         );
-        let owner_canonical = Arc::clone(&base.canonical_id);
+        let owner_canonical = base.canonical_id.clone();
         let slot = self.type_slot_for(
-            Arc::clone(&base.canonical_id),
+            base.canonical_id.clone(),
             base.owner,
-            Arc::clone(&base.decl_name),
+            base.decl_name.clone(),
         );
         let args = Arc::clone(args.as_arc());
         let read = self.execute_read(SemanticQueryKey::Instantiate(

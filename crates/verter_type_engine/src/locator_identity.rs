@@ -574,9 +574,9 @@ pub enum LocatorKeyError {
     /// `locator.anchor.canonical_id` ≠ `slot.defining_canonical`.
     CanonicalMismatch {
         /// The slot's defining canonical.
-        slot_canonical: Arc<str>,
+        slot_canonical: verter_type_expr::OwnedStr,
         /// The locator anchor's canonical.
-        locator_canonical: Arc<str>,
+        locator_canonical: verter_type_expr::OwnedStr,
     },
     /// `locator.anchor.owner` ≠ `slot.owner`.
     OwnerMismatch {
@@ -588,9 +588,9 @@ pub enum LocatorKeyError {
     /// `locator.anchor.symbol` ≠ `slot.merged_symbol_name`.
     SymbolMismatch {
         /// The slot's merged symbol name.
-        slot_symbol: Arc<str>,
+        slot_symbol: verter_type_expr::OwnedStr,
         /// The locator anchor's symbol.
-        locator_symbol: Arc<str>,
+        locator_symbol: verter_type_expr::OwnedStr,
     },
     /// `locator.anchor.space` does not map onto `slot.symbol_space`.
     SpaceMismatch {

@@ -38,7 +38,7 @@ fn carrier_naming(
 // Family-memo backfill matrix
 // ──────────────────────────────────────────────────────────────────
 
-fn family_test_path() -> Arc<[PathSegment]> {
+fn family_test_path() -> verter_type_expr::OwnedSlice<PathSegment> {
     Arc::from(
         vec![PathSegment::Member(
             crate::semantic_query::PropertyKey::identifier("foo"),

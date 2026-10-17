@@ -324,14 +324,22 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             };
             let resolved = if depth > 0 {
                 self.namespace_private_value(evaluation, user, &candidate[..=depth])
-                    .map(|identity| (identity, candidate[depth + 1..].to_vec()))
+                    .map(|identity| {
+                        (
+                            identity,
+                            candidate[depth + 1..]
+                                .iter()
+                                .map(verter_type_expr::OwnedStr::from)
+                                .collect::<Vec<_>>(),
+                        )
+                    })
             } else {
                 None
             };
             let Some((identity, remaining)) = resolved.or_else(|| {
                 self.value_path_declaration(
                     &value_root,
-                    rest,
+                    &rest.iter().map(verter_type_expr::OwnedStr::from).collect::<Vec<_>>(),
                     &mut rustc_hash::FxHashSet::default(),
                 )
             }) else {
@@ -722,9 +730,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let first = blocks.iter().find(|block| block.addressed)?;
         let decl = DeclIdentity {
             whole_hash: self.decl_whole_hash(&first.canonical),
-            canonical_id: Arc::clone(&first.canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(first.canonical.clone()),
             owner: first.owner,
-            decl_name: Arc::clone(&symbol),
+            decl_name: verter_type_expr::OwnedStr::from(symbol.clone()),
         };
         let namespace_members =
             self.enum_namespace_members(&canonical, owner, &symbol, is_global, &members);
@@ -873,7 +881,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let QueryResult::Value(crate::semantic_query::SemanticQueryOutput { value, .. }) = self
             .execute_type_node(self.typeof_key_with_path(
                 value_root,
-                path,
+                verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(path),
                 crate::semantic_query::ProjectionReductionContext::structural_transit(),
             ))
         else {
@@ -1193,7 +1201,7 @@ struct EnumEvaluation {
     /// The read enum each addressed block's `(canonical, owner, name)`
     /// declares.
     declared_at: rustc_hash::FxHashMap<
-        (Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>),
+        (verter_type_expr::OwnedStr, verter_type_expr::TopLevelOwnerId, verter_type_expr::OwnedStr),
         DeclIdentity,
     >,
     states: rustc_hash::FxHashMap<EnumMemberKey, MemberState>,
@@ -1224,9 +1232,9 @@ impl EnumEvaluation {
         for block in enumeration.blocks.iter().filter(|block| block.addressed) {
             self.declared_at
                 .entry((
-                    Arc::clone(&block.canonical),
+                    verter_type_expr::OwnedStr::from(block.canonical.clone()),
                     block.owner,
-                    Arc::clone(&enumeration.decl.decl_name),
+                    enumeration.decl.decl_name.clone(),
                 ))
                 .or_insert_with(|| enumeration.decl.clone());
         }
@@ -1272,9 +1280,9 @@ impl EnumEvaluation {
         ENUM_ASSEMBLY_WORK.with(|count| count.set(count.get() + 1));
         self.declared_at
             .get(&(
-                Arc::clone(&identity.canonical_id),
+                verter_type_expr::OwnedStr::from(identity.canonical_id.clone()),
                 identity.owner,
-                Arc::clone(&identity.symbol_name),
+                verter_type_expr::OwnedStr::from(identity.symbol_name.clone()),
             ))
             .cloned()
     }

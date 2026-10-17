@@ -332,7 +332,7 @@ pub(super) enum BinderIdentityMode<'a> {
     /// symbol name + the parameter's declared ordinal.
     DeclHeader {
         /// The declaring symbol's stable merged name.
-        owner_symbol: &'a Arc<str>,
+        owner_symbol: &'a verter_type_expr::OwnedStr,
     },
     /// A free authored `TypeParameter` occurrence: binder identity = the
     /// display name at ordinal 0.
@@ -353,7 +353,7 @@ pub(super) enum BinderIdentityMode<'a> {
         /// position names one — it qualifies the binder identity so two
         /// same-name parameters of DIFFERENT declared functions in one
         /// file never share a binder node.
-        anchor_symbol: Option<&'a Arc<str>>,
+        anchor_symbol: Option<&'a verter_type_expr::OwnedStr>,
     },
 }
 
@@ -1950,7 +1950,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     && root.split(':').nth(1) == Some("field");
                 let canonical = value_root.scope.canonical_id.clone();
                 let carrier = graph.intern_node_with_scope(
-                    SemanticNodeData::new_typeof(value_root, path, type_args),
+                    SemanticNodeData::new_typeof(value_root, verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(path), type_args),
                     scope.clone(),
                 );
                 if is_instance_field_value && ctx.binders.innermost_first().next().is_some() {
@@ -1970,7 +1970,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 graph.intern_node_with_scope(
                     SemanticNodeData::new_import_type(
                         Arc::clone(specifier),
-                        Arc::clone(qualifier),
+                        verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(Arc::clone(qualifier)),
                         type_args,
                         *typeof_query,
                     ),
@@ -2626,10 +2626,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         use crate::project_semantic_dispatch::carrier::RefHeadResolution;
         if let Some((ri, whole_hash)) = resolved {
             let identity = DeclIdentity {
-                canonical_id: Arc::clone(&ri.canonical_id),
+                canonical_id: verter_type_expr::OwnedStr::from(ri.canonical_id.clone()),
                 owner: ri.owner,
                 whole_hash,
-                decl_name: Arc::clone(&ri.symbol_name),
+                decl_name: verter_type_expr::OwnedStr::from(ri.symbol_name.clone()),
             };
             return LocatorRefPlan::Carrier(RefHeadResolution::Resolved(identity));
         }
@@ -2642,10 +2642,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .is_some()
         {
             return LocatorRefPlan::Carrier(RefHeadResolution::Builtin(DeclIdentity {
-                canonical_id: Arc::from("__builtin__"),
+                canonical_id: verter_type_expr::OwnedStr::from("__builtin__"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: HashValue::default(),
-                decl_name: Arc::clone(name),
+                decl_name: verter_type_expr::OwnedStr::from(name),
             }));
         }
 

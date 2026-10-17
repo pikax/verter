@@ -86,7 +86,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                 .whole_hash;
                             let mut object =
                                 self.assigned_module_object(&assigned, None, interop, context)?;
-                            push_root(&mut object.1, (Arc::from(dependency.as_str()), hash));
+                            push_root(&mut object.1, (verter_type_expr::OwnedStr::from(dependency.as_str()), hash));
                             Some(object)
                         }
                         None => self.file_module_object(&dependency, context),
@@ -164,7 +164,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     canonical_id,
                     hash,
                 } if seen.insert((canonical_id.clone(), *hash)) => {
-                    roots.push((Arc::from(canonical_id.as_str()), *hash));
+                    roots.push((verter_type_expr::OwnedStr::from(canonical_id.as_str()), *hash));
                 }
                 _ => {}
             }
@@ -210,7 +210,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     self.graph().intern_node_with_scope(
                         SemanticNodeData::new_import_type(
                             Arc::clone(dependency),
-                            Arc::from([]),
+                            verter_type_expr::OwnedSlice::from([]),
                             Arc::from([]),
                             true,
                         ),
@@ -263,7 +263,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             };
             push_root(
                 &mut roots,
-                (Arc::clone(&block.canonical), indexed.whole_hash),
+                (verter_type_expr::OwnedStr::from(block.canonical.clone()), indexed.whole_hash),
             );
             let shallow = &indexed.shallow_state;
             let headers = &shallow.headers;
@@ -351,7 +351,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             else {
                 continue;
             };
-            push_root(&mut roots, (Arc::from(canonical), indexed.whole_hash));
+            push_root(&mut roots, (verter_type_expr::OwnedStr::from(canonical), indexed.whole_hash));
             let headers = &indexed.shallow_state.headers;
             instantiated |= headers.namespace_is_instantiated(None, entry.owner, name);
             for member in headers.namespace_value_members(None, entry.owner, Some(name)) {
@@ -423,7 +423,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         };
         Some((
             self.value_object(members, node_scope, canonical, context),
-            vec![(Arc::from(canonical), indexed.whole_hash)],
+            vec![(verter_type_expr::OwnedStr::from(canonical), indexed.whole_hash)],
         ))
     }
 
