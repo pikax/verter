@@ -960,12 +960,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     pub fn charge_connected_work(&self) -> Result<(), crate::semantic_query::PartialReasonSet> {
-        if self.snapshot.flags().is_cancelled() {
+        self.charge_connected_work_observed(self.snapshot.flags().is_cancelled())
+    }
+
+    /// [`Self::charge_connected_work`] with the request's cancellation
+    /// already read as `cancelled`: one read serves the abort observation
+    /// and the charge.
+    fn charge_connected_work_observed(
+        &self,
+        cancelled: bool,
+    ) -> Result<(), crate::semantic_query::PartialReasonSet> {
+        if cancelled {
             crate::request_context::observe_execution_abort(
                 crate::semantic_query::ExecutionAbort::Cancelled,
             );
         }
-        self.connected_demand.charge()
+        self.connected_demand.charge_observed(cancelled)
     }
 
     /// The limit of the connected-work rail the active demand tripped (the
@@ -3657,8 +3667,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.connected_limit_read(key, reasons),
                 ));
             }
+            // One read of the request's cancellation serves the nested
+            // entry and the charge it makes.
+            let cancelled = self.snapshot.flags().is_cancelled();
             if charge_depth {
-                let (guard, depth_trip) = self.enter_connected_demand(true);
+                let (guard, depth_trip) = self.connected_demand.enter_observed(true, cancelled);
                 if let Some(reasons) = depth_trip {
                     return Err(widen_node_cache_read(
                         self.connected_limit_read(key, reasons),
@@ -3666,7 +3679,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
                 query_depth_guard = Some(guard);
             }
-            if let Err(reasons) = self.charge_connected_work() {
+            if let Err(reasons) = self.charge_connected_work_observed(cancelled) {
                 return Err(widen_node_cache_read(
                     self.connected_limit_read(key, reasons),
                 ));

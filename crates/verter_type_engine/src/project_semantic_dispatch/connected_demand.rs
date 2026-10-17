@@ -543,6 +543,17 @@ impl<'a> ConnectedDemandLedger<'a> {
         &self,
         query_boundary: bool,
     ) -> (ConnectedDemandGuard<'_>, Option<PartialReasonSet>) {
+        self.enter_observed(query_boundary, self.cancellation.is_cancelled())
+    }
+
+    /// [`Self::enter`] with the request's cancellation already read as
+    /// `cancelled`, for a caller that reads it once for the entry and the
+    /// charge that follows it.
+    pub(super) fn enter_observed(
+        &self,
+        query_boundary: bool,
+        cancelled: bool,
+    ) -> (ConnectedDemandGuard<'_>, Option<PartialReasonSet>) {
         let root = !self.active.get();
         if root {
             self.work_used.set(0);
@@ -556,7 +567,7 @@ impl<'a> ConnectedDemandLedger<'a> {
             self.tripped.set(PartialReasonSet::empty());
             self.active.set(true);
         }
-        if self.cancellation.is_cancelled() {
+        if cancelled {
             self.record_trip(PartialReasonSet::CANCELLED);
         }
         let mut entered_query_depth = false;
@@ -615,11 +626,17 @@ impl<'a> ConnectedDemandLedger<'a> {
     /// Charge one work unit. `Err` carries the sticky trip set that now
     /// forbids further work.
     pub fn charge(&self) -> Result<(), PartialReasonSet> {
+        self.charge_observed(self.cancellation.is_cancelled())
+    }
+
+    /// [`Self::charge`] with the request's cancellation already read as
+    /// `cancelled`.
+    pub(super) fn charge_observed(&self, cancelled: bool) -> Result<(), PartialReasonSet> {
         verter_debug_assert!(
             self.active.get(),
             "connected work must be charged inside a connected-demand guard"
         );
-        if self.cancellation.is_cancelled() {
+        if cancelled {
             return Err(self.record_trip(PartialReasonSet::CANCELLED));
         }
         let tripped = self.tripped.get();
