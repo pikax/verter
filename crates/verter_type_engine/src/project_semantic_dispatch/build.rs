@@ -4926,9 +4926,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if is_non_file_base {
                 None
             } else {
-                self.ctx
-                    .ensure_indexed_ready_serve(decl_canonical_str)
-                    .map(|serve| serve.indexed)
+                self.instantiation_indexed_record(decl_canonical_str)
             };
         let decl_whole_hash: crate::semantic_query::HashValue = match &live_indexed {
             Some(indexed) => indexed.whole_hash,
@@ -8306,6 +8304,50 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .into_iter()
             .collect::<Option<Vec<_>>>()
             .map(Arc::from)
+    }
+
+    /// The live `IndexedReady` record of the declaration file `canonical`, as
+    /// an instantiation reads it: the declaration's content version and
+    /// shallow inventory. Every instantiation of a declaration reads its
+    /// file's record, so a record this transaction already served under the
+    /// same edit clocks answers again by replaying what serving it read —
+    /// its facts, refusal and self-roots reach the enclosing build exactly as
+    /// serving it again would deliver them.
+    pub(super) fn instantiation_indexed_record(
+        &self,
+        canonical: &str,
+    ) -> Option<Arc<verter_session_query::inputs::indexed::IndexedInputRecord>> {
+        let served_at = self.workspace_edit();
+        let completed = self
+            .dispatch_txn
+            .borrow()
+            .indexed_serves
+            .get(canonical, served_at)
+            .cloned();
+        if let Some(completed) = completed {
+            self.replay_transaction_read(&completed.reuse, &completed.replay);
+            return completed.record;
+        }
+        let (record, recorded) = self.record_transaction_read(
+            || {
+                self.ctx
+                    .ensure_indexed_ready_serve(canonical)
+                    .map(|serve| serve.indexed)
+            },
+            Option::is_some,
+        );
+        if let Some((reuse, replay)) = recorded {
+            self.dispatch_txn.borrow_mut().indexed_serves.complete(
+                Arc::from(canonical),
+                super::dispatch_txn::TransactionIndexedServe {
+                    record: record.clone(),
+                    served_at,
+                    reuse,
+                    replay,
+                },
+            );
+        }
+        record
     }
 
     /// Resolve the typed declaration kind of a prepared declaration rooted at

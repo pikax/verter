@@ -2620,6 +2620,58 @@ pub struct CheckerDispatchTransaction {
     pub augmentation: AugmentationPlanTable,
     /// The declaration kinds read on this transaction.
     pub decl_kinds: DeclKindTable,
+    /// The declaration files' `IndexedReady` records instantiations read on
+    /// this transaction.
+    pub indexed_serves: IndexedServeTable,
+}
+
+/// A declaration file's `IndexedReady` record this transaction served
+/// completely: the record, the edit clocks it was served under, how far the
+/// read may travel, and what serving it again replays.
+#[derive(Debug, Clone)]
+pub struct TransactionIndexedServe {
+    pub record: Option<Arc<verter_session_query::inputs::indexed::IndexedInputRecord>>,
+    pub(super) served_at: super::WorkspaceEdit,
+    pub reuse: verter_session_query::facts::reuse::ReuseClass,
+    pub replay: FlowMemberReuse,
+}
+
+/// The `IndexedReady` records served on this transaction, by declaration
+/// file. A canonical names no content version, so a record answers only
+/// under the edit clocks it was served under: an edit since moves them and
+/// the file is served afresh.
+#[derive(Default)]
+pub struct IndexedServeTable {
+    served: FxHashMap<Arc<str>, TransactionIndexedServe>,
+}
+
+impl std::fmt::Debug for IndexedServeTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IndexedServeTable")
+            .field("served", &self.served.len())
+            .finish()
+    }
+}
+
+impl IndexedServeTable {
+    /// The completed serve of `canonical` under the edit clocks `at`, if any.
+    pub(super) fn get(
+        &self,
+        canonical: &str,
+        at: super::WorkspaceEdit,
+    ) -> Option<&TransactionIndexedServe> {
+        self.served
+            .get(canonical)
+            .filter(|served| served.served_at == at)
+    }
+
+    /// Record a completed serve. Only a request-reusable class enters; a
+    /// later serve under newer clocks replaces an older one.
+    pub(super) fn complete(&mut self, canonical: Arc<str>, served: TransactionIndexedServe) {
+        if served.reuse.is_request_reusable() {
+            self.served.insert(canonical, served);
+        }
+    }
 }
 
 /// A declaration kind this transaction read completely: the kind, how far
