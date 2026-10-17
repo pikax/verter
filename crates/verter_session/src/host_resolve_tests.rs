@@ -7330,7 +7330,8 @@ fn an_unnameable_root_component_zeroes_its_whole_arm() {
             ResolvedRootStep::NativeTag {
                 tag: "div".to_string(),
             },
-        ],
+        ]
+        .into(),
         status: BranchStatus::Resolved,
     };
     let resolution = crate::types::FallthroughResolution {

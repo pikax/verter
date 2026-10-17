@@ -2122,7 +2122,7 @@ defineProps<{ own: SharedAlias }>()
                 }],
             }],
             events: Vec::new(),
-            root_chain: Vec::new(),
+            root_chain: Default::default(),
             status: cm::BranchStatus::Resolved,
         }],
     };

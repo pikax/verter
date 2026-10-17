@@ -1435,6 +1435,20 @@ impl PayloadHeap for cm::ResolvedRootStep {
     }
 }
 
+/// Each link block once per measurement: chains of different branches share
+/// their tails.
+impl PayloadHeap for cm::RootChain {
+    fn heap(&self, m: &mut Meter) -> usize {
+        let mut bytes = 0;
+        for (link, step) in self.links() {
+            if m.borrowed.insert(link as usize) {
+                bytes += arc_block_bytes(cm::RootChain::link_inline_bytes()) + step.heap(m);
+            }
+        }
+        bytes
+    }
+}
+
 impl PayloadHeap for cm::FallthroughBranch {
     fn heap(&self, m: &mut Meter) -> usize {
         let Self {

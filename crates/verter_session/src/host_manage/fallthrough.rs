@@ -342,7 +342,8 @@ impl VerterHost {
                             reason: UnresolvedBranchReason::Cycle {
                                 canonical_id: canonical_id.to_string(),
                             },
-                        }],
+                        }]
+                        .into(),
                         status: BranchStatus::Unresolved {
                             reason: UnresolvedBranchReason::Cycle {
                                 canonical_id: canonical_id.to_string(),
@@ -675,14 +676,10 @@ impl VerterHost {
         // Child / dep `Route` facts DO round-trip, so they are kept.
         // Empty signatures and an absent tracer stack are both a
         // no-op.
-        let cross_file_fallthrough_facts: Vec<
-            verter_session_query::facts::fact_cache::FactVersionRef,
-        > = resolved_surface
-            .fact_versions
-            .iter()
-            .filter(|fact| fact.canonical_id() != Some(canonical_id))
-            .cloned()
-            .collect();
+        let cross_file_fallthrough_facts = crate::resolver_core::cross_file_fallthrough_facts(
+            &resolved_surface.fact_versions,
+            canonical_id,
+        );
         verter_type_engine::fact_signature_helpers::observe_fact_signature(
             &cross_file_fallthrough_facts,
         );
@@ -1565,12 +1562,10 @@ impl VerterHost {
                 // `mirror_cached_resolved_meta_arc`). The stored
                 // `CachedFallthroughEntry` keeps the FULL set for its
                 // own warm validation. Empty signatures are a no-op.
-                let cross_file_facts: Vec<verter_session_query::facts::fact_cache::FactVersionRef> =
-                    fact_versions
-                        .iter()
-                        .filter(|fact| fact.canonical_id() != Some(canonical_id))
-                        .cloned()
-                        .collect();
+                let cross_file_facts = crate::resolver_core::cross_file_fallthrough_facts(
+                    &fact_versions,
+                    canonical_id,
+                );
                 verter_type_engine::fact_signature_helpers::observe_fact_signature(
                     &cross_file_facts,
                 );

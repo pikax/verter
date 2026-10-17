@@ -810,6 +810,174 @@ pub enum ResolvedRootStep {
     },
 }
 
+/// The ordered chain of root steps a fallthrough branch traversed, outermost
+/// step first.
+///
+/// A persistent list: a parent that reaches a child's branch through one more
+/// component hop prepends that hop to the child's chain and SHARES the rest,
+/// so composing a `n`-hop chain writes one step per hop instead of copying
+/// every suffix into every ancestor. Order, multiplicity and every step are
+/// preserved exactly; equality compares the steps in order.
+#[derive(Clone, Default)]
+pub struct RootChain {
+    head: Option<std::sync::Arc<RootChainLink>>,
+}
+
+/// One step of a [`RootChain`] and the chain after it.
+struct RootChainLink {
+    step: ResolvedRootStep,
+    len: usize,
+    rest: RootChain,
+}
+
+impl RootChain {
+    /// The chain holding only `step`.
+    #[must_use]
+    pub fn single(step: ResolvedRootStep) -> Self {
+        Self::prepend(step, &Self::default())
+    }
+
+    /// `step` followed by `rest`, sharing `rest`.
+    #[must_use]
+    pub fn prepend(step: ResolvedRootStep, rest: &Self) -> Self {
+        Self {
+            head: Some(std::sync::Arc::new(RootChainLink {
+                step,
+                len: rest.len() + 1,
+                rest: rest.clone(),
+            })),
+        }
+    }
+
+    /// How many steps the chain holds.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.head.as_ref().map_or(0, |link| link.len)
+    }
+
+    /// Whether the chain holds no step.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.head.is_none()
+    }
+
+    /// The steps, outermost first.
+    pub fn iter(&self) -> RootChainIter<'_> {
+        RootChainIter {
+            next: self.head.as_deref(),
+        }
+    }
+
+    /// The outermost step.
+    #[must_use]
+    pub fn first(&self) -> Option<&ResolvedRootStep> {
+        self.head.as_deref().map(|link| &link.step)
+    }
+
+    /// The innermost step: the target the chain ends at.
+    #[must_use]
+    pub fn last(&self) -> Option<&ResolvedRootStep> {
+        self.iter().last()
+    }
+
+    /// Each link's shared allocation address with its step, outermost first, so a footprint measurement can count a link shared by several
+    /// chains once.
+    pub fn links(&self) -> impl Iterator<Item = (*const (), &ResolvedRootStep)> + '_ {
+        std::iter::successors(self.head.as_ref(), |link| link.rest.head.as_ref())
+            .map(|link| (std::sync::Arc::as_ptr(link).cast::<()>(), &link.step))
+    }
+
+    /// Inline bytes of one link's shared allocation payload.
+    #[must_use]
+    pub const fn link_inline_bytes() -> usize {
+        std::mem::size_of::<RootChainLink>()
+    }
+
+    /// Whether two chains share one head allocation.
+    #[must_use]
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        match (&self.head, &other.head) {
+            (Some(left), Some(right)) => std::sync::Arc::ptr_eq(left, right),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+}
+
+/// The steps of a [`RootChain`], outermost first.
+pub struct RootChainIter<'a> {
+    next: Option<&'a RootChainLink>,
+}
+
+impl<'a> Iterator for RootChainIter<'a> {
+    type Item = &'a ResolvedRootStep;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let link = self.next?;
+        self.next = link.rest.head.as_deref();
+        Some(&link.step)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.next.map_or(0, |link| link.len);
+        (len, Some(len))
+    }
+}
+
+impl ExactSizeIterator for RootChainIter<'_> {}
+
+impl<'a> IntoIterator for &'a RootChain {
+    type Item = &'a ResolvedRootStep;
+    type IntoIter = RootChainIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl FromIterator<ResolvedRootStep> for RootChain {
+    fn from_iter<I: IntoIterator<Item = ResolvedRootStep>>(steps: I) -> Self {
+        let steps: Vec<ResolvedRootStep> = steps.into_iter().collect();
+        steps
+            .into_iter()
+            .rev()
+            .fold(Self::default(), |rest, step| Self::prepend(step, &rest))
+    }
+}
+
+impl From<Vec<ResolvedRootStep>> for RootChain {
+    fn from(steps: Vec<ResolvedRootStep>) -> Self {
+        steps.into_iter().collect()
+    }
+}
+
+impl PartialEq for RootChain {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len()
+            && (self.ptr_eq(other) || self.iter().zip(other.iter()).all(|(a, b)| a == b))
+    }
+}
+
+impl std::fmt::Debug for RootChain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+/// Dropped from a loop: a long chain whose links each own the next would
+/// otherwise drop one native frame per step.
+impl Drop for RootChain {
+    fn drop(&mut self) {
+        let mut next = self.head.take();
+        while let Some(link) = next {
+            next = match std::sync::Arc::try_unwrap(link) {
+                Ok(mut link) => link.rest.head.take(),
+                Err(_) => None,
+            };
+        }
+    }
+}
+
 /// A single branch in the fallthrough surface.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FallthroughBranch {
@@ -822,7 +990,7 @@ pub struct FallthroughBranch {
     /// Inherited events in this branch (after subtraction).
     pub events: Vec<FallthroughEventEntry>,
     /// Chain of root steps traversed to produce this branch.
-    pub root_chain: Vec<ResolvedRootStep>,
+    pub root_chain: RootChain,
     /// Resolution status of this branch.
     pub status: BranchStatus,
 }

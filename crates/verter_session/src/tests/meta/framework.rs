@@ -2087,7 +2087,7 @@ fn component_meta_output_missing_sources_follow_central_policy_on_every_lane() {
                     tag: "div".to_string(),
                 }],
             }],
-            root_chain: Vec::new(),
+            root_chain: Default::default(),
             status: cm::BranchStatus::Resolved,
         }],
     };
@@ -2219,7 +2219,7 @@ fn component_meta_output_unraisable_nested_sources_fail_typed_with_inner_index()
                     condition_text: None,
                     props: Vec::new(),
                     events: Vec::new(),
-                    root_chain: Vec::new(),
+                    root_chain: Default::default(),
                     status: verter_session_query::analysis::component_meta::BranchStatus::Resolved,
                 },
                 verter_session_query::analysis::component_meta::FallthroughBranch {
@@ -2242,7 +2242,7 @@ fn component_meta_output_unraisable_nested_sources_fail_typed_with_inner_index()
                         },
                     ],
                     events: Vec::new(),
-                    root_chain: Vec::new(),
+                    root_chain: Default::default(),
                     status: verter_session_query::analysis::component_meta::BranchStatus::Resolved,
                 },
             ],
