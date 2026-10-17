@@ -1027,13 +1027,21 @@ beyond the output they own. `FactReadSet::finalise` merges absorbed canonical
 runs over borrowed facts (comparison count unchanged) and clones each distinct
 fact once; fan-out to an enclosing tracer copies a fact only when its recent
 window lacks it; `semantic_graph_read_set_signature` keys self-roots in a sorted
-small list and leaves sorting to the one seal. The reverse index registers and
-drains through ONE borrowed projection (`RegisteredCanonicals` over
-`ReadSetSignature::for_each_canonical_id` ∪ the dispatch-fence canonicals), so
-publish, displacement, FIFO eviction and canonical invalidation stay symmetric
-without allocating a canonical per call; an existing shard is reached by a read
-guard (which excludes the outer `remove_if` like the write-locked `entry` path),
-and a prune attempts the outer drop only when it emptied the inner map. The
+small list and leaves sorting to the one seal. The reverse index
+(`semantic_query_memo::ReceiptReverseIndex`, shared by the family memo, the
+refusal-summary table and `cache_runtime::ReverseIndexedCandidateStore`)
+registers DIRECT edges, each once: canonical → the evidence (carrier, receipt
+or page, cached or not) whose own facts read it, consumed receipt → the
+evidence that consumed it, carrier → its candidates, plus each candidate's
+extra canonicals (dispatch fence / strict self-roots). A chain or diamond costs
+`O(F + E + C)` physical registrations however many candidates share it —
+never a per-candidate canonical closure — and `invalidate_canonical` walks up
+from the canonical, each node once. Unregistering a candidate drops every
+evidence node and canonical only it reached, so the index drains to empty with
+its last candidate; edges naming a candidate are charged by that candidate's
+reservation, edges naming evidence by the index's own pin. The index drives
+explicit-invalidation cleanup only, never validity; its one leaf lock is taken
+inside each store's existing consistency boundary. The
 allocation canary `recursive_paths_allocations_per_entity_stay_flat` guards the
 per-entity allocation ceiling and its flat growth across layouts.
 

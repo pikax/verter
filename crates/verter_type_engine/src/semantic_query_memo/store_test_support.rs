@@ -307,7 +307,7 @@ impl SemanticGraphStore {
             &entry,
             &family,
             populated_slots,
-            reverse_index_inputs.canonical_count(),
+            reverse_index_inputs.direct_edge_count(),
         ) else {
             return 0;
         };

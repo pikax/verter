@@ -122,7 +122,7 @@ impl MemoEntry {
     /// The bytes of this candidate's cache-only bookkeeping, held for exactly
     /// as long as the candidate: its entry in every slot its publication may
     /// populate (with each slot's container convention), its materialised
-    /// point record, and its reverse-index registrations. None of these is
+    /// point record, and its reverse-index registration. None of these is
     /// handed to a caller, so none outlives the candidate. Its delivery
     /// lease is caller metadata warm reads share, charged by the lease's own
     /// owner for as long as it lives; the carrier, the delivered rails and
@@ -132,18 +132,18 @@ impl MemoEntry {
         &self,
         family: &FamilyKey,
         populated_slots: usize,
-        registered_canonicals: usize,
+        direct_edges: usize,
     ) -> usize {
         use crate::semantic_query::allocation_footprint::OwnedHeap as _;
         let mut aliases = verter_session_query::retention::allocation::AliasSet::new();
         populated_slots
             * (std::mem::size_of::<Self>() + verter_session_query::retention::ENTRY_OVERHEAD_BYTES)
             + self.satisfied_projection.owned_heap_bytes(&mut aliases)
-            + super::reverse_index::registration_bytes(
-                family,
-                registered_canonicals,
-                populated_slots,
-            )
+            + if populated_slots == 0 {
+                0
+            } else {
+                super::reverse_index::registration_bytes(family, direct_edges)
+            }
     }
 }
 

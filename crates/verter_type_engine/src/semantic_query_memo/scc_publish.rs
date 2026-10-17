@@ -391,10 +391,9 @@ impl SemanticGraphStore {
             .iter()
             .map(|member| (&member.family, &member.entry))
             .collect();
-        let registered_canonicals =
-            reverse_index::ReverseIndexInputs::new(carrier, &dispatch_dep_signature)
-                .canonical_count();
-        let retentions = match self.reserve_scc_batch(&staged_entries, registered_canonicals) {
+        let direct_edges = reverse_index::ReverseIndexInputs::new(carrier, &dispatch_dep_signature)
+            .direct_edge_count();
+        let retentions = match self.reserve_scc_batch(&staged_entries, direct_edges) {
             Ok(retentions) => retentions,
             Err(_) => {
                 for member in &prepared {
@@ -579,7 +578,7 @@ impl SemanticGraphStore {
     pub(super) fn reserve_scc_batch(
         &self,
         members: &[(&FamilyKey, &MemoEntry)],
-        registered_canonicals: usize,
+        direct_edges: usize,
     ) -> Result<
         Vec<Arc<super::retention::MemoRetention>>,
         verter_session_query::retention::RetentionRefusal,
@@ -609,7 +608,7 @@ impl SemanticGraphStore {
         let own: Vec<usize> = members
             .iter()
             .map(|(family, entry)| {
-                super::retention::own_reservation_bytes(entry, family, 1, registered_canonicals)
+                super::retention::own_reservation_bytes(entry, family, 1, direct_edges)
             })
             .collect();
         // A shared carrier's evidence pages were claimed with the root; a
@@ -816,9 +815,12 @@ impl SemanticGraphStore {
         // refuses is not seeded.
         let reverse_index_inputs =
             reverse_index::ReverseIndexInputs::new(&carrier, &dispatch_dep_signature);
-        let Ok(retention) =
-            self.reserve_memo_candidate(&entry, &family, 1, reverse_index_inputs.canonical_count())
-        else {
+        let Ok(retention) = self.reserve_memo_candidate(
+            &entry,
+            &family,
+            1,
+            reverse_index_inputs.direct_edge_count(),
+        ) else {
             return;
         };
         entry.retention = Some(retention);

@@ -201,18 +201,13 @@ impl SemanticGraphStore {
         entry: &MemoEntry,
         family: &super::family::FamilyKey,
         populated_slots: usize,
-        registered_canonicals: usize,
+        direct_edges: usize,
     ) -> Result<Arc<MemoRetention>, RetentionRefusal> {
         let reserved = match entry
             .cost_receipt
             .reserve_retention(self.retention_account())
         {
-            Ok(()) => self.reserve_candidate_charges(
-                entry,
-                family,
-                populated_slots,
-                registered_canonicals,
-            ),
+            Ok(()) => self.reserve_candidate_charges(entry, family, populated_slots, direct_edges),
             Err(refusal) => Err(refusal),
         };
         reserved.map(Arc::new).inspect_err(|refusal| {
@@ -230,11 +225,10 @@ impl SemanticGraphStore {
         entry: &MemoEntry,
         family: &super::family::FamilyKey,
         populated_slots: usize,
-        registered_canonicals: usize,
+        direct_edges: usize,
     ) -> Result<MemoRetention, RetentionRefusal> {
         let shared = self.hold_shared_allocations(SharedParts::of(entry))?;
-        let own_bytes =
-            own_reservation_bytes(entry, family, populated_slots, registered_canonicals);
+        let own_bytes = own_reservation_bytes(entry, family, populated_slots, direct_edges);
         match verter_session_query::facts::receipt::reserve_retained_with_evidence(
             self.retention_account(),
             own_bytes,
@@ -402,10 +396,11 @@ impl SemanticGraphStore {
     }
 
     /// Bytes the store's memo bookkeeping is pinned for: its reverse
-    /// index's shards, its shared-charge registry's table and its
+    /// indexes' own storage, its shared-charge registry's table and its
     /// dependency-rail interner. A required current count.
     pub fn bookkeeping_storage_charge_bytes(&self) -> usize {
         self.canonical_to_entries.storage_charge_bytes()
+            + self.refusal_summaries.index_storage_charge_bytes()
             + self.alias_charges.table_charged_bytes()
             + self.dep_signature_interner.storage_charge_bytes()
     }
@@ -471,13 +466,13 @@ impl SharedHolds {
 }
 
 /// What `entry`'s own reservation covers: its bookkeeping for
-/// `populated_slots` slots registered under `registered_canonicals`
-/// canonicals each.
+/// `populated_slots` slots and a reverse-index registration naming
+/// `direct_edges` edges.
 pub(super) fn own_reservation_bytes(
     entry: &MemoEntry,
     family: &super::family::FamilyKey,
     populated_slots: usize,
-    registered_canonicals: usize,
+    direct_edges: usize,
 ) -> usize {
-    entry.own_retained_footprint_bytes(family, populated_slots, registered_canonicals)
+    entry.own_retained_footprint_bytes(family, populated_slots, direct_edges)
 }

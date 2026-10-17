@@ -623,3 +623,48 @@ fn publisher_registration_visible_to_concurrent_invalidator() {
     // Disarm the gate so subsequent tests are unaffected.
     store.test_arm_publish_post_push_pre_register_gate(None);
 }
+
+/// A candidate whose carrier consumes a chain of uncached results is
+/// reached from every file of the chain, registers each result once
+/// however many candidates share it, and drains with its last sibling.
+#[test]
+fn chained_receipts_reach_their_candidates_and_drain_with_the_last() {
+    use verter_session_query::facts::fact_cache::ResultReceipt;
+
+    let file = |i: usize| FactVersionRef::FileWholeHash {
+        canonical_id: format!("/w/chain{i}.ts"),
+        hash: [5; 16],
+    };
+    let mut receipts: Vec<ResultReceipt> = Vec::new();
+    for i in 0..16 {
+        let mut facts = vec![file(i)];
+        if let Some(below) = receipts.last() {
+            facts.push(FactVersionRef::Receipt(below.clone()));
+        }
+        receipts.push(ResultReceipt::new(facts));
+    }
+    let carrier = |receipt: &ResultReceipt| {
+        ReadSetSignature::new(Arc::from(vec![FactVersionRef::Receipt(receipt.clone())]))
+    };
+    let store: ReverseIndexedCandidateStore<u32, u32> =
+        ReverseIndexedCandidateStore::with_counter(Arc::new(AtomicU64::new(0)));
+    store.insert_for_test(1, 10, carrier(&receipts[15]), Arc::from(Vec::new()), 0);
+    store.insert_for_test(2, 20, carrier(&receipts[15]), Arc::from(Vec::new()), 1);
+    store.insert_for_test(3, 30, carrier(&receipts[4]), Arc::from(Vec::new()), 0);
+    let occupancy = store.reverse_index_occupancy_for_test();
+    assert_eq!(occupancy.canonicals, 16);
+    // Sixteen results and three carriers; each file, consumed edge,
+    // carrier edge and candidate edge once.
+    assert_eq!(occupancy.evidence, 16 + 3);
+    assert_eq!(occupancy.edges, 16 + 15 + 3 + 3);
+
+    assert_eq!(store.invalidate_canonical("/w/chain9.ts"), 2);
+    assert!(store.reverse_index_contains_key_for_test("/w/chain0.ts", &3));
+    assert!(!store.reverse_index_contains_key_for_test("/w/chain0.ts", &1));
+    assert_eq!(store.invalidate_canonical("/w/chain0.ts"), 1);
+    assert_eq!(
+        store.reverse_index_occupancy_for_test(),
+        crate::semantic_query_memo::ReverseIndexOccupancy::default()
+    );
+    assert_eq!(store.live_count(), 0);
+}
