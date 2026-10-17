@@ -21,6 +21,13 @@
 //! folds into its own taint: what a nested evaluation left on the enclosing
 //! build's tracer and taint frame when it ran on the native stack.
 //!
+//! A body projection that reaches a conditional type needs its decision as
+//! well. The decision runs as a frame whose reads of instantiations and
+//! `typeof`s are answered by the deliveries it received; one it has no
+//! answer for becomes its need, and the run that reached it is dropped and
+//! runs again once that need is delivered. A chain of conditionals each
+//! deciding over the one before is therefore a chain of frames too.
+//!
 //! Every other query, and every query a frame's step evaluates in place,
 //! keeps the synchronous path; code a step reaches never drives.
 //!
