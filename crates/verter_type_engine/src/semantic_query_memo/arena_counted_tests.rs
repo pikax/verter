@@ -16,9 +16,9 @@ fn arena_wait_counter_includes_hit_and_both_miss_acquisitions() {
         let provenance = Arc::new(crate::engine_provenance::EngineProvenance::default());
         arena.provenance = Some(Arc::clone(&provenance));
         let data = SemanticNodeData::Literal(LiteralValue::String("contended".into()));
-        if hit {
-            let _ = arena.push(data.clone());
-        }
+        // The hit case's seed stays owned across the worker's intern, so
+        // the worker finds it live rather than interning a fresh node.
+        let seeded = hit.then(|| arena.intern_owned(data.clone(), NodeScopeId::Global));
         let before = provenance
             .node_arena_inner_write_wait_ns
             .load(Ordering::Relaxed);
@@ -43,7 +43,10 @@ fn arena_wait_counter_includes_hit_and_both_miss_acquisitions() {
             resume.send(()).unwrap();
             std::thread::sleep(HOLD);
             drop(held);
-            worker.join().unwrap();
+            let interned = worker.join().unwrap();
+            if let Some(seeded) = &seeded {
+                assert_eq!(interned, seeded.id(), "the worker hit the live seed");
+            }
         });
         *arena.race_hook.lock() = None;
         let waited = provenance

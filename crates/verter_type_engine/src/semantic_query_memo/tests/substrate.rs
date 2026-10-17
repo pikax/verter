@@ -242,6 +242,88 @@ fn a_final_drop_after_close_keeps_the_destroyed_log_bounded() {
     }
 }
 
+/// A final release's drain that takes some sidecar locks and is blocked on
+/// another overlaps the blocking holder's unlock: the holder's settle runs
+/// while the drain still holds its partial locks. The obligation must
+/// survive that overlap — the drain retries once it lets its partial locks
+/// go — so the log is drained with no later work.
+///
+/// Discriminating against overlapping drain attempts that each fail on the
+/// other's partial locks and both return: the obligation stays owed and
+/// every destroyed id and its structure bits stay retained.
+#[test]
+fn an_unlock_during_a_blocked_drain_leaves_no_cleanup_stranded() {
+    use crate::semantic_query_memo::arena::ArenaRaceEvent;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    const WAIT: Duration = Duration::from_secs(30);
+    let threshold = super::super::release::DESTROYED_DRAIN_THRESHOLD;
+    let count = threshold * 4;
+    let store = SemanticGraphStore::new();
+    let scope = store.enter_node_root_scope();
+    let scoped = release_file_scope("/w/a.ts", 1);
+    for index in 0..count {
+        let node = store.intern_node_with_scope(
+            release_type_param("/w/a.ts", 1, &format!("T{index}")),
+            scoped.clone(),
+        );
+        store.node_is_inert_structure(node);
+    }
+    store.close_canonical("/w/a.ts");
+
+    let (held_tx, held_rx) = mpsc::channel();
+    let (unlock_tx, unlock_rx) = mpsc::channel::<()>();
+    let (unlocked_tx, unlocked_rx) = mpsc::channel();
+    let unlocked_rx = parking_lot::Mutex::new(unlocked_rx);
+    let blocked = Arc::new(AtomicUsize::new(0));
+    std::thread::scope(|threads| {
+        let holder = threads.spawn({
+            let store = &store;
+            move || {
+                let held = store.derivation.lock();
+                held_tx.send(()).unwrap();
+                let _ = unlock_rx.recv_timeout(WAIT);
+                // The guard's unlock settles while the drain holds its other
+                // sidecar locks.
+                drop(held);
+                let _ = unlocked_tx.send(());
+            }
+        });
+        held_rx.recv_timeout(WAIT).unwrap();
+        let observed = Arc::clone(&blocked);
+        store.arena.set_race_hook(Some(Arc::new(move |event| {
+            if event == ArenaRaceEvent::SidecarDrainBlocked
+                && observed.fetch_add(1, Ordering::SeqCst) == 0
+            {
+                let _ = unlock_tx.send(());
+                let _ = unlocked_rx.lock().recv_timeout(WAIT);
+            }
+        })));
+        drop(scope);
+        // Dropping the hook disconnects a holder the drain never released.
+        store.arena.set_race_hook(None);
+        holder.join().unwrap();
+    });
+
+    assert!(
+        blocked.load(Ordering::SeqCst) >= 1,
+        "premise: the final release's drain was blocked by the held lock"
+    );
+    assert_eq!(store.node_count(), 0, "the final drop destroys them all");
+    assert!(
+        store.pending_destroyed_nodes() <= threshold,
+        "pending {} of {count}",
+        store.pending_destroyed_nodes()
+    );
+    assert!(
+        store.unresolved_reach_count() <= threshold,
+        "stale structure bits {} of {count}",
+        store.unresolved_reach_count()
+    );
+}
+
 /// The inert-structure bit and the unresolved-reach bit of a node live in
 /// ONE per-node entry, so the two memos share one lifecycle: an entry
 /// released for a node id takes both bits with it, and no second node-id
