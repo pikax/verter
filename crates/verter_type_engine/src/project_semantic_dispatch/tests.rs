@@ -400,3 +400,58 @@ fn strip_line_comments(src: &str) -> String {
 }
 
 mod substitution;
+
+/// The active-instantiation index answers as the stack it indexes: an
+/// instantiation is refused while it is active, a declaration stays
+/// active while any instantiation of it is, and an entry left from the
+/// middle of the stack — a continuation frame stopped between its steps —
+/// leaves every index without disturbing the entries around it.
+#[test]
+fn active_instantiation_index_follows_its_stack() {
+    use std::sync::Arc;
+
+    use super::{ActiveInstantiation, ActiveInstantiations};
+    use crate::semantic_query::SemanticNodeId;
+
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let declaration = |name: &str| (Arc::<str>::from("/a.ts"), owner, Arc::<str>::from(name));
+    let entry = |name: &str, arg: u64| ActiveInstantiation {
+        identity: declaration(name),
+        args: Arc::from([SemanticNodeId(arg)]),
+    };
+    let mut active = ActiveInstantiations::default();
+    assert!(active.push(entry("A", 1)));
+    assert!(active.push(entry("B", 1)));
+    assert!(
+        active.push(entry("A", 2)),
+        "A over other arguments is another instantiation"
+    );
+    assert!(
+        !active.push(entry("A", 1)),
+        "A over the same arguments is active"
+    );
+    assert_eq!(active.len(), 3);
+
+    active.leave(&entry("A", 1));
+    assert_eq!(active.len(), 2);
+    assert!(
+        active.declares("/a.ts", owner, "A"),
+        "A over 2 is still active"
+    );
+    assert!(
+        active.push(entry("A", 1)),
+        "A over 1 left the index with the stack"
+    );
+
+    active.pop();
+    active.pop();
+    assert!(!active.declares("/a.ts", owner, "A"));
+    assert!(active.declares("/a.ts", owner, "B"));
+    active.pop();
+    assert_eq!(active.len(), 0);
+    assert!(!active.declares("/a.ts", owner, "B"));
+    assert!(
+        active.push(entry("B", 1)),
+        "nothing is left once the stack is empty"
+    );
+}

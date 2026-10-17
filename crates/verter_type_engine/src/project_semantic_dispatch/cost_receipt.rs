@@ -150,6 +150,24 @@ impl Hash for CostIdentity {
     }
 }
 
+/// The identity of one failed-prefix receipt
+/// ([`DemandCostReceipt::failed_prefix`]): its own allocation, equal only
+/// to itself. The receipt holding it keeps the allocation, and so the
+/// address its hash is taken from, alive.
+struct FailedPrefixIdentity;
+
+impl ProducerIdentity for FailedPrefixIdentity {
+    fn producer_hash(&self) -> u64 {
+        std::ptr::from_ref(self) as usize as u64
+    }
+
+    fn same_producer(&self, other: &dyn ProducerIdentity) -> bool {
+        other
+            .downcast_ref::<Self>()
+            .is_some_and(|other| std::ptr::eq(self, other))
+    }
+}
+
 /// A computation identified by an exact byte encoding.
 struct EncodedIdentity {
     hash: u64,
@@ -241,6 +259,11 @@ pub enum Nesting {
     /// A continuation frame's need, whose own frame runs at instantiation
     /// depth `depth` — one below the needing frame.
     Frame { depth: u32 },
+    /// The prerequisites of a recording that did not complete, folded into
+    /// its consumer as one failed-prefix receipt
+    /// ([`DemandCostReceipt::failed_prefix`]): they are the consumer's own,
+    /// so the receipt's footprint is the consumer's as it stands.
+    Folded,
 }
 
 impl Nesting {
@@ -248,14 +271,14 @@ impl Nesting {
     pub fn query_levels(self) -> u16 {
         match self {
             Self::Entered | Self::Drive => 1,
-            Self::InPlace | Self::Frame { .. } => 0,
+            Self::InPlace | Self::Frame { .. } | Self::Folded => 0,
         }
     }
 
     /// The deeper of two ways one result was consumed.
     fn deeper(self, other: Self) -> Self {
         let rank = |nesting: Self| match nesting {
-            Self::InPlace => 0,
+            Self::InPlace | Self::Folded => 0,
             Self::Entered => 1,
             Self::Drive => 2,
             Self::Frame { .. } => 3,
@@ -395,6 +418,12 @@ impl DemandCostReceipt {
                         .instantiation_required
                         .max(u32::from(below.instantiation_height) + 1);
                 }
+                // A failed prefix's frames are its consumer's own.
+                Nesting::Folded => {
+                    footprint.instantiation_height = footprint
+                        .instantiation_height
+                        .max(below.instantiation_height);
+                }
                 // A result read synchronously is evaluated without frames
                 // inside a running drive.
                 Nesting::InPlace | Nesting::Entered => {}
@@ -407,6 +436,22 @@ impl DemandCostReceipt {
             footprint,
             retention: OnceLock::new(),
         })
+    }
+
+    /// The failed-prefix receipt of `prerequisites`: what a recording that
+    /// did not complete consumed, sealed as one receipt its consumer owes in
+    /// their place ([`Nesting::Folded`]). Its identity is its own
+    /// allocation, so it is never confused with a computation that
+    /// completed, never paid on its own and never shared; it owes nothing
+    /// of its own, the recording's usage having been folded into the
+    /// consumer's. A chain of recordings that each fail folds one receipt
+    /// per level into the next, never the whole closure again.
+    pub(crate) fn failed_prefix(prerequisites: Vec<CostDependency>) -> Arc<Self> {
+        Self::new(
+            CostIdentity::of_producer(Arc::new(FailedPrefixIdentity)),
+            LogicalUsage::default(),
+            prerequisites,
+        )
     }
 
     /// The computation this receipt costs.

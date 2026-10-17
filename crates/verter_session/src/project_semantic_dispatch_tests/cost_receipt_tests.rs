@@ -401,6 +401,59 @@ fn an_abandoned_computation_is_its_consumers_cost() {
     );
 }
 
+/// A chain of computations that each fail — every level consuming one
+/// result, then abandoned into the level below — folds what each level
+/// consumed into its consumer as one failed-prefix receipt per level, not
+/// as every prerequisite the levels above already folded: the surviving
+/// consumer's receipt names a bounded list. It still owes everything the
+/// failed levels spent and consumed, and its footprint is what the levels
+/// needed: a result consumed by a frame below any of them keeps its frame.
+#[test]
+fn failed_computations_fold_one_prefix_per_level() {
+    const LEVELS: usize = 64;
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let ledger = &dispatch.connected_demand();
+    let (_guard, _) = dispatch.enter_connected_demand(false);
+    ledger.open_cost_scope(identity("root"));
+    for level in 0..LEVELS {
+        ledger.open_cost_scope(identity(&format!("L{level}")));
+    }
+    for level in (0..LEVELS).rev() {
+        let consumed =
+            DemandCostReceipt::new(identity(&format!("R{level}")), usage(1, 0), Vec::new());
+        let nesting = if level == LEVELS / 2 {
+            Nesting::Frame { depth: 1 }
+        } else {
+            Nesting::InPlace
+        };
+        ledger.record_prerequisite(&consumed, nesting);
+        ledger.charge().expect("the level's own unit");
+        ledger.abandon_cost_scope();
+    }
+    let root = ledger.seal_cost_scope(None).expect("the root seals");
+    assert!(
+        root.prerequisites().len() <= 2,
+        "{} prerequisites folded into the surviving consumer",
+        root.prerequisites().len()
+    );
+    assert_eq!(
+        root.exclusive(),
+        usage(LEVELS as u64, 0),
+        "the failed levels' own units"
+    );
+    assert_eq!(
+        root.closure_usage(),
+        usage(2 * LEVELS as u64, 0),
+        "the failed levels' units and every result they consumed"
+    );
+    assert_eq!(
+        root.footprint().instantiation_height,
+        1,
+        "the frame a failed level consumed a result through is the consumer's"
+    );
+}
+
 /// A computation run again in the same demand — its result could not be
 /// served — is charged again: the demand pays for the work it does, so a
 /// demand that recomputes a result is bounded by its allowance however
