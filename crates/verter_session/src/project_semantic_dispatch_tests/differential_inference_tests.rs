@@ -1976,6 +1976,11 @@ export function n15() { return pa([c ? { v: "a" } : { v: sl }]); }
 export function n16() { return pu(c ? { v: "a" } : { v: sl }); }
 export function n17() { return pu({ v: "a" satisfies string }); }
 export function n18() { return pu({ v: ["a" as const, "b"] }); }
+declare function id<T>(x: T): T;
+export function n19() { return id(c ? { a: 1 } : { a: 2 }); }
+export function n20() { return id(c ? { a: 2 } : { a: 1 }); }
+export function n21() { return id(c ? { a: 1 } : { a: "s" }); }
+export function n22() { return id(c ? { a: 1 } : { a: 2, b: "x" }); }
 "##;
 
 /// A literal's freshness belongs to its authored occurrence: a fresh
@@ -1983,7 +1988,9 @@ export function n18() { return pu({ v: ["a" as const, "b"] }); }
 /// conditional of a fresh and an asserted arm widens, an equal asserted
 /// literal at a sibling element does not keep a fresh one, a whole stored
 /// argument keeps its literal, and a `const` type parameter keeps every
-/// nested literal readonly.
+/// nested literal readonly. A conditional's object arms the widening makes
+/// alike are one type in either order, while arms that stay unlike keep
+/// both.
 #[test]
 fn authored_literal_occurrences() {
     let failures = Matrix::new(AUTHORED_LITERAL_OCCURRENCES).four(&[
@@ -2091,6 +2098,34 @@ fn authored_literal_occurrences() {
             r#"string[]"#,
             r#"string[]"#,
             r#"string[]"#,
+        ),
+        (
+            Read::Return(r#"n19"#),
+            r#"{ a: number; }"#,
+            r#"{ a: number; }"#,
+            r#"{ a: number; }"#,
+            r#"{ a: number; }"#,
+        ),
+        (
+            Read::Return(r#"n20"#),
+            r#"{ a: number; }"#,
+            r#"{ a: number; }"#,
+            r#"{ a: number; }"#,
+            r#"{ a: number; }"#,
+        ),
+        (
+            Read::Return(r#"n21"#),
+            r#"{ a: number; } | { a: string; }"#,
+            r#"{ a: number; } | { a: string; }"#,
+            r#"{ a: number; } | { a: string; }"#,
+            r#"{ a: number; } | { a: string; }"#,
+        ),
+        (
+            Read::Return(r#"n22"#),
+            r#"{ a: number; b?: undefined; } | { a: number; b: string; }"#,
+            r#"{ a: number; b?: undefined; } | { a: number; b: string; }"#,
+            r#"{ a: number; b?: undefined; } | { a: number; b: string; }"#,
+            r#"{ a: number; b?: undefined; } | { a: number; b: string; }"#,
         ),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
