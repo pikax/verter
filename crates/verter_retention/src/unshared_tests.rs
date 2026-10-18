@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use super::*;
-use crate as verter_retention;
 
 #[derive(Debug, Clone, PartialEq, Unshared)]
 enum Tree {
