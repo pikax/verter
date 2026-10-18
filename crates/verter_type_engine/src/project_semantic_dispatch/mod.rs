@@ -1093,10 +1093,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// Exchange all of this dispatcher's request state with `other`, a
     /// dispatcher of the same request ([`Self::task_dispatcher`]): every
-    /// active instantiation and recursion guard, the checker transaction
-    /// with its inference sessions, the build taint stack, the connected
-    /// demand and its cost recordings, and the request's kept results. A
-    /// semantic task borrows the state for its drive and gives it back.
+    /// active instantiation and recursion guard, the free-type-variable
+    /// summaries, the checker transaction with its inference sessions, the
+    /// build taint stack, the connected demand and its cost recordings, and
+    /// the request's kept results. A semantic task borrows the state for
+    /// its drive and gives it back.
     pub(super) fn exchange_request_state(&self, other: &Self) {
         let Self {
             binding: _,
@@ -1109,6 +1110,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             awaited_active,
             carrier_normalizing,
             closedness_active,
+            free_type_variables,
             heritage_ancestry,
             build_local_taint,
             homomorphic_aliases,
@@ -1133,12 +1135,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             call_seam,
             flow_seam,
             substitution_binder,
-            free_type_variables,
         } = self;
         instantiate_active.swap(&other.instantiate_active);
         awaited_active.swap(&other.awaited_active);
         carrier_normalizing.swap(&other.carrier_normalizing);
         closedness_active.swap(&other.closedness_active);
+        free_type_variables.swap(&other.free_type_variables);
         heritage_ancestry.swap(&other.heritage_ancestry);
         build_local_taint.swap(&other.build_local_taint);
         homomorphic_aliases.swap(&other.homomorphic_aliases);
@@ -1173,7 +1175,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         call_seam.swap(&other.call_seam);
         flow_seam.swap(&other.flow_seam);
         substitution_binder.swap(&other.substitution_binder);
-        free_type_variables.swap(&other.free_type_variables);
     }
 
     /// Open a nested construction scope of this dispatcher's graph: the
