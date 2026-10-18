@@ -641,18 +641,11 @@ pub(super) async fn resync_aliased_imports_for_open_files(
         // `CachedTsx` but no `Main` — is not skipped. `Ok(false)` (no IDE
         // surface) skips; otherwise proceed to the owner-aware provider sync.
         let profile = documents.tsx_profile.read().clone();
-        if !host
-            .ensure_ide_compiled(import_id, &profile)
-            .unwrap_or(false)
-        {
+        let Some(compiled) = host.compile_ide(import_id, &profile).ok().flatten() else {
             continue;
-        }
-
-        let ide = if is_tsgo {
-            host.get_ide(import_id, &profile)
-        } else {
-            None
         };
+
+        let ide = is_tsgo.then_some(compiled);
 
         // Route the owner-resolved carrier (or an owner lost mid-flight) through the
         // SINGLE carrier-sync gateway: tsserver publishes the membership, tsgo opens
@@ -835,14 +828,11 @@ pub(super) async fn resync_aliased_imports_for_open_files(
             // IDE-sync: gate on the IDE/TSX surface (not the runtime `Main`) so
             // a Main-less carrier (Svelte) is not skipped here.
             let profile = documents.tsx_profile.read().clone();
-            if !host
-                .ensure_ide_compiled(carrier_id, &profile)
-                .unwrap_or(false)
-            {
+            let Some(compiled) = host.compile_ide(carrier_id, &profile).ok().flatten() else {
                 continue;
-            }
+            };
 
-            let ide = host.get_ide(carrier_id, &profile);
+            let ide = Some(compiled);
 
             // Route the owner-resolved carrier (or an owner lost mid-flight) through
             // the SINGLE carrier-sync gateway. Any synced kind counts as progress.
@@ -1058,11 +1048,14 @@ pub(super) async fn sync_pending_carrier_provider_file(
     };
     let profile = documents.tsx_profile.read().clone();
     // IDE-sync: drive the IDE/TSX surface (not the runtime `Main`) so a
-    // Main-less carrier (Svelte) populates its `CachedTsx` before `get_ide`.
-    let _ = block_in_place_if_available(|| {
-        documents.host().ensure_ide_compiled(canonical_id, &profile)
+    // Main-less carrier (Svelte) serves its `CachedTsx`. A failed compile
+    // falls back to whatever the cache still holds.
+    let ide = block_in_place_if_available(|| {
+        documents
+            .host()
+            .compile_ide(canonical_id, &profile)
+            .unwrap_or_else(|_| documents.host().get_ide(canonical_id, &profile))
     });
-    let ide = block_in_place_if_available(|| documents.host().get_ide(canonical_id, &profile));
     // The drain's compile is the OTHER path that can recover a carrier left
     // without a provider projection (the document commit never compiles). Cache
     // read only — the compile just above already ran — and a no-op once a
