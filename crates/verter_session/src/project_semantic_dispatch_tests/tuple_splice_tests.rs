@@ -422,6 +422,44 @@ fn an_expression_splice_past_the_limit_is_ts2800() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// A refused array-literal splice is still the literal's TS2800 recovery,
+/// but the checker checks every element after it first: a write in a later
+/// element is applied and narrows the variable it assigns.
+#[test]
+fn elements_after_a_refused_splice_still_evaluate() {
+    let host = default_probe_host();
+    let source = format!(
+        "declare const a5000: {};\n\
+         export function refused() {{ let x: string | number = \"a\"; \
+         const t = [...a5000, ...a5000, (x = 1)] as const; return [t, x] as const; }}\n",
+        zeros(5_000)
+    );
+    let result = flow_return_audited_on_host(&host, &source, "refused")
+        .into_result()
+        .unwrap_or_else(|error| panic!("`refused` returns: {error:?}"));
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&ctx);
+    let data = dispatch.graph().node_data(result.return_type());
+    let Some(SemanticNodeData::Tuple { elements, .. }) = data.as_deref() else {
+        panic!("the return is the pair of the literal and the written variable");
+    };
+    let [literal, written] = elements.as_ref() else {
+        panic!("a pair is returned");
+    };
+    assert_eq!(
+        recovery(&dispatch, literal.value).map(|(diagnostic, basis, _)| (diagnostic, basis)),
+        Some((TS2800, RecoveryBasis::Budget)),
+        "the literal is the checker's recovery"
+    );
+    assert_eq!(
+        render_node(&dispatch, written.value, 0),
+        "number",
+        "the write after the spread is applied"
+    );
+}
+
 /// Checking for a tuple product must not materialize recursive nominal
 /// members through a generic return alias either.
 #[test]

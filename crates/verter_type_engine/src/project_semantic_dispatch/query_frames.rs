@@ -93,6 +93,18 @@ pub(super) struct FrameDelivery {
     depth: u32,
 }
 
+/// One demand of a semantic task: the query and the checking site it is
+/// evaluated at. A query evaluated at one site recovers differently from
+/// the same query at the other (TS2799 against TS2800), so the two are two
+/// computations: a result completed at one site never answers a need at
+/// the other, and a need at one site never closes a cycle through the
+/// other's open demand.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(super) struct QueryDemand {
+    key: SemanticQueryKey,
+    site: TupleSplicePosition,
+}
+
 /// The program instantiations run on: the dispatcher they evaluate through
 /// — the semantic task's own, holding the request state the task borrowed
 /// — the graph its producers and subscriptions are claimed on, and the
@@ -102,12 +114,11 @@ pub(super) struct QueryProgram<'p, 'a, C: crate::resolver_core::ResolverCapabili
     graph: &'p crate::semantic_query_memo::SemanticGraphStore,
     task: ExecutionTask,
     /// Claims that continue after an outside producer went away.
-    retries: FxHashMap<SemanticQueryKey, ClaimAttempt>,
+    retries: FxHashMap<QueryDemand, ClaimAttempt>,
     /// The depth a frame started now nests at: one below the frame whose
     /// step needed it (the drive runs one chain, so a demand starts right
     /// after the step that needed it, or after its wait restarts it).
     child_depth: u32,
-    child_site: TupleSplicePosition,
     /// Test-only: the demands a call's walk suspends on are claimed by
     /// another task first, and held until released.
     #[cfg(any(test, feature = "test-support"))]
@@ -352,7 +363,7 @@ impl FrameProducer<'_> {
 
 /// A subscription to another task's producer, with the claim it continues.
 pub(super) struct PendingClaim<'p> {
-    key: SemanticQueryKey,
+    demand: QueryDemand,
     subscription: Subscription<'p>,
     /// Taken when the subscription resolves, for the claim to continue.
     attempt: Option<ClaimAttempt>,
@@ -394,7 +405,7 @@ pub struct SemanticTask<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilitie
     /// for the dispatcher that lent it.
     home: Arc<parking_lot::Mutex<Option<UnreturnedTask<'a, C>>>>,
     /// The root the first poll opens.
-    root: Option<SemanticQueryKey>,
+    root: Option<QueryDemand>,
 }
 
 /// The per-thread accounting a task records for the computes it was lent
@@ -603,18 +614,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if let Some(context) = verter_execution::request_context::current_context() {
             execution.bind_request_context(context);
         }
-        let child_site = dispatch.checking_site.get();
+        let root = QueryDemand {
+            key,
+            site: attempt.checking_site(),
+        };
         let mut program = QueryProgram {
             dispatch,
             graph,
             task: graph.execution_task(),
             retries: FxHashMap::default(),
             child_depth: 1,
-            child_site,
             #[cfg(any(test, feature = "test-support"))]
             held_call_needs: None,
         };
-        program.retries.insert(key.clone(), attempt);
+        program.retries.insert(root.clone(), attempt);
         SemanticTask {
             execution,
             program: Some(program),
@@ -627,7 +640,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             job_cancellation: verter_execution::cancellation::current_job_cancellation_token(),
             accounting: TaskAccounting::lend(),
             home: Arc::new(parking_lot::Mutex::new(None)),
-            root: Some(key),
+            root: Some(root),
         }
     }
 
@@ -693,14 +706,14 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> QueryProgram<'p, 'a,
     /// Claim `key` as another task's producer, when the test holds the
     /// demands a call's walk suspends on.
     #[cfg(any(test, feature = "test-support"))]
-    fn hold_call_need_for_tests(&mut self, key: &SemanticQueryKey) {
+    fn hold_call_need_for_tests(&mut self, key: &SemanticQueryKey, site: TupleSplicePosition) {
         let Some(held) = self.held_call_needs.as_mut() else {
             return;
         };
         let dispatch = &self.dispatch;
         let other = self.graph.task_registry_for_tests().register_task();
         let mut capture = ReadCapture::default();
-        capture.set_checking_site(self.child_site);
+        capture.set_checking_site(site);
         let Ok(mut attempt) = self.graph.begin_query_claim(
             dispatch.ctx,
             dispatch.snapshot.flags(),
@@ -744,25 +757,22 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> QueryProgram<'p, 'a,
 impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
     for QueryProgram<'p, 'a, C>
 {
-    type Demand = SemanticQueryKey;
+    type Demand = QueryDemand;
     type Frame = QueryFrame<'p, 'a, C>;
     type Value = QueryDelivery;
     type Failure = ();
     type Role = ();
     type Subscription = PendingClaim<'p>;
 
-    fn start(&mut self, key: &SemanticQueryKey) -> Start<Self> {
+    fn start(&mut self, demand: &QueryDemand) -> Start<Self> {
         let dispatch = &self.dispatch;
-        let site = self
-            .retries
-            .get(key)
-            .map_or(self.child_site, ClaimAttempt::checking_site);
-        let _site = dispatch.checking_site_scope(site);
+        let key = &demand.key;
+        let _site = dispatch.checking_site_scope(demand.site);
         // The needed key's own frame runs one level below the needing one.
         let nesting = Nesting::Frame {
             depth: self.child_depth,
         };
-        let mut attempt = match self.retries.remove(key) {
+        let mut attempt = match self.retries.remove(demand) {
             Some(attempt) => attempt,
             None => match dispatch.enter_query_frame(key, self.child_depth) {
                 Ok(attempt) => attempt,
@@ -838,7 +848,7 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
                 Start::Answer(Ok(dispatch.recursion_delivery(key, recursion)))
             }
             Claim::Subscribed(subscription) => Start::Subscribe(PendingClaim {
-                key: key.clone(),
+                demand: demand.clone(),
                 subscription,
                 attempt: Some(attempt),
                 nesting,
@@ -853,52 +863,58 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
         match frame {
             QueryFrame::Instantiate(frame) => {
                 self.child_depth = frame.depth + 1;
-                let step = self.dispatch.step_instantiate_frame(frame, delivery);
-                self.child_site = match &frame.build {
-                    Some(FrameBuild::Typeof(build)) => build
-                        .body
-                        .as_ref()
-                        .map_or(TupleSplicePosition::Type, |body| body.checking_site()),
-                    _ if matches!(frame.key, SemanticQueryKey::TypeOf { .. }) => {
-                        TupleSplicePosition::Type
+                let mut step = self.dispatch.step_instantiate_frame(frame, delivery);
+                // The site the need is checked at is part of its identity:
+                // the claim its read entered with when there is one, else
+                // the site the needing evaluation checks at.
+                if let EvalStep::Need { demand, .. } = &mut step {
+                    let mut site = match &frame.build {
+                        Some(FrameBuild::Typeof(build)) => build
+                            .body
+                            .as_ref()
+                            .map_or(TupleSplicePosition::Type, |body| body.checking_site()),
+                        _ if matches!(frame.key, SemanticQueryKey::TypeOf { .. }) => {
+                            TupleSplicePosition::Type
+                        }
+                        _ => frame.site,
+                    };
+                    if matches!(demand.key, SemanticQueryKey::ResolveCall(_)) {
+                        site = TupleSplicePosition::Expression;
                     }
-                    _ => frame.site,
-                };
-                // A decision's need entered already: its claim continues
-                // when the runtime starts it.
-                if let EvalStep::Need { demand, .. } = &step {
-                    if matches!(demand, SemanticQueryKey::ResolveCall(_)) {
-                        self.child_site = TupleSplicePosition::Expression;
-                    }
+                    // A decision's need entered already: its claim continues
+                    // when the runtime starts it.
                     let claim = match frame.build.as_mut() {
                         Some(FrameBuild::Conditional(build)) => build.claim.take(),
                         Some(FrameBuild::Typeof(build)) => build.operands.claim.take(),
                         Some(FrameBuild::Call(build)) => {
                             let claim = build.claim.take();
                             if let Some(claim) = &claim {
-                                self.child_site = claim.checking_site();
+                                site = claim.checking_site();
                             }
                             #[cfg(any(test, feature = "test-support"))]
-                            self.hold_call_need_for_tests(demand);
+                            self.hold_call_need_for_tests(&demand.key, site);
                             claim
                         }
                         Some(FrameBuild::Flow(build)) => {
                             let claim = build.claim.take();
                             if let Some(claim) = &claim {
-                                self.child_site = claim.checking_site();
+                                site = claim.checking_site();
                             }
                             // Held only while a contextual call's route waits
                             // on it, collector included.
                             #[cfg(any(test, feature = "test-support"))]
                             if !build.routes.is_empty() {
-                                self.hold_call_need_for_tests(demand);
+                                self.hold_call_need_for_tests(&demand.key, site);
                             }
                             claim
                         }
                         _ => None,
                     };
+                    if let Some(claim) = &claim {
+                        site = claim.checking_site();
+                    }
+                    demand.site = site;
                     if let Some(claim) = claim {
-                        self.child_site = claim.checking_site();
                         self.retries.insert(demand.clone(), claim);
                     }
                 }
@@ -907,16 +923,20 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
         }
     }
 
-    fn close_cycle(&mut self, key: &SemanticQueryKey, _role: ()) -> Outcome<Self> {
+    fn close_cycle(&mut self, demand: &QueryDemand, _role: ()) -> Outcome<Self> {
         // The open demand's producer is this task's own: the memo answers
         // the claim exactly as it answers a synchronous re-entry — a warm
-        // result where one validates, else the same-path carrier.
+        // result where one validates, else the same-path carrier. The claim
+        // is the open demand's, at its site.
         let dispatch = &self.dispatch;
+        let key = &demand.key;
+        let _site = dispatch.checking_site_scope(demand.site);
         let nesting = Nesting::Frame {
             depth: self.child_depth,
         };
         let mut carrier = None;
         let mut capture = ReadCapture::deferring_carrier(&mut carrier);
+        capture.set_checking_site(demand.site);
         let graph = self.graph;
         let claim = match graph.begin_query_claim(
             dispatch.ctx,
@@ -947,7 +967,13 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
         })
     }
 
-    fn reusable(&self, _key: &SemanticQueryKey, delivery: &QueryDelivery) -> bool {
+    fn reusable(&self, demand: &QueryDemand, delivery: &QueryDelivery) -> bool {
+        // Every answer to a demand is produced at the demand's site, so a
+        // kept result answers only needs checked where it was computed.
+        verter_debug_assert!(
+            delivery.site == demand.site,
+            "a demand is answered at its own checking site"
+        );
         // Exactly what the memo would serve warm: a complete, cacheable
         // result. A partial or non-cacheable one is evaluated again, as a
         // synchronous re-entry would evaluate it.
@@ -960,12 +986,14 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
         waker: &std::task::Waker,
     ) -> std::task::Poll<External<Self>> {
         let dispatch = &self.dispatch;
-        let site = pending
-            .attempt
-            .as_ref()
-            .expect("a pending claim owns its context")
-            .checking_site();
-        let _site = dispatch.checking_site_scope(site);
+        verter_debug_assert!(
+            pending
+                .attempt
+                .as_ref()
+                .is_some_and(|attempt| attempt.checking_site() == pending.demand.site),
+            "a pending claim continues at its demand's site"
+        );
+        let _site = dispatch.checking_site_scope(pending.demand.site);
         let mut carrier = None;
         let joined = {
             let mut capture = ReadCapture::deferring_carrier(&mut carrier);
@@ -983,7 +1011,8 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
                 std::task::Poll::Ready(joined) => joined,
             }
         };
-        let key = pending.key.clone();
+        let demand = pending.demand.clone();
+        let key = &demand.key;
         let nesting = pending.nesting;
         // The runtime drops a resolved subscription; its claim continues
         // in `retries` when the demand starts again.
@@ -1004,22 +1033,22 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
                 )
             {
                 attempt.recompute();
-                self.retries.insert(key, attempt);
+                self.retries.insert(demand, attempt);
                 return std::task::Poll::Ready(External::Restart);
             }
         }
         std::task::Poll::Ready(match joined {
             Joined::Read(read) => {
-                External::Complete(Ok(dispatch.answered(&key, read, carrier, nesting)))
+                External::Complete(Ok(dispatch.answered(key, read, carrier, nesting)))
             }
             Joined::Recursive(recursion) => {
                 if recursion == Recursion::SamePath {
                     dispatch.connected_demand.note_divergence_certificate();
                 }
-                External::Complete(Ok(dispatch.recursion_delivery(&key, recursion)))
+                External::Complete(Ok(dispatch.recursion_delivery(key, recursion)))
             }
             Joined::Retry => {
-                self.retries.insert(key, attempt);
+                self.retries.insert(demand, attempt);
                 External::Restart
             }
         })
@@ -1854,8 +1883,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         drop(installed);
         drop(taint);
         match poll {
+            // The program settles the need's site from the read's claim.
             FramePoll::Need(key) => EvalStep::Need {
-                demand: key,
+                demand: QueryDemand {
+                    key,
+                    site: frame.site,
+                },
                 role: (),
             },
             FramePoll::Done(output) => {

@@ -1908,11 +1908,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let read = self.read_frame_delivery(
                     delivery.expect("a checked return resumes with its demand"),
                 );
-                if read.result_is_partial() {
-                    if let QueryResult::Value(
-                        crate::semantic_query::SemanticQueryValue::TypeNode(node),
-                    ) = read.value
-                    {
+                if let QueryResult::Value(crate::semantic_query::SemanticQueryValue::TypeNode(
+                    node,
+                )) = read.value
+                {
+                    if self.declared_return_is_recovery(read.partial_reasons(), node) {
                         original.node = node;
                     }
                 }
@@ -2168,10 +2168,30 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         key: crate::semantic_query::SemanticQueryKey,
     ) -> IndexedValue {
         let read = self.read_declared_call_return(key);
-        match (read.result_is_partial(), read.value) {
-            (true, QueryResult::Value(node)) => IndexedValue { node, ..original },
+        match read.value {
+            QueryResult::Value(node)
+                if self.declared_return_is_recovery(read.partial_reasons(), node) =>
+            {
+                IndexedValue { node, ..original }
+            }
             _ => original,
         }
+    }
+
+    /// Whether a checked declared return read is the checker's recovery for
+    /// a refused construction, which replaces the authored carrier. Any
+    /// other partial read keeps the lazy carrier: an incomplete value never
+    /// stands in for it.
+    fn declared_return_is_recovery(
+        &self,
+        reasons: crate::semantic_query::PartialReasonSet,
+        node: SemanticNodeId,
+    ) -> bool {
+        reasons.contains(crate::semantic_query::PartialReasonSet::OPERATION_BUDGET)
+            || matches!(
+                self.graph().node_data(node).as_deref(),
+                Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery { .. }))
+            )
     }
 
     /// The value a call's resolution, resolved by a frame of its own,
@@ -13451,6 +13471,9 @@ struct ArrayEvalFrame<'e> {
     /// The holds before the element the literal waits on.
     holds_before: usize,
     certified_elements: bool,
+    /// The checker's recovery for the first spread the tuple could not
+    /// splice: the literal's value once its remaining elements evaluated.
+    refused: Option<SemanticNodeId>,
 }
 
 /// What an array literal's evaluation needs next.
@@ -15513,6 +15536,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             next: 0,
             holds_before: 0,
             certified_elements: true,
+            refused: None,
         }
     }
 
@@ -15631,6 +15655,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                 frame.tuple_view.push(element.copy());
                                 frame.tuple.push(element);
                             }
+                            // The tuple is already the recovery: a later
+                            // spread is evaluated for its effects only.
+                            Some(SemanticNodeData::Tuple { .. }) if frame.refused.is_some() => {}
                             Some(SemanticNodeData::Tuple { elements, .. }) => {
                                 match self.dispatch.admit_expression_tuple_splice(
                                     frame.tuple.len(),
@@ -15647,8 +15674,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                             frame.tuple.push(element);
                                         }
                                     }
+                                    // The checker still checks every later
+                                    // element before it reports the splice.
                                     super::build::ExpressionSplice::Refused(recovery) => {
-                                        return ArrayEvalStep::Done(Positional::Value(recovery));
+                                        frame.refused = Some(recovery);
                                     }
                                     // The spread stays in place, never a
                                     // truncated tuple: the trip is the
@@ -15692,6 +15721,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let undefined = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
         let const_asserted = frame.const_asserted;
         let tupled = frame.tupled;
+        if let Some(recovery) = frame.refused.take() {
+            return Positional::Value(recovery);
+        }
         let tuple = std::mem::take(&mut frame.tuple);
         let tuple_view = std::mem::take(&mut frame.tuple_view);
         let mut parts = std::mem::take(&mut frame.parts);
