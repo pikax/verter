@@ -13,7 +13,7 @@
 //! **Storage charge.** A `Weak` keeps its rail's cell block allocated
 //! after the last handle drops (the entries and their charge go with the
 //! handle), and a rail keeps its block allocated after the interner lets
-//! go. The block is therefore charged by a [`BlockShare`] the rail and its
+//! go. The block is therefore charged by a share the rail and its weak
 //! entry here each keep a clone of: it stays charged until both have let
 //! go, in either order ([`DepSignature::interned_rail`]). The interner
 //! charges, pinned against its store's account, its own storage — every
@@ -25,27 +25,14 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 
-use verter_session_query::retention::owned::{BlockShare, ChargeCtx, Owned, WeakOwned};
+use verter_session_query::retention::owned::{ChargeCtx, Owned, WeakOwned};
 
 use crate::semantic_query::{DepEntry, DepRail, DepSignature, DepVersion};
 
-/// `Weak` view of an interned `DepSignature` payload, with its share of the
-/// charge on the block the view keeps allocated — see
+/// `Weak` view of an interned `DepSignature` payload: it holds its share of
+/// the charge on the block it keeps allocated — see
 /// [`DepSignatureInterner`].
-struct DepSignatureWeak {
-    rail: WeakOwned<DepRail>,
-    _block: BlockShare,
-}
-
-impl DepSignatureWeak {
-    fn strong_count(&self) -> usize {
-        self.rail.strong_count()
-    }
-
-    fn upgrade(&self) -> Option<Owned<DepRail>> {
-        self.rail.upgrade()
-    }
-}
+type DepSignatureWeak = WeakOwned<DepRail>;
 
 /// Shards the interner's buckets are spread over.
 const SHARDS: usize = 16;
@@ -206,12 +193,9 @@ impl DepSignatureInterner {
             None => {
                 // Miss: insert a fresh rail and downgrade for the bucket,
                 // the entry sharing the charge on the block it keeps.
-                let (fresh, block) =
+                let fresh =
                     DepSignature::interned_rail(normalised, ChargeCtx::new(&storage.account));
-                bucket.push(DepSignatureWeak {
-                    rail: Owned::downgrade(&fresh),
-                    _block: block,
-                });
+                bucket.push(Owned::downgrade(&fresh).expect("an interned rail's block is shared"));
                 DepSignature::from_owned(fresh)
             }
         };

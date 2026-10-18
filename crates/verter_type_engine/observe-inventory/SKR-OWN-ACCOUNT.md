@@ -31,7 +31,7 @@ admission returns its complete value uncached.
 | Data tree | a retained plain data tree (a type expression, a flow slice or graph, a compile product, a declaration record) is measured exhaustively by `HeapSize`: every field of every variant, `String` / `Vec` / map by capacity, each distinct raw `Arc` once per measurement, owned handles offered to their own cells; `#[derive(HeapSize)]` measures every field, an `inline` field must be `Copy`, and a recursive tree (`#[heap_size(iterative)]`) is measured from a work-list, never the call stack | `verter_retention/src/heap_size.rs`, `verter_retention_derive` |
 | Data-tree cell | a data tree a cache hands to its readers is one owned cell (`OwnedTree`): the cell charges the whole tree, every reader's clone shares that charge, and it passes to the readers when the cache lets go | `verter_retention/src/heap_size.rs` (`Tree`, `owned_tree`) |
 | Hash table | a map or set costs one block of buckets sized to its capacity (a power of two at load at most seven eighths, at least four) plus one control byte per bucket and a probe group | `heap_size::hash_table_bytes` |
-| Weak-held block | an interned dependency rail's cell block stays allocated while either strong rail owners or the interner's weak entry survives; both keep the same `BlockShare`, charged until the last share drops. The rail separately charges its entry backing and canonicals | `verter_retention/src/owned.rs`, `semantic_query_memo/interner.rs` |
+| Weak-held block | a weak view (`WeakOwned`, `Owned::downgrade`) exists only for a cell built for one (`Owned::new_with_shared_block`): the cell and every view keep the same `BlockShare`, so the block stays charged while strong owners or any view survives, in either order, until the last share drops. An interned dependency rail is such a cell; it separately charges its entry backing and canonicals. An owned string is named without a view by its never-reused `OwnedStr::identity` stamp, which keeps nothing allocated (the arena's thread-local scope digest) | `verter_retention/src/owned.rs`, `semantic_query_memo/{interner,arena}.rs` |
 | Process statics | the process-wide empty diagnostic list and dependency rail are static storage, never charged | `semantic_query_memo/mod.rs` |
 | Granular storage pin | graph storage is charged in whole granules: never below the live total, above it by less than two granules, released entirely when the storage is | `verter_retention/src/granular.rs` |
 | Publication slot bound | a memo candidate pays for every slot its publication may populate (the slot plus each sibling a recorded point satisfies) | `semantic_query_memo/family.rs` |
@@ -153,8 +153,3 @@ These remain accounting defects of this task, not optimization debt:
   closedness and member-path allocations independently of their cells;
 - an authorized output unwrap clones a `TypeExpr` whose raw subtree
   allocations can outlive its charged `PayloadTree`;
-- normal `WeakOwned` handles, including the arena's thread-local scope
-  digest cache, can keep a cell block allocated after its last strong
-  owner releases the charge. Interned dependency rails already share their
-  block charge with their interner's weak entries; normal weak handles
-  need the same allocation-lifetime guarantee.
