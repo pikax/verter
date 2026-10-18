@@ -35,15 +35,15 @@
 //! of the transaction, and resumes with the same session once each is
 //! delivered: a call's inference spans the frame's suspensions.
 //!
-//! A function's return evaluated outside any drive is a frame as well. While
-//! a contextual call in its body types a callback — the call's candidate
-//! collector held out of the transaction meanwhile — an instantiation or a
-//! `typeof` the callback reads that must be computed becomes the frame's
-//! need: the call's route is held as it stood before the callback, with its
-//! collector, and the run that reached the need is dropped and runs again
-//! once it is delivered, resuming the held route at that call instead of
-//! asking its executor again. The callback then types over answered reads,
-//! into the same collector.
+//! A function's return evaluated outside any drive is a frame as well, run
+//! as a decision is: an instantiation or a `typeof` its own body reads that
+//! must be computed becomes the frame's need, and the run that reached it is
+//! dropped and runs again once it is delivered. When the read is made while a
+//! contextual call in the body types a callback — the call's candidate
+//! collector held out of the transaction meanwhile — the call's route is
+//! held as it stood before the callback, with its collector, and the next
+//! run resumes the held route at that call instead of asking its executor
+//! again: the callback types over answered reads, into the same collector.
 //!
 //! Every other query, and every query a frame's step evaluates in place,
 //! keeps the synchronous path; code a step reaches never drives.
@@ -130,16 +130,18 @@ pub(super) enum FrameBuild {
 /// its contextual callbacks made, the one it waits on and the others its
 /// last run reached, and the contextual calls it holds.
 ///
-/// A run evaluates the function's body. While a contextual call in it types
-/// a callback, its candidate's collector held out of the transaction, a read
-/// of an instantiation or a `typeof` none of the answers holds that must be
-/// computed becomes a need of the frame. The call's route is held as it
-/// stood before the callback, collector included, and the run is dropped
-/// with what it observed; the next run resumes the held route where the
-/// call is asked again, and the callback types over the delivered answers
-/// into that same collector. Outside a callback typing under a held
-/// collector, every read evaluates in place, as it does in a synchronous
-/// build.
+/// A run evaluates the function's body. A read of an instantiation or a
+/// `typeof` the body itself makes — not a query it evaluates in place, nor a
+/// callee evaluated inline beneath it — that none of the answers holds and
+/// that must be computed becomes a need of the frame, and the run is dropped
+/// with what it observed: a chain of values the body reads is then a chain
+/// of frames, as it is for a synchronous build that drives each. When a
+/// contextual call in the body was typing a callback at that read, its
+/// candidate's collector held out of the transaction, or relating the typed
+/// callback needs it, the call's route is held as it stood before the
+/// callback, collector included; the next run resumes the held route where
+/// the call is asked again, and the callback types over the delivered
+/// answers into that same collector.
 #[derive(Default)]
 pub(super) struct FlowBuild {
     answers: FxHashMap<SemanticQueryKey, QueryDelivery>,
@@ -164,7 +166,7 @@ pub(super) struct FlowSeam {
     /// evaluate as they would anywhere.
     nested: u32,
     /// How many contextual callbacks are typing now, each under a held
-    /// collector.
+    /// collector: a need made meanwhile holds their call's route.
     windows: u32,
     /// The checker transaction's frame depth the function's own evaluation
     /// runs at: a callee's evaluated inline beneath it is not this frame's.
@@ -820,8 +822,12 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
                             build.claim.take()
                         }
                         Some(FrameBuild::Flow(build)) => {
+                            // Held only while a contextual call's route waits
+                            // on it, collector included.
                             #[cfg(any(test, feature = "test-support"))]
-                            self.hold_call_need_for_tests(demand);
+                            if !build.routes.is_empty() {
+                                self.hold_call_need_for_tests(demand);
+                            }
                             build.claim.take()
                         }
                         _ => None,
@@ -2038,14 +2044,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         FramePoll::Done(Box::new(output))
     }
 
-    /// Answer a read at the seam of the flow evaluation whose frame is
-    /// stepping, while a contextual callback in the function's own body
-    /// types under its call's held collector: an instantiation or a
-    /// `typeof` the frame holds the answer to reads it; one the memo serves
-    /// warm answers at once and joins the answers; one that must be
-    /// computed becomes one of the frame's needs and reads as a typed gap
-    /// nothing built from it keeps. `None` everywhere else, where the read
-    /// evaluates in place.
+    /// Answer a read the function's own body makes at the seam of the flow
+    /// evaluation whose frame is stepping: an instantiation or a `typeof`
+    /// the frame holds the answer to reads it; one the memo serves warm
+    /// answers at once and joins the answers; one that must be computed
+    /// becomes one of the frame's needs and reads as a typed gap nothing
+    /// built from it keeps. `None` everywhere else — a query the body
+    /// evaluates in place, a callee evaluated inline beneath it — where the
+    /// read evaluates in place.
     pub(super) fn read_at_flow_seam(&self, key: &SemanticQueryKey) -> Option<ValueRead> {
         if !matches!(
             key,
@@ -2061,7 +2067,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let (seam, depth) = {
             let installed = self.flow_seam.borrow();
             let seam = installed.as_ref()?;
-            if !self.flow_seam_is_open(seam) || seam.windows == 0 {
+            if !self.flow_seam_is_open(seam) {
                 return None;
             }
             let read = match seam.answers.get(key).cloned() {
@@ -2107,9 +2113,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// Open a window in which a contextual callback of the stepping flow
-    /// evaluation's own body types while its call's collector is held: its
-    /// reads the frame must produce become the frame's needs. Whether the
-    /// window opened — not outside a flow frame's run, nor once the run
+    /// evaluation's own body types while its call's collector is held: a
+    /// need made meanwhile holds the call's route for the next run. Whether
+    /// the window opened — not outside a flow frame's run, nor once the run
     /// waits on a need already, when what is left of it is dropped.
     pub(super) fn open_contextual_window(&self) -> bool {
         let mut installed = self.flow_seam.borrow_mut();
