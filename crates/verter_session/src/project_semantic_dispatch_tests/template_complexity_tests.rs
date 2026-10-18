@@ -315,11 +315,11 @@ fn a_template_past_its_byte_allowance_is_a_memory_partial() {
         ))
     };
     let template = graph.intern_node(SemanticNodeData::TemplateLiteral {
-        quasis: std::sync::Arc::from(
+        quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
             vec![
-                std::sync::Arc::<str>::from(""),
-                std::sync::Arc::from("-"),
-                std::sync::Arc::from(""),
+                verter_type_expr::OwnedStr::from(""),
+                verter_type_expr::OwnedStr::from("-"),
+                verter_type_expr::OwnedStr::from(""),
             ]
             .into_boxed_slice(),
         ),

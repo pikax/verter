@@ -931,7 +931,7 @@ fn ntuple(
         .into_iter()
         .map(
             |(label, value)| verter_type_engine::semantic_query::TupleElement {
-                label: label.map(Arc::from),
+                label: label.map(verter_type_expr::OwnedStr::from),
                 value,
                 optional: false,
                 rest: false,
@@ -959,10 +959,10 @@ fn nsnippet(
     graph.intern_node(
         verter_type_engine::semantic_query::SemanticNodeData::InstantiationRef {
             base: verter_type_engine::semantic_query::DeclIdentity {
-                canonical_id: Arc::from("__builtin__"),
+                canonical_id: verter_type_expr::OwnedStr::from("__builtin__"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: verter_type_engine::semantic_query::HashValue::default(),
-                decl_name: Arc::from("Snippet"),
+                decl_name: verter_type_expr::OwnedStr::from("Snippet"),
             },
             args: verter_type_engine::semantic_query::PayloadArray::from(args.into_boxed_slice()),
         },
@@ -1138,7 +1138,7 @@ fn snippet_carrier_open_generic_params_is_present_bindingless() {
             param_index: 0,
             constraint: None,
             default: None,
-            display_name: Arc::from("Params"),
+            display_name: verter_type_expr::OwnedStr::from("Params"),
         },
     );
     let snippet = nsnippet(&graph, vec![open]);
@@ -1678,7 +1678,9 @@ fn assert_callback_row_param_resolves_precisely(
         ctx,
         &dispatch,
         row_param_ty,
-        Arc::from(Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(
+            Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice(),
+        ),
         verter_type_engine::semantic_query::ProjectionReductionContext::published(
             verter_type_engine::semantic_query::ProjectionMode::Shallow,
         ),
@@ -2418,9 +2420,7 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
     };
     let args_data = graph.node_data(*args_node).expect("Args graph node");
     assert_eq!(
-        args_data
-            .bare_ref_head()
-            .map(|(name, _scope)| name.as_ref()),
+        args_data.bare_ref_head().map(|(name, _scope)| name),
         Some("Args"),
         "the unresolved exact-owner import stays an authored BareRef"
     );
@@ -2450,7 +2450,7 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
     let read = dispatch.execute_read(
         verter_type_engine::semantic_query::SemanticQueryKey::ProjectPath {
             base,
-            path: Arc::from(
+            path: verter_type_expr::OwnedSlice::from(
                 Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice(),
             ),
             context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
@@ -2660,7 +2660,7 @@ fn snippet_resolved_params_preparation_stays_complete_and_cacheable() {
     let read = dispatch.execute_read(
         verter_type_engine::semantic_query::SemanticQueryKey::ProjectPath {
             base,
-            path: Arc::from(
+            path: verter_type_expr::OwnedSlice::from(
                 Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice(),
             ),
             context: verter_type_engine::semantic_query::ProjectionReductionContext::published(

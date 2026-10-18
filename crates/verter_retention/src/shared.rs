@@ -59,6 +59,11 @@
 //! with it, and a cache adopting the carrier adopts its leaves too, or
 //! neither. A leaf is released with the last carrier holding it.
 //!
+//! A registered carrier's owned handles (an owned name in a fact key) are
+//! charged by their own cells: the carrier pins each when it is first
+//! charged for a caller, and holds each as a cache while a cache holds the
+//! carrier, all or nothing, exactly as it holds its leaves.
+//!
 //! # Caller-first charges
 //!
 //! An allocation a caller receives before any cache retains it — a
@@ -74,6 +79,7 @@ use rustc_hash::FxHashMap;
 
 use super::allocation::{arc_block_bytes, heap_block_bytes, AliasSet};
 use super::granular::GranularPin;
+use super::owned::{hold_nodes, pin_node, ChargeCtx, HeldHandles, Node};
 use super::{
     ChargeClass, RetentionAdmission, RetentionCharge, RetentionRefusal, SemanticRetentionAccount,
 };
@@ -93,20 +99,32 @@ struct SharedState {
     charge: Option<RetentionCharge>,
     cache_holds: usize,
     caller_holds: usize,
-    /// The holds this allocation keeps on its leaves, in its own class.
+    /// The holds this allocation keeps on its leaves and its owned
+    /// handles, in its own class.
     leaves: LeafHolds,
+    /// The owned handles the allocation reaches, each charged by its own
+    /// cell.
+    children: Box<[Arc<dyn Node>]>,
 }
 
-/// A carrier's holds on its leaves: cache holds while the carrier is
-/// retained, caller holds while only callers hold it.
+/// A carrier's holds on its leaves and owned handles: cache holds while the
+/// carrier is retained; while only callers hold it, caller holds on its
+/// leaves, and its handles are their own callers' (pinned).
 enum LeafHolds {
-    Cache(Box<[CacheHold]>),
+    Cache {
+        leaves: Box<[CacheHold]>,
+        /// Held for their release on drop.
+        _children: HeldHandles,
+    },
     Caller(Box<[CallerHold]>),
 }
 
 impl LeafHolds {
     fn none() -> Self {
-        Self::Cache(Box::new([]))
+        Self::Cache {
+            leaves: Box::new([]),
+            _children: HeldHandles::default(),
+        }
     }
 }
 
@@ -130,6 +148,7 @@ impl SharedCharge {
                 cache_holds,
                 caller_holds,
                 leaves: LeafHolds::none(),
+                children: Box::new([]),
             }),
             registration: None,
             _allocation: None,
@@ -150,23 +169,32 @@ impl SharedCharge {
             // hold is releasing it with no caller left: the revival keeps
             // them, and its charge is still retained.
             let adopted = match &state.leaves {
-                LeafHolds::Caller(callers) => Some(
-                    callers
+                LeafHolds::Caller(callers) => {
+                    let leaves = callers
                         .iter()
                         .map(CallerHold::adopt)
-                        .collect::<Result<Box<[CacheHold]>, _>>()?,
-                ),
-                LeafHolds::Cache(_) => None,
+                        .collect::<Result<Box<[CacheHold]>, _>>()?;
+                    let account = state
+                        .charge()
+                        .account()
+                        .expect("a reachable charge is not yet released");
+                    let children = hold_nodes(&state.children, ChargeCtx::new(account))?;
+                    Some((leaves, children))
+                }
+                LeafHolds::Cache { .. } => None,
             };
             state
                 .charge
                 .as_mut()
                 .expect("a reachable charge is not yet released")
                 .try_adopt_retained()?;
-            if let Some(adopted) = adopted {
+            if let Some((leaves, children)) = adopted {
                 // The callers' leaf holds drop after their leaves gained a
                 // cache hold: nothing is released.
-                state.leaves = LeafHolds::Cache(adopted);
+                state.leaves = LeafHolds::Cache {
+                    leaves,
+                    _children: children,
+                };
             }
         }
         state.cache_holds += 1;
@@ -194,10 +222,12 @@ impl SharedCharge {
     /// Move this allocation's leaf holds to its callers, before its last
     /// cache hold is dropped. Called with `state` locked.
     fn hand_leaves_to_callers(state: &mut SharedState) {
-        if let LeafHolds::Cache(caches) = &state.leaves {
-            let callers = caches.iter().map(CacheHold::caller).collect();
+        if let LeafHolds::Cache { leaves, .. } = &state.leaves {
+            let callers = leaves.iter().map(CacheHold::caller).collect();
             // The cache holds drop here, after their leaves gained a caller:
-            // each leaf transfers to its callers, never released.
+            // each leaf transfers to its callers, never released, and each
+            // owned handle's charge moves to its own callers (this carrier
+            // among them).
             state.leaves = LeafHolds::Caller(callers);
         }
     }
@@ -490,6 +520,16 @@ pub fn registration_bytes() -> usize {
         + heap_block_bytes(std::mem::size_of::<usize>())
 }
 
+/// Bytes a registered carrier's own bookkeeping keeps for as long as it is
+/// registered: the slice of holds on its `leaves` leaf names (cache or
+/// caller holds, one pointer each) and the slice recording its `children`
+/// owned allocations. Neither allocates when empty.
+fn bookkeeping_bytes(leaves: usize, children: usize) -> usize {
+    const _: () = assert!(std::mem::size_of::<CacheHold>() == std::mem::size_of::<CallerHold>());
+    heap_block_bytes(leaves * std::mem::size_of::<CacheHold>())
+        + heap_block_bytes(children * std::mem::size_of::<Arc<dyn Node>>())
+}
+
 /// Charges keyed by allocation, so independently charged owners of one
 /// allocation share one charge. See the module docs.
 #[derive(Clone, Default)]
@@ -558,12 +598,19 @@ impl AliasCharges {
         let mut aliases = AliasSet::collecting();
         let bytes = measure(&mut aliases);
         let leaves = aliases.take_leaves();
+        let children = aliases.take_handles().into_children();
         // Reserved under the registry lock, so two first holders of one
         // allocation cannot both reserve it.
-        let charge = match account.reserve(ChargeClass::Retained, bytes + registration_bytes()) {
+        let charge = match account.reserve(
+            ChargeClass::Retained,
+            bytes + registration_bytes() + bookkeeping_bytes(leaves.len(), children.len()),
+        ) {
             RetentionAdmission::Admitted(charge) => charge,
             RetentionAdmission::Refused(refusal) => return Err(refusal),
         };
+        // A refused child hold drops the child holds taken so far; an owned
+        // cell's release never takes the registry lock.
+        let child_holds = hold_nodes(&children, ChargeCtx::new(account))?;
         let mut leaf_holds = Vec::with_capacity(leaves.len());
         for leaf in &leaves {
             match self.hold_leaf_in(table, account, leaf) {
@@ -575,7 +622,14 @@ impl AliasCharges {
             }
         }
         let shared = SharedCharge::new(charge);
-        shared.state.lock().leaves = LeafHolds::Cache(leaf_holds.into_boxed_slice());
+        {
+            let mut state = shared.state.lock();
+            state.leaves = LeafHolds::Cache {
+                leaves: leaf_holds.into_boxed_slice(),
+                _children: child_holds,
+            };
+            state.children = children;
+        }
         Ok(CacheHold(
             self.register(table, account, key, allocation, shared),
         ))
@@ -619,13 +673,22 @@ impl AliasCharges {
         let mut aliases = AliasSet::collecting();
         let bytes = measure(&mut aliases);
         let leaves = aliases.take_leaves();
-        let charge = account.pin(bytes + registration_bytes());
+        let children = aliases.take_handles().into_children();
+        for child in children.iter() {
+            pin_node(&**child, ChargeCtx::new(account));
+        }
+        let charge = account
+            .pin(bytes + registration_bytes() + bookkeeping_bytes(leaves.len(), children.len()));
         let leaf_holds: Box<[CallerHold]> = leaves
             .iter()
             .map(|leaf| self.pin_leaf_in(table, account, leaf))
             .collect();
         let shared = SharedCharge::with_holds(charge, 0, 1);
-        shared.state.lock().leaves = LeafHolds::Caller(leaf_holds);
+        {
+            let mut state = shared.state.lock();
+            state.leaves = LeafHolds::Caller(leaf_holds);
+            state.children = children;
+        }
         CallerHold(self.register(table, account, key, allocation, shared))
     }
 

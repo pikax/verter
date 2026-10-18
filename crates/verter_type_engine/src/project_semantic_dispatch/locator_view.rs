@@ -187,7 +187,7 @@ impl ProjectionStamp {
 pub struct LocatorViewInputs<'a> {
     pub env: &'a FxHashMap<String, SemanticNodeId>,
     pub scope: &'a NodeScopeId,
-    pub name_resolution: &'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+    pub name_resolution: &'a FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
     pub scope_payload: Option<&'a DeclarationScopePayload>,
     pub shadowing: &'a ScopeShadowing,
     pub authored_resolution_debt: Option<&'a super::carrier::AuthoredResolutionDebtFrame>,
@@ -207,7 +207,7 @@ pub type ViewMemo = FxHashMap<(SemanticNodeId, ProjectionReductionContext), Sema
 pub struct ProjectionBenchCase {
     root: SemanticNodeId,
     scope: NodeScopeId,
-    name_resolution: FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+    name_resolution: FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
     scope_payload: Option<DeclarationScopePayload>,
     shadowing: ScopeShadowing,
 }
@@ -261,12 +261,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectionBenchHarness<'
             .dispatch
             .lower_locator(AuthoredBodyLocator::DeclBody(TypeBodySlot {
                 anchor: AuthoredAnchor {
-                    canonical_id: Arc::from(canonical_id),
+                    canonical_id: verter_type_expr::OwnedStr::from(canonical_id),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    symbol: Arc::from(symbol),
+                    symbol: verter_type_expr::OwnedStr::from(symbol),
                     space: LocatorSymbolSpace::Type,
                 },
-                path: Arc::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+                path: verter_type_expr::OwnedSlice::from(
+                    Vec::<TypeBodyPathStep>::new().into_boxed_slice(),
+                ),
             })) {
             crate::semantic_query::QueryResult::Value(root) => root,
             crate::semantic_query::QueryResult::Recursive(root) => root,
@@ -279,7 +281,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectionBenchHarness<'
             .map(|state| state.whole_hash)
             .unwrap_or_default();
         let scope = NodeScopeId::File {
-            canonical_id: Arc::from(canonical_id),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical_id),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash,
             local_scope: None,
@@ -288,7 +290,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectionBenchHarness<'
             .iter()
             .map(|(local_name, defining_canonical, defining_symbol)| {
                 (
-                    Arc::from(*local_name),
+                    verter_type_expr::OwnedStr::from(*local_name),
                     ResolvedRootIdentity::new_in_owner(
                         *defining_canonical,
                         verter_type_expr::TopLevelOwnerId::ordinary_file(),

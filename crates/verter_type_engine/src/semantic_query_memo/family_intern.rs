@@ -34,18 +34,18 @@ pub struct InternedResolveCallKey(
 );
 
 intern_domain!(RelateMemoKey {
-    fn value_heap_bytes(&self) -> usize {
+    fn value_heap_bytes(&self, aliases: &mut verter_session_query::retention::allocation::AliasSet) -> usize {
         super::family_footprint::relate_payload_heap_bytes(
             self,
-            &mut verter_session_query::retention::allocation::AliasSet::new(),
+            aliases,
         )
     }
 });
 intern_domain!(ResolveCallKey {
-    fn value_heap_bytes(&self) -> usize {
+    fn value_heap_bytes(&self, aliases: &mut verter_session_query::retention::allocation::AliasSet) -> usize {
         super::family_footprint::resolve_call_payload_heap_bytes(
             self,
-            &mut verter_session_query::retention::allocation::AliasSet::new(),
+            aliases,
         )
     }
 });

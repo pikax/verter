@@ -9,9 +9,10 @@
 //! having been computed first. The hash node's compute runs the demand
 //! planner (graph reachability over the shared per-function
 //! [`FunctionFlowGraph`]) ONCE per cold demand, hashes the selected
-//! subgraph, and RETAINS the plan on the published outcome
-//! ([`PlannedFlowSlice`]); the lowered node's compute lowers exactly that
-//! retained plan — it never re-plans and never computes a slice hash.
+//! subgraph, and carries the plan on its outcome ([`PlannedFlowSlice`]),
+//! retained with the entry when the account admits it; the lowered node's
+//! compute lowers exactly the plan that outcome delivered — it never
+//! re-plans and never computes a slice hash.
 //!
 //! Both nodes are CONTENT-ADDRESSED memory-side [`crate::cache_runtime::node::ArtifactNode`]s: the
 //! key pins the canonical, the five-axis function identity, the
@@ -75,7 +76,9 @@ use super::singleflight::InflightTable;
 /// path (empty = whole return). Further demand axes (the
 /// `ReturnProjectionDemand` lattice point with its `EvalPolicy`) land
 /// with the `FlowReturn` key axes and map onto this identity.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, verter_session_query::retention::heap_size::HeapSize,
+)]
 pub struct FlowSliceDemandIdentity {
     /// The demanded projection path under the return value, in authored
     /// key text (empty = the whole return).
@@ -84,7 +87,9 @@ pub struct FlowSliceDemandIdentity {
 
 /// [`FlowSliceHashNode`] cache key: function content identity plus the
 /// demand identity.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, verter_session_query::retention::heap_size::HeapSize,
+)]
 pub struct FlowSliceHashKey {
     /// The content-pinned function identity.
     pub function: FlowSliceFunctionKey,
@@ -97,7 +102,9 @@ pub struct FlowSliceHashKey {
 /// semantic slice hasher mints it — so this key is unconstructible
 /// until the hash node's compute has run: the slice hash PRECEDES the
 /// lowered lookup by type, not by convention.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, verter_session_query::retention::heap_size::HeapSize,
+)]
 pub struct FlowSliceLoweredKey {
     /// The slice's hash-node key.
     pub hash_key: FlowSliceHashKey,
@@ -115,8 +122,44 @@ pub struct FlowSliceLoweredKey {
 /// graph. Memory-side; evicted per canonical through
 /// [`Self::remove_canonical`].
 pub struct FunctionFlowGraphStore {
-    entries: DashMap<FlowSliceFunctionKey, Arc<FlowGraphBundle>>,
+    entries: DashMap<FlowSliceFunctionKey, GraphEntry>,
     builds: AtomicU64,
+    /// The account a retained bundle is charged to.
+    retention: verter_session_query::retention::StoreAccount,
+}
+
+/// One retained bundle and the charge for keeping it: its map slot, its key
+/// and the whole bundle — skeleton, binding map and graph — pinned, never
+/// refused (a slice plan and its completeness proof address the memoized
+/// bundle, so it is evaluation storage like the graph arena), released with
+/// the entry.
+struct GraphEntry {
+    bundle: Arc<FlowGraphBundle>,
+    _retention: verter_session_query::retention::RetentionCharge,
+}
+
+impl GraphEntry {
+    /// Charge an entry for keeping `bundle`.
+    fn admit(
+        bundle: &Arc<FlowGraphBundle>,
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) -> Self {
+        use verter_session_query::retention::allocation::arc_block_bytes;
+        let footprint = verter_session_query::retention::heap_size::footprint(&**bundle);
+        footprint
+            .handles
+            .pin(verter_session_query::retention::owned::ChargeCtx::new(
+                account,
+            ));
+        let own = verter_session_query::retention::ENTRY_OVERHEAD_BYTES
+            + std::mem::size_of::<(FlowSliceFunctionKey, GraphEntry)>()
+            + arc_block_bytes(std::mem::size_of::<FlowGraphBundle>())
+            + footprint.bytes;
+        Self {
+            bundle: Arc::clone(bundle),
+            _retention: account.pin(own),
+        }
+    }
 }
 
 /// A storage claim; the producer retains the existing shard lock until it
@@ -129,8 +172,9 @@ pub enum GraphClaim<'a> {
 }
 
 pub struct GraphPublish<'a> {
-    slot: dashmap::mapref::entry::VacantEntry<'a, FlowSliceFunctionKey, Arc<FlowGraphBundle>>,
+    slot: dashmap::mapref::entry::VacantEntry<'a, FlowSliceFunctionKey, GraphEntry>,
     builds: &'a AtomicU64,
+    account: &'a Arc<verter_session_query::retention::SemanticRetentionAccount>,
 }
 
 impl GraphPublish<'_> {
@@ -143,7 +187,7 @@ impl GraphPublish<'_> {
         }
         self.builds.fetch_add(1, Ordering::Relaxed);
         let bundle = Arc::new(bundle);
-        self.slot.insert(Arc::clone(&bundle));
+        self.slot.insert(GraphEntry::admit(&bundle, self.account));
         Some(bundle)
     }
 }
@@ -155,6 +199,18 @@ impl FunctionFlowGraphStore {
         Self {
             entries: DashMap::new(),
             builds: AtomicU64::new(0),
+            retention: verter_session_query::retention::StoreAccount::default(),
+        }
+    }
+
+    /// An empty store whose retained bundles are charged to `account`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn charged_to_for_test(
+        account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) -> Self {
+        Self {
+            retention: verter_session_query::retention::StoreAccount::new(account),
+            ..Self::new()
         }
     }
 
@@ -164,15 +220,16 @@ impl FunctionFlowGraphStore {
     /// source product abandons it without publishing an absence.
     pub fn claim(&self, key: &FlowSliceFunctionKey) -> GraphClaim<'_> {
         if let Some(hit) = self.entries.get(key) {
-            return GraphClaim::Read(Arc::clone(hit.value()));
+            return GraphClaim::Read(Arc::clone(&hit.value().bundle));
         }
         match self.entries.entry(key.clone()) {
             dashmap::mapref::entry::Entry::Occupied(occupied) => {
-                GraphClaim::Read(Arc::clone(occupied.get()))
+                GraphClaim::Read(Arc::clone(&occupied.get().bundle))
             }
             dashmap::mapref::entry::Entry::Vacant(slot) => GraphClaim::Produce(GraphPublish {
                 slot,
                 builds: &self.builds,
+                account: self.retention.get(),
             }),
         }
     }
@@ -196,11 +253,11 @@ impl FunctionFlowGraphStore {
     ) -> BoundFlowGraph {
         let structure = KeyedFunctionStructure::bind_fixture(key.clone(), prepared);
         let bundle = match self.entries.entry(key) {
-            dashmap::mapref::entry::Entry::Occupied(occupied) => Arc::clone(occupied.get()),
+            dashmap::mapref::entry::Entry::Occupied(occupied) => Arc::clone(&occupied.get().bundle),
             dashmap::mapref::entry::Entry::Vacant(vacant) => {
                 let bundle = Arc::new(FlowGraphBundle::build(structure));
                 self.builds.fetch_add(1, Ordering::Relaxed);
-                vacant.insert(Arc::clone(&bundle));
+                vacant.insert(GraphEntry::admit(&bundle, self.retention.get()));
                 bundle
             }
         };
@@ -217,7 +274,9 @@ impl FunctionFlowGraphStore {
     /// the engine driver's blocking build to resolve it. Unavailable source
     /// versions and correspondence errors never enter this store.
     pub fn peek(&self, key: &FlowSliceFunctionKey) -> Option<Arc<FlowGraphBundle>> {
-        self.entries.get(key).map(|hit| Arc::clone(hit.value()))
+        self.entries
+            .get(key)
+            .map(|hit| Arc::clone(&hit.value().bundle))
     }
 
     /// Number of retained graph bundles (retention observability).
@@ -231,7 +290,7 @@ impl FunctionFlowGraphStore {
     pub fn retained_bundles_for_test(&self) -> Vec<Arc<FlowGraphBundle>> {
         self.entries
             .iter()
-            .map(|entry| Arc::clone(entry.value()))
+            .map(|entry| Arc::clone(&entry.value().bundle))
             .collect()
     }
 
@@ -261,6 +320,7 @@ impl FunctionFlowGraphStore {
 /// `pub` only so the hermetic test surface (`crate::for_tests`) can name
 /// the carrier; the module path stays crate-private, so production code
 /// outside this module tree cannot reach it.
+#[derive(verter_session_query::retention::heap_size::HeapSize)]
 pub struct PlannedFlowSlice {
     /// The planner-produced slice identity (the lowered-lookup key input).
     hash: FlowSliceHash,
@@ -300,10 +360,11 @@ impl PlannedFlowSlice {
 /// The planned arm carries the minted slice identity AND the retained
 /// plan it was minted from, so lowering and demand planning share the one
 /// cold planning run (hash-then-lower without a re-plan).
-#[derive(Clone)]
+#[derive(Clone, verter_session_query::retention::heap_size::HeapSize)]
 pub enum FlowSliceHashOutcome {
-    /// The planned slice: minted identity plus the retained plan.
-    Planned(Arc<PlannedFlowSlice>),
+    /// The planned slice: minted identity plus the retained plan, a
+    /// self-charged allocation every reader shares.
+    Planned(verter_session_query::retention::heap_size::OwnedTree<PlannedFlowSlice>),
     /// The typed budget refusal — a genuine partial: returned, never
     /// admitted, and carrying NO slice hash, so the lowered store cannot
     /// even be addressed for it.
@@ -362,15 +423,16 @@ impl FlowSliceHashNode {
     /// when its minted hash still matches `slice_hash`. `None` when the
     /// entry is absent, evicted (`remove_canonical`), or names another
     /// plan — the lowered node fails closed on each, never re-planning.
-    pub(crate) fn retained_plan(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn retained_plan_for_test(
         &self,
         key: &FlowSliceHashKey,
         slice_hash: FlowSliceHash,
-    ) -> Option<Arc<PlannedFlowSlice>> {
+    ) -> Option<verter_session_query::retention::heap_size::OwnedTree<PlannedFlowSlice>> {
         let entry = self.entries.get(key)?;
         match &entry.value {
             FlowSliceHashOutcome::Planned(planned) if planned.hash == slice_hash => {
-                Some(Arc::clone(planned))
+                Some(planned.clone())
             }
             _ => None,
         }
@@ -385,7 +447,10 @@ impl FlowSliceHashNode {
 /// the hash node's RETAINED plan (the one cold planning run — it never
 /// re-plans) and NEVER computes a slice hash.
 pub struct FlowSliceLoweredBodyNode {
-    pub(crate) entries: DashMap<FlowSliceLoweredKey, Arc<CacheEntry<Arc<FlowSliceIR>>>>,
+    pub(crate) entries: DashMap<
+        FlowSliceLoweredKey,
+        Arc<CacheEntry<verter_session_query::retention::heap_size::OwnedTree<FlowSliceIR>>>,
+    >,
     pub(crate) inflight: InflightTable<QueryFlightKey<FlowSliceLoweredKey>>,
 }
 
@@ -431,9 +496,30 @@ pub struct FlowSliceStores {
     /// constrained test host can re-arm the budget the nodes read.
     #[cfg(any(test, feature = "test-support"))]
     budget: FlowSliceBudgetCell,
+    /// The account both nodes' entries are charged to.
+    retention: verter_session_query::retention::StoreAccount,
 }
 
 impl FlowSliceStores {
+    /// These stores, their entries charged to `account`.
+    pub(crate) fn charged_to(
+        mut self,
+        account: verter_session_query::retention::StoreAccount,
+    ) -> Self {
+        if let Some(graphs) = Arc::get_mut(&mut self.graphs) {
+            graphs.retention = account.clone();
+        }
+        self.retention = account;
+        self
+    }
+
+    /// The account the nodes' entries are charged to.
+    pub(crate) fn retention_account(
+        &self,
+    ) -> Arc<verter_session_query::retention::SemanticRetentionAccount> {
+        Arc::clone(self.retention.get())
+    }
+
     /// Production storage: armed default budget and one shared graph store.
     pub fn new() -> Self {
         let graphs = Arc::new(FunctionFlowGraphStore::new());
@@ -450,6 +536,7 @@ impl FlowSliceStores {
             demand_plans: AtomicU64::new(0),
             #[cfg(any(test, feature = "test-support"))]
             budget,
+            retention: verter_session_query::retention::StoreAccount::default(),
         }
     }
 

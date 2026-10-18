@@ -106,12 +106,12 @@ fn decl_body_locator_in_owner(
 ) -> AuthoredBodyLocator {
     AuthoredBodyLocator::DeclBody(TypeBodySlot {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner,
-            symbol: Arc::from(symbol),
+            symbol: verter_type_expr::OwnedStr::from(symbol),
             space: LocatorSymbolSpace::Type,
         },
-        path: Arc::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
     })
 }
 
@@ -163,7 +163,7 @@ fn lower_locator_distinguishes_same_named_module_and_instance_declarations() {
             .semantic_graph()
             .node_scope(module),
         Some(NodeScopeId::File {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner: TopLevelOwnerId::module(0),
             whole_hash: host
                 .ensure_indexed_ready(canonical)
@@ -177,7 +177,7 @@ fn lower_locator_distinguishes_same_named_module_and_instance_declarations() {
             .semantic_graph()
             .node_scope(instance),
         Some(NodeScopeId::File {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner: TopLevelOwnerId::instance(0),
             whole_hash: host
                 .ensure_indexed_ready(canonical)
@@ -198,12 +198,12 @@ fn type_param_bound_locator(
 ) -> AuthoredBodyLocator {
     AuthoredBodyLocator::DeclBody(TypeBodySlot {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner: TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(symbol),
+            symbol: verter_type_expr::OwnedStr::from(symbol),
             space: LocatorSymbolSpace::Type,
         },
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![TypeBodyPathStep::TypeParamBound { ordinal, position }].into_boxed_slice(),
         ),
     })
@@ -380,7 +380,7 @@ fn locator_shape_nodes_exclude_caller_relative_stamps() {
         )],
     }));
     let scope = NodeScopeId::File {
-        canonical_id: Arc::from(OWNER_ID),
+        canonical_id: verter_type_expr::OwnedStr::from(OWNER_ID),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: indexed.whole_hash,
         local_scope: None,
@@ -452,7 +452,7 @@ fn locator_shape_infer_identity_matches_eager_and_relowering() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let scope = NodeScopeId::File {
-        canonical_id: Arc::from(OWNER_ID),
+        canonical_id: verter_type_expr::OwnedStr::from(OWNER_ID),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: indexed.whole_hash,
         local_scope: None,
@@ -533,7 +533,7 @@ fn authored_infer_identity_uses_locator_and_exact_path_not_body_text() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let scope = NodeScopeId::File {
-        canonical_id: Arc::from(OWNER_ID),
+        canonical_id: verter_type_expr::OwnedStr::from(OWNER_ID),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: indexed.whole_hash,
         local_scope: None,
@@ -592,7 +592,7 @@ fn eager_and_locator_routes_share_authored_infer_identity() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let scope = NodeScopeId::File {
-        canonical_id: Arc::from(OWNER_ID),
+        canonical_id: verter_type_expr::OwnedStr::from(OWNER_ID),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: indexed.whole_hash,
         local_scope: None,
@@ -654,7 +654,7 @@ fn spread_fragments_keep_the_authored_root_and_member_path() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let scope = NodeScopeId::File {
-        canonical_id: Arc::from(OWNER_ID),
+        canonical_id: verter_type_expr::OwnedStr::from(OWNER_ID),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: indexed.whole_hash,
         local_scope: None,
@@ -736,7 +736,7 @@ fn locator_predeclares_carrier_template_and_signature_bound_infers() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let scope = NodeScopeId::File {
-        canonical_id: Arc::from(OWNER_ID),
+        canonical_id: verter_type_expr::OwnedStr::from(OWNER_ID),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: indexed.whole_hash,
         local_scope: None,
@@ -830,7 +830,7 @@ fn locator_shape_infer_predeclaration_does_not_capture_ordinary_sibling_ref() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let scope = NodeScopeId::File {
-        canonical_id: Arc::from(OWNER_ID),
+        canonical_id: verter_type_expr::OwnedStr::from(OWNER_ID),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: indexed.whole_hash,
         local_scope: None,
@@ -841,7 +841,7 @@ fn locator_shape_infer_predeclaration_does_not_capture_ordinary_sibling_ref() {
             param_index: 0,
             constraint: None,
             default: None,
-            display_name: Arc::from("U"),
+            display_name: verter_type_expr::OwnedStr::from("U"),
         },
         scope.clone(),
     );
@@ -910,7 +910,7 @@ fn locator_spread_shape_is_one_ordered_program() {
         .expect("owner must materialise");
     let dispatch = ProjectSemanticDispatch::new(&host);
     let scope = NodeScopeId::File {
-        canonical_id: Arc::from(OWNER_ID),
+        canonical_id: verter_type_expr::OwnedStr::from(OWNER_ID),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: indexed.whole_hash,
         local_scope: None,
@@ -1023,9 +1023,9 @@ fn lower_locator_rejects_macro_type_argument_payload() {
 
     let locator = AuthoredBodyLocator::MacroPayload(MacroPayloadLocator {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(OWNER_ID),
+            canonical_id: verter_type_expr::OwnedStr::from(OWNER_ID),
             owner: TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("default"),
+            symbol: verter_type_expr::OwnedStr::from("default"),
             space: LocatorSymbolSpace::Value,
         },
         macro_index: 0,
@@ -1075,9 +1075,9 @@ fn annotation_carried_macro_payload_deref_hydrates_from_snapshot() {
     let annotation_locator = |macro_index: u32| {
         AuthoredBodyLocator::MacroPayload(MacroPayloadLocator {
             anchor: AuthoredAnchor {
-                canonical_id: Arc::from(ANNOTATION_OWNER_ID),
+                canonical_id: verter_type_expr::OwnedStr::from(ANNOTATION_OWNER_ID),
                 owner: TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from("default"),
+                symbol: verter_type_expr::OwnedStr::from("default"),
                 space: LocatorSymbolSpace::Value,
             },
             macro_index,
@@ -1159,9 +1159,9 @@ fn macro_payload_replay_rejects_wrong_owner_for_type_argument_and_field() {
     let locator = |macro_index, payload| {
         AuthoredBodyLocator::MacroPayload(MacroPayloadLocator {
             anchor: AuthoredAnchor {
-                canonical_id: Arc::from(PAYLOAD_OWNER),
+                canonical_id: verter_type_expr::OwnedStr::from(PAYLOAD_OWNER),
                 owner: TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from("default"),
+                symbol: verter_type_expr::OwnedStr::from("default"),
                 space: LocatorSymbolSpace::Value,
             },
             macro_index,
@@ -1224,12 +1224,12 @@ fn jsdoc_typedef_body_locator_lowers_through_the_shape_query() {
 
     let locator = AuthoredBodyLocator::JsdocTypedefBody(JsdocTypedefBodyLocator {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(TYPEDEF_OWNER_ID),
+            canonical_id: verter_type_expr::OwnedStr::from(TYPEDEF_OWNER_ID),
             owner: TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("FromDoc"),
+            symbol: verter_type_expr::OwnedStr::from("FromDoc"),
             space: LocatorSymbolSpace::Type,
         },
-        path: Arc::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
     });
 
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -1297,16 +1297,16 @@ fn broken_lease_lower_locator_suppresses_parent_admission() {
     let locator = decl_body_locator(OWNER_ID, "Base");
     let (canonical_id, owner, symbol, space) = match &locator {
         AuthoredBodyLocator::DeclBody(slot) => (
-            Arc::clone(&slot.anchor.canonical_id),
+            slot.anchor.canonical_id.clone(),
             slot.anchor.owner,
-            Arc::clone(&slot.anchor.symbol),
+            slot.anchor.symbol.clone(),
             slot.anchor.space,
         ),
         _ => unreachable!("decl_body_locator builds a DeclBody locator"),
     };
     let dispatch = ProjectSemanticDispatch::new(&host);
     let slot = dispatch
-        .type_slot_for(Arc::clone(&canonical_id), owner, symbol)
+        .type_slot_for(canonical_id.clone(), owner, symbol)
         .with_symbol_space(semantic_space_for_locator_space(space));
     let env = host.host_view_env_hashes_for(canonical_id.as_ref());
     let key = LocatorLoweringKey::new_unsubstituted(
@@ -1467,12 +1467,12 @@ fn lower_locator_derefs_a_member_value_sub_position() {
     // `Base` member ordinal 0 is `x: string`.
     let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(OWNER_ID),
+            canonical_id: verter_type_expr::OwnedStr::from(OWNER_ID),
             owner: TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("Base"),
+            symbol: verter_type_expr::OwnedStr::from("Base"),
             space: LocatorSymbolSpace::Type,
         },
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![
                 TypeBodyPathStep::Member { ordinal: 0 },
                 TypeBodyPathStep::MemberValue,

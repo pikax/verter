@@ -1569,7 +1569,9 @@ impl Default for CompileProfile {
 /// Each SFC is split into multiple virtual nodes that the bundler loads
 /// independently (script, template, styles, custom blocks), plus a `Main`
 /// node that assembles them into a single ES module.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, verter_retention::heap_size::HeapSize,
+)]
 pub enum VirtualNodeKind {
     /// The assembled main module (imports styles, binds render function, exports component).
     Main,
@@ -1859,7 +1861,7 @@ pub struct VirtualQuery {
 }
 
 /// Block-specific metadata attached to a [`VirtualFileResponse`].
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, verter_retention::heap_size::HeapSize)]
 pub struct VirtualMeta {
     /// Scoped style ID (e.g. `"data-v-abc123"`), present on Main nodes when styles are scoped.
     pub scope_id: Option<String>,
@@ -2399,7 +2401,7 @@ pub struct HostRemoveResult {
 }
 
 /// Severity level for a [`HostDiagnostic`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub enum HostSeverity {
     Error,
     Warning,
@@ -2407,7 +2409,7 @@ pub enum HostSeverity {
 }
 
 /// A single diagnostic (error, warning, or info) produced during parsing or compilation.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, verter_retention::heap_size::HeapSize)]
 pub struct HostDiagnostic {
     pub severity: HostSeverity,
     /// Machine-readable error code (e.g. `"HOST_MISSING_EXTERNAL_SOURCE"`).
@@ -2415,6 +2417,7 @@ pub struct HostDiagnostic {
     /// Human-readable diagnostic message.
     pub message: String,
     /// Canonically comparable semantic values used to render the message.
+    #[heap_size(with = "crate::heap_size_foreign::diagnostic_args")]
     pub arguments: Vec<verter_language::DiagnosticArg>,
     /// SFC-absolute byte offset span. Mandatory: a producer that cannot
     /// derive a real mapped location must fail closed at its own seam
@@ -2429,7 +2432,7 @@ pub struct HostDiagnostic {
 /// `append_advisory` can add an IDE-visible `Error` without flipping
 /// the compile-entry gate. `from_vec`/`merge` compute it from
 /// severity; see [`LanguageDiagnostic::blocks_compile`](verter_language::LanguageDiagnostic::blocks_compile).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, verter_retention::heap_size::HeapSize)]
 pub struct DiagnosticsSnapshot {
     /// All diagnostics (errors + warnings + info).
     pub diagnostics: Vec<HostDiagnostic>,
@@ -2840,7 +2843,7 @@ pub(crate) struct ParseSnapshot {
     pub(crate) refused: Option<verter_parser::oxc_parse::StackUnavailable>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub(crate) struct CachedVirtualFile {
     pub(crate) code: Arc<str>,
     pub(crate) source_map: Option<Arc<str>>,
@@ -2849,11 +2852,12 @@ pub(crate) struct CachedVirtualFile {
 }
 
 /// Cached IDE output for LSP type checking, stored separately from virtual files.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub(crate) struct CachedTsx {
     pub(crate) code: Arc<str>,
     pub(crate) source_map: Option<Arc<str>>,
     pub(crate) is_jsx: bool,
+    #[heap_size(with = "crate::heap_size_foreign::destructured_block")]
     pub(crate) destructured_block: Option<verter_compiler::compile::types::DestructuredBlockMeta>,
 }
 
@@ -2868,6 +2872,17 @@ pub struct IdeResponse {
     pub is_jsx: bool,
     /// Structured metadata for the destructured block region, if present.
     pub destructured_block: Option<verter_compiler::compile::types::DestructuredBlockMeta>,
+}
+
+impl From<&CachedTsx> for IdeResponse {
+    fn from(tsx: &CachedTsx) -> Self {
+        Self {
+            code: Arc::clone(&tsx.code),
+            source_map: tsx.source_map.clone(),
+            is_jsx: tsx.is_jsx,
+            destructured_block: tsx.destructured_block.clone(),
+        }
+    }
 }
 
 /// One separately addressed output of a compiled runtime product.
@@ -3180,7 +3195,7 @@ pub enum PublicApiMode {
 ///
 /// `large_enum_variant` is allowed: boxing the common produced arm
 /// would add a hop on every warm read.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum CompileProducts {
     /// The compile produced the requested product set.
@@ -3298,8 +3313,9 @@ pub(crate) struct CompileSlot {
     /// zero-cost off the override path.
     pub(crate) css_hash_override: Option<Arc<str>>,
     /// What this transaction committed — the produced product set, OR a
-    /// payload-free runtime refusal. See [`CompileProducts`].
-    pub(crate) products: CompileProducts,
+    /// payload-free runtime refusal. See [`CompileProducts`]. One
+    /// self-charged allocation every warm hit shares.
+    pub(crate) products: verter_retention::heap_size::OwnedTree<CompileProducts>,
     pub(crate) diagnostics: DiagnosticsSnapshot,
     #[allow(dead_code)]
     pub(crate) last_access_tick: u64,
@@ -3322,6 +3338,52 @@ pub(crate) struct CompileSlot {
     /// falls back to the existing `semantic_hash`/override-hash
     /// pre-filter.
     pub(crate) fact_dep_signature: verter_session_query::facts::fact_cache::ReadSetSignature,
+    /// The slot's own allocations — its map slot, its diagnostics, its
+    /// override text, its fact slice and the evidence pages it reaches —
+    /// on one refusable reservation that also holds the products' cell.
+    pub(crate) _retention: Arc<verter_session_query::retention::RetentionCharge>,
+}
+
+/// A compile slot's fields, for a fixture that builds one directly.
+#[cfg(test)]
+pub(crate) struct CompileSlotFixture {
+    pub(crate) semantic_hash: Hash16,
+    pub(crate) content_override_hash: u64,
+    pub(crate) css_hash_override: Option<Arc<str>>,
+    pub(crate) products: CompileProducts,
+    pub(crate) diagnostics: DiagnosticsSnapshot,
+    pub(crate) last_access_tick: u64,
+    pub(crate) fact_dep_signature: verter_session_query::facts::fact_cache::ReadSetSignature,
+}
+
+#[cfg(test)]
+impl CompileSlotFixture {
+    /// The slot, charged to the process account like a published one.
+    pub(crate) fn into_slot(self) -> CompileSlot {
+        let value = crate::compile_output_node::CompileOutputValue::from_compile_record(
+            self.semantic_hash,
+            self.content_override_hash,
+            self.css_hash_override,
+            self.products,
+            self.diagnostics,
+        );
+        let retention = crate::compile_output_node::compile_slot_retention(
+            &value,
+            &self.fact_dep_signature,
+            &verter_session_query::retention::SemanticRetentionAccount::process_local(),
+        )
+        .expect("a fixture slot is admitted");
+        CompileSlot {
+            semantic_hash: value.semantic_hash,
+            content_override_hash: value.content_override_hash,
+            css_hash_override: value.css_hash_override,
+            products: value.products,
+            diagnostics: value.diagnostics,
+            last_access_tick: self.last_access_tick,
+            fact_dep_signature: self.fact_dep_signature,
+            _retention: Arc::new(retention),
+        }
+    }
 }
 
 /// Lightweight extract of FileEntry fields needed for compilation,

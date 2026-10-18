@@ -1,4 +1,6 @@
 use super::*;
+use verter_type_expr::OwnedSlice;
+use verter_type_expr::OwnedStr;
 use verter_type_expr::{
     ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, PropertyKey, TypeExpr, UnknownValue,
 };
@@ -873,12 +875,12 @@ fn signature_fact(has_authored_return: bool) -> FunctionSignature {
             verter_type_expr::facts::FunctionReturnSource::Declared(
                 verter_type_expr::locators::FunctionReturnLocator::Authored(TypeBodySlot {
                     anchor: AuthoredAnchor {
-                        canonical_id: Arc::from("/ws/a.ts"),
+                        canonical_id: OwnedStr::from("/ws/a.ts"),
                         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                        symbol: Arc::from("f"),
+                        symbol: OwnedStr::from("f"),
                         space: LocatorSymbolSpace::Value,
                     },
-                    path: Arc::from(
+                    path: OwnedSlice::from(
                         Vec::<verter_type_expr::locators::TypeBodyPathStep>::new()
                             .into_boxed_slice(),
                     ),

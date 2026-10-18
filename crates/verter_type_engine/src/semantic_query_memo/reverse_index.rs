@@ -4,9 +4,20 @@
 //! (the warm map), `memo_budget` (its FIFO ledger), and
 //! `canonical_to_entries` (this reverse index) — is mutated under
 //! ONE lock domain (the `entries` `Mutex`). The helpers here own the
-//! reverse-index portion of that contract: registration on publish,
-//! per-candidate drain on displacement / FIFO eviction, and single
-//! `(family, slot, seq)` removal during cross-canonical cleanup.
+//! reverse-index portion of that contract: registration of the published
+//! candidates not yet indexed, per-candidate drain on displacement / FIFO
+//! eviction, and single `(family, slot, seq)` removal during
+//! cross-canonical cleanup.
+//!
+//! **Registration on read.** Publishing a candidate leaves it unindexed
+//! and notes its family and admission sequence in [`PendingRegistrations`];
+//! the next read of the index registers exactly those candidates, under
+//! the same `entries` lock hold as that read
+//! ([`SemanticGraphStore::index_unregistered_candidates_locked`](super::SemanticGraphStore)),
+//! so its work follows the publishes since the previous read, not the
+//! memo's size. An index read therefore always sees every resident
+//! candidate, and a candidate displaced or evicted before any read is
+//! dropped with nothing to prune.
 //!
 //! **Per-candidate keying.** Reverse-index entries identify
 //! `(FamilyKey, ModeSlot, admission_seq)` — per-candidate, not
@@ -36,27 +47,121 @@ use super::RegisteredFacts;
 use crate::instant::Instant;
 use crate::semantic_query::DepSignature;
 
-/// One immutable carrier projection, reused by every member of a publication
-/// batch and every populated slot. The facts and their canonical union travel
-/// together so registration cannot accidentally pair different carriers.
-pub(super) struct ReverseIndexInputs<'a> {
-    registered_facts: RegisteredFacts,
-    canonicals: RegisteredCanonicals<'a>,
+/// How many canonicals one candidate registers under, per populated slot.
+pub(super) fn registered_canonical_count(
+    read_set_signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
+    dispatch_dep_signature: &DepSignature,
+) -> usize {
+    RegisteredCanonicals::of(read_set_signature, dispatch_dep_signature)
+        .ordered
+        .len()
 }
 
-impl<'a> ReverseIndexInputs<'a> {
-    /// The canonicals each populated slot registers under.
-    pub(super) fn canonical_count(&self) -> usize {
-        self.canonicals.ordered.len()
-    }
+/// The candidates published since the reverse index was last read, so the
+/// read registers exactly those instead of walking every resident family.
+/// Locked only while the family memo's `entries` lock is held
+/// (`entries → pending`), so it never contends.
+///
+/// The list is charged, pinned, while it waits: its backing by capacity and
+/// the boxes each entry's family-key clone copies (the clone shares the
+/// key's `Arc`s and owned names, which keep their own charges). The read
+/// that takes the list gives the charge back.
+pub(super) struct PendingRegistrations {
+    /// Each publish's family and admission sequence, in publish order. An
+    /// entry whose candidate was displaced or evicted before the read
+    /// finds nothing to register.
+    published: Vec<(FamilyKey, u64)>,
+    /// The list grew to the memo's resident family count (repeat publishes
+    /// into resident families, or candidates evicted unread) and was
+    /// dropped: the next read registers every unindexed resident candidate
+    /// in one walk. The list therefore never outgrows the memo it indexes,
+    /// and the walk costs no more per publish than the list it replaces.
+    overflowed: bool,
+    /// The heap the waiting family-key clones copied.
+    key_heap: usize,
+    /// The bytes `storage` counts for the list: its backing plus `key_heap`.
+    charged: usize,
+    storage: IndexStorage,
+}
 
-    pub(super) fn new(
-        read_set_signature: &'a verter_session_query::facts::fact_cache::ReadSetSignature,
-        dispatch_dep_signature: &'a DepSignature,
+/// What a reverse-index read registers.
+pub(super) enum PendingWork {
+    /// Nothing was published since the previous read.
+    None,
+    /// These publishes' candidates.
+    Published(Vec<(FamilyKey, u64)>),
+    /// Every unindexed resident candidate.
+    All,
+}
+
+impl PendingRegistrations {
+    /// An empty list whose storage is charged to `account`.
+    pub(super) fn charged(
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) -> Self {
         Self {
-            registered_facts: Arc::clone(&read_set_signature.facts),
-            canonicals: RegisteredCanonicals::of(read_set_signature, dispatch_dep_signature),
+            published: Vec::new(),
+            overflowed: false,
+            key_heap: 0,
+            charged: 0,
+            storage: IndexStorage {
+                account: Some(Arc::clone(account)),
+                ..IndexStorage::default()
+            },
+        }
+    }
+
+    /// Note one published candidate; `resident_families` is the memo's
+    /// family count after the publish.
+    pub(super) fn note(
+        &mut self,
+        family: &FamilyKey,
+        admission_seq: u64,
+        resident_families: usize,
+    ) {
+        if self.overflowed {
+            return;
+        }
+        if self.published.len() >= resident_families {
+            self.published = Vec::new();
+            self.overflowed = true;
+            self.release();
+            return;
+        }
+        self.published.push((family.clone(), admission_seq));
+        self.key_heap += super::family_footprint::family_key_clone_heap_bytes(family).bytes;
+        let bytes =
+            verter_session_query::retention::allocation::vec_bytes(&self.published) + self.key_heap;
+        let before = std::mem::replace(&mut self.charged, bytes);
+        self.storage.adjust(bytes, before);
+    }
+
+    /// Bytes the pending list is charged.
+    pub(super) fn storage_charge_bytes(&self) -> usize {
+        self.storage.pin.as_ref().map_or(
+            0,
+            verter_session_query::retention::granular::GranularPin::charged,
+        )
+    }
+
+    /// Give back the charge of a list that no longer waits.
+    fn release(&mut self) {
+        self.key_heap = 0;
+        let before = std::mem::take(&mut self.charged);
+        self.storage.adjust(0, before);
+    }
+
+    /// Take the registration work a read owes, leaving none pending.
+    pub(super) fn take(&mut self) -> PendingWork {
+        let published = std::mem::take(&mut self.published);
+        let overflowed = std::mem::take(&mut self.overflowed);
+        self.release();
+        if overflowed {
+            PendingWork::All
+        } else if published.is_empty() {
+            PendingWork::None
+        } else {
+            PendingWork::Published(published)
         }
     }
 }
@@ -110,10 +215,6 @@ impl<'a> RegisteredCanonicals<'a> {
     fn iter(&self) -> impl Iterator<Item = &'a str> + '_ {
         self.ordered.iter().copied()
     }
-
-    fn is_empty(&self) -> bool {
-        self.ordered.is_empty()
-    }
 }
 
 /// One canonical's shard: its registrations, keyed by `(admission_seq, slot)`.
@@ -135,7 +236,7 @@ const INDEX_STORAGE_GRANULE: usize = 4 * 1024;
 /// beside its records.
 ///
 /// Every registration record is charged by the candidate that registered it
-/// ([`registration_bytes`]). Everything else the index holds is charged
+/// ([`registration_footprint`]). Everything else the index holds is charged
 /// here, pinned while it is held: each shard's copy of its canonical's
 /// text, every shard table's unused buckets (capacity beyond its live
 /// records), and the outer table's buckets. A shard table gives its backing
@@ -144,7 +245,7 @@ const INDEX_STORAGE_GRANULE: usize = 4 * 1024;
 /// Every mutation runs under the family memo's `entries` lock (see the
 /// module docs), so the storage figures settle without racing each other.
 pub(super) struct CanonicalToEntries {
-    map: dashmap::DashMap<Arc<str>, Mutex<ShardMap>>,
+    map: dashmap::DashMap<Arc<str>, Mutex<ShardMap>, rustc_hash::FxBuildHasher>,
     storage: Mutex<IndexStorage>,
 }
 
@@ -194,7 +295,7 @@ fn shrink_drained_shard(map: &mut ShardMap) {
 }
 
 impl std::ops::Deref for CanonicalToEntries {
-    type Target = dashmap::DashMap<Arc<str>, Mutex<ShardMap>>;
+    type Target = dashmap::DashMap<Arc<str>, Mutex<ShardMap>, rustc_hash::FxBuildHasher>;
     fn deref(&self) -> &Self::Target {
         &self.map
     }
@@ -206,7 +307,7 @@ impl CanonicalToEntries {
         account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) -> Self {
         Self {
-            map: dashmap::DashMap::new(),
+            map: dashmap::DashMap::default(),
             storage: Mutex::new(IndexStorage {
                 account: Some(Arc::clone(account)),
                 ..IndexStorage::default()
@@ -270,30 +371,34 @@ impl CanonicalToEntries {
 /// `Arc`s it shares with `family`). A shard's own storage — its canonical's
 /// text, its unused buckets — is charged by the index
 /// ([`CanonicalToEntries`]).
-pub(super) fn registration_bytes(
+pub(super) fn registration_footprint(
     family: &FamilyKey,
     registered_canonicals: usize,
     populated_slots: usize,
-) -> usize {
+) -> verter_session_query::retention::Footprint {
     use verter_session_query::retention::allocation::arc_block_bytes;
     if registered_canonicals == 0 || populated_slots == 0 {
-        return 0;
+        return verter_session_query::retention::Footprint {
+            bytes: 0,
+            handles: Default::default(),
+        };
     }
-    registered_canonicals * populated_slots * RECORD_BUCKET_BYTES
-        + arc_block_bytes(std::mem::size_of::<FamilyKey>())
-        + super::family_footprint::family_key_clone_heap_bytes(family)
+    let clone = super::family_footprint::family_key_clone_heap_bytes(family);
+    verter_session_query::retention::Footprint {
+        bytes: registered_canonicals * populated_slots * RECORD_BUCKET_BYTES
+            + arc_block_bytes(std::mem::size_of::<FamilyKey>())
+            + clone.bytes,
+        handles: clone.handles,
+    }
 }
 
-/// Register the just-published candidate's reverse-index entries.
-///
-/// Inserts one `(admission_seq, slot) -> (family, registered_facts)`
-/// record per `(populated_slot × canonical)` pair, where canonicals
-/// are the UNION of the carrier's `canonical_ids()` and the
-/// dispatch-fence canonicals. The two sets overlap in production
-/// (the cold build folds the dispatch fence into the carrier); the
-/// `seen` dedup collapses them. The dispatch-fence pass covers
-/// synthetic / test publishes whose carrier was seeded without the
-/// fence merge.
+/// Register one candidate's reverse-index entries: one
+/// `(admission_seq, slot) -> (family, registered_facts)` record under each
+/// canonical the candidate registers under — the UNION of its carrier's
+/// `canonical_ids()` and its dispatch-fence canonicals, each once. The two
+/// sets overlap in production (the cold build folds the dispatch fence into
+/// the carrier); the dispatch-fence pass covers synthetic / test publishes
+/// whose carrier was seeded without the fence merge.
 ///
 /// A carrier whose signature COMPACTED registers under fewer canonicals:
 /// its terminal aggregate names none of the files it stands in for. That
@@ -302,28 +407,25 @@ pub(super) fn registration_bytes(
 /// identical projection so the two stay symmetric; and the aggregate
 /// rejects at read time on any movement in its domain. The consequence is
 /// a later eviction, never a stale serve.
-pub(super) fn register_reverse_index(
+pub(super) fn register_candidate(
     canonical_to_entries: &CanonicalToEntries,
-    family: &FamilyKey,
-    populated_slots: &[ModeSlot],
-    inputs: &ReverseIndexInputs<'_>,
-    admission_seq: u64,
+    family: &Arc<FamilyKey>,
+    slot: ModeSlot,
+    entry: &MemoEntry,
+    timing_on: bool,
 ) {
-    if populated_slots.is_empty() || inputs.canonicals.is_empty() {
-        return;
-    }
-    let timing_on = verter_execution::request_context::current_timing_enabled();
-    // Every registration of this candidate names the one family.
-    let family = Arc::new(family.clone());
-    // One shard lookup and lock per canonical takes every populated slot.
-    for canonical in inputs.canonicals.iter() {
+    let canonicals =
+        RegisteredCanonicals::of(&entry.read_set_signature, &entry.dispatch_dep_signature);
+    let registered_facts: RegisteredFacts = Arc::clone(&entry.read_set_signature.facts);
+    // One shard lookup and lock per canonical.
+    for canonical in canonicals.iter() {
         register_canonical_slots(
             canonical_to_entries,
             canonical,
-            &family,
-            populated_slots,
-            admission_seq,
-            &inputs.registered_facts,
+            family,
+            &[slot],
+            entry.admission_seq,
+            &registered_facts,
             timing_on,
         );
     }
@@ -331,7 +433,7 @@ pub(super) fn register_reverse_index(
 
 /// Drain a single candidate's per-candidate reverse-index
 /// registrations. Walks the SAME canonical-iteration union
-/// [`register_reverse_index`] uses and removes each
+/// [`register_candidate`] uses and removes each
 /// `(family, slot, candidate.admission_seq)` entry. Surviving
 /// sibling candidates' registrations stay intact — each carries its
 /// own seq. Caller holds the `entries` lock.
@@ -340,6 +442,9 @@ pub(super) fn drain_candidate_reverse_index_registrations(
     slot: ModeSlot,
     entry: &MemoEntry,
 ) {
+    if !entry.reverse_indexed {
+        return;
+    }
     let registration = (slot, entry.admission_seq);
     let canonicals =
         RegisteredCanonicals::of(&entry.read_set_signature, &entry.dispatch_dep_signature);
@@ -371,7 +476,7 @@ pub(super) fn drain_registrations_except(
 /// per-canonical `Mutex` before the outer drop is attempted; the
 /// outer drop is then a single [`dashmap::DashMap::remove_if`] whose
 /// emptiness predicate runs while the shard write lock is held.
-/// A [`register_reverse_index`] inserter holds that shard's lock — read
+/// A [`register_candidate`] inserter holds that shard's lock — read
 /// for an existing shard, write for `entry(canonical).or_insert_with(...)`
 /// — across its inner `insert`, so the two serialise: either the inserter
 /// runs first
@@ -419,7 +524,7 @@ pub(super) fn prune_reverse_index_registration(
 }
 
 /// Single-shard registration step used by
-/// [`register_reverse_index`]. Inserts one
+/// [`register_candidate`]. Inserts one
 /// `(seq, slot) -> (family, registered_facts)` record per populated slot
 /// into the `canonical_to_entries[canonical]` shard, holding the shard lock
 /// (read for an existing shard, write to create one) across the inner
@@ -495,7 +600,7 @@ fn record_lock_wait(lock_start: Option<Instant>) {
 ///
 /// Walks every candidate in every slot — a multi-view slot must drain
 /// registrations for each candidate, not just the first — over the SAME
-/// union [`register_reverse_index`] iterates (carrier `canonical_ids()`
+/// union [`register_candidate`] iterates (carrier `canonical_ids()`
 /// PLUS `dispatch_dep_signature`), so a dispatch-only registration
 /// cannot survive the removal. Returns whether at least one registration
 /// was pruned. The caller holds the family memo's `entries` `Mutex`.
@@ -505,6 +610,9 @@ pub(super) fn drain_family_slots_registrations(
 ) -> bool {
     let mut pruned_any = false;
     for (slot, entry) in slots.iter_populated_slots_all() {
+        if !entry.reverse_indexed {
+            continue;
+        }
         let canonicals =
             RegisteredCanonicals::of(&entry.read_set_signature, &entry.dispatch_dep_signature);
         for canonical in canonicals.iter() {

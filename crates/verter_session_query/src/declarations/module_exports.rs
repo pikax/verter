@@ -162,6 +162,26 @@ pub enum ModuleExportBinding {
     Namespace(Arc<str>),
 }
 
+impl verter_retention::heap_size::HeapSize for ModuleExportTable {
+    /// The fact slice; the persistent binding structure is charged by the
+    /// table's retention record, which follows the shared nodes, and a table
+    /// without one is estimated by the binding slots it wrote.
+    fn heap_size<'t>(
+        &'t self,
+        meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+    ) -> usize {
+        let bindings = if self.retention.is_some() {
+            0
+        } else {
+            verter_retention::allocation::heap_block_bytes(
+                self.owned_binding_slots
+                    * std::mem::size_of::<(Arc<str>, Option<ModuleExportBinding>)>(),
+            )
+        };
+        bindings + crate::retention::allocation::fact_slice_bytes(&self.facts, meter.handles())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

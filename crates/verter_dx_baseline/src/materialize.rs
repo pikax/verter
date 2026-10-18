@@ -942,16 +942,20 @@ pub fn materialize(req: &MaterializeRequest) -> Result<MaterializeReport, Materi
         // the separate public-API declaration. `ensure_ide_compiled` is the
         // route for the first and normalizes the TSX bit (idempotent here — the
         // profile already carries `IDE`), so it drives the same compile into the
-        // same slot `get_ide` peeks while asking only for what is read.
-        if let Err(e) = host.ensure_ide_compiled(&canonical, &profile) {
-            // A bad file must not abort the whole pass — record and move on.
-            report
-                .compile_errors
-                .push((canonical.clone(), format!("{e:?}")));
-        }
+        // same compile `get_ide` peeks while asking only for what is read.
+        let ide = match host.compile_ide(&canonical, &profile) {
+            Ok(ide) => ide,
+            Err(e) => {
+                // A bad file must not abort the whole pass — record and move on.
+                report
+                    .compile_errors
+                    .push((canonical.clone(), format!("{e:?}")));
+                host.get_ide(&canonical, &profile)
+            }
+        };
 
         // IDE artifact (.vue.tsx / .vue.jsx).
-        if let Some(ide) = host.get_ide(&canonical, &profile) {
+        if let Some(ide) = ide {
             let suffix = if ide.is_jsx { ".jsx" } else { ".tsx" };
             let gen_path = artifact_path(vue, suffix);
             let rewrite = rewrite_vue_imports_tracked(&ide.code);

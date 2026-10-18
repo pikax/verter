@@ -16,8 +16,8 @@ note: expected `StoreAccount`, found `Arc<SemanticRetentionAccount>`
   |
   |     let _ = EngineStores::create(live_graph, live_account, &counter, Default::default());
   |                                              ^^^^^^^^^^^^
-  = note: expected struct `verter_session_query::retention::StoreAccount`
-             found struct `Arc<verter_session_query::retention::SemanticRetentionAccount>`
+  = note: expected struct `verter_retention::StoreAccount`
+             found struct `Arc<verter_retention::SemanticRetentionAccount>`
 note: associated function defined here
  --> $WORKSPACE/crates/verter_type_engine/src/project_semantic_dispatch/engine_resources.rs
   |

@@ -62,9 +62,9 @@ fn build_host(audit_enabled: bool) -> Arc<VerterHost> {
 fn make_thing_identity() -> FlowFunctionReturnIdentity {
     FlowFunctionReturnIdentity {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(CANONICAL),
+            canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("makeThing"),
+            symbol: verter_type_expr::OwnedStr::from("makeThing"),
             space: LocatorSymbolSpace::Value,
         },
         function_part: FunctionPartIdentity::DeclarationBody,

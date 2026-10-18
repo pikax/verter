@@ -70,7 +70,7 @@ fn distinct_flow_keys(count: usize) -> Vec<FlowReturnKey> {
                 function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
                 overload_ordinal: 0,
             },
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: FlowReturnContext {
                 parse_env_hash: [0u8; 16],
                 resolve_env_hash: [0u8; 16],
@@ -137,11 +137,15 @@ fn flow_demand_basis_for_member(
     FlowDemandBasis {
         ancestry: Default::default(),
         graph_body: verter_session_query::flow::bundle::FlowSliceFunctionKey {
-            canonical_id: Arc::clone(&key.function.declaration_slot.defining_canonical),
+            canonical_id: std::sync::Arc::<str>::from(
+                key.function.declaration_slot.defining_canonical.as_str(),
+            ),
             function: verter_session_query::function_program::FunctionProgramKey {
                 declaration: verter_session_query::function_program::FunctionDeclarationRef {
                     owner: key.function.declaration_slot.owner,
-                    name: Arc::clone(&key.function.declaration_slot.merged_symbol_name),
+                    name: std::sync::Arc::<str>::from(
+                        key.function.declaration_slot.merged_symbol_name.as_str(),
+                    ),
                     space: verter_session_query::facts::SymbolSpace::Value,
                 },
                 part: key.function.function_part.clone(),
@@ -233,7 +237,7 @@ fn counted_component_candidates_and_subscribers_own_flow_operands() {
                 "flow returned operand".into(),
             )));
             let mut flow_key = distinct_flow_keys(1).remove(0);
-            flow_key.normalized_type_args = Arc::from([key_node]);
+            flow_key.normalized_type_args = verter_type_expr::OwnedSlice::from([key_node]);
             let flight = store.begin_inline_flow_return_flight(&flow_key).unwrap();
             let subscriber = if subscribe {
                 let mut capture = ReadCapture::default();
@@ -322,6 +326,73 @@ fn counted_component_candidates_and_subscribers_own_flow_operands() {
             assert!(!store.node_is_live(key_node));
             assert!(!store.node_is_live(return_node));
         });
+    }
+}
+
+/// A member whose decided value named a node already destroyed when its
+/// component closed cannot be held; the batched publish refuses the WHOLE
+/// component and releases every member flight, rather than publishing a
+/// candidate whose value no lease can root.
+///
+/// Discriminating against a hold failure that is ignored: the component
+/// would publish both members, the unheld one included.
+#[test]
+fn scc_batch_refuses_whole_when_a_member_value_could_not_be_held() {
+    for unheld in [false, true] {
+        let store = SemanticGraphStore::new_with_memo_budget_for_test(8);
+        let _scope = store.enter_node_root_scope();
+        let keys = distinct_keys(&store, 3);
+        let witness = seed_root(&store, &keys[0]);
+        let dead = {
+            let _inner = store.enter_node_root_scope();
+            store.intern_node(SemanticNodeData::Literal(
+                verter_type_engine::semantic_query::LiteralValue::String(
+                    "destroyed member value".into(),
+                ),
+            ))
+        };
+        assert!(!store.node_is_live(dead), "premise: only the scope held it");
+        let mut pending = Vec::new();
+        for key in &keys[1..] {
+            let mut flight = store
+                .begin_inline_relation_flight(key)
+                .expect("each member claims its vacant family flight");
+            if unheld && pending.is_empty() {
+                flight.hold_value_for_tests(
+                    &store,
+                    &QueryResult::Value(SemanticQueryValue::TypeNode(dead)),
+                );
+            }
+            pending.push(PendingRelationMember {
+                key: key.clone(),
+                payload: store.relation_payload_for_tests(RelationOutcome::Assignable),
+                flight,
+            });
+        }
+        let published = store.publish_scc_members_fenced_for_tests(
+            None::<
+                &dyn verter_type_engine::resolver_core::ResolverContext<
+                    crate::resolver_core::HostCapabilities,
+                >,
+            >,
+            &witness,
+            &verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+            &Arc::from(Vec::<Arc<str>>::new()),
+            0,
+            pending,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(published, !unheld, "unheld={unheld}");
+        let members = keys[1..]
+            .iter()
+            .filter(|key| store.slot_candidate_count_for_tests(&key.to_query_key()) > 0)
+            .count();
+        assert_eq!(members, if unheld { 0 } else { 2 }, "unheld={unheld}");
+        assert!(
+            store.retained_claimed_flight_keys_for_tests().is_empty(),
+            "every member flight is released either way"
+        );
     }
 }
 

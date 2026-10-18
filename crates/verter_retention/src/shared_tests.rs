@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::retention::{RetentionLimits, SemanticRetentionAccount};
+use crate::{RetentionLimits, SemanticRetentionAccount};
 
 fn account(ceiling: usize) -> Arc<SemanticRetentionAccount> {
     SemanticRetentionAccount::new(RetentionLimits {
@@ -10,6 +10,18 @@ fn account(ceiling: usize) -> Arc<SemanticRetentionAccount> {
         max_entry_bytes: ceiling,
         pin_threshold_bytes: ceiling,
     })
+}
+
+/// Bytes a registered carrier's slice of holds on `leaves` leaf names
+/// keeps while it is registered: one pointer per hold.
+fn leaf_slice(leaves: usize) -> usize {
+    heap_block_bytes(leaves * std::mem::size_of::<usize>())
+}
+
+/// Bytes a slice of `cells` type-erased owned-cell pointers takes: a
+/// carrier's record of its owned children, or a cache's holds on them.
+fn cell_slice(cells: usize) -> usize {
+    heap_block_bytes(cells * 2 * std::mem::size_of::<usize>())
 }
 
 fn occupancy(account: &SemanticRetentionAccount) -> (usize, usize) {
@@ -333,7 +345,7 @@ fn a_caller_first_charge_is_never_refused() {
 /// released with the last carrier holding it.
 #[test]
 fn a_leaf_two_carriers_share_is_charged_once_through_either_release_order() {
-    use crate::retention::allocation::arc_str_list_bytes;
+    use crate::allocation::arc_str_list_bytes;
     const LEAF: usize = 50_000;
     for first_released in [0, 1] {
         let account = account(1 << 30);
@@ -345,7 +357,9 @@ fn a_leaf_two_carriers_share_is_charged_once_through_either_release_order() {
             Arc::from(vec![Arc::clone(&leaf), Arc::clone(&small)]),
         ];
         let block = |carrier: &Arc<[Arc<str>]>| {
-            arc_block_bytes(std::mem::size_of_val::<[Arc<str>]>(carrier)) + registration_bytes()
+            arc_block_bytes(std::mem::size_of_val::<[Arc<str>]>(carrier))
+                + registration_bytes()
+                + leaf_slice(carrier.len())
         };
         let leaf_charge = arc_block_bytes(LEAF) + registration_bytes();
         let small_charge = arc_block_bytes(small.len()) + registration_bytes();
@@ -389,14 +403,15 @@ fn a_leaf_two_carriers_share_is_charged_once_through_either_release_order() {
 /// retains it again.
 #[test]
 fn a_carriers_leaves_move_with_its_class_and_adopt_all_or_nothing() {
-    use crate::retention::allocation::arc_str_list_bytes;
+    use crate::allocation::arc_str_list_bytes;
     const LEAF: usize = 10_000;
     let account = account(1 << 20);
     let registry = AliasCharges::new();
     let carrier: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from("l".repeat(LEAF))]);
     let total = arc_block_bytes(std::mem::size_of_val::<[Arc<str>]>(&carrier))
         + arc_block_bytes(LEAF)
-        + 2 * registration_bytes();
+        + 2 * registration_bytes()
+        + leaf_slice(1);
     let cache = registry
         .hold(&account, &carrier, |aliases| {
             arc_str_list_bytes(&carrier, aliases)
@@ -441,7 +456,7 @@ fn a_carriers_leaves_move_with_its_class_and_adopt_all_or_nothing() {
 /// thread blocks on the other.
 #[test]
 fn a_carrier_revived_while_its_last_holder_releases_keeps_its_sole_leaf_charged_once() {
-    use crate::retention::allocation::arc_str_list_bytes;
+    use crate::allocation::arc_str_list_bytes;
     const LEAF: usize = 20_000;
     for revive_as_caller in [false, true] {
         let account = account(1 << 20);
@@ -449,7 +464,8 @@ fn a_carrier_revived_while_its_last_holder_releases_keeps_its_sole_leaf_charged_
         let carrier: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from("r".repeat(LEAF))]);
         let total = arc_block_bytes(std::mem::size_of_val::<[Arc<str>]>(&carrier))
             + arc_block_bytes(LEAF)
-            + 2 * registration_bytes();
+            + 2 * registration_bytes()
+            + leaf_slice(1);
         let last = registry
             .hold(&account, &carrier, |aliases| {
                 arc_str_list_bytes(&carrier, aliases)
@@ -516,4 +532,55 @@ fn a_carrier_revived_while_its_last_holder_releases_keeps_its_sole_leaf_charged_
         assert!(registry.is_empty());
         assert_eq!(occupancy(&account), (0, 0));
     }
+}
+
+/// A registered carrier's owned name is charged once, by its own cell, in
+/// the carrier's class: retained while a cache holds the carrier, its
+/// callers' once the cache lets go, and kept by a clone that outlives the
+/// carrier and its registration.
+#[test]
+fn a_registered_carriers_owned_name_is_charged_by_its_cell_in_the_carriers_class() {
+    use crate::owned::OwnedStr;
+    const NAME: usize = 3_000;
+    let account = account(1 << 30);
+    let registry = AliasCharges::new();
+    let name = OwnedStr::from("r".repeat(NAME));
+    let carrier: Arc<[OwnedStr]> = Arc::from([name.clone()]);
+    let measure = |aliases: &mut AliasSet| carrier.iter().map(|n| n.offer(aliases)).sum();
+    let cache = registry
+        .hold(&account, &carrier, measure)
+        .expect("admitted");
+    let name_charge = OwnedStr::charge_for_len(NAME);
+    assert_eq!(name.charge_class(), Some(ChargeClass::Retained));
+    let own = cache.bytes();
+    assert_eq!(
+        own,
+        registration_bytes() + cell_slice(1),
+        "the carrier's registration and its record of the name; its measure counts nothing else"
+    );
+    assert_eq!(
+        occupancy(&account).0,
+        own + name_charge + cell_slice(1),
+        "the carrier's own charge excludes the name, which its cell charges once; \
+         the cache's hold on the name is kept in a charged slice"
+    );
+    let caller = registry.pin_caller(&account, &carrier, measure);
+    drop(cache);
+    assert_eq!(
+        name.charge_class(),
+        Some(ChargeClass::Pinned),
+        "the name follows the carrier to its callers"
+    );
+    let survivor = name.clone();
+    drop(name);
+    drop(caller);
+    drop(carrier);
+    assert!(registry.is_empty());
+    assert_eq!(
+        occupancy(&account),
+        (0, name_charge),
+        "the surviving clone alone keeps the name charged"
+    );
+    drop(survivor);
+    assert_eq!(occupancy(&account), (0, 0));
 }

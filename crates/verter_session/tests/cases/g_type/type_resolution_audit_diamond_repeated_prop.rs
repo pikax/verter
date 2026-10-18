@@ -48,14 +48,14 @@ fn type_resolution_audit_diamond_intra_request_interning() {
     // projection that visits `Shared` indirectly via both branches.
     let resolve_ab = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::from("/diamond.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/diamond.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
-        name: Arc::from("AB"),
+        name: verter_type_expr::OwnedStr::from("AB"),
     });
     let (ab_node, _) = host
         .resolve_type_with_audit(resolve_ab, "/diamond.ts")
@@ -67,7 +67,7 @@ fn type_resolution_audit_diamond_intra_request_interning() {
     // First visit: AB.a.left — walks through A and lands on Shared.
     let path_a = SemanticQueryKey::ProjectPath {
         base: ab_node,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![
                 PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     Arc::from("a"),
@@ -99,7 +99,7 @@ fn type_resolution_audit_diamond_intra_request_interning() {
     // says the second visit reuses the first visit's node id.
     let path_b = SemanticQueryKey::ProjectPath {
         base: ab_node,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![
                 PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     Arc::from("b"),
@@ -173,7 +173,7 @@ fn type_resolution_audit_diamond_intra_request_interning() {
     //    cache hit).
     let third = SemanticQueryKey::ProjectPath {
         base: ab_node,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![
                 PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     Arc::from("a"),

@@ -103,8 +103,20 @@ const CARRIER_STRUCTS: [&str; 4] = [
 /// The only derives the carrier structs may carry — the exact built-ins. A
 /// custom or qualified derive could synthesise a leaking trait impl a syn
 /// `#[derive(...)]` scan would treat as benign, so the set is CLOSED (each
-/// carrier must derive EXACTLY these five, by bare single-segment ident).
+/// carrier must derive EXACTLY its set, by bare single-segment ident). A
+/// carrier holding a raw argument list or name has no `Clone`: a public
+/// copy would carry those allocations away from the payload charging them.
 const ALLOWED_DERIVES: [&str; 5] = ["Clone", "PartialEq", "Eq", "Hash", "Debug"];
+const ALLOWED_DERIVES_NO_COPY: [&str; 4] = ["PartialEq", "Eq", "Hash", "Debug"];
+
+/// The exact derive set `owner` carries.
+fn allowed_derives(owner: &str) -> &'static [&'static str] {
+    if owner == "TypeOfNominalCarrier" {
+        &ALLOWED_DERIVES
+    } else {
+        &ALLOWED_DERIVES_NO_COPY
+    }
+}
 
 // ════════════════════════════════════════════════════════════════════
 // EXACT-SHAPE description tables. The exact-shape allowlist accepts an item
@@ -117,10 +129,11 @@ const ALLOWED_DERIVES: [&str; 5] = ["Clone", "PartialEq", "Eq", "Hash", "Debug"]
 /// The EXACT `use` imports carrier.rs may carry — no renames, no extras, no
 /// fewer. Compared as normalized token strings, so a `use … as …` rename, an
 /// added import, or a removed import is a deviation.
-const EXPECTED_USES: [&str; 3] = [
+const EXPECTED_USES: [&str; 4] = [
     "use std::sync::Arc;",
     "use super::{NodeScopeId, SemanticNodeData, SemanticNodeId, ValueRootKey};",
     "use verter_type_expr::facts::ValueDeclIdentityPart;",
+    "use verter_type_expr::{OwnedSlice, OwnedStr};",
 ];
 
 /// The EXACT head-view aliases (full definitions, attrs ignored). Pinned by
@@ -130,15 +143,15 @@ const EXPECTED_USES: [&str; 3] = [
 const EXPECTED_HEAD_ALIASES: [(&str, &str); 3] = [
     (
         "TypeOfHead",
-        "pub(crate) type TypeOfHead<'a> = (&'a ValueRootKey, &'a Arc<[Arc<str>]>);",
+        "pub(crate) type TypeOfHead<'a> = (&'a ValueRootKey, &'a OwnedSlice<OwnedStr>);",
     ),
     (
         "BareRefHead",
-        "pub(crate) type BareRefHead<'a> = (&'a Arc<str>, &'a NodeScopeId);",
+        "pub(crate) type BareRefHead<'a> = (&'a str, &'a NodeScopeId);",
     ),
     (
         "ImportTypeHead",
-        "pub(crate) type ImportTypeHead<'a> = (&'a Arc<str>, &'a Arc<[Arc<str>]>, bool);",
+        "pub(crate) type ImportTypeHead<'a> = (&'a str, &'a OwnedSlice<OwnedStr>, bool);",
     ),
 ];
 
@@ -157,16 +170,16 @@ const CARRIER_SPECS: [CarrierSpec; 4] = [
         name: "TypeOfCarrier",
         fields: &[
             ("value_root", "ValueRootKey"),
-            ("path", "Arc<[Arc<str>]>"),
+            ("path", "OwnedSlice<OwnedStr>"),
             ("type_args", "Arc<[SemanticNodeId]>"),
         ],
         methods: &[
             (
                 "new",
-                "fn new(value_root: ValueRootKey, path: Arc<[Arc<str>]>, type_args: Arc<[SemanticNodeId]>) -> Self",
+                "fn new(value_root: ValueRootKey, path: OwnedSlice<OwnedStr>, type_args: Arc<[SemanticNodeId]>) -> Self",
             ),
             ("value_root", "fn value_root(&self) -> &ValueRootKey"),
-            ("path", "fn path(&self) -> &Arc<[Arc<str>]>"),
+            ("path", "fn path(&self) -> &OwnedSlice<OwnedStr>"),
             ("arg_nodes", "fn arg_nodes(&self) -> &[SemanticNodeId]"),
             (
                 "with_type_args",
@@ -178,16 +191,16 @@ const CARRIER_SPECS: [CarrierSpec; 4] = [
         name: "TypeOfNominalCarrier",
         fields: &[
             ("value_root", "ValueRootKey"),
-            ("path", "Arc<[Arc<str>]>"),
+            ("path", "OwnedSlice<OwnedStr>"),
             ("identity", "ValueDeclIdentityPart"),
         ],
         methods: &[
             (
                 "new",
-                "fn new(value_root: ValueRootKey, path: Arc<[Arc<str>]>, identity: ValueDeclIdentityPart) -> Self",
+                "fn new(value_root: ValueRootKey, path: OwnedSlice<OwnedStr>, identity: ValueDeclIdentityPart) -> Self",
             ),
             ("value_root", "fn value_root(&self) -> &ValueRootKey"),
-            ("path", "fn path(&self) -> &Arc<[Arc<str>]>"),
+            ("path", "fn path(&self) -> &OwnedSlice<OwnedStr>"),
             ("identity", "fn identity(&self) -> &ValueDeclIdentityPart"),
         ],
     },
@@ -203,7 +216,7 @@ const CARRIER_SPECS: [CarrierSpec; 4] = [
                 "new",
                 "fn new(name: Arc<str>, scope: NodeScopeId, type_args: Arc<[SemanticNodeId]>) -> Self",
             ),
-            ("name", "fn name(&self) -> &Arc<str>"),
+            ("name", "fn name(&self) -> &str"),
             ("scope", "fn scope(&self) -> &NodeScopeId"),
             ("arg_nodes", "fn arg_nodes(&self) -> &[SemanticNodeId]"),
             (
@@ -216,17 +229,17 @@ const CARRIER_SPECS: [CarrierSpec; 4] = [
         name: "ImportTypeCarrier",
         fields: &[
             ("specifier", "Arc<str>"),
-            ("qualifier", "Arc<[Arc<str>]>"),
+            ("qualifier", "OwnedSlice<OwnedStr>"),
             ("type_args", "Arc<[SemanticNodeId]>"),
             ("typeof_query", "bool"),
         ],
         methods: &[
             (
                 "new",
-                "fn new(specifier: Arc<str>, qualifier: Arc<[Arc<str>]>, type_args: Arc<[SemanticNodeId]>, typeof_query: bool) -> Self",
+                "fn new(specifier: Arc<str>, qualifier: OwnedSlice<OwnedStr>, type_args: Arc<[SemanticNodeId]>, typeof_query: bool) -> Self",
             ),
-            ("specifier", "fn specifier(&self) -> &Arc<str>"),
-            ("qualifier", "fn qualifier(&self) -> &Arc<[Arc<str>]>"),
+            ("specifier", "fn specifier(&self) -> &str"),
+            ("qualifier", "fn qualifier(&self) -> &OwnedSlice<OwnedStr>"),
             ("typeof_query", "fn typeof_query(&self) -> bool"),
             ("arg_nodes", "fn arg_nodes(&self) -> &[SemanticNodeId]"),
             (
@@ -260,12 +273,12 @@ const ACCESSOR_SPECS: [AccessorSpec; 10] = [
     AccessorSpec {
         name: "new_typeof",
         vis: "pub",
-        sig: "fn new_typeof(value_root: ValueRootKey, path: Arc<[Arc<str>]>, type_args: Arc<[SemanticNodeId]>) -> Self",
+        sig: "fn new_typeof(value_root: ValueRootKey, path: OwnedSlice<OwnedStr>, type_args: Arc<[SemanticNodeId]>) -> Self",
     },
     AccessorSpec {
         name: "new_nominal_typeof",
         vis: "pub(crate)",
-        sig: "fn new_nominal_typeof(value_root: ValueRootKey, path: Arc<[Arc<str>]>, nominal_identity: ValueDeclIdentityPart) -> Self",
+        sig: "fn new_nominal_typeof(value_root: ValueRootKey, path: OwnedSlice<OwnedStr>, nominal_identity: ValueDeclIdentityPart) -> Self",
     },
     AccessorSpec {
         name: "new_bare_ref",
@@ -275,7 +288,7 @@ const ACCESSOR_SPECS: [AccessorSpec; 10] = [
     AccessorSpec {
         name: "new_import_type",
         vis: "pub",
-        sig: "fn new_import_type(specifier: Arc<str>, qualifier: Arc<[Arc<str>]>, type_args: Arc<[SemanticNodeId]>, typeof_query: bool) -> Self",
+        sig: "fn new_import_type(specifier: Arc<str>, qualifier: OwnedSlice<OwnedStr>, type_args: Arc<[SemanticNodeId]>, typeof_query: bool) -> Self",
     },
     AccessorSpec {
         name: "typeof_head",
@@ -1316,10 +1329,11 @@ fn check_derive_exact(attrs: &[syn::Attribute], owner: &str, v: &mut Vec<String>
         });
     }
     let actual: BTreeSet<&str> = derives.iter().map(String::as_str).collect();
-    let expected: BTreeSet<&str> = ALLOWED_DERIVES.iter().copied().collect();
+    let allowed = allowed_derives(owner);
+    let expected: BTreeSet<&str> = allowed.iter().copied().collect();
     if actual != expected {
         v.push(format!(
-            "carrier struct `{owner}` must derive EXACTLY {ALLOWED_DERIVES:?} — found {derives:?} \
+            "carrier struct `{owner}` must derive EXACTLY {allowed:?} — found {derives:?} \
              (an extra derive could attach a leaking trait surface; a missing one changes the \
              frozen shape)"
         ));

@@ -16,7 +16,6 @@
 //! lane answer published complete and undegraded.
 
 use super::differential_harness_tests::{Matrix, Read};
-use std::sync::Arc;
 
 #[test]
 fn deferred_class_return_rebinding_preserves_a_same_file_permutation() {
@@ -121,15 +120,15 @@ fn generic_method_return_inference_precedes_enclosing_specialization() {
     super::flow_return_class_tests::with_dispatch(MEMBERS, |dispatch| {
         let key = verter_type_engine::semantic_query::FlowReturnKey {
             function: dispatch.flow_function_slot_for(
-                Arc::from("/ws/cls/classes.ts"),
+                verter_type_expr::OwnedStr::from("/ws/cls/classes.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("Box"),
+                verter_type_expr::OwnedStr::from("Box"),
                 verter_type_expr::facts::FunctionPartIdentity::Member {
-                    member_path: Arc::from([0u32]),
+                    member_path: verter_type_expr::OwnedSlice::from([0u32]),
                 },
                 0,
             ),
-            normalized_type_args: Arc::from([]),
+            normalized_type_args: verter_type_expr::OwnedSlice::from([]),
             context: dispatch.flow_return_context_for("/ws/cls/classes.ts"),
             demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
             input: verter_type_engine::semantic_query::FlowInputContext::empty(),

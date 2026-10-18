@@ -35,13 +35,31 @@ disallowed-macros = [
 # release its bytes; a charge carried by a self-charged record (an interned
 # identity, a budget profile) never participates in that record's equality or
 # hash.
+# An owned allocation (`Owned`, `OwnedStr`, `OwnedSlice`) reaches its
+# self-charge solely for retention accounting; equality, order and hash read
+# only its immutable payload.
 # Node roots and signature epoch leases reach mutable storage solely for
 # lifetime management. Their immutable operands/version attachments never
 # mutate a key's semantic equality or hash (see IdentityNodeRoots/SignatureVersion).
+# An owned, self-charged handle (`Owned`, `OwnedSlice`, `OwnedStr`) reaches
+# its cell's charge slot solely to charge and release its allocation; its
+# `Eq`/`Ord`/`Hash` read only the immutable value.
+# A literal value identity holds its node's shared payload, which reaches the
+# payload's held-release charge slot solely for lifetime accounting; its
+# `Eq`/`Hash` read only the immutable literal value and its precomputed hash.
+# A graph payload read (`NodeData`) reaches its payload cell's release slot
+# solely to give back the payload's charge when its last holder drops; its
+# `Eq`/`Hash` read only the immutable payload.
 ignore-interior-mutability = [
   "bytes::Bytes",
   "verter_session_query::facts::receipt::ResultReceipt",
   "verter_session_query::retention::RetentionCharge",
+  "verter_type_engine::project_semantic_dispatch::canonical_algebra::LiteralValueIdentity",
   "verter_type_engine::semantic_query_memo::node_roots::NodeRootSet",
   "verter_type_engine::signature_kernel::lifetime::SignatureEpochLease",
+  "verter_retention::owned::Owned",
+  "verter_retention::owned::OwnedSlice",
+  "verter_retention::owned::OwnedStr",
+  "verter_retention::RetentionCharge",
+  "verter_type_engine::semantic_query_memo::arena::NodeData",
 ]

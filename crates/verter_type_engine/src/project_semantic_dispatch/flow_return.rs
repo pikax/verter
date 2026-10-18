@@ -25,6 +25,7 @@
 
 use std::sync::Arc;
 use verter_session_query::source::demand::ExpressionSourceDemand as _;
+use verter_type_expr::OwnedStr;
 
 use super::call_resolve::union_self_roots;
 use super::dispatch_txn::flow_obligation_state::{
@@ -662,7 +663,7 @@ struct EvaluatedFlowRoot {
 pub(crate) struct ExactMemberValue {
     key: FlowReturnKey,
     node: SemanticNodeId,
-    roots: Arc<[crate::semantic_query_memo::ObservedGraphSelfRoot]>,
+    roots: Box<[crate::semantic_query_memo::ObservedGraphSelfRoot]>,
 }
 
 impl ExactMemberValue {
@@ -671,7 +672,7 @@ impl ExactMemberValue {
         Self {
             key,
             node,
-            roots: Arc::from([]),
+            roots: Box::new([]),
         }
     }
 
@@ -694,8 +695,8 @@ pub(super) enum FlowMemberHop {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExactReturnKeyDomain {
     key: FlowReturnKey,
-    keys: Arc<[Arc<str>]>,
-    roots: Arc<[crate::semantic_query_memo::ObservedGraphSelfRoot]>,
+    keys: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
+    roots: Box<[crate::semantic_query_memo::ObservedGraphSelfRoot]>,
 }
 impl ExactReturnKeyDomain {
     pub(crate) fn proves_absent(&self, key: &FlowReturnKey, member: &str) -> bool {
@@ -1559,9 +1560,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// slot-finalization choke point.
     pub fn flow_function_slot_for(
         &self,
-        canonical: Arc<str>,
+        canonical: impl Into<verter_type_expr::OwnedStr>,
         owner: verter_type_expr::TopLevelOwnerId,
-        name: Arc<str>,
+        name: impl Into<verter_type_expr::OwnedStr>,
         part: verter_type_expr::facts::FunctionPartIdentity,
         overload_ordinal: u32,
     ) -> crate::semantic_query::FlowFunctionSlotIdentity {
@@ -1617,13 +1618,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> FlowReturnKey {
         FlowReturnKey {
             function: self.flow_function_slot_for(
-                Arc::clone(&identity.anchor.canonical_id),
+                identity.anchor.canonical_id.clone(),
                 identity.anchor.owner,
-                Arc::clone(&identity.anchor.symbol),
+                identity.anchor.symbol.clone(),
                 identity.function_part.clone(),
                 identity.overload_ordinal,
             ),
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: self.flow_return_context_for(identity.anchor.canonical_id.as_ref()),
             demand,
             input: crate::semantic_query::FlowInputContext::empty(),
@@ -1661,7 +1662,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             identity,
             crate::semantic_query::ReturnProjectionDemand::whole_return(),
         );
-        key.normalized_type_args = normalized_type_args;
+        key.normalized_type_args = verter_type_expr::OwnedSlice::from(normalized_type_args);
         key.context.type_substitution = substitution;
         key.context.result_evaluation = evaluation;
         key
@@ -1954,8 +1955,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let object = self.self_reference_declaration(object).unwrap_or(object);
         let _demand_scope =
             super::LexicalDemandScopeGuard::push(&self.lexical_demand_scope, Arc::from(canonical));
-        let path: Arc<[crate::semantic_query::PathSegment]> =
-            Arc::from([crate::semantic_query::PathSegment::Member(
+        let path: verter_type_expr::OwnedSlice<crate::semantic_query::PathSegment> =
+            verter_type_expr::OwnedSlice::from([crate::semantic_query::PathSegment::Member(
                 crate::semantic_query::PropertyKey::identifier(Arc::clone(name)),
             )]);
         match self.execute_type_node(crate::semantic_query::SemanticQueryKey::ProjectPath {
@@ -2046,7 +2047,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let (result, held) = self.execute_indexed_resolve_call_with_flow_hold(
             crate::semantic_query::ResolveCallKey {
                 point: crate::semantic_query::ProgramPointId {
-                    canonical_id: Arc::from(canonical),
+                    canonical_id: verter_type_expr::OwnedStr::from(canonical),
                     offset: call.point,
                 },
                 callee,
@@ -2342,9 +2343,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !typeof_path.is_empty() {
             return None;
         }
-        let scope_canonical = Arc::clone(&value_root.scope.canonical_id);
+        let scope_canonical = value_root.scope.canonical_id.clone();
         let scope_owner = value_root.scope.owner;
-        let value_name = Arc::clone(&value_root.name);
+        let value_name = value_root.name.clone();
         drop(data);
         let prepared = self.ctx.prepared_value_decl_return_only(
             scope_canonical.as_ref(),
@@ -2416,9 +2417,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         match self.execute_type_node(SemanticQueryKey::Instantiate(
             crate::semantic_query::InstantiateKey::new(
                 self.type_slot_for(
-                    Arc::clone(&base.canonical_id),
+                    base.canonical_id.clone(),
                     base.owner,
-                    Arc::clone(&base.decl_name),
+                    base.decl_name.clone(),
                 ),
                 Arc::clone(args.as_arc()),
                 self.instantiate_context_for(&base.canonical_id, context),
@@ -2492,7 +2493,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             crate::semantic_query::PathSegment::Member(key) => Arc::from(key.as_string()?),
             crate::semantic_query::PathSegment::Index(crate::semantic_query::IndexKey::String(
                 value,
-            )) => Arc::clone(value),
+            )) => std::sync::Arc::<str>::from(value.as_str()),
             crate::semantic_query::PathSegment::Index(_) => return None,
         };
         let identity = self.flow_return_callee_for_typeof_arg(callee_arg)?;
@@ -2640,7 +2641,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let key = verter_session_query::function_program::FunctionProgramKey {
             declaration: verter_session_query::function_program::FunctionDeclarationRef {
                 owner: identity.anchor.owner,
-                name: Arc::clone(&identity.anchor.symbol),
+                name: std::sync::Arc::<str>::from(identity.anchor.symbol.as_str()),
                 space: verter_session_query::facts::SymbolSpace::Value,
             },
             part: identity.function_part.clone(),
@@ -3822,10 +3823,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 };
                 graph.intern_node(SemanticNodeData::InstantiationRef {
                     base: crate::semantic_query::DeclIdentity {
-                        canonical_id: Arc::from("__builtin__"),
+                        canonical_id: verter_type_expr::OwnedStr::from("__builtin__"),
                         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         whole_hash: crate::semantic_query::HashValue::default(),
-                        decl_name: Arc::from("Promise"),
+                        decl_name: verter_type_expr::OwnedStr::from("Promise"),
                     },
                     args: crate::semantic_query::PayloadArray::from(
                         vec![payload].into_boxed_slice(),
@@ -4015,7 +4016,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if let Some(recorded) = probe.as_mut() {
             *recorded = roots
                 .iter()
-                .map(|(canonical, _)| Arc::clone(canonical))
+                .map(|(canonical, _)| Arc::<str>::from(canonical))
                 .collect();
         }
     }
@@ -5785,7 +5786,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .map(|state| state.whole_hash)
             .unwrap_or_default();
         let scope = crate::semantic_query::NodeScopeId::File {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner,
             whole_hash,
             local_scope: None,
@@ -5799,33 +5800,36 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             scope_payload.as_ref(),
         );
         let name_resolution: rustc_hash::FxHashMap<
-            std::sync::Arc<str>,
+            verter_type_expr::OwnedStr,
             verter_session_query::type_solver::host::ResolvedRootIdentity,
         > = rustc_hash::FxHashMap::default();
         // Seed from the ENCLOSING environment, then let this clause
         // shadow it.
         let mut env: rustc_hash::FxHashMap<String, SemanticNodeId> =
             outer.map(|outer| outer.env.clone()).unwrap_or_default();
-        let intern_binder = |name: &Arc<str>,
+        let intern_binder = |name: &OwnedStr,
                              constraint: Option<SemanticNodeId>,
                              default: Option<SemanticNodeId>| {
             let decl_name = match nested_at {
-                Some(offset) => Arc::from(format!("{name}\u{1}{offset}").as_str()),
-                None => Arc::clone(name),
+                Some(offset) => OwnedStr::from(format!("{name}\u{1}{offset}")),
+                None => name.clone(),
             };
             graph.intern_node(SemanticNodeData::TypeParam {
                 decl: crate::semantic_query::DeclIdentity::from_scope(&scope, decl_name),
                 param_index: 0,
                 constraint,
                 default,
-                display_name: Arc::clone(name),
+                display_name: name.clone(),
             })
         };
         // PASS 1 — every binder of this clause, bare. Sibling references
         // in a constraint / default resolve against these, in either
         // direction.
         for tp in type_parameters.iter() {
-            env.insert(tp.name.to_string(), intern_binder(&tp.name, None, None));
+            env.insert(
+                tp.name.to_string(),
+                intern_binder(&OwnedStr::from(&tp.name), None, None),
+            );
         }
         // PASS 2 — the constraints and defaults, lowered under the
         // composed environment, then the final binders.
@@ -5849,7 +5853,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             };
             let constraint = tp.constraint.as_ref().map(&mut lower);
             let default = tp.default.as_ref().map(&mut lower);
-            let display_name: Arc<str> = Arc::clone(&tp.name);
+            let display_name = OwnedStr::from(&tp.name);
             let binder = intern_binder(&display_name, constraint, default);
             finalized.push((tp.name.to_string(), binder));
             type_param_decls.push(crate::semantic_query::TypeParamDecl {
@@ -5968,8 +5972,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             });
         };
         let indexed = serve.indexed;
-        let self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> =
-            vec![(Arc::from(canonical), indexed.whole_hash)];
+        let self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> = vec![(
+            verter_type_expr::OwnedStr::from(canonical),
+            indexed.whole_hash,
+        )];
         let source_demand = source_demand.ok_or_else(|| FlowSliceDemandSiteError {
             failure: FlowReturnFailure::Missing,
             self_roots: self_roots.clone(),
@@ -6231,7 +6237,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     hash_key: slice_key,
                     slice_hash: planned.hash(),
                 };
-                match self.flow_slice_driver().lookup_lowered(lowered_key) {
+                match self
+                    .flow_slice_driver()
+                    .lookup_lowered(lowered_key, &planned)
+                {
                     None => {
                         return degraded(FlowReturnFailure::Unresolved, self_roots);
                     }
@@ -6987,7 +6996,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let proof = ExactMemberValue {
                 key: key.clone(),
                 node: result.return_type(),
-                roots: Arc::from(self_roots.clone()),
+                roots: Box::from(self_roots.clone()),
             };
             result.with_independent_member(proof)
         } else {
@@ -7030,8 +7039,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if let Some(keys) = keys {
                 result.with_exact_return_keys(ExactReturnKeyDomain {
                     key: key.clone(),
-                    keys: Arc::from(keys),
-                    roots: Arc::from(self_roots.clone()),
+                    keys: verter_type_expr::OwnedSlice::from(keys),
+                    roots: Box::from(self_roots.clone()),
                 })
             } else {
                 result
@@ -7770,7 +7779,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .ensure_indexed_ready_serve(&identity.canonical_id)?
                 .indexed;
             let scope = crate::semantic_query::NodeScopeId::File {
-                canonical_id: Arc::clone(&identity.canonical_id),
+                canonical_id: identity.canonical_id.clone(),
                 owner: identity.owner,
                 whole_hash: indexed.whole_hash,
                 local_scope: None,
@@ -8537,7 +8546,7 @@ fn flow_demanded_member_name(
         crate::semantic_query::PathSegment::Member(key) => key.as_string().map(Arc::<str>::from),
         crate::semantic_query::PathSegment::Index(crate::semantic_query::IndexKey::String(
             value,
-        )) => Some(Arc::clone(value)),
+        )) => Some(std::sync::Arc::<str>::from(value.as_str())),
         crate::semantic_query::PathSegment::Index(_) => None,
     }
 }
@@ -9152,7 +9161,7 @@ pub(super) struct FlowBinderEnv {
     shadowing: crate::resolver_core::scope_shadowing::ScopeShadowing,
     /// The (empty) explicit name-resolution overlay.
     name_resolution: rustc_hash::FxHashMap<
-        Arc<str>,
+        verter_type_expr::OwnedStr,
         verter_session_query::type_solver::host::ResolvedRootIdentity,
     >,
     /// Binder name → interned `TypeParam` node.
@@ -9721,7 +9730,14 @@ pub(super) trait FlowDemandDriver {
     fn flow_slice_lowered(
         &self,
         key: crate::cache_runtime::flow_slice_node::FlowSliceLoweredKey,
-    ) -> Option<Arc<verter_session_query::flow::flow_ir::FlowSliceIR>>;
+        planned: &verter_session_query::retention::heap_size::OwnedTree<
+            crate::cache_runtime::flow_slice_node::PlannedFlowSlice,
+        >,
+    ) -> Option<
+        verter_session_query::retention::heap_size::OwnedTree<
+            verter_session_query::flow::flow_ir::FlowSliceIR,
+        >,
+    >;
     fn flow_slice_hash(
         &self,
         key: crate::cache_runtime::flow_slice_node::FlowSliceHashKey,
@@ -9974,7 +9990,7 @@ pub(super) trait FlowDemandDriver {
     ) -> ReunionReduction;
     fn reduce_template_literal_nodes(
         &self,
-        quasis: &[Arc<str>],
+        quasis: &[OwnedStr],
         args: &[SemanticNodeId],
         eval_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Result<SemanticNodeId, crate::semantic_query::PartialReasonSet>;
@@ -10008,7 +10024,7 @@ pub(super) trait FlowDemandDriver {
         expr: &TypeExpr,
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
-        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+        name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
         shadowing: &ScopeShadowing,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
@@ -10113,8 +10129,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     fn flow_slice_lowered(
         &self,
         key: crate::cache_runtime::flow_slice_node::FlowSliceLoweredKey,
-    ) -> Option<Arc<verter_session_query::flow::flow_ir::FlowSliceIR>> {
-        self.flow_slice_driver().lookup_lowered(key)
+        planned: &verter_session_query::retention::heap_size::OwnedTree<
+            crate::cache_runtime::flow_slice_node::PlannedFlowSlice,
+        >,
+    ) -> Option<
+        verter_session_query::retention::heap_size::OwnedTree<
+            verter_session_query::flow::flow_ir::FlowSliceIR,
+        >,
+    > {
+        self.flow_slice_driver().lookup_lowered(key, planned)
     }
     fn flow_slice_hash(
         &self,
@@ -10548,7 +10571,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     }
     fn reduce_template_literal_nodes(
         &self,
-        quasis: &[Arc<str>],
+        quasis: &[OwnedStr],
         args: &[SemanticNodeId],
         eval_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Result<SemanticNodeId, crate::semantic_query::PartialReasonSet> {
@@ -10598,7 +10621,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         expr: &TypeExpr,
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
-        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+        name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
         shadowing: &ScopeShadowing,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
@@ -10802,8 +10825,15 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     fn flow_slice_lowered(
         &self,
         key: crate::cache_runtime::flow_slice_node::FlowSliceLoweredKey,
-    ) -> Option<Arc<verter_session_query::flow::flow_ir::FlowSliceIR>> {
-        self.driver.flow_slice_lowered(key)
+        planned: &verter_session_query::retention::heap_size::OwnedTree<
+            crate::cache_runtime::flow_slice_node::PlannedFlowSlice,
+        >,
+    ) -> Option<
+        verter_session_query::retention::heap_size::OwnedTree<
+            verter_session_query::flow::flow_ir::FlowSliceIR,
+        >,
+    > {
+        self.driver.flow_slice_lowered(key, planned)
     }
     fn flow_slice_hash(
         &self,
@@ -11213,7 +11243,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     }
     fn reduce_template_literal_nodes(
         &self,
-        quasis: &[Arc<str>],
+        quasis: &[OwnedStr],
         args: &[SemanticNodeId],
         eval_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Result<SemanticNodeId, crate::semantic_query::PartialReasonSet> {
@@ -11264,7 +11294,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         expr: &TypeExpr,
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
-        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+        name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
         shadowing: &ScopeShadowing,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
@@ -13613,7 +13643,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         visibility: verter_type_expr::MemberVisibility::Public,
                         excess_origin: verter_type_expr::ExcessPropertyOrigin::FreshOwn,
                         spans: member.spans,
-                        declaration_origin: Some(Arc::from(self.canonical)),
+                        declaration_origin: Some(verter_type_expr::OwnedStr::from(self.canonical)),
                         declared_in_macro_type_arg:
                             crate::semantic_query::MacroOwnBodyStamp::default(),
                         merge_role: crate::semantic_query::MergeRoleStamp::default(),
@@ -13876,7 +13906,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             visibility: verter_type_expr::MemberVisibility::Public,
             excess_origin: verter_type_expr::ExcessPropertyOrigin::FreshOwn,
             spans: member.spans,
-            declaration_origin: Some(Arc::from(self.canonical)),
+            declaration_origin: Some(verter_type_expr::OwnedStr::from(self.canonical)),
             declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::default(),
             merge_role: crate::semantic_query::MergeRoleStamp::default(),
         };
@@ -14245,11 +14275,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             self.dispatch.graph().intern_node_with_scope(
                 SemanticNodeData::ClassExpressionInstance {
                     identity: Arc::new(crate::semantic_query::ClassExpressionIdentity {
-                        canonical_id: Arc::from(self.canonical),
+                        canonical_id: verter_type_expr::OwnedStr::from(self.canonical),
                         owner: self.owner,
                         offset,
-                        name: Arc::from("(object literal)"),
-                        outer_clauses: Arc::from([]),
+                        name: verter_type_expr::OwnedStr::from("(object literal)"),
+                        outer_clauses: verter_type_expr::OwnedSlice::from([]),
                         own_arity: 0,
                         constructor_visibility: None,
                         prototype: None,
@@ -18475,29 +18505,30 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // A segment spelled as a canonical integer is an element read
         // (`a[0]`), which indexes an array, a tuple or a numeric index
         // signature as the type-level `T[0]` does; no identifier spells one.
-        let path: Arc<[crate::semantic_query::PathSegment]> = Arc::from(
-            segments
-                .iter()
-                .map(|segment| {
-                    match segment
-                        .parse::<i64>()
-                        .ok()
-                        .filter(|index| index.to_string() == segment.as_ref())
-                        .and_then(crate::semantic_query::CanonicalIndexInt::from_canonical_i64)
-                    {
-                        Some(index) => crate::semantic_query::PathSegment::Index(
-                            crate::semantic_query::IndexKey::Number(index),
-                        ),
-                        None => crate::semantic_query::PathSegment::Member(
-                            crate::semantic_query::PropertyKey::identifier(Arc::from(
-                                segment.as_ref(),
-                            )),
-                        ),
-                    }
-                })
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-        );
+        let path: verter_type_expr::OwnedSlice<crate::semantic_query::PathSegment> =
+            verter_type_expr::OwnedSlice::from(
+                segments
+                    .iter()
+                    .map(|segment| {
+                        match segment
+                            .parse::<i64>()
+                            .ok()
+                            .filter(|index| index.to_string() == segment.as_ref())
+                            .and_then(crate::semantic_query::CanonicalIndexInt::from_canonical_i64)
+                        {
+                            Some(index) => crate::semantic_query::PathSegment::Index(
+                                crate::semantic_query::IndexKey::Number(index),
+                            ),
+                            None => crate::semantic_query::PathSegment::Member(
+                                crate::semantic_query::PropertyKey::identifier(Arc::from(
+                                    segment.as_ref(),
+                                )),
+                            ),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            );
         // The member walk may widen a ROOTLESS callable (a function-typed
         // parameter's signature) to its ambient apparent surface; that
         // widening scopes its registry lookup by the lexical demand site,
@@ -18533,7 +18564,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             .dispatch
             .demand_type_node(crate::semantic_query::SemanticQueryKey::ProjectPath {
                 base,
-                path: Arc::from([crate::semantic_query::PathSegment::Member(key)]),
+                path: verter_type_expr::OwnedSlice::from([
+                    crate::semantic_query::PathSegment::Member(key),
+                ]),
                 context: crate::semantic_query::ProjectionReductionContext::published(
                     crate::semantic_query::ProjectionMode::Navigate,
                 ),
@@ -25648,7 +25681,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 let node = self.unmodeled_position();
                 params.push(node);
                 signature_params.push(crate::semantic_query::FunctionParam {
-                    name: param.name.clone(),
+                    name: param.name.as_deref().map(OwnedStr::from),
                     ty: node,
                     optional: param.optional,
                     rest: param.rest,
@@ -25679,7 +25712,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             };
             params.push(node);
             signature_params.push(crate::semantic_query::FunctionParam {
-                name: param.name.clone(),
+                name: param.name.as_deref().map(OwnedStr::from),
                 ty: node,
                 optional: param.optional,
                 rest: param.rest,
@@ -28324,9 +28357,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     verter_type_expr::facts::FunctionReturnSource::Flow(
                         verter_type_expr::facts::FlowFunctionReturnIdentity {
                             anchor: verter_type_expr::locators::AuthoredAnchor {
-                                canonical_id: Arc::from(self.canonical),
+                                canonical_id: verter_type_expr::OwnedStr::from(self.canonical),
                                 owner: target.declaration.owner,
-                                symbol: Arc::clone(&target.declaration.name),
+                                symbol: verter_type_expr::OwnedStr::from(
+                                    target.declaration.name.clone(),
+                                ),
                                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                             },
                             function_part: target.part.clone(),
@@ -28400,7 +28435,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             }
                             FlowReturnStep::Hold(key) => {
                                 self.holds
-                                    .push(HeldCallee::foreign(*key.clone(), callee_clause));
+                                    .push(HeldCallee::foreign((*key).clone(), callee_clause));
                                 Positional::Hold
                             }
                             FlowReturnStep::NoValue(FlowReturnFailure::EmptyCycle) => {

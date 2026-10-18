@@ -230,21 +230,41 @@ const ARC_STR_HEADER_BYTES: usize = ARC_HEADER_BYTES;
 /// own facts hold (a consumed receipt is its own charged allocation, so it
 /// costs only its slot here), its aggregated domains and the canonical-set
 /// storage it does not share with the evidence it consumed.
+///
+/// The owned names its facts reach are charged by their own cells: they
+/// are pinned with the evidence (`pin_names_to`), never counted here.
 fn evidence_storage_bytes(
     facts: &[FactVersionRef],
     aggregated: usize,
     canonical_set_bytes: usize,
+    pin_names_to: &std::sync::Arc<crate::retention::SemanticRetentionAccount>,
 ) -> usize {
     use crate::retention::allocation::{arc_block_bytes, fact_heap_bytes, AliasSet};
     let mut aliases = AliasSet::new();
-    arc_block_bytes(std::mem::size_of::<ResultEvidence>())
+    let bytes = arc_block_bytes(std::mem::size_of::<ResultEvidence>())
         + arc_block_bytes(std::mem::size_of_val(facts))
         + facts
             .iter()
             .map(|fact| fact_heap_bytes(fact, &mut aliases))
             .sum::<usize>()
         + arc_block_bytes(aggregated * std::mem::size_of::<CompactionDomain>())
-        + canonical_set_bytes
+        + canonical_set_bytes;
+    aliases
+        .take_handles()
+        .pin(crate::retention::owned::ChargeCtx::new(pin_names_to));
+    bytes
+}
+
+/// The owned names `facts` reach, each once: charged by their own cells,
+/// pinned with the evidence holding them and held with its retained share.
+fn evidence_names(facts: &[FactVersionRef]) -> crate::retention::owned::OwnedHandles {
+    use crate::retention::allocation::{fact_heap_bytes, AliasSet};
+    let mut aliases = AliasSet::new();
+    for fact in facts {
+        // A raw leaf is counted in the evidence's own charge.
+        let _raw = fact_heap_bytes(fact, &mut aliases);
+    }
+    aliases.take_handles()
 }
 
 /// A receipt for a completed result: its evidence, shared.
@@ -403,6 +423,7 @@ impl ResultReceipt {
             &facts,
             aggregated.len(),
             canonical_set_bytes,
+            account,
         )));
         Self(Arc::new(ResultEvidence {
             facts: facts.into(),
@@ -567,8 +588,10 @@ impl ReceiptWalk {
 /// returned charge holds `own_bytes`. A page another admission claimed
 /// first, concurrently, keeps that claim and its share is released here.
 /// The reservation is taken before any pin is released, so a page is never
-/// uncharged during the exchange. On refusal nothing changes: every page
-/// stays pinned by the live signatures holding it.
+/// uncharged during the exchange. The owned names a claimed evidence's
+/// facts reach are held with its share, so they are retained as long as it
+/// is. On refusal nothing changes: every page and name stays pinned by the
+/// live signatures holding it.
 pub fn reserve_retained_with_evidence(
     account: &Arc<SemanticRetentionAccount>,
     own_bytes: usize,
@@ -577,7 +600,7 @@ pub fn reserve_retained_with_evidence(
     use std::sync::atomic::Ordering;
     let mut seen: rustc_hash::FxHashSet<*const ResultEvidence> = rustc_hash::FxHashSet::default();
     let mut walked: Vec<&ResultEvidence> = Vec::new();
-    let mut claim: Vec<(&parking_lot::Mutex<RetentionCharge>, usize)> = Vec::new();
+    let mut claim: Vec<(&ResultEvidence, usize)> = Vec::new();
     let mut stack: Vec<&[FactVersionRef]> = signatures.to_vec();
     // Every distinct evidence that can reach a page is walked once, whatever
     // its kind: a consumed result's receipt carries its own charge, claimed
@@ -595,10 +618,9 @@ pub fn reserve_retained_with_evidence(
                 continue;
             }
             walked.push(&receipt.0);
-            let cell = &receipt.0.retention;
-            let charge = cell.lock();
+            let charge = receipt.0.retention.lock();
             if charge.class() != ChargeClass::Retained {
-                claim.push((cell, charge.bytes()));
+                claim.push((&receipt.0, charge.bytes()));
             }
             stack.push(&receipt.0.facts);
         }
@@ -608,8 +630,17 @@ pub fn reserve_retained_with_evidence(
         RetentionAdmission::Admitted(charge) => charge,
         refused @ RetentionAdmission::Refused(_) => return refused,
     };
-    for (cell, bytes) in claim {
-        let share = charge.split_off(bytes);
+    let ctx = crate::retention::owned::ChargeCtx::new(account);
+    let mut names = Vec::with_capacity(claim.len());
+    for (evidence, _) in &claim {
+        match evidence_names(&evidence.facts).hold(ctx) {
+            Ok(holds) => names.push(holds),
+            Err(refusal) => return RetentionAdmission::Refused(refusal),
+        }
+    }
+    for ((evidence, bytes), names) in claim.into_iter().zip(names) {
+        let share = charge.split_off(bytes).holding(names);
+        let cell = &evidence.retention;
         let mut held = cell.lock();
         let released = if held.class() == ChargeClass::Retained {
             share

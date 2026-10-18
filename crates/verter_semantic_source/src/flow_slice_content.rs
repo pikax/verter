@@ -14058,7 +14058,9 @@ impl<'a> Lowerer<'a> {
             let key = || verter_session_query::function_program::FunctionProgramKey {
                 declaration: self.bindings.function().declaration.clone(),
                 part: verter_type_expr::facts::FunctionPartIdentity::Member {
-                    member_path: Arc::from([u32::try_from(ordinal).unwrap_or(u32::MAX)]),
+                    member_path: verter_type_expr::OwnedSlice::from([
+                        u32::try_from(ordinal).unwrap_or(u32::MAX)
+                    ]),
                 },
                 overload_ordinal: 0,
             };
@@ -14099,7 +14101,9 @@ impl<'a> Lowerer<'a> {
         let key = |ordinal: usize| verter_session_query::function_program::FunctionProgramKey {
             declaration: self.bindings.function().declaration.clone(),
             part: verter_type_expr::facts::FunctionPartIdentity::Member {
-                member_path: Arc::from([u32::try_from(ordinal).unwrap_or(u32::MAX)]),
+                member_path: verter_type_expr::OwnedSlice::from([
+                    u32::try_from(ordinal).unwrap_or(u32::MAX)
+                ]),
             },
             overload_ordinal: 0,
         };

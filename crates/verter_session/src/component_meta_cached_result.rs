@@ -12,8 +12,17 @@ impl verter_session_query::retention::RetainedFootprint for CachedComponentMetaR
     /// The result's `Arc` block and every allocation its payload keeps
     /// alive (see [`crate::component_meta_footprint`]).
     fn retained_footprint_bytes(&self) -> usize {
-        verter_session_query::retention::allocation::arc_block_bytes(std::mem::size_of::<Self>())
-            + crate::component_meta_footprint::cached_result_heap_bytes(self)
+        self.retained_footprint().bytes
+    }
+
+    fn retained_footprint(&self) -> verter_session_query::retention::Footprint {
+        let footprint = crate::component_meta_footprint::cached_result_footprint(self);
+        verter_session_query::retention::Footprint {
+            bytes: verter_session_query::retention::allocation::arc_block_bytes(
+                std::mem::size_of::<Self>(),
+            ) + footprint.bytes,
+            handles: footprint.handles,
+        }
     }
 }
 
