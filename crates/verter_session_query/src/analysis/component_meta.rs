@@ -897,10 +897,45 @@ impl RootChain {
             .map(|link| (std::sync::Arc::as_ptr(link).cast::<()>(), &link.step))
     }
 
-    /// Inline bytes of one link's shared allocation payload.
-    #[must_use]
-    pub const fn link_inline_bytes() -> usize {
-        std::mem::size_of::<RootChainLink>()
+    /// Heap the chain's links keep reachable under a measurement whose
+    /// link admission is `first_link`: each link block and its step's heap
+    /// count the first time the link's shared allocation address is
+    /// admitted. An already-admitted link ends the walk, because its whole
+    /// rest was counted with it, so chains sharing a tail cost that tail once
+    /// and the innermost link reached through the terminal shortcut is never
+    /// counted twice. Walked in a loop: a long chain costs no stack.
+    pub fn unique_link_heap<'a, M: ?Sized>(
+        &'a self,
+        meter: &mut M,
+        mut first_link: impl FnMut(&mut M, *const ()) -> bool,
+        step_heap: impl FnMut(&mut M, &'a ResolvedRootStep) -> usize,
+    ) -> usize {
+        self.walk_unique_links(
+            meter,
+            |meter, link| first_link(meter, std::sync::Arc::as_ptr(link).cast::<()>()),
+            step_heap,
+        )
+    }
+
+    /// [`Self::unique_link_heap`] over the links' shared handles.
+    fn walk_unique_links<'a, M: ?Sized>(
+        &'a self,
+        meter: &mut M,
+        mut first_link: impl FnMut(&mut M, &'a std::sync::Arc<RootChainLink>) -> bool,
+        mut step_heap: impl FnMut(&mut M, &'a ResolvedRootStep) -> usize,
+    ) -> usize {
+        let mut bytes = 0;
+        let mut next = self.head.as_ref();
+        while let Some(link) = next {
+            if !first_link(meter, link) {
+                break;
+            }
+            bytes += verter_retention::allocation::arc_block_bytes(std::mem::size_of::<
+                RootChainLink,
+            >()) + step_heap(meter, &link.step);
+            next = link.rest.head.as_ref();
+        }
+        bytes
     }
 
     /// Whether two chains share one head allocation.
@@ -974,6 +1009,22 @@ impl std::fmt::Debug for RootChain {
     }
 }
 
+/// Each link's shared block once per measurement, through the meter's raw
+/// allocation set, so chains of different branches sharing a tail pay for
+/// it once.
+impl verter_retention::heap_size::HeapSize for RootChain {
+    fn heap_size<'t>(
+        &'t self,
+        meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+    ) -> usize {
+        self.walk_unique_links(
+            meter,
+            |meter, link| meter.first(link),
+            |meter, step| step.heap_size(meter),
+        )
+    }
+}
+
 /// Dropped from a loop: a long chain whose links each own the next would
 /// otherwise drop one native frame per step.
 impl Drop for RootChain {
@@ -1008,6 +1059,8 @@ pub struct FallthroughBranch {
 #[cfg(test)]
 mod root_chain_tests {
     use super::{ResolvedRootStep, RootChain};
+    use verter_retention::allocation::{arc_block_bytes, heap_block_bytes};
+    use verter_retention::heap_size::footprint;
 
     fn tag(name: &str) -> ResolvedRootStep {
         ResolvedRootStep::NativeTag {
@@ -1058,5 +1111,56 @@ mod root_chain_tests {
         }
         assert_eq!(chain.len(), 300_000);
         drop(chain);
+    }
+
+    fn link_bytes() -> usize {
+        arc_block_bytes(std::mem::size_of::<super::RootChainLink>())
+    }
+
+    /// Two chains sharing a tail cost the tail once in one measurement, and
+    /// the innermost link the terminal shortcut also reaches is never
+    /// counted twice: every link block and every step string exactly once.
+    #[test]
+    fn shared_tail_chains_measure_each_link_once() {
+        let tail = RootChain::from(vec![tag("c"), tag("d")]);
+        let left = RootChain::prepend(tag("a"), &tail);
+        let right = RootChain::prepend(tag("b"), &tail);
+        let step = heap_block_bytes(1);
+
+        assert_eq!(footprint(&tail).bytes, 2 * (link_bytes() + step));
+        assert_eq!(footprint(&left).bytes, 3 * (link_bytes() + step));
+        assert_eq!(
+            footprint(&(&left, &right)).bytes,
+            4 * (link_bytes() + step),
+            "the shared tail counts once"
+        );
+        assert_eq!(
+            footprint(&(&left, &left)).bytes,
+            3 * (link_bytes() + step),
+            "a chain held twice counts once"
+        );
+        assert_eq!(footprint(&RootChain::default()).bytes, 0);
+    }
+
+    /// A chain far deeper than a small stack could recurse through measures
+    /// exactly, from a loop.
+    #[test]
+    fn a_long_chain_measures_without_native_recursion() {
+        const DEPTH: usize = 300_000;
+        let measured = std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(64 * 1024)
+                .spawn_scoped(scope, || {
+                    let mut chain = RootChain::default();
+                    for _ in 0..DEPTH {
+                        chain = RootChain::prepend(tag("x"), &chain);
+                    }
+                    footprint(&chain).bytes
+                })
+                .expect("spawned")
+                .join()
+                .expect("measured without overflowing")
+        });
+        assert_eq!(measured, DEPTH * (link_bytes() + heap_block_bytes(1)));
     }
 }
