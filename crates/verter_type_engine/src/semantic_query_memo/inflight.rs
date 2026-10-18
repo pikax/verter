@@ -781,6 +781,9 @@ impl Drop for FlightRendezvous<'_> {
             .flight_rendezvous
             .lock()
             .retain(|armed| !Arc::ptr_eq(armed, &self.shared));
+        self.store
+            .flight_rendezvous_armed
+            .fetch_sub(1, std::sync::atomic::Ordering::Release);
         self.shared.release();
     }
 }
@@ -810,6 +813,8 @@ impl super::SemanticGraphStore {
             changed: Condvar::new(),
         });
         self.flight_rendezvous.lock().push(Arc::clone(&shared));
+        self.flight_rendezvous_armed
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
         FlightRendezvous {
             store: self,
             shared,
@@ -825,11 +830,20 @@ impl super::SemanticGraphStore {
     /// The armed rendezvous a cold build of `key` reports to: the first
     /// one armed for that key, so a rendezvous armed later for another key
     /// never shadows an older live one. Cloned out so no store lock is held
-    /// while a hook point signals or parks.
+    /// while a hook point signals or parks. The armed count is the lock-free
+    /// miss path: with no rendezvous armed anywhere on the store, a cold
+    /// build or joined wait never takes the table's mutex at all.
     pub(super) fn armed_flight_rendezvous(
         &self,
         key: &crate::semantic_query::SemanticQueryKey,
     ) -> Option<Arc<FlightRendezvousShared>> {
+        if self
+            .flight_rendezvous_armed
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 0
+        {
+            return None;
+        }
         self.flight_rendezvous
             .lock()
             .iter()

@@ -639,16 +639,17 @@ impl Subscription<'_> {
         } else {
             None
         };
-        // A rendezvous learns of this registered subscriber with the flight
-        // unlocked: the wait below re-checks the flight before parking. The
-        // registration is held until the wait returns, so the rendezvous's
-        // live-participant oracle never counts a completed subscriber.
+        // A rendezvous learns of this registered subscriber while the flight
+        // state is held: the producer's completion needs the same lock, so a
+        // flight that already completed is never counted as a subscriber's
+        // registration event — the registration happens-before the
+        // completion whenever both occur. The registration is held until
+        // the wait returns, so the rendezvous's live-participant oracle
+        // never counts a completed subscriber either.
         #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
         let mut subscriber_registration = if wait_edge.is_some() {
             match store.armed_flight_rendezvous(prepared.key()) {
-                Some(rendezvous) => parking_lot::MutexGuard::unlocked(&mut state, || {
-                    rendezvous.note_subscriber(prepared.key(), &inflight)
-                }),
+                Some(rendezvous) => rendezvous.note_subscriber(prepared.key(), &inflight),
                 None => super::inflight::SubscriberRegistration::inactive(),
             }
         } else {
@@ -674,8 +675,9 @@ impl Subscription<'_> {
         }
         drop(wait_edge);
         // The wait returned: retire the subscriber's registration before any
-        // further engine work on this request, with the flight unlocked
-        // exactly as the registration took it.
+        // further engine work on this request, with the flight unlocked —
+        // retirement only removes the token, so it needs no ordering against
+        // the flight's completion.
         #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
         parking_lot::MutexGuard::unlocked(&mut state, || subscriber_registration.retire());
         store

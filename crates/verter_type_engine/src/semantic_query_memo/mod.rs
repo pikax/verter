@@ -761,6 +761,12 @@ pub struct SemanticGraphStore {
     /// own registration, so overlapping scopes may end in any order.
     #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
     flight_rendezvous: parking_lot::Mutex<Vec<Arc<inflight::FlightRendezvousShared>>>,
+    /// How many rendezvous guards are live on this store right now — the
+    /// lock-free miss path of [`Self::armed_flight_rendezvous`], so a store
+    /// with nothing armed never takes the table's mutex from a cold build
+    /// or a joined wait.
+    #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+    flight_rendezvous_armed: std::sync::atomic::AtomicUsize,
 }
 
 /// The family memo's retention bound, chosen when a store is constructed
@@ -874,6 +880,8 @@ impl SemanticGraphStore {
             exhausted_join_abort: Default::default(),
             #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
             flight_rendezvous: Default::default(),
+            #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+            flight_rendezvous_armed: Default::default(),
         };
         store.bind_destroyed_sidecar_sink();
         store

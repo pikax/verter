@@ -71,8 +71,13 @@ fn a_same_key_subscriber_of_another_flight_never_satisfies_readiness() {
             "the wrong-flight event leaves readiness unsatisfied"
         );
         // The held producer's exact flight satisfies it, and the
-        // registration retires with the subscriber's wait.
+        // registration retires with the subscriber's wait. Registered under
+        // a live request context, so the registration captures a real
+        // cancellation token: a no-op retire would leave that token armed
+        // and make cancel_participants below count this request.
+        let _request = crate::request_context::install_test_request_for("/src/types/icon.ts");
         let mut registration = shared.note_subscriber(&key, &held);
+        drop(_request);
         rendezvous
             .wait_subscriber_registered(HANG_BOUND)
             .expect("the held flight's subscriber registers");
