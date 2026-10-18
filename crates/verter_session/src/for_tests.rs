@@ -231,19 +231,21 @@ pub fn dispatch_inject_parse_fact_for_tests(
     verter_type_engine::project_semantic_dispatch::DispatchInjectParseFactGuard::arm(fact)
 }
 
-/// Hand `nodes` — construction ordinals a helper's own dispatcher produced —
-/// to the caller's construction scope once that dispatcher is gone, so the
-/// caller reads them for as long as its scope lives. With no caller scope
-/// they are released with the dispatcher. Every ordinal handed here is one
-/// the still-live dispatcher produced — a recursion result included, which
-/// is an allocated opaque node — so a failed rooting is a lost handoff and
-/// panics rather than leaving the caller an ordinal nothing owns.
+/// Hand `nodes` — construction ordinals a helper's own dispatcher produced
+/// under the helper's own `builder` — to the caller's construction scope once
+/// that builder and dispatcher are gone, so the caller reads them for as long
+/// as its scope lives. With no caller scope they are released with the
+/// builder. Every ordinal handed here is one the helper's builder still owns
+/// — a recursion result included, which is an allocated opaque node — so a
+/// failed rooting is a lost handoff and panics rather than leaving the caller
+/// an ordinal nothing owns.
 fn hand_to_caller_scope<'h>(
     host: &'h crate::VerterHost,
     dispatch: verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         'h,
         crate::resolver_core::HostCapabilities,
     >,
+    builder: verter_type_engine::semantic_query_memo::node_roots::NodeRootScope,
     nodes: impl IntoIterator<Item = verter_type_engine::semantic_query::SemanticNodeId>,
 ) {
     let roots = host
@@ -253,6 +255,7 @@ fn hand_to_caller_scope<'h>(
         .unwrap_or_else(|error| {
             panic!("a node the live dispatcher produced must root for its caller: {error:?}")
         });
+    drop(builder);
     drop(dispatch);
     roots.retain_for_construction();
 }
@@ -270,8 +273,9 @@ mod handoff_tests {
         };
         assert!(!graph.node_is_live(node));
         let dispatch = host.semantic_dispatch();
+        let builder = dispatch.enter_construction_scope();
         let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            super::hand_to_caller_scope(&host, dispatch, [node]);
+            super::hand_to_caller_scope(&host, dispatch, builder, [node]);
         }))
         .expect_err("a failed handoff must fail visibly");
         let message = failure
@@ -300,13 +304,14 @@ pub fn dispatch_execute_type_node_for_tests(
     use verter_type_engine::semantic_query::SemanticQueryApi;
     let dispatch =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let builder = dispatch.enter_construction_scope();
     let read = dispatch.execute_type_node(key);
     let node = match &read {
         verter_type_engine::semantic_query::QueryResult::Value(output) => Some(output.value),
         verter_type_engine::semantic_query::QueryResult::Recursive(node) => Some(*node),
         verter_type_engine::semantic_query::QueryResult::Error(_) => None,
     };
-    hand_to_caller_scope(host, dispatch, node);
+    hand_to_caller_scope(host, dispatch, builder, node);
     read
 }
 
@@ -379,8 +384,9 @@ pub fn dispatch_lower_type_expr_in_scope_with_context_for_tests(
 ) -> Option<verter_type_engine::semantic_query::SemanticNodeId> {
     let dispatch =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let builder = dispatch.enter_construction_scope();
     let node = dispatch.lower_type_expr_in_scope_with_context(scope_canonical_id, expr, context);
-    hand_to_caller_scope(host, dispatch, node);
+    hand_to_caller_scope(host, dispatch, builder, node);
     node
 }
 
@@ -473,8 +479,9 @@ pub fn dispatch_substitute_for_tests(
 ) -> verter_type_engine::semantic_query::SemanticNodeId {
     let dispatch =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let builder = dispatch.enter_construction_scope();
     let node = dispatch.substitute_semantic_type_param_for_tests(node, parameter_node, arg);
-    hand_to_caller_scope(host, dispatch, [node]);
+    hand_to_caller_scope(host, dispatch, builder, [node]);
     node
 }
 
@@ -507,8 +514,9 @@ pub fn dispatch_evaluate_deferred_for_tests(
 ) {
     let dispatch =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let builder = dispatch.enter_construction_scope();
     let outcome = dispatch.evaluate_deferred_semantic_node_with_context_for_tests(node, context);
-    hand_to_caller_scope(host, dispatch, [outcome.0]);
+    hand_to_caller_scope(host, dispatch, builder, [outcome.0]);
     outcome
 }
 
@@ -1202,6 +1210,7 @@ pub fn dispatch_resolve_type_decl_for_tests(
 
     let dispatch =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let builder = dispatch.enter_construction_scope();
     let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
     match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
@@ -1213,7 +1222,7 @@ pub fn dispatch_resolve_type_decl_for_tests(
         name: verter_type_expr::OwnedStr::from(name),
     })) {
         QueryResult::Value(SemanticQueryOutput { value, .. }) => {
-            hand_to_caller_scope(host, dispatch, [value]);
+            hand_to_caller_scope(host, dispatch, builder, [value]);
             value
         }
         other => panic!("ResolveDecl({canonical}#{name}) must anchor, got {other:?}"),

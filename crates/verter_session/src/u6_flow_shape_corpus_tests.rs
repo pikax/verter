@@ -837,6 +837,7 @@ fn drive_flow(row: &Row, function: &str) -> MeasuredFlow {
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
 
     let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
     let mut source = match host.prepared_value_decl_in(&canonical, owner, function) {

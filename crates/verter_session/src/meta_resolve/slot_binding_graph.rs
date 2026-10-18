@@ -701,6 +701,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
         let bindings = compute_bindings_via_graph(
             dispatch,
             ctx.ctx,
+            ctx.builder(),
             macro_payload_node,
             SlotMacroIdentity {
                 owner: owner.clone(),
@@ -799,6 +800,8 @@ pub(crate) fn resolve_slot_bindings_graph_native(
 pub(crate) fn compute_bindings_via_graph(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    // Owns every realized slot callable whose nodes the returned bindings name.
+    builder: &verter_type_engine::semantic_query_memo::node_roots::NodeRootScope,
     macro_payload_node: SemanticNodeId,
     owner_macro: SlotMacroIdentity,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
@@ -942,13 +945,14 @@ pub(crate) fn compute_bindings_via_graph(
         // and records its typed reason — the missing binding row is then
         // partial, never byte-identical to a genuinely non-callable member.
         let realized =
-            match verter_type_engine::project_semantic_dispatch::callable_view::realize_callable_member(
+            match verter_type_engine::project_semantic_dispatch::callable_view::CallableNodeView::new(
                 dispatch,
                 slot_member.value,
+            ).owning().realized_callable_root(
                 verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Shallow,
                 ),
-            ) {
+            ).into_value_in(builder) {
                 verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Resolved(id)
                 | verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(id) => {
                     id.into_inner()
@@ -1427,6 +1431,9 @@ fn closed_member_path_route_source(
     // inner-to-outer, so reverse on emit.
     let mut rev_keys: Vec<String> = Vec::new();
     let mut current = value_node;
+    // The carrier of each head resolution owns the node the walk continues
+    // from.
+    let mut held = Vec::new();
     // Bounded: an authored indexed-access chain is short; the cap only
     // guards against pathological graph shapes.
     for _ in 0..64 {
@@ -1454,16 +1461,17 @@ fn closed_member_path_route_source(
                 // head re-enters the loop (a `DeclRef` mints the fact), an
                 // unresolved head fails closed below.
                 drop(data);
-                let resolved = dispatch.resolve_carrier_subject_node(
+                let resolved = dispatch.owning().resolve_carrier_subject_node(
                     current,
                     verter_type_engine::semantic_query::ProjectionReductionContext::published(
                         ProjectionMode::Navigate,
                     ),
                 );
-                if resolved == current {
+                if *resolved.value() == current {
                     return None;
                 }
-                current = resolved;
+                current = *resolved.value();
+                held.push(resolved);
             }
             SemanticNodeData::DeclRef { identity } if !rev_keys.is_empty() => {
                 if identity.canonical_id.as_ref() == owner_canonical
@@ -1535,15 +1543,14 @@ fn owner_local_member_reaches_non_owner_ref(
     else {
         return false;
     };
-    let Some(member_node) = dispatch
-        .raise_authored_locator_to_hot(
+    let raised = dispatch
+        .owning().raise_authored_locator_to_hot(
             &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(member.ty.clone()),
             verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                 ProjectionMode::Navigate,
             ),
-        )
-        .at_optional_boundary()
-    else {
+        );
+    let Some(member_node) = raised.value().clone().at_optional_boundary() else {
         return false;
     };
     node_reaches_non_owner_ref(dispatch, owner_canonical, member_node.node())
@@ -1561,6 +1568,8 @@ fn node_reaches_non_owner_ref(
     node: SemanticNodeId,
 ) -> bool {
     use verter_type_engine::graph_walk::Reach;
+    // The carrier of each head resolution owns the node it queues.
+    let mut held = Vec::new();
     verter_type_engine::graph_walk::reaches(node, |node| {
         let Some(data) = dispatch.graph().read_in_scope(node) else {
             return Reach::Parts(Vec::new());
@@ -1591,16 +1600,18 @@ fn node_reaches_non_owner_ref(
                 // expansion); an unresolvable name cannot be proven
                 // imported and is ignored.
                 drop(data);
-                let resolved = dispatch.resolve_carrier_subject_node(
+                let resolved = dispatch.owning().resolve_carrier_subject_node(
                     node,
                     verter_type_engine::semantic_query::ProjectionReductionContext::published(
                         ProjectionMode::Navigate,
                     ),
                 );
-                if resolved == node {
+                let next = *resolved.value();
+                held.push(resolved);
+                if next == node {
                     Vec::new()
                 } else {
-                    vec![resolved]
+                    vec![next]
                 }
             }
             SemanticNodeData::Alias(inner) => vec![*inner],

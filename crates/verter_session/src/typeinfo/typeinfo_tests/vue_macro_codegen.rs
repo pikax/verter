@@ -380,6 +380,7 @@ defineProps<Props>()
 
     let fixture_dispatch_0 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let _builder = fixture_dispatch_0.enter_construction_scope();
     let resolved =
         verter_type_engine::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
             &host,

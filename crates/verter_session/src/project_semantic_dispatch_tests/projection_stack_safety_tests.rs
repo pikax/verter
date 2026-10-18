@@ -359,6 +359,7 @@ fn missing_projection_nodes_remain_unavailable_on_repeated_visits() {
     use verter_type_engine::semantic_query::{SemanticNodeId, SurfaceMember, SurfaceView};
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let missing = SemanticNodeId(u64::MAX);
     assert!(dispatch.graph().node_data(missing).is_none());
     let number = dispatch
@@ -438,6 +439,7 @@ fn missing_projection_nodes_remain_unavailable_on_repeated_visits() {
 fn expanded_locator_projection_does_not_request_hidden_spread_writes() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let array = graph.intern_node(SemanticNodeData::Array {
@@ -506,6 +508,7 @@ fn expanded_locator_projection_does_not_request_hidden_spread_writes() {
 fn projection_work_limit_allows_last_step_and_refuses_the_next_without_memoizing_root() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     // A leaf that is not an inert structure, so the projection walks every
     // array level above it (an array of primitives is its own projection
@@ -569,6 +572,7 @@ fn projection_work_limit_allows_last_step_and_refuses_the_next_without_memoizing
 fn active_identity_cycle_keeps_recursive_sentinel_at_exhausted_work_boundary() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     dispatch.set_connected_limits_for_tests(0, 24);
     let graph = host.project_type_store().semantic_graph();
     let recursive = graph.intern_node(SemanticNodeData::DeclRef {

@@ -8,6 +8,34 @@ use verter_session_query::analysis::types::Hash16;
 
 use verter_type_engine::semantic_query::ProjectionMode;
 
+/// A component-meta analysis held as the value of a self-charged cell
+/// ([`SharedComponentMetaAnalysis`]).
+#[derive(Debug, Clone)]
+pub struct ComponentMetaAnalysisCell(
+    pub verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
+);
+
+impl std::ops::Deref for ComponentMetaAnalysisCell {
+    type Target = verter_session_query::analysis::component_meta::ComponentMetaAnalysis;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// A component-meta analysis the final-result cache, every delivery of it
+/// and every reader share: one allocation and one charge, released by its
+/// last holder, so an analysis a caller keeps past the cache stays charged.
+pub type SharedComponentMetaAnalysis = crate::resolver_core::CachedValue<ComponentMetaAnalysisCell>;
+
+/// `analysis` as a new shared cell, charged by the first owner that keeps
+/// it.
+#[must_use]
+pub fn shared_component_meta_analysis(
+    analysis: verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
+) -> SharedComponentMetaAnalysis {
+    crate::resolver_core::CachedValue::new(ComponentMetaAnalysisCell(analysis))
+}
+
 impl verter_session_query::retention::RetainedFootprint for CachedComponentMetaResult {
     /// The result's `Arc` block and every allocation its payload keeps
     /// alive (see [`crate::component_meta_footprint`]).
@@ -82,7 +110,9 @@ pub struct ResolutionTemplate {
 /// both halves without rerunning the cold resolver.
 #[derive(Debug, Clone)]
 pub struct CachedComponentMetaResult {
-    pub analysis: verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
+    /// The analysis as one self-charged cell the cache and every delivery
+    /// of it share.
+    pub analysis: SharedComponentMetaAnalysis,
     pub resolution_template: ResolutionTemplate,
     /// Owner canonical id used to reload `snapshot` via
     /// [`ProjectTypeStore::indexed()`] on rehydrate.

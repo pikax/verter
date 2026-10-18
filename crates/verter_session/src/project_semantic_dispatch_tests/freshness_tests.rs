@@ -57,6 +57,7 @@ fn object_with(
 fn all_fresh_own_members_derive_fresh() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(
         verter_type_engine::semantic_query::PrimitiveKind::String,
@@ -79,6 +80,7 @@ fn all_fresh_own_members_derive_fresh() {
 fn empty_object_surface_derives_fresh() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let node = object_with(graph, Vec::new());
     assert_eq!(
@@ -135,6 +137,7 @@ fn non_literal_member_revokes_freshness() {
 fn alias_chains_derive_through() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(
         verter_type_engine::semantic_query::PrimitiveKind::String,

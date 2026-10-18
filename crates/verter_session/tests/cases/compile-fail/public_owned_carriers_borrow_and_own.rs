@@ -6,7 +6,9 @@
 //! them. Origin reads, display and the canonical union builder keyed by an
 //! ordinal stay callable: they answer only inside a construction lane the
 //! caller holds, and a dispatcher merges a macro spread formula in its own
-//! lane.
+//! lane. A dispatcher's query output borrows nothing from the dispatcher: it
+//! is kept, cloned and read after the dispatcher is gone, and a builder that
+//! composes construction ordinals opens its own explicit owner.
 
 use verter_session_query::flow::policy::NullabilityPolicy;
 use verter_type_engine::project_semantic_dispatch::canonical_algebra;
@@ -16,10 +18,11 @@ use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
 use verter_type_engine::resolver_core::ResolverCapabilities;
 use verter_type_engine::semantic_query::{
     display, CacheRead, DisplayNeeds, ObjectProjectionFormula, QueryError, QueryResult,
-    SemanticNodeData, SemanticNodeId, SemanticQueryValue, SurfaceEntry,
+    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
+    SemanticQueryValue, SurfaceEntry,
 };
 use verter_type_engine::semantic_query_memo::node_data_lease::{NodeDataLease, SurfaceLease};
-use verter_type_engine::semantic_query_memo::node_roots::NodeRoot;
+use verter_type_engine::semantic_query_memo::node_roots::{NodeRoot, NodeRootScope};
 use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 use verter_type_engine::signature_kernel::SignatureSetValue;
 
@@ -113,7 +116,11 @@ fn spread_through_a_dispatcher<C: ResolverCapabilities>(
     dispatch: &ProjectSemanticDispatch<'_, C>,
     formula: &ObjectProjectionFormula,
 ) -> usize {
-    dispatch.spread_formula_positive_members_for_macro(formula).len()
+    dispatch
+        .owning()
+        .spread_formula_positive_members_for_macro(formula)
+        .value()
+        .len()
 }
 
 fn keep_error(error: &QueryError) -> QueryError {
@@ -127,4 +134,93 @@ fn read_import_head(data: &SemanticNodeData) -> Option<(&str, usize, bool)> {
     Some((specifier, qualifier.len(), typeof_query))
 }
 
+fn keep_output_past_its_dispatcher<C: ResolverCapabilities>(
+    dispatch: ProjectSemanticDispatch<'_, C>,
+    key: SemanticQueryKey,
+) -> Result<Option<SemanticQueryOutput<SemanticNodeId>>, QueryError> {
+    let QueryResult::Value(output) = dispatch.execute_type_node(key) else {
+        return Ok(None);
+    };
+    drop(dispatch);
+    let kept = output.clone();
+    drop(output);
+    let _ = kept.node(kept.value)?.read()?;
+    Ok(Some(kept))
+}
+
+fn build_under_an_explicit_owner<C: ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
+    error: QueryError,
+) -> Result<(NodeRootScope, NodeRoot), QueryError> {
+    let builder = dispatch.enter_construction_scope();
+    let constructed = dispatch.owning().opaque(error);
+    let root = constructed.node(*constructed.value())?.to_root()?;
+    Ok((builder, root))
+}
+
+fn hand_a_label_to_an_explicit_builder<C: ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
+    graph: &SemanticGraphStore,
+    error: QueryError,
+) -> bool {
+    let builder = dispatch.enter_construction_scope();
+    let label = dispatch.owning().opaque(error).into_value_in(&builder);
+    let readable = graph.read_in_scope(label).is_some();
+    drop(builder);
+    readable
+}
+
 fn main() {}
+
+fn keep_construction_past_dispatcher<C: ResolverCapabilities>(
+    dispatch: ProjectSemanticDispatch<'_, C>,
+) -> Result<
+    Option<verter_type_engine::semantic_query_memo::node_roots::Constructed<SemanticNodeId>>,
+    QueryError,
+> {
+    let result = dispatch.owning().decl_body_hot_ref(
+        "/public.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "Target",
+        std::sync::Arc::from([]),
+        verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
+        ),
+    );
+    let Some(hot) = *result.value() else {
+        return Ok(None);
+    };
+    let result = result.map(|_| hot.node());
+    drop(dispatch);
+    let clone = result.clone();
+    drop(result);
+    let _ = clone.node(*clone.value())?.read()?;
+    Ok(Some(clone))
+}
+
+fn keep_callable_param<C: ResolverCapabilities>(
+    dispatch: ProjectSemanticDispatch<'_, C>,
+    node: SemanticNodeId,
+    context: verter_type_engine::semantic_query::ProjectionReductionContext,
+) -> Option<verter_type_engine::semantic_query_memo::node_roots::Constructed<Option<SemanticNodeId>>>
+{
+    let callable =
+        verter_type_engine::project_semantic_dispatch::callable_view::CallableNodeView::new(
+            &dispatch, node,
+        );
+    let signature = callable.owning().signature(context)?;
+    let first = signature.first_param();
+    drop(signature);
+    drop(dispatch);
+    Some(first)
+}
+
+fn lower_with_an_explicit_mode<C: ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
+    expr: &verter_type_expr::TypeExpr,
+    mode: verter_type_engine::semantic_query::ProjectionMode,
+) -> verter_type_engine::semantic_query_memo::node_roots::Constructed<Option<SemanticNodeId>> {
+    dispatch
+        .owning()
+        .lower_type_expr_in_scope_with_mode("/public.ts", expr, mode)
+}
