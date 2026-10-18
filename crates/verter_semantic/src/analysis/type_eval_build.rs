@@ -7063,24 +7063,31 @@ pub fn indexed_literal_mode(expr: Option<&Expression<'_>>) -> IndexedValueLitera
                     pending.push(&conditional.consequent);
                     pending.push(&conditional.alternate);
                 }
-                arm if indexed_literal_mode(Some(arm)) == IndexedValueLiteralMode::Widened => {}
+                arm if bare_literal_expression(arm) => {}
                 _ => return IndexedValueLiteralMode::Literal,
             }
         }
         return IndexedValueLiteralMode::Widened;
     }
     match expr {
-        Some(
-            Expression::StringLiteral(_)
+        Some(expr) if bare_literal_expression(expr) => IndexedValueLiteralMode::Widened,
+        _ => IndexedValueLiteralMode::Literal,
+    }
+}
+
+/// Whether one unwrapped expression is a bare literal — a scalar literal, a
+/// template, an object literal or an array literal.
+fn bare_literal_expression(expr: &Expression<'_>) -> bool {
+    matches!(
+        expr,
+        Expression::StringLiteral(_)
             | Expression::NumericLiteral(_)
             | Expression::BooleanLiteral(_)
             | Expression::BigIntLiteral(_)
             | Expression::TemplateLiteral(_)
             | Expression::ObjectExpression(_)
-            | Expression::ArrayExpression(_),
-        ) => IndexedValueLiteralMode::Widened,
-        _ => IndexedValueLiteralMode::Literal,
-    }
+            | Expression::ArrayExpression(_)
+    )
 }
 
 /// A contextual declarator whose method bodies need the initializer's flow
