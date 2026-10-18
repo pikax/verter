@@ -2115,6 +2115,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticNodeData::DeclRef { identity } => (identity, Arc::from([])),
             _ => return None,
         };
+        // A named interface or class is already the return's structural
+        // carrier. Materializing its members cannot construct a tuple at
+        // this call, and can introduce unrelated recursive member reads.
+        if matches!(
+            self.prepared_decl_kind(base),
+            Some(
+                verter_session_query::declarations::TypeDeclKind::Interface
+                    | verter_session_query::declarations::TypeDeclKind::Class
+            )
+        ) {
+            return None;
+        }
         let slot = self.type_slot_for(
             base.canonical_id.clone(),
             base.owner,
