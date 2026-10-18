@@ -585,6 +585,24 @@ impl<T: Measured> Owned<T> {
         pin_node(&*self.0, ctx);
     }
 
+    /// The value, when this is its allocation's only handle: the value
+    /// leaves the allocation and the allocation's charge is released with
+    /// it, in one step. Any other holder means the handle comes back
+    /// unchanged.
+    ///
+    /// # Errors
+    ///
+    /// `this`, when another handle shares the allocation.
+    pub fn try_unwrap(this: Self) -> Result<T, Self> {
+        match Arc::try_unwrap(this.0) {
+            Ok(Cell { slot, value }) => {
+                drop(slot);
+                Ok(value)
+            }
+            Err(shared) => Err(Self(shared)),
+        }
+    }
+
     /// A cache's hold on this allocation: retains its charge — and its
     /// children's — refusably while the hold lives.
     ///

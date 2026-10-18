@@ -406,6 +406,13 @@ pub fn owned_tree<T: HeapSize + Send + Sync + 'static>(value: T) -> OwnedTree<T>
     Owned::new(Tree(value))
 }
 
+impl<T> Tree<T> {
+    /// The tree, out of its cell's value ([`Owned::try_unwrap`]).
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+}
+
 impl<T> std::ops::Deref for Tree<T> {
     type Target = T;
     fn deref(&self) -> &T {
