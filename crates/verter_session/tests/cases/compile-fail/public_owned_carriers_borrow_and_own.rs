@@ -195,3 +195,13 @@ fn keep_callable_param<C: ResolverCapabilities>(
     drop(dispatch);
     Some(first)
 }
+
+fn lower_with_an_explicit_mode<C: ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
+    expr: &verter_type_expr::TypeExpr,
+    mode: verter_type_engine::semantic_query::ProjectionMode,
+) -> verter_type_engine::semantic_query_memo::node_roots::Constructed<Option<SemanticNodeId>> {
+    dispatch
+        .owning()
+        .lower_type_expr_in_scope_with_mode("/public.ts", expr, mode)
+}

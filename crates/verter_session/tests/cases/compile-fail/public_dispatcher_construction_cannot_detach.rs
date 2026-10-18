@@ -42,3 +42,28 @@ fn raw_callable<C: ResolverCapabilities>(
 ) -> Option<SemanticNodeId> {
     callable.single_callable_arm(context)
 }
+
+fn missing_mode<C: ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
+    expr: &verter_type_expr::TypeExpr,
+) -> Constructed<Option<SemanticNodeId>> {
+    dispatch
+        .owning()
+        .lower_type_expr_in_scope_with_mode("/public.ts", expr)
+}
+
+fn implicit_owned_mode<C: ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
+    expr: &verter_type_expr::TypeExpr,
+) -> Constructed<Option<SemanticNodeId>> {
+    dispatch
+        .owning()
+        .lower_type_expr_in_scope("/public.ts", expr)
+}
+
+fn implicit_raw_mode<C: ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
+    expr: &verter_type_expr::TypeExpr,
+) -> Option<SemanticNodeId> {
+    dispatch.lower_type_expr_in_scope("/public.ts", expr)
+}

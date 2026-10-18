@@ -31,6 +31,51 @@ error[E0624]: method `single_callable_arm` is private
    |         pub(crate) fn $($item)*
    |         --- private method defined here
 
+error[E0061]: this method takes 3 arguments but 2 arguments were supplied
+  --> tests/cases/compile-fail/public_dispatcher_construction_cannot_detach.rs:52:10
+   |
+52 |         .lower_type_expr_in_scope_with_mode("/public.ts", expr)
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^-------------------- argument #3 of type `ProjectionMode` is missing
+   |
+note: method defined here
+  --> $WORKSPACE/crates/verter_type_engine/src/project_semantic_dispatch/owning_dispatch.rs
+   |
+   |     fn lower_type_expr_in_scope_with_mode(
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: provide the argument
+   |
+52 |         .lower_type_expr_in_scope_with_mode("/public.ts", expr, /* ProjectionMode */)
+   |                                                               ++++++++++++++++++++++
+
+error[E0599]: no method named `lower_type_expr_in_scope` found for struct `OwningDispatch<'d, 'a, C>` in the current scope
+  --> tests/cases/compile-fail/public_dispatcher_construction_cannot_detach.rs:61:10
+   |
+59 | /     dispatch
+60 | |         .owning()
+61 | |         .lower_type_expr_in_scope("/public.ts", expr)
+   | |_________-^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a method `lower_type_expr_in_scope_with_mode` with a similar name, but with different arguments
+  --> $WORKSPACE/crates/verter_type_engine/src/project_semantic_dispatch/owning_dispatch.rs
+   |
+   |                   pub fn $name(&self $(, $arg: $ty)*) -> Constructed<$ret> {
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+   | / owning_methods! {
+   | |     /// Intern a typed opaque fallback in its owning carrier.
+   | |     fn opaque(&self, error: crate::semantic_query::QueryError) -> SemanticNodeId;
+...  |
+   | |     >;
+   | | }
+   | |_- in this macro invocation
+   = note: this error originates in the macro `owning_methods` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: no method named `lower_type_expr_in_scope` found for reference `&ProjectSemanticDispatch<'_, C>` in the current scope
+  --> tests/cases/compile-fail/public_dispatcher_construction_cannot_detach.rs:68:14
+   |
+68 |     dispatch.lower_type_expr_in_scope("/public.ts", expr)
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&ProjectSemanticDispatch<'_, C>`
+
 error[E0515]: cannot return value referencing function parameter `result`
  --> tests/cases/compile-fail/public_dispatcher_construction_cannot_detach.rs:9:5
   |
