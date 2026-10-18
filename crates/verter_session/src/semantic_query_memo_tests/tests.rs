@@ -6967,7 +6967,7 @@ fn memo_admission_or_gate_refuses_partial_without_suppress_in_release() {
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/release_launder.ts"),
-        name: Arc::from("ReleaseLaundered"),
+        name: verter_type_expr::OwnedStr::from("ReleaseLaundered"),
     });
 
     let first = store.execute_cooperative(

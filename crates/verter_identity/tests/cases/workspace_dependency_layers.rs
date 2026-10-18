@@ -134,6 +134,11 @@ const REPOSITORY_TOOLING_NOT_IN_THE_LAYER_MATRIX: &[&str] = &[
     "verter_compile_contracts",
     "verter_compile_contracts_bench",
     "verter_compile_contracts_session_variants",
+    // The soak/tooling runner's feature-profile compile contracts
+    // (flight-rendezvous opt-in through `soak-support` alone): the same
+    // trybuild shape as the variants crate above — repository tooling no
+    // layered crate may depend on.
+    "verter_compile_contracts_session_soak",
 ];
 
 fn layer_map() -> HashMap<&'static str, u8> {
