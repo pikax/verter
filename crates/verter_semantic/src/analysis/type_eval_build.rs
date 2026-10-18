@@ -7072,22 +7072,24 @@ pub fn indexed_literal_mode(expr: Option<&Expression<'_>>) -> IndexedValueLitera
                     pending.push(&conditional.consequent);
                     pending.push(&conditional.alternate);
                 }
-                arm if indexed_literal_mode(Some(arm)) == IndexedValueLiteralMode::Widened => {}
+                arm if literal_mode_of_leaf(arm) == IndexedValueLiteralMode::Widened => {}
                 _ => return IndexedValueLiteralMode::Literal,
             }
         }
         return IndexedValueLiteralMode::Widened;
     }
+    expr.map_or(IndexedValueLiteralMode::Literal, literal_mode_of_leaf)
+}
+
+fn literal_mode_of_leaf(expr: &Expression<'_>) -> IndexedValueLiteralMode {
     match expr {
-        Some(
-            Expression::StringLiteral(_)
-            | Expression::NumericLiteral(_)
-            | Expression::BooleanLiteral(_)
-            | Expression::BigIntLiteral(_)
-            | Expression::TemplateLiteral(_)
-            | Expression::ObjectExpression(_)
-            | Expression::ArrayExpression(_),
-        ) => IndexedValueLiteralMode::Widened,
+        Expression::StringLiteral(_)
+        | Expression::NumericLiteral(_)
+        | Expression::BooleanLiteral(_)
+        | Expression::BigIntLiteral(_)
+        | Expression::TemplateLiteral(_)
+        | Expression::ObjectExpression(_)
+        | Expression::ArrayExpression(_) => IndexedValueLiteralMode::Widened,
         _ => IndexedValueLiteralMode::Literal,
     }
 }
@@ -7498,95 +7500,155 @@ fn indexed_argument_report_site(argument: &oxc_ast::ast::Argument<'_>) -> Indexe
 /// an arrow function whose body is an expression and none of whose
 /// parameters is annotated (`elaborateArrowFunction`), an object literal
 /// (`elaborateObjectLiteral`) or an array literal (`elaborateArrayLiteral`),
-/// through parentheses.
+/// through parentheses. Nested forms are walked from an explicit stack, so
+/// source nesting never costs native stack.
 fn indexed_report_site(expression: &Expression<'_>) -> IndexedReportSite {
-    IndexedReportSite {
-        point: expression.span().start,
-        form: indexed_elaboration_form(expression),
+    /// One site's elaborated shape; children are named by their index in the
+    /// node list, always allocated after their parent.
+    enum Shape {
+        Whole,
+        Unmodelled,
+        Arrow(usize),
+        Object(Vec<(Arc<str>, u32, Option<usize>)>),
+        Array(Vec<usize>),
     }
-}
+    fn child<'a, 'b>(
+        expression: &'a Expression<'b>,
+        nodes: &mut Vec<(u32, Shape)>,
+        pending: &mut Vec<(usize, &'a Expression<'b>)>,
+    ) -> usize {
+        nodes.push((expression.span().start, Shape::Whole));
+        pending.push((nodes.len() - 1, expression));
+        nodes.len() - 1
+    }
 
-fn indexed_elaboration_form(mut expression: &Expression<'_>) -> Option<IndexedElaborationForm> {
-    while let Expression::ParenthesizedExpression(parenthesized) = expression {
-        expression = &parenthesized.expression;
-    }
-    match expression {
-        Expression::ArrowFunctionExpression(arrow) => {
-            if arrow
-                .params
-                .items
-                .iter()
-                .any(|param| param.type_annotation.is_some())
-                || arrow
+    let mut nodes: Vec<(u32, Shape)> = Vec::new();
+    let mut pending = Vec::new();
+    child(expression, &mut nodes, &mut pending);
+    while let Some((index, mut expression)) = pending.pop() {
+        while let Expression::ParenthesizedExpression(parenthesized) = expression {
+            expression = &parenthesized.expression;
+        }
+        nodes[index].1 = match expression {
+            Expression::ArrowFunctionExpression(arrow) => {
+                let annotated = arrow
                     .params
-                    .rest
-                    .as_ref()
-                    .is_some_and(|rest| rest.type_annotation.is_some())
-            {
-                return None;
-            }
-            arrow
-                .get_expression()
-                .map(|body| IndexedElaborationForm::Arrow(Box::new(indexed_report_site(body))))
-        }
-        Expression::ObjectExpression(object) => {
-            let mut properties = Vec::with_capacity(object.properties.len());
-            for property in &object.properties {
-                let oxc_ast::ast::ObjectPropertyKind::ObjectProperty(property) = property else {
-                    return Some(IndexedElaborationForm::Unmodelled);
-                };
-                let name: Arc<str> = match &property.key {
-                    oxc_ast::ast::PropertyKey::StaticIdentifier(identifier) => {
-                        Arc::from(identifier.name.as_str())
-                    }
-                    oxc_ast::ast::PropertyKey::StringLiteral(literal) if !property.computed => {
-                        Arc::from(literal.value.as_str())
-                    }
-                    _ => return Some(IndexedElaborationForm::Unmodelled),
-                };
-                let value = (property.kind == oxc_ast::ast::PropertyKind::Init
-                    && !property.method
-                    && !property.shorthand)
-                    .then(|| indexed_report_site(&property.value));
-                properties.push(IndexedElaboratedProperty {
-                    name,
-                    point: property.key.span().start,
-                    value,
-                });
-            }
-            Some(IndexedElaborationForm::Object(Arc::from(
-                properties.into_boxed_slice(),
-            )))
-        }
-        Expression::ArrayExpression(array) => {
-            let mut elements = Vec::with_capacity(array.elements.len());
-            for element in &array.elements {
-                match element {
-                    oxc_ast::ast::ArrayExpressionElement::SpreadElement(_)
-                    | oxc_ast::ast::ArrayExpressionElement::Elision(_) => {
-                        return Some(IndexedElaborationForm::Unmodelled)
-                    }
-                    element => elements.push(indexed_report_site(element.to_expression())),
+                    .items
+                    .iter()
+                    .any(|param| param.type_annotation.is_some())
+                    || arrow
+                        .params
+                        .rest
+                        .as_ref()
+                        .is_some_and(|rest| rest.type_annotation.is_some());
+                match arrow.get_expression() {
+                    Some(body) if !annotated => Shape::Arrow(child(body, &mut nodes, &mut pending)),
+                    _ => Shape::Whole,
                 }
             }
-            Some(IndexedElaborationForm::Array(Arc::from(
-                elements.into_boxed_slice(),
-            )))
-        }
-        Expression::TSAsExpression(assertion)
-            if matches!(
-                &assertion.type_annotation,
-                oxc_ast::ast::TSType::TSTypeReference(reference)
-                    if matches!(&reference.type_name, oxc_ast::ast::TSTypeName::IdentifierReference(name) if name.name == "const")
-            ) =>
-        {
-            Some(IndexedElaborationForm::Unmodelled)
-        }
-        Expression::AssignmentExpression(_) | Expression::SequenceExpression(_) => {
-            Some(IndexedElaborationForm::Unmodelled)
-        }
-        _ => None,
+            Expression::ObjectExpression(object) => {
+                let mut properties = Vec::with_capacity(object.properties.len());
+                let mut modelled = true;
+                for property in &object.properties {
+                    let oxc_ast::ast::ObjectPropertyKind::ObjectProperty(property) = property
+                    else {
+                        modelled = false;
+                        break;
+                    };
+                    let name: Arc<str> = match &property.key {
+                        oxc_ast::ast::PropertyKey::StaticIdentifier(identifier) => {
+                            Arc::from(identifier.name.as_str())
+                        }
+                        oxc_ast::ast::PropertyKey::StringLiteral(literal) if !property.computed => {
+                            Arc::from(literal.value.as_str())
+                        }
+                        _ => {
+                            modelled = false;
+                            break;
+                        }
+                    };
+                    let value = (property.kind == oxc_ast::ast::PropertyKind::Init
+                        && !property.method
+                        && !property.shorthand)
+                        .then(|| child(&property.value, &mut nodes, &mut pending));
+                    properties.push((name, property.key.span().start, value));
+                }
+                if modelled {
+                    Shape::Object(properties)
+                } else {
+                    Shape::Unmodelled
+                }
+            }
+            Expression::ArrayExpression(array) => {
+                let mut elements = Vec::with_capacity(array.elements.len());
+                let mut modelled = true;
+                for element in &array.elements {
+                    match element {
+                        oxc_ast::ast::ArrayExpressionElement::SpreadElement(_)
+                        | oxc_ast::ast::ArrayExpressionElement::Elision(_) => {
+                            modelled = false;
+                            break;
+                        }
+                        element => {
+                            elements.push(child(element.to_expression(), &mut nodes, &mut pending))
+                        }
+                    }
+                }
+                if modelled {
+                    Shape::Array(elements)
+                } else {
+                    Shape::Unmodelled
+                }
+            }
+            Expression::TSAsExpression(assertion)
+                if matches!(
+                    &assertion.type_annotation,
+                    oxc_ast::ast::TSType::TSTypeReference(reference)
+                        if matches!(&reference.type_name, oxc_ast::ast::TSTypeName::IdentifierReference(name) if name.name == "const")
+                ) =>
+            {
+                Shape::Unmodelled
+            }
+            Expression::AssignmentExpression(_) | Expression::SequenceExpression(_) => {
+                Shape::Unmodelled
+            }
+            _ => Shape::Whole,
+        };
     }
+
+    let mut sites: Vec<Option<IndexedReportSite>> = (0..nodes.len()).map(|_| None).collect();
+    let take = |sites: &mut Vec<Option<IndexedReportSite>>, child: usize| {
+        sites[child]
+            .take()
+            .expect("a child site is built before its parent")
+    };
+    for (index, (point, shape)) in nodes.into_iter().enumerate().rev() {
+        let form = match shape {
+            Shape::Whole => None,
+            Shape::Unmodelled => Some(IndexedElaborationForm::Unmodelled),
+            Shape::Arrow(body) => Some(IndexedElaborationForm::Arrow(Box::new(take(
+                &mut sites, body,
+            )))),
+            Shape::Object(properties) => Some(IndexedElaborationForm::Object(Arc::from(
+                properties
+                    .into_iter()
+                    .map(|(name, point, value)| IndexedElaboratedProperty {
+                        name,
+                        point,
+                        value: value.map(|value| take(&mut sites, value)),
+                    })
+                    .collect::<Vec<_>>(),
+            ))),
+            Shape::Array(elements) => Some(IndexedElaborationForm::Array(Arc::from(
+                elements
+                    .into_iter()
+                    .map(|element| take(&mut sites, element))
+                    .collect::<Vec<_>>(),
+            ))),
+        };
+        sites[index] = Some(IndexedReportSite { point, form });
+    }
+    sites[0].take().expect("the root site is built")
 }
 
 fn lower_indexed_explicit_type_arguments(
