@@ -314,5 +314,9 @@ tokens naming the closed content and marks them stranded; while a read view or
 token, until the last holder drops, and an intern of a stranded token takes its
 deferred root back. The epoch is replaced once stranded tokens outnumber live
 ones (`replace_epoch_if_mostly_stranded`) or its records pass
-`EPOCH_RECORD_CAP`. Substitution and inference semantics are unaffected.
+`EPOCH_RECORD_CAP`. A lease owns the whole readable epoch, including deferred
+tokens of unrelated documents; this accepted bound ends at the final epoch
+holder, and a token has only one root across repeated close/requery cycles.
+Public delivery tests cover the ownership/backing plateau and both release
+orders. Substitution and inference semantics are unaffected.
 See the [ownership reference](../type-resolution/references/counted-node-ownership.md).

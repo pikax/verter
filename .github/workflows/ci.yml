@@ -531,11 +531,17 @@ jobs:
           # developer machine (where rustup installs it) mismatches for a reason
           # that has nothing to do with the seal it protects.
           components: rust-src
-      - uses: Swatinem/rust-cache@v2
+      # Cache the compile-contract artifacts directly. Rust-target pruning
+      # must not traverse optional nested workspaces under target/tests.
+      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        id: compiler-contract-cache
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          key: compiler-contracts
-          cache-directories: target/tests/trybuild
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git/db
+            target/tests/trybuild
+          key: ${{ runner.os }}-compiler-contracts-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-compiler-contracts-
       - uses: mozilla-actions/sccache-action@v0.0.11
         with:
           version: v0.17.0
@@ -562,6 +568,14 @@ jobs:
         run: |
           cargo build -p verter_compiler
           cargo test -p verter_compiler --lib
+      - uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        if: github.ref == 'refs/heads/main' && steps.compiler-contract-cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git/db
+            target/tests/trybuild
+          key: ${{ steps.compiler-contract-cache.outputs.cache-primary-key }}
 
   # Required and parallel with the shared archive lanes. The core filter omits
   # `verter_session/bf2-authoritative`; this lane owns its pinned oracle setup,

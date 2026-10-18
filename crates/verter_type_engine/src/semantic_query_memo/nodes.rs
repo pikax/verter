@@ -109,8 +109,8 @@ impl SemanticGraphStore {
     /// The scope is the capability: outside one the ordinal authorizes
     /// nothing and the read is `None`. A live node is returned under its own
     /// root, so the lease outlives the scope. A slot whose last owner already
-    /// dropped reads as the unresolved placeholder with no root, and none of
-    /// its children can be borrowed through it.
+    /// dropped is a label kept past its owner, never a plausible payload: it
+    /// reads nothing.
     pub fn read_in_scope(&self, id: SemanticNodeId) -> Option<node_data_lease::NodeDataLease> {
         if !node_roots::NodeRootScope::holds(&self.arena.core) {
             return None;
@@ -122,10 +122,6 @@ impl SemanticGraphStore {
             Ok(roots) => Some(node_data_lease::NodeDataLease {
                 data: self.arena.get(id)?,
                 root: node_roots::NodeRoot::from_roots(id, roots),
-            }),
-            Err(QueryError::StaleSemanticOperand) => Some(node_data_lease::NodeDataLease {
-                data: self.arena.get(id)?,
-                root: node_roots::NodeRoot::from_roots(id, Default::default()),
             }),
             Err(_) => None,
         }

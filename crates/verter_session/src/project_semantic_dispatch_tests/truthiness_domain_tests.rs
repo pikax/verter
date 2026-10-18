@@ -250,6 +250,7 @@ fn decided_domain_warms_and_undecided_domain_never_does() {
     let host = VerterHost::new_standalone(Default::default());
     let graph = host.project_type_store().semantic_graph();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let decided_key = SemanticQueryKey::ClassifyTruthinessDomain { subject: string };

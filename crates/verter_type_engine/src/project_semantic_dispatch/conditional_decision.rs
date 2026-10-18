@@ -315,73 +315,75 @@ impl<C: crate::resolver_core::ResolverCapabilities> ConditionalBranches<C> for L
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
-    /// Conditional type (lazy-block evaluation +
-    /// distributive-conditional authority), read from the materialized
-    /// branch handles of a [`SemanticQueryKey::Conditional`].
-    ///
-    /// Evaluates `check extends extends ? true_branch : false_branch`
-    /// using the shared relation engine and returns one of:
-    ///
-    /// - **Distributive union check** — when `distributive == true` AND
-    ///   `check` resolves to a [`SemanticNodeData::Union`], the builder
-    ///   distributes per-member by re-entering the dispatcher with
-    ///   `SemanticQueryApi::execute(SemanticQueryKey::Conditional {
-    ///   check: member, extends, true_branch, false_branch,
-    ///   distributive: false })` for every member, then combines the
-    ///   per-member results through
-    ///   `SemanticQueryApi::execute(SemanticQueryKey::ReduceUnion {
-    ///   members: per_member_results, nullability: Strict })`. Termination is guaranteed by
-    ///   the `distributive: false` flag on each sub-query (no re-
-    ///   distribution), the family memo's per-member dedup, and the
-    ///   dispatch layer's same-path recursion sentinel. Dispatch owns
-    ///   distributive distribution.
-    /// - **Closed/decidable check** — one of the branch shell references
-    ///   directly (no `Conditional` node interned). Emits a
-    ///   [`OriginEdgeKind::ConditionalSelect`] edge with
-    ///   [`BranchSelection::True`] or [`BranchSelection::False`]. The
-    ///   unselected branch is NOT materialised beyond its shell
-    ///   reference (it already has one via the key's
-    ///   `true_branch` / `false_branch` fields), and it is a dead
-    ///   operand for dependency purposes: the result's observed
-    ///   self-roots cover `check`, `extends`, and the WINNER only.
-    /// - **Open/undecidable check** — a
-    ///   [`SemanticNodeData::Conditional`] shell with both branch
-    ///   references intact. Emits
-    ///   [`OriginEdgeKind::ConditionalSelect`] with
-    ///   [`BranchSelection::Deferred`]. Neither branch is recursively
-    ///   materialised; path projection into the result drives
-    ///   per-subexpression lazy expansion.
-    ///
-    /// The relation evaluator handles the decidable shapes the shallow
-    /// walker reaches directly: primitive identity, primitive-to-top/any,
-    /// `never` bottom, exact node identity, and the obvious
-    /// non-assignability cases. Object / union / intersection / generic
-    /// relations stay deferred — the full solver routing lands via the
-    /// `resolve_conditional` dispatch handoff in . Bare-infer
-    /// bindings (`T extends infer X`) are handled by the shortcut below;
-    /// nested-infer in complex patterns defers to the relation engine.
-    pub fn build_conditional(
-        &self,
-        check: SemanticNodeId,
-        extends: SemanticNodeId,
-        true_branch: SemanticNodeId,
-        false_branch: SemanticNodeId,
-        distributive: bool,
-        pending: Option<
-            verter_session_query::retention::owned::Owned<ConditionalPendingSubstitution>,
-        >,
-    ) -> super::walk::QueryBuildOutput {
-        verter_audit::attribute_scope!(ConditionalReduce);
-        self.decide_conditional(
-            check,
-            extends,
-            distributive,
-            &mut MaterializedBranches {
-                true_branch,
-                false_branch,
-                pending,
-            },
-        )
+    construction_ordinal_seam! {
+        /// Conditional type (lazy-block evaluation +
+        /// distributive-conditional authority), read from the materialized
+        /// branch handles of a [`SemanticQueryKey::Conditional`].
+        ///
+        /// Evaluates `check extends extends ? true_branch : false_branch`
+        /// using the shared relation engine and returns one of:
+        ///
+        /// - **Distributive union check** — when `distributive == true` AND
+        ///   `check` resolves to a [`SemanticNodeData::Union`], the builder
+        ///   distributes per-member by re-entering the dispatcher with
+        ///   `SemanticQueryApi::execute(SemanticQueryKey::Conditional {
+        ///   check: member, extends, true_branch, false_branch,
+        ///   distributive: false })` for every member, then combines the
+        ///   per-member results through
+        ///   `SemanticQueryApi::execute(SemanticQueryKey::ReduceUnion {
+        ///   members: per_member_results, nullability: Strict })`. Termination is guaranteed by
+        ///   the `distributive: false` flag on each sub-query (no re-
+        ///   distribution), the family memo's per-member dedup, and the
+        ///   dispatch layer's same-path recursion sentinel. Dispatch owns
+        ///   distributive distribution.
+        /// - **Closed/decidable check** — one of the branch shell references
+        ///   directly (no `Conditional` node interned). Emits a
+        ///   [`OriginEdgeKind::ConditionalSelect`] edge with
+        ///   [`BranchSelection::True`] or [`BranchSelection::False`]. The
+        ///   unselected branch is NOT materialised beyond its shell
+        ///   reference (it already has one via the key's
+        ///   `true_branch` / `false_branch` fields), and it is a dead
+        ///   operand for dependency purposes: the result's observed
+        ///   self-roots cover `check`, `extends`, and the WINNER only.
+        /// - **Open/undecidable check** — a
+        ///   [`SemanticNodeData::Conditional`] shell with both branch
+        ///   references intact. Emits
+        ///   [`OriginEdgeKind::ConditionalSelect`] with
+        ///   [`BranchSelection::Deferred`]. Neither branch is recursively
+        ///   materialised; path projection into the result drives
+        ///   per-subexpression lazy expansion.
+        ///
+        /// The relation evaluator handles the decidable shapes the shallow
+        /// walker reaches directly: primitive identity, primitive-to-top/any,
+        /// `never` bottom, exact node identity, and the obvious
+        /// non-assignability cases. Object / union / intersection / generic
+        /// relations stay deferred — the full solver routing lands via the
+        /// `resolve_conditional` dispatch handoff in . Bare-infer
+        /// bindings (`T extends infer X`) are handled by the shortcut below;
+        /// nested-infer in complex patterns defers to the relation engine.
+        fn build_conditional(
+            &self,
+            check: SemanticNodeId,
+            extends: SemanticNodeId,
+            true_branch: SemanticNodeId,
+            false_branch: SemanticNodeId,
+            distributive: bool,
+            pending: Option<
+                verter_session_query::retention::owned::Owned<ConditionalPendingSubstitution>,
+            >,
+        ) -> super::walk::QueryBuildOutput {
+            verter_audit::attribute_scope!(ConditionalReduce);
+            self.decide_conditional(
+                check,
+                extends,
+                distributive,
+                &mut MaterializedBranches {
+                    true_branch,
+                    false_branch,
+                    pending,
+                },
+            )
+        }
     }
 
     /// Transient lowering ingress. Only selected syntax is lowered; no

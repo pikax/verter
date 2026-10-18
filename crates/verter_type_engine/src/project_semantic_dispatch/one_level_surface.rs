@@ -442,6 +442,9 @@ pub fn project_one_level_surface<C: crate::resolver_core::ResolverCapabilities>(
         ProjectionMode::Shallow,
         "project_one_level_surface synthesises a one-level surface; mode must be Shallow"
     );
+    // One dispatcher operation: what the projection interns is owned until
+    // the returned surface roots its operands.
+    let _operation = dispatch.enter_operation(true);
     // Path-precise `Shallow` projection synthesises the one-level surface
     // (call / construct / index signatures + merged members) without
     // expanding member bodies. An empty `path` projects `base`'s own
@@ -942,6 +945,9 @@ pub fn project_macro_argument_surface_claim<C: crate::resolver_core::ResolverCap
 ) -> SurfaceResolution<MacroArgumentSurface> {
     use crate::semantic_query::SurfaceProvenanceContext;
 
+    // One dispatcher operation: what the projection interns is owned until
+    // the returned surface roots its operands.
+    let _operation = dispatch.enter_operation(true);
     // Structurally read-only: surface resolution runs inside the
     // DTO producer's traced scope; fenced-ness gates admission there.
     let Some(indexed) = ctx

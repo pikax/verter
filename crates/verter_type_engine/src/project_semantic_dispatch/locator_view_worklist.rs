@@ -1412,12 +1412,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     fn read_typeof_in_place(&self, mut read: Box<TypeofRead>) -> ReferenceProjectionPlan {
         loop {
             let answer = match self.execute_type_node(read.key.clone()) {
-                QueryResult::Value(SemanticQueryOutput { value, provenance }) => {
-                    ProjectionDelivery {
-                        node: value,
-                        answered: Some(provenance.fact_status),
-                    }
-                }
+                QueryResult::Value(SemanticQueryOutput {
+                    value, provenance, ..
+                }) => ProjectionDelivery {
+                    node: value,
+                    answered: Some(provenance.fact_status),
+                },
                 _ => ProjectionDelivery {
                     node: self.opaque(QueryError::Miss),
                     answered: None,

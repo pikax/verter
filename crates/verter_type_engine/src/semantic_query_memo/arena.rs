@@ -530,14 +530,10 @@ impl DestroyedLog {
         self.settle(account);
     }
 
-    /// Hand the logged ids to the cleanup; the log keeps no backing.
-    fn drain(&mut self) -> Vec<SemanticNodeId> {
-        let ids = std::mem::take(&mut self.ids);
-        if let Some(storage) = self.storage.as_mut() {
-            storage.sub(self.charged);
-        }
-        self.charged = 0;
-        ids
+    /// Hand the log and its charge to cleanup. The batch owns its backing
+    /// until cleanup drops it; taking it never leaves an uncharged buffer.
+    fn drain(&mut self) -> Self {
+        std::mem::take(self)
     }
 
     fn settle(&mut self, account: &Arc<verter_session_query::retention::SemanticRetentionAccount>) {
@@ -556,6 +552,14 @@ impl DestroyedLog {
             storage.sub(self.charged - bytes);
         }
         self.charged = bytes;
+    }
+}
+
+impl std::ops::Deref for DestroyedLog {
+    type Target = [SemanticNodeId];
+
+    fn deref(&self) -> &Self::Target {
+        &self.ids
     }
 }
 
@@ -1522,7 +1526,7 @@ impl NodeArenaCore {
     }
 
     /// Take the destroyed ids whose sidecar entries the store must drop.
-    pub(super) fn drain_destroyed(&self) -> Vec<SemanticNodeId> {
+    pub(super) fn drain_destroyed(&self) -> DestroyedLog {
         self.destroyed.lock().drain()
     }
 
