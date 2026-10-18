@@ -702,10 +702,10 @@ fn a_refused_splice_answers_its_own_profile_without_rebuilding() {
         refused.partial && refused.reasons == PartialReasonSet::OPERATION_BUDGET,
         "the splice is refused by its own allowance: {refused:?}"
     );
-    assert!(
-        refused.answer.contains("TupleTooLarge"),
-        "{}",
-        refused.answer
+    assert_eq!(
+        refused.answer,
+        format!("recovery {TS2799:?} {:?}", RecoveryBasis::Budget),
+        "an instantiated type alias is refused at the type site"
     );
     assert!(sealed_refusals(&host) >= 1, "the refusal is sealed");
 
@@ -902,6 +902,52 @@ fn indexed_calls_preserve_expression_tuple_recovery() {
     }
 }
 
+/// An argument the frame does not lower (`concat(z)!`) evaluates through the
+/// inline indexed run. Its call's lazy declared return is checked while the
+/// expression is checked, exactly as a frame-lowered call argument's is: no
+/// unchecked tuple carrier escapes into the outer call's result.
+#[test]
+fn inline_indexed_arguments_check_their_declared_tuple_return() {
+    let host = default_probe_host();
+    let source = format!(
+        "declare const z: {};\n\
+         {CONCAT}declare function concat<T extends unknown[]>(a: T): Concat<T, T>;\n\
+         declare function id<T>(a: T): T;\n\
+         declare function wrap<T>(a: T): {{ v: T }};\n\
+         export function lowered() {{ return id(concat(z)); }}\n\
+         export function indexed() {{ return id(concat(z)!); }}\n\
+         export function loweredMember() {{ return wrap(concat(z)); }}\n\
+         export function indexedMember() {{ return wrap(concat(z)!); }}\n",
+        zeros(5_000)
+    );
+    let answer = |function: &str| {
+        let result = flow_return_audited_on_host(&host, &source, function)
+            .into_result()
+            .unwrap_or_else(|error| panic!("`{function}` returns: {error:?}"));
+        let store_view = host.resolver_store_view_read().into_owned_view();
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+        let dispatch = ProjectSemanticDispatch::new(&ctx);
+        (
+            abbreviated(&render_node(&dispatch, result.return_type(), 0)),
+            result.degradation(),
+        )
+    };
+    for (lowered, indexed) in [("lowered", "indexed"), ("loweredMember", "indexedMember")] {
+        let expected = answer(lowered);
+        assert_eq!(
+            expected.1,
+            Some(verter_type_engine::semantic_query::FlowReturnDegradation::OperationBudget),
+            "`{lowered}` is the checker's expression recovery"
+        );
+        assert_eq!(
+            answer(indexed),
+            expected,
+            "`{indexed}` answers as `{lowered}`"
+        );
+    }
+}
+
 /// A traversal commits exactly the admitted prefix, even when its last
 /// window is smaller than a batch; an unpaid product constructs no list.
 #[test]
@@ -992,6 +1038,39 @@ fn substitution_reuse_pays_for_tuple_construction() {
         cold,
         "the lower demand cannot poison the complete entry"
     );
+}
+
+/// A substitution over an operand the graph cannot root (an unallocated
+/// sentinel) is an unpriced miss: it reads as an opaque miss and publishes
+/// no memo entry, rather than failing to price the walk.
+#[test]
+fn an_unrootable_substitution_operand_is_an_unpriced_miss() {
+    let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = dispatch.graph();
+    let parameter = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: verter_type_engine::semantic_query::DeclIdentity {
+            canonical_id: verter_type_expr::OwnedStr::from(PROBE_FILE),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: Default::default(),
+            decl_name: verter_type_expr::OwnedStr::from("T"),
+        },
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: verter_type_expr::OwnedStr::from("T"),
+    });
+    let zero = graph.intern_node(SemanticNodeData::Literal(
+        verter_type_expr::LiteralValue::Number(0.0),
+    ));
+    let absent = SemanticNodeId(verter_type_engine::semantic_query_memo::UNALLOCATABLE_ID_FLOOR);
+    let _demand = dispatch.enter_connected_demand(false).0;
+    let result = dispatch.substitute_semantic_type_param(absent, parameter, zero);
+    assert!(matches!(
+        graph.node_data(result).as_deref(),
+        Some(SemanticNodeData::Opaque(QueryError::Miss))
+    ));
+    assert_eq!(graph.substitute_memo_get(absent, parameter, zero), None);
 }
 
 /// Stored tuples need not have been normalized bottom-up by lowering. An

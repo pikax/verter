@@ -1957,18 +1957,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     };
                     continue;
                 }
-                Phase::CheckCall(value) => {
-                    if suspend {
-                        if let Some((original, key)) = value.and_then(|original| {
-                            self.indexed_call_return_key(original.node)
-                                .map(|key| (original, key))
-                        }) {
-                            *next = IndexedNext::AwaitReturn { original };
-                            return IndexedValuePoll::Need(key);
-                        }
+                // A call's lazy declared return is checked before its value
+                // is delivered: a continuation awaits the check as a frame
+                // of its own, an inline run reads it in place.
+                Phase::CheckCall(value) => match value
+                    .map(|original| (original, self.indexed_call_return_key(original.node)))
+                {
+                    Some((original, Some(key))) if suspend => {
+                        *next = IndexedNext::AwaitReturn { original };
+                        return IndexedValuePoll::Need(key);
                     }
-                    value
-                }
+                    Some((original, Some(key))) => {
+                        Some(self.checked_declared_call_return(original, key))
+                    }
+                    checked => checked.map(|(original, _)| original),
+                },
                 Phase::Deliver(value) => value,
             };
             // `value` is the evaluated expression's: deliver it to the
@@ -2089,7 +2092,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 phase = Phase::CheckCall(self.resolve_indexed_call_key(key, hold_flow_result));
                 continue;
             }
-            phase = Phase::Deliver(self.resolve_indexed_call(
+            phase = Phase::CheckCall(self.resolve_indexed_call(
                 canonical,
                 owner,
                 call,
@@ -2144,6 +2147,31 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 ),
             ),
         ))
+    }
+
+    /// Read a lazy declared return's instantiation demand in place.
+    fn read_declared_call_return(
+        &self,
+        key: crate::semantic_query::SemanticQueryKey,
+    ) -> crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>> {
+        self.read_declared_return_at_seam(&key)
+            .map(super::narrow_value_cache_read)
+            .unwrap_or_else(|| self.execute_read(key))
+    }
+
+    /// A call's value once its lazy declared return (`key`) is checked in
+    /// place: a refused return is its recovery, a complete one keeps the
+    /// authored carrier — what [`IndexedNext::AwaitReturn`] delivers.
+    fn checked_declared_call_return(
+        &self,
+        original: IndexedValue,
+        key: crate::semantic_query::SemanticQueryKey,
+    ) -> IndexedValue {
+        let read = self.read_declared_call_return(key);
+        match (read.result_is_partial(), read.value) {
+            (true, QueryResult::Value(node)) => IndexedValue { node, ..original },
+            _ => original,
+        }
     }
 
     /// The value a call's resolution, resolved by a frame of its own,
@@ -11112,11 +11140,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         &self,
         node: SemanticNodeId,
     ) -> Option<crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>> {
-        self.indexed_call_return_key(node).map(|key| {
-            self.read_declared_return_at_seam(&key)
-                .map(super::narrow_value_cache_read)
-                .unwrap_or_else(|| self.execute_read(key))
-        })
+        self.indexed_call_return_key(node)
+            .map(|key| self.read_declared_call_return(key))
     }
     fn normalize_expression_tuple_spread(
         &self,

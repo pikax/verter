@@ -74,8 +74,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         parameter: SemanticNodeId,
         arg: SemanticNodeId,
     ) -> Option<SemanticNodeId> {
-        let value = self.graph().substitute_memo_get(node, parameter, arg)?;
-        let receipt = self.graph().substitute_memo_receipt(node, parameter, arg)?;
+        let (value, receipt) = self
+            .graph()
+            .substitute_memo_get_priced(node, parameter, arg)?;
         matches!(
             self.admit_served(&receipt, super::cost_receipt::Nesting::InPlace),
             super::ServedAdmission::Admitted
@@ -83,13 +84,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         .then_some(value)
     }
 
+    /// Open the cost recording of one substitution walk, rooted at its
+    /// operands. `None` when an operand is not live in this graph (released
+    /// or foreign): the walk still runs on its `node_data` fallback, but it
+    /// seals no receipt and so publishes nothing to the memo.
     fn substitution_cost(
         &self,
         identity: SubstitutionCost,
         node: SemanticNodeId,
         parameter: SemanticNodeId,
         arg: SemanticNodeId,
-    ) -> super::connected_demand::CostRecording<'_, '_> {
+    ) -> Option<super::connected_demand::CostRecording<'_, '_>> {
         let roots = self
             .graph()
             .root_nodes([node, parameter, arg].into_iter().filter(|node| {
@@ -98,16 +103,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // only actual graph operands acquire counted root holds.
                 !crate::signature_kernel::SignatureStore::is_binder_token(*node)
             }))
-            .expect("a substitution owns its operands");
-        self.connected_demand
-            .record_cost(super::cost_receipt::CostIdentity::of_key(identity).with_roots(roots))
+            .ok()?;
+        Some(
+            self.connected_demand
+                .record_cost(super::cost_receipt::CostIdentity::of_key(identity).with_roots(roots)),
+        )
     }
 
     fn finish_substitution_cost(
         &self,
-        recording: super::connected_demand::CostRecording<'_, '_>,
+        recording: Option<super::connected_demand::CostRecording<'_, '_>>,
         epoch: u64,
     ) -> Option<Arc<super::cost_receipt::DemandCostReceipt>> {
+        let recording = recording?;
         let request = crate::request_context::current_request_budget();
         let complete = self.canonical_evidence_epoch.get() == epoch
             && self.connected_demand_trip().is_none()

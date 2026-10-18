@@ -65,47 +65,57 @@ impl SemanticGraphStore {
         /// `substitute_semantic_type_param`. Bumps
         /// `substitute_memo_hits` on hit, `substitute_memo_misses` on
         /// miss.
+        #[cfg_attr(
+            not(any(test, feature = "test-support")),
+            expect(dead_code, reason = "Fixture and compile-fail privacy seam; production substitution reads priced entries.")
+        )]
         fn substitute_memo_get(
             &self,
             value_expr: SemanticNodeId,
             parameter_node: SemanticNodeId,
             arg: SemanticNodeId,
         ) -> Option<SemanticNodeId> {
-            let hit =
-                self.substitute_memo
-                    .get(&(value_expr, parameter_node, arg))
-                    .map(|entry| {
-                        let SubstituteMemoEntry { result, roots, .. } = entry.value();
-                        super::node_roots::NodeRootScope::capture(
-                            super::node_roots::NodeRoot::from_roots(*result, roots.clone()),
-                        );
-                        *result
-                    });
-            if hit.is_some() {
-                self.stats
-                    .substitute_memo_hits
-                    .fetch_add(1, Ordering::Relaxed);
-            } else {
-                self.stats
-                    .substitute_memo_misses
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-            hit
+            self.substitute_memo_get_priced(value_expr, parameter_node, arg)
+                .map(|(result, _)| result)
         }
     }
 
-    /// The receipt of the same immutable first-writer-wins result. A
-    /// concurrent eviction makes the caller recompute rather than serve an
-    /// unpriced node.
-    pub(crate) fn substitute_memo_receipt(
+    /// The immutable first-writer-wins result and its receipt, read from
+    /// one entry: a concurrent eviction misses whole, so the caller
+    /// recomputes rather than serve an unpriced node. A hit roots the
+    /// result in the active scope and bumps `substitute_memo_hits`; a miss
+    /// bumps `substitute_memo_misses`.
+    pub(crate) fn substitute_memo_get_priced(
         &self,
         node: SemanticNodeId,
         parameter: SemanticNodeId,
         arg: SemanticNodeId,
-    ) -> Option<Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>> {
-        self.substitute_memo
-            .get(&(node, parameter, arg))
-            .map(|entry| Arc::clone(&entry.receipt))
+    ) -> Option<(
+        SemanticNodeId,
+        Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
+    )> {
+        let hit =
+            self.substitute_memo
+                .get(&(node, parameter, arg))
+                .map(|entry| {
+                    let SubstituteMemoEntry {
+                        result,
+                        receipt,
+                        roots,
+                        ..
+                    } = entry.value();
+                    super::node_roots::NodeRootScope::capture(
+                        super::node_roots::NodeRoot::from_roots(*result, roots.clone()),
+                    );
+                    (*result, Arc::clone(receipt))
+                });
+        let counter = if hit.is_some() {
+            &self.stats.substitute_memo_hits
+        } else {
+            &self.stats.substitute_memo_misses
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+        hit
     }
 
     construction_ordinal_seam! {
