@@ -3896,8 +3896,8 @@ impl IndexedExpressionDemand {
         {
             return WalkedRead::clean(None);
         }
-        let skeleton = Arc::clone(bound.bundle().skeleton());
-        let bindings = Arc::clone(bound.bundle().bindings());
+        let skeleton = bound.skeleton_ref();
+        let bindings = bound.bindings_ref();
         let Some(service) = self.snapshot.service.as_ref() else {
             return WalkedRead::clean(None);
         };
@@ -3942,7 +3942,7 @@ impl IndexedExpressionDemand {
                         entry,
                         selection.as_ref(),
                         &skeleton,
-                        Arc::clone(&bindings),
+                        bindings.clone(),
                         carrier_module,
                         &snapshot,
                         context.as_deref(),

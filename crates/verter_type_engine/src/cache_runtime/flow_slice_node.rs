@@ -64,7 +64,6 @@ use dashmap::DashMap;
 use verter_session_query::flow::flow_ir::{FlowSliceIR, ReturnSlicePlan};
 use verter_session_query::flow::hashing::FlowSliceHash;
 use verter_session_query::flow::peeker::{FlowSliceBudget, FlowSliceBudgetExceeded};
-use verter_session_query::flow::skeleton::FunctionBodySkeleton;
 #[cfg(any(test, feature = "test-support"))]
 use verter_session_query::flow::skeleton::PreparedFunctionBodySkeleton;
 
@@ -575,10 +574,10 @@ impl FlowSliceStores {
     pub fn peek_skeleton_for(
         &self,
         key: &FlowSliceFunctionKey,
-    ) -> Option<Arc<FunctionBodySkeleton>> {
+    ) -> Option<verter_session_query::flow::bundle::SkeletonRef> {
         self.graphs
             .peek(key)
-            .map(|bundle| Arc::clone(bundle.skeleton()))
+            .map(|bundle| verter_session_query::flow::bundle::SkeletonRef::of(&bundle))
     }
 
     /// The store-minted bound graph of one function content version — the
