@@ -186,7 +186,7 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
                     interior_failures: None,
                 },
             )
-            .value
+            .into_value_in(self.engine.builder())
             .at_optional_boundary()
     }
 

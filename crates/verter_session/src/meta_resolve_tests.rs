@@ -8029,9 +8029,15 @@ defineEmits<ConditionalEmits>()
     );
 
     let mut carrier_visited = rustc_hash::FxHashSet::default();
-    let conditional_root =
-        resolve_emit_payload_to_conditional_root(&dispatch, payload_node, 0, &mut carrier_visited)
-            .expect("the named emit alias carrier must reach its conditional root");
+    let builder = dispatch.enter_construction_scope();
+    let conditional_root = resolve_emit_payload_to_conditional_root(
+        &dispatch,
+        &builder,
+        payload_node,
+        0,
+        &mut carrier_visited,
+    )
+    .expect("the named emit alias carrier must reach its conditional root");
     assert!(matches!(
         verter_type_engine::project_semantic_dispatch::node_data_for(
             host.project_type_store().semantic_graph(),
@@ -8506,9 +8512,15 @@ defineEmits<EmitChain0>()
     );
 
     let mut carrier_visited = rustc_hash::FxHashSet::default();
-    let conditional_root =
-        resolve_emit_payload_to_conditional_root(&dispatch, payload_node, 0, &mut carrier_visited)
-            .expect("the >8-hop named emit alias carrier must reach its conditional root");
+    let builder = dispatch.enter_construction_scope();
+    let conditional_root = resolve_emit_payload_to_conditional_root(
+        &dispatch,
+        &builder,
+        payload_node,
+        0,
+        &mut carrier_visited,
+    )
+    .expect("the >8-hop named emit alias carrier must reach its conditional root");
     assert!(matches!(
         verter_type_engine::project_semantic_dispatch::node_data_for(
             host.project_type_store().semantic_graph(),
@@ -8634,7 +8646,14 @@ fn dispatch_mutual_alias_cycle_emits_terminates_by_identity() {
     // Drive the carrier walk DIRECTLY so the termination mechanism is
     // observable. A mutual alias cycle has no Conditional root → `None`.
     let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
-    let result = resolve_emit_payload_to_conditional_root(&dispatch, payload_node, 0, &mut visited);
+    let builder = dispatch.enter_construction_scope();
+    let result = resolve_emit_payload_to_conditional_root(
+        &dispatch,
+        &builder,
+        payload_node,
+        0,
+        &mut visited,
+    );
 
     assert!(
         result.is_none(),

@@ -21,6 +21,9 @@ pub(super) fn direct_member_dependency_is_missing(
         return false;
     }
 
+    // The walk carries resolved nodes across dispatcher operations; this
+    // explicit builder owns every one of them until the walk returns.
+    let builder = dispatch.enter_construction_scope();
     let carrier_context =
         ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
     let eager_context =
@@ -48,6 +51,7 @@ pub(super) fn direct_member_dependency_is_missing(
                 drop(data);
                 let Some(resolved) = resolve_member_carrier(
                     dispatch,
+                    &builder,
                     node,
                     tracked_dependency,
                     eager_context,
@@ -66,6 +70,7 @@ pub(super) fn direct_member_dependency_is_missing(
                 drop(data);
                 let Some(resolved) = resolve_member_carrier(
                     dispatch,
+                    &builder,
                     node,
                     tracked_dependency,
                     eager_context,
@@ -81,6 +86,7 @@ pub(super) fn direct_member_dependency_is_missing(
                 drop(data);
                 let Some(resolved) = resolve_member_carrier(
                     dispatch,
+                    &builder,
                     node,
                     tracked_dependency,
                     eager_context,
@@ -225,6 +231,9 @@ fn is_definitely_non_object_root(
     let mut visited = FxHashSet::default();
     let resolution_context =
         ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
+    // The walk carries resolved nodes across dispatcher operations; this
+    // explicit builder owns every one of them until the walk returns.
+    let builder = dispatch.enter_construction_scope();
 
     while visited.insert(subject) {
         let Some(data) = dispatch.graph().read_in_scope(subject) else {
@@ -249,14 +258,18 @@ fn is_definitely_non_object_root(
                 // definitely-non-object root — exactly as its widened
                 // `symbol` inhabitant is — so widen and let the primitive
                 // arm decide.
-                if let Some(widened) = dispatch.owning().widened_nominal_typeof(subject).value {
+                if let Some(widened) = dispatch
+                    .owning()
+                    .widened_nominal_typeof(subject)
+                    .into_value_in(&builder)
+                {
                     subject = widened;
                     continue;
                 }
                 let resolved = dispatch
                     .owning()
                     .resolve_carrier_subject_node(subject, resolution_context)
-                    .value;
+                    .into_value_in(&builder);
                 if resolved == subject {
                     return false;
                 }
@@ -375,11 +388,10 @@ pub(super) fn classify_runtime(
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<RuntimeClassification, ProjectionFailure> {
     counters.runtime_classifier_calls += 1;
-    let result = dispatch
+    let fact = dispatch
         .owning()
-        .execute_fact(dispatch.broad_runtime_key_for(subject))
-        .value;
-    let classification = match result {
+        .execute_fact(dispatch.broad_runtime_key_for(subject));
+    let classification = match fact.value() {
         Ok(verter_type_engine::semantic_query::FactResult::Complete(
             SemanticQueryValue::BroadRuntime(classification),
         )) => classification,
@@ -463,12 +475,10 @@ pub(super) fn emits_surface_has_invalid_member(
         .iter()
         .filter(|member| member.visibility.is_public())
         .any(|member| {
-            let Some(node) = dispatch
+            let normalized = dispatch
                 .owning()
-                .normalize_node_for_structural_fact_demand(member.value, shape_context)
-                .value
-                .into_complete_node()
-            else {
+                .normalize_node_for_structural_fact_demand(member.value, shape_context);
+            let Some(node) = normalized.value().into_complete_node() else {
                 return false;
             };
             match dispatch.graph().read_in_scope(node).as_deref() {
@@ -551,8 +561,11 @@ pub(super) fn observe_local<R>(body: impl FnOnce() -> R) -> (R, ResultCompletene
     (value, local)
 }
 
+/// The carrier subject `node` resolves to, handed to `builder`, which keeps
+/// it live while the caller's walk continues from it.
 fn resolve_member_carrier(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    builder: &verter_type_engine::semantic_query_memo::node_roots::NodeRootScope,
     node: verter_type_engine::semantic_query::SemanticNodeId,
     tracked_dependency: bool,
     eager_context: ProjectionReductionContext,
@@ -569,7 +582,7 @@ fn resolve_member_carrier(
                     carrier_context
                 },
             )
-            .value
+            .into_value_in(builder)
     });
     if local.is_partial() {
         None

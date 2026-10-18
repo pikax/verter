@@ -25,11 +25,12 @@ fn nameable_render_node(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: verter_type_engine::semantic_query::SemanticNodeId,
     owner_canonical: &str,
-) -> verter_type_engine::semantic_query::SemanticNodeId {
+) -> verter_type_engine::semantic_query_memo::node_roots::Constructed<
+    verter_type_engine::semantic_query::SemanticNodeId,
+> {
     dispatch
         .owning()
         .widen_owner_local_nominal_typeofs(node, owner_canonical)
-        .value
 }
 
 pub(super) fn render_tsc_node(
@@ -39,7 +40,9 @@ pub(super) fn render_tsc_node(
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<TscSpliceText, ProjectionFailure> {
     counters.tsc_materializations += 1;
-    let node = nameable_render_node(dispatch, node, owner_canonical);
+    // The widened carrier owns the rendered node until the text is produced.
+    let nameable = nameable_render_node(dispatch, node, owner_canonical);
+    let node = *nameable.value();
     let (rendered, local) =
         observe_local(|| crate::typeinfo::raise::render_node_display_with_ctx(dispatch, node));
     if local.is_partial() {
@@ -99,7 +102,9 @@ pub(super) fn render_tsc_testing_node(
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<(TscSpliceText, Option<TscDeclarationFailureReason>), ProjectionFailure> {
     counters.tsc_materializations += 1;
-    let node = nameable_render_node(dispatch, node, owner_canonical);
+    // The widened carrier owns the rendered node until the text is produced.
+    let nameable = nameable_render_node(dispatch, node, owner_canonical);
+    let node = *nameable.value();
     let (rendered, local) =
         observe_local(|| crate::typeinfo::raise::render_node_display_with_ctx(dispatch, node));
     if local.is_partial() {
@@ -899,10 +904,11 @@ fn inferred_class_members(
             };
             identity.anchor.canonical_id = std::sync::Arc::from(owner_canonical);
             identity.anchor.owner = owner;
-            let (type_text, typeof_paths) = match dispatch.owning().execute_function_return_source(
+            let returned = dispatch.owning().execute_function_return_source(
                 &verter_type_expr::facts::FunctionReturnSource::Flow(*identity),
                 owner_canonical,
-            ).value {
+            );
+            let (type_text, typeof_paths) = match returned.value() {
                 verter_type_engine::project_semantic_dispatch::flow_return::FunctionReturnNode::Flow(result) => {
                     // A DEGRADED SUCCESS never splices display text: this
                     // projection is fail-closed (every degraded shape
@@ -950,7 +956,7 @@ fn inferred_class_members(
                 verter_type_engine::project_semantic_dispatch::flow_return::FunctionReturnNode::NoValue(
                     verter_type_engine::semantic_query::FlowReturnFailure::Budget(reason),
                 ) => {
-                    return Err(ClassInferenceFailure::InferenceUnavailable(reason));
+                    return Err(ClassInferenceFailure::InferenceUnavailable(reason.clone()));
                 }
                 // A call in the body did not resolve: the member is typed
                 // UNSUPPORTED and suppresses admission — never widened
@@ -1336,7 +1342,7 @@ pub(super) fn tsc_emit_rows(
         let parameters = match render_function_parameters(
             dispatch,
             owner_canonical,
-            &signature.raw_params().value[1..],
+            &signature.raw_params().value()[1..],
             counters,
         ) {
             Ok(parameters) => parameters,
@@ -1430,9 +1436,8 @@ fn render_emit_payload_parameters(
         dispatch
             .owning()
             .normalize_node_for_structural_fact_demand(node, context)
-            .value
     });
-    let Some(node) = normalized.into_complete_node() else {
+    let Some(node) = normalized.value().into_complete_node() else {
         return Err(failure_from_local(local));
     };
     match dispatch.graph().read_in_scope(node).as_deref() {

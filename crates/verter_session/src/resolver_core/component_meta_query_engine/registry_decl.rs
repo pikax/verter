@@ -464,7 +464,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Navigate,
                     ),
-                ).value
+                ).into_value_in(self.builder())
                 .at_optional_boundary()
                 .map(|hot| hot.node())?
         };

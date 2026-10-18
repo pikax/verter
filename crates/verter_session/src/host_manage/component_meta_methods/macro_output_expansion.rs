@@ -264,7 +264,7 @@ pub(crate) fn expand_define_model_output(
     ) else {
         return DefineModelOutputExpansion::CarrierMiss;
     };
-    let base_id = base.value;
+    let base_id = *base.value();
     let artifact =
         AdmittedExpansionNode::new(base_id, Arc::from(Vec::new().into_boxed_slice()), false);
     match materialize_admitted_expansion_node(dispatch, &artifact, fallback_source) {
@@ -307,7 +307,7 @@ pub(crate) fn expand_generic_project_path_output(
     else {
         return MacroPathOutputExpansion::CarrierMiss;
     };
-    let base_id = base.value;
+    let base_id = *base.value();
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: base_id,
         path: terminal_path,
@@ -371,7 +371,7 @@ pub(crate) fn expand_slot_binding_output(
     else {
         return MacroPathOutputExpansion::CarrierMiss;
     };
-    let base_id = base.value;
+    let base_id = *base.value();
     let slot_binding = dispatch.project_slot_binding_member_with_terminal_id(
         base_id,
         slot_name,

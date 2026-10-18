@@ -599,7 +599,7 @@ fn completed_receipts_release_when_the_callers_builder_closes() {
         &verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String("next".into())),
         ProjectionMode::Navigate,
     );
-    assert!(next.value.is_some(), "the dispatcher remains usable");
+    assert!(next.value().is_some(), "the dispatcher remains usable");
     drop(next);
     assert_eq!(graph.node_count(), baseline);
 }
@@ -626,7 +626,7 @@ fn construction_carriers_own_new_and_reused_results_past_every_builder() {
     );
     for text in ["first construction", "second construction"] {
         let result = d.owning().opaque(QueryError::Other(Arc::from(text)));
-        assert!(result.node(result.value).unwrap().read().is_ok());
+        assert!(result.node(*result.value()).unwrap().read().is_ok());
         drop(result);
         assert_eq!(
             graph.node_count(),
@@ -645,7 +645,7 @@ fn construction_carriers_own_new_and_reused_results_past_every_builder() {
     drop(builder);
     graph.invalidate_all();
     assert!(matches!(
-        &*result.node(result.value).unwrap().read().unwrap(),
+        &*result.node(*result.value()).unwrap().read().unwrap(),
         SemanticNodeData::Literal(_)
     ));
     let counts = graph.node_ownership_counts();
@@ -661,7 +661,7 @@ fn construction_carriers_own_new_and_reused_results_past_every_builder() {
         "reused".into(),
     )));
     let reused = d.owning().resolve_carrier_subject_node(source, context);
-    assert_eq!(reused.value, source);
+    assert_eq!(*reused.value(), source);
     let clone = reused.clone();
     drop(builder);
     drop(reused);
@@ -674,6 +674,35 @@ fn construction_carriers_own_new_and_reused_results_past_every_builder() {
     assert!(clone.node(source).unwrap().read().is_ok());
     drop(clone);
     assert_eq!(graph.node_count(), baseline);
+}
+
+/// A carrier handed to an explicit builder keeps its construction exactly as
+/// long as that builder is open: the label it yields names a live node until
+/// the builder closes, and nothing after.
+#[test]
+fn a_construction_handed_to_a_builder_lives_until_the_builder_closes() {
+    let host = host();
+    let d = verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::with_ownership_harness(&host, zero_headroom_harness());
+    let graph = Arc::clone(d.graph());
+    let baseline = graph.node_ownership_counts().permanent_nodes;
+    // Built with no owner open, so only the carrier holds it.
+    let carrier = d
+        .owning()
+        .opaque(QueryError::Other(Arc::from("handed to a builder")));
+    let builder = d.enter_construction_scope();
+    let label = carrier.into_value_in(&builder);
+    graph.invalidate_all();
+    assert!(
+        graph.node_is_live(label),
+        "the builder keeps the construction it was handed"
+    );
+    drop(builder);
+    graph.invalidate_all();
+    assert_eq!(
+        graph.node_count(),
+        baseline,
+        "closing the builder releases it while the dispatcher lives"
+    );
 }
 
 const DELIVERY_FILE: &str = "/public/deliveries.ts";
@@ -885,19 +914,19 @@ fn public_hot_handle_adapters_deliver_owners_without_an_ambient_builder() {
         Arc::from([]),
         context,
     );
-    let hot = declared.value.expect("the declaration has a body");
+    let hot = (*declared.value()).expect("the declaration has a body");
     assert_eq!(delivered_shape(declared.node(hot.node()).unwrap()), "base");
     let resolved = d.owning().resolve_hot_handle_with_context(hot, context);
     drop(declared);
     assert_eq!(
-        delivered_shape(resolved.node(resolved.value).unwrap()),
+        delivered_shape(resolved.node(*resolved.value()).unwrap()),
         "base"
     );
     let clone = resolved.clone();
     drop(d);
     graph.invalidate_all();
     drop(resolved);
-    assert_eq!(delivered_shape(clone.node(clone.value).unwrap()), "base");
+    assert_eq!(delivered_shape(clone.node(*clone.value()).unwrap()), "base");
     drop(clone);
     assert_eq!(graph.node_count(), baseline);
 }
@@ -981,13 +1010,13 @@ fn public_callable_adapters_own_their_parameters_past_dispatcher_teardown() {
         Arc::from([]),
         context,
     );
-    let callable = CallableNodeView::new(&d, declared.value.expect("callback body").node());
+    let callable = CallableNodeView::new(&d, (*declared.value()).expect("callback body").node());
     let signature = callable.owning().signature(context).expect("a signature");
     drop(declared);
     let parameters = signature.raw_params();
-    let parameter = parameters.value[0].ty;
+    let parameter = parameters.value()[0].ty;
     let first = signature.first_param();
-    assert_eq!(first.value, Some(parameter));
+    assert_eq!(*first.value(), Some(parameter));
     drop(signature);
     drop(d);
     graph.invalidate_all();

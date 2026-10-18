@@ -187,7 +187,7 @@ impl VerterHost {
                     interior_failures: None,
                 },
             ).map(|outcome| outcome.at_optional_boundary());
-        let hot = raised.value?;
+        let hot = (*raised.value())?;
         // The raise arm's honest degraded answer is the shallow carrier NODE
         // itself — a refusal to deepen, not a deepened view. Decided on the
         // NODE-DOMAIN fact (never on a reverse-materialized `TypeExpr` — the

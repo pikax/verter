@@ -195,9 +195,16 @@ in production and public only as test fixture seams. The carrier seals the build
 construction attachments and explicit roots for every represented result operand,
 including a reused node that the build did not intern. Only the engine mints it;
 `node` borrows a capability and `map` preserves the owner. Its clones share that
-owner, independently of the dispatcher and every builder scope. If a caller has
-an explicit builder open, sealing also gives that builder its own share, so host
-construction code may compose labels while keeping that builder open.
+owner, independently of the dispatcher and every builder scope. Its value is
+private: a consumer borrows it (`value()`) for as long as it holds the carrier,
+or hands the carrier to an explicit builder it holds (`into_value_in`), which
+keeps the construction until that builder closes. A label is never taken from
+a carrier at the call that delivers it. If a caller has an explicit builder
+open, sealing also gives that builder its own share, so host construction code
+may compose labels while keeping that builder open. Session consumers follow
+the same rule: a walk that carries a label across operations keeps each
+carrier (a local, a held list, or the returned `Constructed`) or holds an
+explicit builder for its whole length.
 `CallableNodeView::owning()` similarly delivers node-bearing callable demands;
 its signature adapter owns its function root while borrowing dispatch services,
 and its parameter/return demands produce independent carriers. Event names,

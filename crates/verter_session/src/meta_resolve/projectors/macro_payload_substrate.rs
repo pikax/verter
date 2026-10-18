@@ -156,8 +156,12 @@ pub(crate) enum PayloadSurfaceScope {
 /// emit-inheritance carve-out, so a `None` here correctly routes the
 /// (decided / object / union / cyclic) payload to the default
 /// single-dispatch surface.
+///
+/// Every alias body the walk resolves is handed to `builder`, which keeps the
+/// returned root live for as long as the caller holds it open.
 pub(crate) fn resolve_emit_payload_to_conditional_root(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    builder: &verter_type_engine::semantic_query_memo::node_roots::NodeRootScope,
     node: SemanticNodeId,
     depth: u16,
     visited: &mut rustc_hash::FxHashSet<SemanticNodeId>,
@@ -191,7 +195,13 @@ pub(crate) fn resolve_emit_payload_to_conditional_root(
             &identity.decl_name,
         )
         .and_then(|resolved| {
-            resolve_emit_payload_to_conditional_root(dispatch, resolved.value, depth + 1, visited)
+            resolve_emit_payload_to_conditional_root(
+                dispatch,
+                builder,
+                resolved.into_value_in(builder),
+                depth + 1,
+                visited,
+            )
         }),
         // A `DeclPlaceholder` deferral (e.g. surfaced by an upstream
         // `ResolveDecl`). Reach its body through the same shared
@@ -204,7 +214,13 @@ pub(crate) fn resolve_emit_payload_to_conditional_root(
                 ..
             },
         )) => lower_decl_body_to_node(dispatch, canonical_id, *owner, name).and_then(|resolved| {
-            resolve_emit_payload_to_conditional_root(dispatch, resolved.value, depth + 1, visited)
+            resolve_emit_payload_to_conditional_root(
+                dispatch,
+                builder,
+                resolved.into_value_in(builder),
+                depth + 1,
+                visited,
+            )
         }),
         _ => None,
     }
@@ -245,7 +261,7 @@ fn lower_decl_body_to_node(
             ProjectionMode::Navigate,
         ),
     );
-    let node = handle.value?.node();
+    let node = (*handle.value())?.node();
     Some(handle.map(|_| node))
 }
 
@@ -261,7 +277,7 @@ pub(crate) fn resolve_payload_surface_with_scope(
     verter_type_engine::semantic_query_memo::node_roots::NodeRoot,
 > {
     use verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons;
-    let _scope = dispatch.enter_construction_scope();
+    let builder = dispatch.enter_construction_scope();
     let claims = dispatch.host_attachment().surface_claims();
     if matches!(scope, PayloadSurfaceScope::Default) {
         return super::resolve_payload_surface(
@@ -296,8 +312,13 @@ pub(crate) fn resolve_payload_surface_with_scope(
     // below emit the dep-signature.
     let mut carrier_visited: rustc_hash::FxHashSet<SemanticNodeId> =
         rustc_hash::FxHashSet::default();
-    let conditional_node =
-        resolve_emit_payload_to_conditional_root(dispatch, payload_node, 0, &mut carrier_visited);
+    let conditional_node = resolve_emit_payload_to_conditional_root(
+        dispatch,
+        &builder,
+        payload_node,
+        0,
+        &mut carrier_visited,
+    );
 
     let Some(conditional_node) = conditional_node else {
         // No Conditional reachable — branch-merge is inapplicable.
@@ -330,11 +351,11 @@ pub(crate) fn resolve_payload_surface_with_scope(
                 dispatch
                     .owning()
                     .apply_conditional_branch_pending(*true_branch_ref, pending.as_deref(), true)
-                    .value,
+                    .into_value_in(&builder),
                 dispatch
                     .owning()
                     .apply_conditional_branch_pending(*false_branch_ref, pending.as_deref(), false)
-                    .value,
+                    .into_value_in(&builder),
             ),
             _ => {
                 // Unreachable per the resolution above, but fall through
@@ -433,7 +454,7 @@ pub(crate) fn resolve_payload_surface_with_scope(
                         verter_type_engine::semantic_query::ProjectionReductionContext::published(
                             ProjectionMode::Shallow,
                         ),
-                    ).value {
+                    ).into_value_in(&builder) {
                         QueryResult::Value(formula) => formula,
                         QueryResult::Recursive(_) => {
                             return Err(NonEmptyReasons::of(
@@ -444,7 +465,10 @@ pub(crate) fn resolve_payload_surface_with_scope(
                             return Err(NonEmptyReasons::from_query_error(&error));
                         }
                     };
-                    let members = dispatch.owning().spread_formula_positive_members_for_macro(&formula).value;
+                    let members = dispatch
+                        .owning()
+                        .spread_formula_positive_members_for_macro(&formula)
+                        .into_value_in(&builder);
                     Ok(Some(members))
                 }
                 other => {

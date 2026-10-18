@@ -114,7 +114,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                     verter_type_engine::semantic_query::ProjectionMode::Navigate,
                 ),
-            ).value
+            ).into_value_in(self.builder())
             .at_optional_boundary()
         else {
             return true;
@@ -261,7 +261,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                                 verter_type_engine::semantic_query::ProjectionMode::Navigate,
                             ),
-                        ).value
+                        ).into_value_in(self.builder())
                         .at_optional_boundary()?;
                     if node_references_type_param_names(
                         self.dispatch,
@@ -320,7 +320,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                                     verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                                         verter_type_engine::semantic_query::ProjectionMode::Navigate,
                                     ),
-                                ).value.at_optional_boundary() {
+                                ).into_value_in(self.builder()).at_optional_boundary() {
                                     let exactness =
                                         match crate::meta_resolve::exactness::classify_node(
                                             dispatch,
@@ -423,7 +423,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                     verter_type_engine::semantic_query::ProjectionMode::Navigate,
                 ),
-            ).value
+            ).into_value_in(self.builder())
             .at_optional_boundary()
     }
 
@@ -625,7 +625,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                                     verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                                         verter_type_engine::semantic_query::ProjectionMode::Navigate,
                                     ),
-                                ).value.at_optional_boundary()
+                                ).into_value_in(self.builder()).at_optional_boundary()
                             });
                         let Some(body) = body else {
                             return Reach::Parts(Vec::new());

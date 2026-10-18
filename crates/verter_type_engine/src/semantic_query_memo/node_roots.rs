@@ -450,6 +450,9 @@ struct ConstructionOwners {
     /// when the owner closes.
     constructed: Vec<SemanticNodeId>,
     deliveries: Vec<super::delivery_lease::SemanticDeliveryLease>,
+    /// Result carriers handed to this owner ([`Constructed::into_value_in`]),
+    /// kept until it closes.
+    held: Vec<ConstructionHold>,
     /// The shared delivery owners `deliveries` already holds. Every clone
     /// of one delivery names the same owner, so an owner keeps it once
     /// however often it is read or cloned under this owner.
@@ -474,6 +477,7 @@ impl ConstructionOwners {
             roots: Vec::new(),
             constructed: Vec::new(),
             deliveries: Vec::new(),
+            held: Vec::new(),
             delivered: Default::default(),
         }
     }
@@ -817,7 +821,8 @@ impl ConstructionSink {
         let core = Arc::clone(&self.core);
         let empty = owners.constructed.is_empty()
             && owners.roots.is_empty()
-            && owners.deliveries.is_empty();
+            && owners.deliveries.is_empty()
+            && owners.held.is_empty();
         Constructed {
             value,
             hold: ConstructionHold {
@@ -867,12 +872,14 @@ impl ConstructionHold {
 /// the build interned, rooted or read — so the value's operands stay live
 /// exactly as long as this carrier or a clone of it does: past its
 /// operation, its dispatcher, every builder scope and every cache. The
-/// value itself is an identity label that authorizes nothing; a read
-/// borrows a capability from the carrier ([`Self::node`]) that cannot
-/// outlive it. A copied label kept after the carrier drops names a released
-/// node. Only the dispatcher mints one.
+/// value is reached only through the carrier: borrowed while it is held
+/// ([`Self::value`]), or handed to an explicit builder owner the caller
+/// holds, which then keeps the construction until it closes
+/// ([`Self::into_value_in`]). The value itself is an identity label that
+/// authorizes nothing; a read borrows a capability from the carrier
+/// ([`Self::node`]) that cannot outlive it. Only the dispatcher mints one.
 pub struct Constructed<T> {
-    pub value: T,
+    value: T,
     hold: ConstructionHold,
 }
 
@@ -901,6 +908,24 @@ impl<T: PartialEq> PartialEq for Constructed<T> {
 impl<T: Eq> Eq for Constructed<T> {}
 
 impl<T> Constructed<T> {
+    /// The carried value, borrowed for as long as the carrier — the owner of
+    /// every node it names — is held.
+    pub fn value(&self) -> &T {
+        &self.value
+    }
+
+    /// Hand this construction to `builder`, which keeps it until the builder
+    /// closes, and take the value: its labels name live nodes for exactly as
+    /// long as that builder scope is open.
+    pub fn into_value_in(self, builder: &NodeRootScope) -> T {
+        SCOPES.with(|scopes| {
+            let mut scopes = scopes.borrow_mut();
+            let position = scopes.position(builder.token);
+            scopes.entries[position].held.push(self.hold);
+        });
+        self.value
+    }
+
     /// Borrow a node this carrier owns. An ordinal the carrier does not own
     /// is foreign: a copied label never authorizes a read.
     pub fn node(&self, id: SemanticNodeId) -> Result<NodeRef<'_>, QueryError> {

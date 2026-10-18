@@ -1111,13 +1111,18 @@ fn svelte_snippet_slots_from_typeinfo_surface(
             // to its ordered elements).
             // A fail-closed `None` (an unresolved `Params` carrier) drops the slot.
             let view = CallableNodeView::new(dispatch, member.value);
-            let params = view.owning().validated_snippet_positional_params(context).value?;
+            // Each carrier below owns the nodes this slot's bindings and
+            // return display are materialized from.
+            let params_carrier = view.owning().validated_snippet_positional_params(context);
+            let params = params_carrier.value().clone()?;
             // An UNRESOLVED snippet root records its typed reason; the
             // return display then stays absent honestly (the validated
             // snippet member itself already resolved above).
-            let return_node = view.owning().realized_callable_root(context).value
-                .recorded()
-                .and_then(|realized_root| {
+            let realized = view
+                .owning()
+                .realized_callable_root(context)
+                .map(verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::recorded);
+            let arms = realized.value().map(|realized_root| {
                     let combine = match dispatch.graph().read_in_scope(realized_root)
                     .as_deref()
                     {
@@ -1126,8 +1131,11 @@ fn svelte_snippet_slots_from_typeinfo_surface(
                         }
                         _ => verter_type_engine::project_semantic_dispatch::callable_view::ArmCombineNode::Intersection,
                     };
-                    view.owning().slot_param_and_return_by_arm(combine, context).value
-                })
+                    view.owning().slot_param_and_return_by_arm(combine, context)
+                });
+            let return_node = arms
+                .as_ref()
+                .and_then(|arms| arms.value().as_ref())
                 .and_then(|parts| parts.return_type);
             // The slot member's scope (the shared member-value-scope rule) —
             // each published binding display value is paired with it.
@@ -1709,8 +1717,9 @@ fn callback_events_from_props_surface(
         // authored macro-payload position, so `payload` stays the honest `None`
         // (paired with a `None` scope); typed payload demand is host-raised
         // through the graph surface.
-        let raw_params = signature.raw_params().value;
-        let payload_tuple = materialize_payload_tuple(dispatch, &raw_params);
+        let raw_params_carrier = signature.raw_params();
+        let raw_params = raw_params_carrier.value();
+        let payload_tuple = materialize_payload_tuple(dispatch, raw_params);
         let payload_type =
             crate::resolver_core::surface_projector::render_type_expr_display(&payload_tuple);
         // The payload SOURCE: the closed tuple over the SAME callback params,
@@ -1722,7 +1731,7 @@ fn callback_events_from_props_surface(
         // so the position is the typed source-construction FAILURE — never a
         // fabricated `unknown` success.
         let payload_source = dispatch
-            .closed_params_tuple_source(&raw_params)
+            .closed_params_tuple_source(raw_params)
             .map(verter_type_expr::facts::SourcePosition::Present)
             .or_else(|| {
                 Some(verter_type_expr::facts::SourcePosition::Present(
@@ -1987,20 +1996,19 @@ pub(crate) fn resolve_svelte_value_export_member(
             // Collecting off the carrier's AUTHORED head would instead retain
             // the export's OWN name as an import of the surface that declares
             // it.
+            let widened = dispatch.owning().widened_nominal_typeof(reduced.node_id());
             let shallow =
                 verter_type_engine::project_semantic_dispatch::raise::node_shallow_member_output_with_dispatch(
                     dispatch,
-                    dispatch
-                        .owning().widened_nominal_typeof(reduced.node_id()).value
-                        .unwrap_or_else(|| reduced.node_id()),
+                    widened.value().unwrap_or_else(|| reduced.node_id()),
                 )
                 .map(NamedTypeMemberOutput::from_raised_shallow)
                 .unwrap_or(NamedTypeMemberOutput::Opaque);
             return (Some(shallow), Some("unique symbol".to_string()), Vec::new());
         }
-        let member_node = dispatch
-            .owning().widened_nominal_typeof(reduced.node_id()).value
-            .unwrap_or_else(|| reduced.node_id());
+        // The widened carrier owns the member node for the rest of this read.
+        let widened = dispatch.owning().widened_nominal_typeof(reduced.node_id());
+        let member_node = widened.value().unwrap_or_else(|| reduced.node_id());
         let shallow =
             verter_type_engine::project_semantic_dispatch::raise::node_shallow_member_output_with_dispatch(
                 dispatch,

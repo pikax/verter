@@ -119,7 +119,7 @@ fn spread_through_a_dispatcher<C: ResolverCapabilities>(
     dispatch
         .owning()
         .spread_formula_positive_members_for_macro(formula)
-        .value
+        .value()
         .len()
 }
 
@@ -147,8 +147,20 @@ fn build_under_an_explicit_owner<C: ResolverCapabilities>(
 ) -> Result<(NodeRootScope, NodeRoot), QueryError> {
     let builder = dispatch.enter_construction_scope();
     let constructed = dispatch.owning().opaque(error);
-    let root = constructed.node(constructed.value)?.to_root()?;
+    let root = constructed.node(*constructed.value())?.to_root()?;
     Ok((builder, root))
+}
+
+fn hand_a_label_to_an_explicit_builder<C: ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
+    graph: &SemanticGraphStore,
+    error: QueryError,
+) -> bool {
+    let builder = dispatch.enter_construction_scope();
+    let label = dispatch.owning().opaque(error).into_value_in(&builder);
+    let readable = graph.read_in_scope(label).is_some();
+    drop(builder);
+    readable
 }
 
 fn main() {}
@@ -168,14 +180,14 @@ fn keep_construction_past_dispatcher<C: ResolverCapabilities>(
             verter_type_engine::semantic_query::ProjectionMode::Expanded,
         ),
     );
-    let Some(hot) = result.value else {
+    let Some(hot) = *result.value() else {
         return Ok(None);
     };
     let result = result.map(|_| hot.node());
     drop(dispatch);
     let clone = result.clone();
     drop(result);
-    let _ = clone.node(clone.value)?.read()?;
+    let _ = clone.node(*clone.value())?.read()?;
     Ok(Some(clone))
 }
 

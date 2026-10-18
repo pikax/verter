@@ -148,7 +148,7 @@ fn finalize_published_prop_source(
                 interior_failures: None,
             },
         )
-        .value
+        .into_value_in(query_engine.builder())
         .at_optional_boundary()
     else {
         // Unraisable under the live view — the source publishes shallow
@@ -171,7 +171,7 @@ fn finalize_published_prop_source(
         dispatch
             .owning()
             .raise_authored_locator_to_hot(shallow, transit_ctx)
-            .value
+            .into_value_in(query_engine.builder())
             .at_optional_boundary()
     });
     if let Some(shallow) = shallow_source {

@@ -516,12 +516,12 @@ fn normalized_projection_shape_equivalent(
         let left = dispatch
             .owning()
             .normalize_node_for_structural_fact_demand(left, reduction)
-            .value
+            .into_value_in(ctx.engine.builder())
             .into_complete_node()?;
         let right = dispatch
             .owning()
             .normalize_node_for_structural_fact_demand(right, reduction)
-            .value
+            .into_value_in(ctx.engine.builder())
             .into_complete_node()?;
         if left == right || !visited.insert((left, right)) {
             continue;

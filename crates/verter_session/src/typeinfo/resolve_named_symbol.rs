@@ -534,7 +534,7 @@ fn resolve_named_symbol_request(
     // instantiation, alias hops) before it roots the one it delivers; the
     // dispatcher's lane owns none of them, so the request holds an explicit
     // builder owner that releases them all when the request returns.
-    let _builder = dispatch.enter_construction_scope();
+    let builder = dispatch.enter_construction_scope();
 
     // Wire-boundary lowering, INSIDE the audited request and under THIS
     // dispatch (and therefore this view), in `Navigate` mode — the args are
@@ -555,7 +555,7 @@ fn resolve_named_symbol_request(
                         arg.as_ref(),
                         ProjectionMode::Navigate,
                     )
-                    .value
+                    .into_value_in(&builder)
                 {
                     Some(node) => lowered.push(node),
                     None => return (Ok(None), effective_mode),

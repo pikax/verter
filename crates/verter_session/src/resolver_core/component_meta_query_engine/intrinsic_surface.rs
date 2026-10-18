@@ -134,7 +134,7 @@ impl ComponentMetaQueryEngine<'_> {
                     interior_failures: None,
                 },
             )
-            .value
+            .into_value_in(self.builder())
             .at_optional_boundary()?;
         let view = dispatch.resolve_typeinfo_surface(
             raised.node(),

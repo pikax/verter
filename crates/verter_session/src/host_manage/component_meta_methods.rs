@@ -1353,15 +1353,14 @@ impl VerterHost {
         ) -> bool {
             let locator =
                 verter_type_expr::locators::AuthoredBodyLocator::DeclBody(body.body_slot.clone());
-            match dispatch
+            let raised = dispatch
                 .owning().raise_authored_locator_to_hot(
                     &locator,
                     verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                         verter_type_engine::semantic_query::ProjectionMode::Navigate,
                     ),
-                ).value
-                .at_optional_boundary()
-            {
+                );
+            match raised.value().clone().at_optional_boundary() {
                 Some(hot) => crate::meta_resolve::exactness::node_root_should_stay_symbolic(
                     dispatch,
                     hot.node(),
@@ -1765,7 +1764,7 @@ impl VerterHost {
                         context: seed_transit_ctx,
                         interior_failures: None,
                     },
-                ).value
+                )
             };
         for (index, entry) in resolved_type_registry.iter().enumerate() {
             let Some(meta) = resolved_type_registry_meta.get(index) else {
@@ -1849,25 +1848,25 @@ impl VerterHost {
                 // Raise ONE input node through the shared dispatch: the
                 // imported declaration's body locator, else the owner
                 // collection locator, else the entry's own published source.
-                let seed_node = match imported_collection_locator
+                // The raised carrier owns the seed node for the collection below.
+                let seed_raised = match imported_collection_locator
                     .as_ref()
                     .or(source_locator.as_ref())
                 {
-                    Some(locator) => seed_dispatch
-                        .owning()
-                        .raise_authored_locator_to_hot(locator, seed_transit_ctx)
-                        .value
-                        .at_optional_boundary()
-                        .map(|hot| hot.node()),
+                    Some(locator) => Some(
+                        seed_dispatch
+                            .owning()
+                            .raise_authored_locator_to_hot(locator, seed_transit_ctx),
+                    ),
                     None => entry
                         .type_source
                         .present()
-                        .and_then(|source| {
-                            raise_seed_source(seed_dispatch, &producer_scope, source)
-                                .at_optional_boundary()
-                        })
-                        .map(|hot| hot.node()),
+                        .map(|source| raise_seed_source(seed_dispatch, &producer_scope, source)),
                 };
+                let seed_node = seed_raised
+                    .as_ref()
+                    .and_then(|raised| raised.value().clone().at_optional_boundary())
+                    .map(|hot| hot.node());
                 if let Some(node) = seed_node {
                     collect_imported_component_meta_registry_seed_refs_node(
                         query_engine.ctx,
@@ -1937,9 +1936,14 @@ impl VerterHost {
                 };
                 let producer_scope =
                     RegistryProducerScope::explicit(canonical, meta.declaration.owner);
-                if let Some(hot) = entry.type_source.present().and_then(|source| {
-                    raise_seed_source(seed_dispatch, &producer_scope, source).at_optional_boundary()
-                }) {
+                let raised = entry
+                    .type_source
+                    .present()
+                    .map(|source| raise_seed_source(seed_dispatch, &producer_scope, source));
+                if let Some(hot) = raised
+                    .as_ref()
+                    .and_then(|raised| raised.value().clone().at_optional_boundary())
+                {
                     crate::resolver_core::component_meta_registry::collect_node_ref_names(
                         dispatch,
                         hot.node(),
@@ -2283,15 +2287,18 @@ impl VerterHost {
             // the OwnerCollectionDb locator lowers through the ONE shared
             // dispatch and the head classifies off the raised carrier — no
             // materialised `TypeExpr` in the BFS.
+            // `(head name, has type arguments)`, read while the raised
+            // carrier owns the body.
             let owner_collection_ref_head = owner_collection_locator.as_ref().and_then(|locator| {
-                seed_dispatch
-                    .owning().raise_authored_locator_to_hot(locator, seed_transit_ctx).value
-                    .at_optional_boundary()
-                    .and_then(|hot| {
-                        verter_type_engine::project_semantic_dispatch::reference_carriers::reference_carrier_head(dispatch,
-                            hot.node(),
-                        )
-                    })
+                let raised = seed_dispatch
+                    .owning()
+                    .raise_authored_locator_to_hot(locator, seed_transit_ctx);
+                let hot = raised.value().clone().at_optional_boundary()?;
+                verter_type_engine::project_semantic_dispatch::reference_carriers::reference_carrier_head(
+                    dispatch,
+                    hot.node(),
+                )
+                .map(|(name, type_arguments)| (name, !type_arguments.is_empty()))
             });
             // Owner-local type aliases whose body is a generic ref to an
             // imported type should resolve inline via indexed access rather
@@ -2306,8 +2313,10 @@ impl VerterHost {
                 && !pending_route_is_whole_local
                 && !seeded_dependency_names.contains(&type_name)
             {
-                if let Some((body_ref_name, type_arguments)) = owner_collection_ref_head.as_ref() {
-                    if !type_arguments.is_empty() {
+                if let Some((body_ref_name, has_type_arguments)) =
+                    owner_collection_ref_head.as_ref()
+                {
+                    if *has_type_arguments {
                         let body_decl = query_engine.resolve_type_declaration(
                             pending_producer_scope.canonical_id.as_ref(),
                             pending_producer_scope.owner,
@@ -2354,7 +2363,7 @@ impl VerterHost {
                 == owner_canonical
                 && owner_collection_ref_head
                     .as_ref()
-                    .is_some_and(|(_, type_arguments)| !type_arguments.is_empty());
+                    .is_some_and(|(_, has_type_arguments)| *has_type_arguments);
             if pending_route_is_deep_member_path && !owner_local_substituted_whole {
                 // Route-scoped publication: a deep member path selects no
                 // top-level member — never widen the entry with the whole

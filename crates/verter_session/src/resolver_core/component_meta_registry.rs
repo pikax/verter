@@ -14,6 +14,7 @@ use verter_type_engine::project_semantic_dispatch::reference_carriers::{
     reference_carrier_head, walk_reference_carriers,
 };
 use verter_type_engine::resolver_core::ResolverContext;
+use verter_type_engine::semantic_query_memo::node_roots::Constructed;
 
 /// Issue #7 / capture-token counters for route-demand
 /// emission. Recorded inside [`enqueue_component_meta_registry_ref`]
@@ -158,7 +159,7 @@ fn raise_component_meta_registry_source(
     >,
     producer_scope: &RegistryProducerScope,
     source: &verter_type_expr::facts::SemanticTypeSource,
-) -> Option<verter_type_engine::semantic_query::HotTypeRef> {
+) -> Constructed<Option<verter_type_engine::semantic_query::HotTypeRef>> {
     dispatch
         .owning().raise_semantic_type_source_to_hot(
             source,
@@ -171,8 +172,8 @@ fn raise_component_meta_registry_source(
                     ),
                 interior_failures: None,
             },
-        ).value
-        .at_optional_boundary()
+        )
+        .map(verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseOutcome::at_optional_boundary)
 }
 
 /// Observe a registry publication source in its exact producing scope and
@@ -190,8 +191,12 @@ pub(crate) fn observe_component_meta_registry_source(
     referenced_names: &mut VecDeque<PendingComponentMetaRegistryRef>,
     member_ref_policy: RegistryMemberRefPolicy,
     cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
-) -> Option<verter_type_engine::semantic_query::HotTypeRef> {
-    let hot = raise_component_meta_registry_source(dispatch, producer_scope, source)?;
+) {
+    // The raised carrier owns the node for the whole collection below.
+    let raised = raise_component_meta_registry_source(dispatch, producer_scope, source);
+    let Some(hot) = *raised.value() else {
+        return;
+    };
     collect_component_meta_registry_refs_node(
         ctx,
         dispatch,
@@ -203,7 +208,6 @@ pub(crate) fn observe_component_meta_registry_source(
         member_ref_policy,
         cursor,
     );
-    Some(hot)
 }
 
 pub(crate) fn upsert_component_meta_registry_entry(
@@ -355,12 +359,14 @@ pub(crate) fn upsert_component_meta_registry_entry(
         // An unraisable candidate never replaces the existing source; a
         // raisable candidate replaces an unraisable existing; both raisable
         // → the node-domain improvement comparator decides.
+        let candidate = raise(&type_source);
+        let current = resolved_type_registry[index]
+            .type_source
+            .present()
+            .map(raise);
         let improves = match (
-            raise(&type_source),
-            resolved_type_registry[index]
-                .type_source
-                .present()
-                .and_then(raise),
+            *candidate.value(),
+            current.as_ref().and_then(|current| *current.value()),
         ) {
             (Some(candidate), Some(current)) => crate::meta_resolve::compare_node_improvement(
                 dispatch,
@@ -489,28 +495,30 @@ pub(crate) fn component_meta_registry_owner_local_component_config_alias_name(
         owner_canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
-    ) -> Option<(String, Vec<SemanticNodeId>)> {
+    ) -> Option<(String, bool)> {
         let prepared = ctx.prepared_type_decl_return_only(owner_canonical, owner, name)?;
-        let root = prepared_body_root_node(dispatch, prepared.as_ref())?;
-        if node_root_is_type_parameter(dispatch, root) {
+        let root = prepared_body_root_node(dispatch, prepared.as_ref());
+        let node = (*root.value())?;
+        if node_root_is_type_parameter(dispatch, node) {
             return None;
         }
-        reference_carrier_head(dispatch, root)
+        reference_carrier_head(dispatch, node).map(|(name, args)| (name, !args.is_empty()))
     }
 
-    let Some((ref_name, type_arguments)) = body_head(ctx, dispatch, owner_canonical, owner, name)
+    let Some((ref_name, has_type_arguments)) =
+        body_head(ctx, dispatch, owner_canonical, owner, name)
     else {
         return false;
     };
-    if ref_name == "ComponentConfig" && !type_arguments.is_empty() {
+    if ref_name == "ComponentConfig" && has_type_arguments {
         return true;
     }
     // Single alias-of-alias indirection — follow once.
-    if type_arguments.is_empty() {
-        if let Some((nested_name, nested_args)) =
+    if !has_type_arguments {
+        if let Some((nested_name, nested_has_args)) =
             body_head(ctx, dispatch, owner_canonical, owner, ref_name.as_str())
         {
-            return nested_name == "ComponentConfig" && !nested_args.is_empty();
+            return nested_name == "ComponentConfig" && nested_has_args;
         }
     }
     false
@@ -734,22 +742,21 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
         verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
             verter_type_engine::semantic_query::ProjectionMode::Navigate,
         );
-    let type_node = field
-        .authority
-        .source()
-        .and_then(|source| {
-            dispatch
-                .owning().raise_semantic_type_source_to_hot(
-                    source,
-                    verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
-                        scope_canonical_id: producer_scope.canonical_id.as_ref(),
-                        scope_owner: producer_scope.owner,
-                        context: transit_ctx,
-                        interior_failures: None,
-                    },
-                ).value
-                .at_optional_boundary()
-        })
+    // Each raised carrier owns its node for the whole classification below.
+    let type_raised = field.authority.source().map(|source| {
+        dispatch.owning().raise_semantic_type_source_to_hot(
+            source,
+            verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                scope_canonical_id: producer_scope.canonical_id.as_ref(),
+                scope_owner: producer_scope.owner,
+                context: transit_ctx,
+                interior_failures: None,
+            },
+        )
+    });
+    let type_node = type_raised
+        .as_ref()
+        .and_then(|raised| raised.value().clone().at_optional_boundary())
         .map(|hot| hot.node());
 
     // When the post-expansion source carries no actionable route (no
@@ -758,32 +765,34 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
     // `MacroPayloadLocator` / `AuthoredBodyLocator`) — the bare annotation
     // the user wrote. A deep indexed member path (len > 1) recovers only
     // when the resolved source is an explicit object surface.
-    let shallow_node = (!type_node
+    let shallow_raised = (!type_node
         .is_some_and(|node| component_meta_registry_node_has_actionable_route(dispatch, node)))
     .then(|| {
-        field.authored_evidence.as_ref().and_then(|evidence| {
+        field.authored_evidence.as_ref().map(|evidence| {
             dispatch
                 .owning()
                 .raise_authored_locator_to_hot(evidence.source().locator(), transit_ctx)
-                .value
-                .at_optional_boundary()
-                .map(|hot| hot.node())
         })
     })
-    .flatten()
-    .filter(|shallow| {
-        let deep_indexed_path = component_meta_registry_node_indexed_access_route(
-            dispatch, *shallow,
-        )
-        .is_some_and(|(_, route)| {
-            matches!(
-                route,
-                RouteDemand::MemberPath(ref path) if path.len() > 1,
+    .flatten();
+    let shallow_node = shallow_raised
+        .as_ref()
+        .and_then(|raised| raised.value().clone().at_optional_boundary())
+        .map(|hot| hot.node())
+        .filter(|shallow| {
+            let deep_indexed_path = component_meta_registry_node_indexed_access_route(
+                dispatch, *shallow,
             )
+            .is_some_and(|(_, route)| {
+                matches!(
+                    route,
+                    RouteDemand::MemberPath(ref path) if path.len() > 1,
+                )
+            });
+            !deep_indexed_path
+                || type_node
+                    .is_some_and(|node| node_root_has_explicit_object_surface(dispatch, node))
         });
-        !deep_indexed_path
-            || type_node.is_some_and(|node| node_root_has_explicit_object_surface(dispatch, node))
-    });
     let Some(node) = shallow_node.or(type_node) else {
         return;
     };
@@ -821,65 +830,66 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
 
     // Prepared-body classifications run NODE-DOMAIN off the declaration's
     // lowered body slot (never an embedded body).
-    let prepared_body_root = |canonical_id: &str,
-                              declaration_owner: verter_type_expr::TopLevelOwnerId,
-                              symbol_name: &str| {
-        ctx.prepared_type_decl_return_only(canonical_id, declaration_owner, symbol_name)
-            .and_then(|prepared| prepared_body_root_node(dispatch, prepared.as_ref()))
-    };
+    // The raised body's carrier owns the root while `satisfies` reads it.
+    let prepared_body_root_satisfies =
+        |canonical_id: &str,
+         declaration_owner: verter_type_expr::TopLevelOwnerId,
+         symbol_name: &str,
+         satisfies: &dyn Fn(SemanticNodeId) -> bool| {
+            ctx.prepared_type_decl_return_only(canonical_id, declaration_owner, symbol_name)
+                .is_some_and(|prepared| {
+                    prepared_body_root_node(dispatch, prepared.as_ref())
+                        .value()
+                        .is_some_and(|root| satisfies(root))
+                })
+        };
     let skip_direct_plain_ref =
         component_meta_registry_node_ref_name(dispatch, node).is_some_and(|name| {
             let name = name.as_str();
-            prepared_body_root(
+            prepared_body_root_satisfies(
                 producer_scope.canonical_id.as_ref(),
                 producer_scope.owner,
                 name,
+                &|root| node_root_is_type_parameter(dispatch, root),
+            ) || owner_component_meta_registry_import_root(
+                ctx,
+                dispatch,
+                producer_scope.canonical_id.as_ref(),
+                producer_scope.owner,
+                snapshot,
+                name,
             )
-            .is_some_and(|root| node_root_is_type_parameter(dispatch, root))
-                || owner_component_meta_registry_import_root(
-                    ctx,
-                    dispatch,
-                    producer_scope.canonical_id.as_ref(),
-                    producer_scope.owner,
-                    snapshot,
-                    name,
-                )
-                .and_then(|(canonical_id, target_owner, exported_name)| {
-                    (!canonical_id.is_empty()
-                        && !ctx.workspace_is_package_backed(canonical_id.as_str()))
-                    .then(|| {
-                        prepared_body_root(
-                            canonical_id.as_str(),
-                            target_owner,
-                            exported_name.as_str(),
-                        )
-                    })
-                })
-                .flatten()
-                .is_some_and(|root| {
-                    node_root_has_non_object_top_level_surface(dispatch, root)
-                        && !node_root_has_explicit_object_surface(dispatch, root)
-                })
-                || owner_component_meta_registry_import_root(
-                    ctx,
-                    dispatch,
-                    producer_scope.canonical_id.as_ref(),
-                    producer_scope.owner,
-                    snapshot,
-                    name,
-                )
-                .is_some_and(|(canonical_id, _, _)| {
-                    ctx.workspace_is_package_backed(canonical_id.as_str())
-                })
-                || ctx.workspace_is_package_backed(
-                    ctx.resolve_type_declaration_for_dep(
-                        producer_scope.canonical_id.as_ref(),
-                        producer_scope.owner,
-                        name,
+            .is_some_and(|(canonical_id, target_owner, exported_name)| {
+                !canonical_id.is_empty()
+                    && !ctx.workspace_is_package_backed(canonical_id.as_str())
+                    && prepared_body_root_satisfies(
+                        canonical_id.as_str(),
+                        target_owner,
+                        exported_name.as_str(),
+                        &|root| {
+                            node_root_has_non_object_top_level_surface(dispatch, root)
+                                && !node_root_has_explicit_object_surface(dispatch, root)
+                        },
                     )
-                    .canonical_source
-                    .as_str(),
+            }) || owner_component_meta_registry_import_root(
+                ctx,
+                dispatch,
+                producer_scope.canonical_id.as_ref(),
+                producer_scope.owner,
+                snapshot,
+                name,
+            )
+            .is_some_and(|(canonical_id, _, _)| {
+                ctx.workspace_is_package_backed(canonical_id.as_str())
+            }) || ctx.workspace_is_package_backed(
+                ctx.resolve_type_declaration_for_dep(
+                    producer_scope.canonical_id.as_ref(),
+                    producer_scope.owner,
+                    name,
                 )
+                .canonical_source
+                .as_str(),
+            )
         });
     let direct_ref = reference_carrier_head(dispatch, node);
     let skip_imported_generic_non_object_ref =
@@ -902,21 +912,25 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
             if canonical_id.is_empty() || ctx.workspace_is_package_backed(canonical_id.as_str()) {
                 return false;
             }
-            prepared_body_root(canonical_id.as_str(), target_owner, exported_name.as_str())
-                .is_some_and(|root| {
+            prepared_body_root_satisfies(
+                canonical_id.as_str(),
+                target_owner,
+                exported_name.as_str(),
+                &|root| {
                     node_root_has_non_object_top_level_surface(dispatch, root)
                         && !node_root_has_explicit_object_surface(dispatch, root)
-                })
+                },
+            )
         });
     if (skip_direct_plain_ref || skip_imported_generic_non_object_ref)
         && direct_ref.as_ref().is_some_and(|(name, _)| {
             let name = name.as_str();
-            let local_type_parameter = prepared_body_root(
+            let local_type_parameter = prepared_body_root_satisfies(
                 producer_scope.canonical_id.as_ref(),
                 producer_scope.owner,
                 name,
-            )
-            .is_some_and(|root| node_root_is_type_parameter(dispatch, root));
+                &|root| node_root_is_type_parameter(dispatch, root),
+            );
             let import_root = owner_component_meta_registry_import_root(
                 ctx,
                 dispatch,
@@ -967,13 +981,12 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
     if let Some((root_name, route)) =
         component_meta_registry_node_indexed_access_route(dispatch, node)
     {
-        if prepared_body_root(
+        if prepared_body_root_satisfies(
             producer_scope.canonical_id.as_ref(),
             producer_scope.owner,
             root_name.as_str(),
-        )
-        .is_some_and(|root| !node_root_is_type_parameter(dispatch, root))
-        {
+            &|root| !node_root_is_type_parameter(dispatch, root),
+        ) {
             // A single-member route records the field's authored annotation
             // slot as the member USE-SITE: when the member's declaring
             // surface sits behind a generic substitution, the route-scoped
@@ -2246,7 +2259,7 @@ pub(crate) fn prepared_body_root_node(
         crate::resolver_core::HostCapabilities,
     >,
     prepared: &verter_session_query::type_solver::PreparedTypeDecl,
-) -> Option<SemanticNodeId> {
+) -> Constructed<Option<SemanticNodeId>> {
     dispatch
         .owning().raise_authored_locator_to_hot(
             &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
@@ -2255,9 +2268,8 @@ pub(crate) fn prepared_body_root_node(
             verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                 verter_type_engine::semantic_query::ProjectionMode::Navigate,
             ),
-        ).value
-        .at_optional_boundary()
-        .map(|hot| hot.node())
+        )
+        .map(|raised| raised.at_optional_boundary().map(|hot| hot.node()))
 }
 
 /// Node-domain sibling of the `matches!(body, TypeExpr::TypeParameter(_))`

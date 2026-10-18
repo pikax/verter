@@ -1564,7 +1564,7 @@ impl<'a, 'ctx, C: crate::resolver_core::ResolverCapabilities>
             .view
             .dispatch
             .construct(|| self.view.signature(context).map(|view| view.function));
-        let function = root.value?;
+        let function = (*root.value())?;
         Some(OwningSignatureNodeView {
             view: SignatureNodeView {
                 dispatch: self.view.dispatch,

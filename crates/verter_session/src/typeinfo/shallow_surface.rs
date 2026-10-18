@@ -297,7 +297,9 @@ pub(crate) fn callable_first_param_object_surface<
         dispatch, callable,
     );
     let signature = view.owning().signature(context)?;
-    let first_param = signature.first_param().value?;
+    // The first-param carrier owns the root the surface projects from.
+    let first_param_carrier = signature.first_param();
+    let first_param = (*first_param_carrier.value())?;
     // Open-generic gate: a symbolic-only param root must NOT be materialised
     // into a committed object surface — the SAME gate
     // `navigate_param_to_object_surface` applies, keeping both binding paths

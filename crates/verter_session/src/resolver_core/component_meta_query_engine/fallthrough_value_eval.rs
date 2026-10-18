@@ -179,7 +179,7 @@ impl ComponentMetaQueryEngine<'_> {
                             dispatch
                                 .owning()
                                 .indexed_member_value(scope_canonical_id, object, name)
-                                .value
+                                .into_value_in(self.builder())
                         });
                         if callee {
                             if let (Some(object), Some(Pending::Call(call))) =
@@ -288,7 +288,7 @@ impl ComponentMetaQueryEngine<'_> {
                         &substituted,
                         ProjectionMode::Navigate,
                     )
-                    .value;
+                    .into_value_in(self.builder());
             }
         }
 
@@ -318,7 +318,7 @@ impl ComponentMetaQueryEngine<'_> {
                 lowered,
                 ProjectionMode::Expanded,
             )
-            .value
+            .into_value_in(self.builder())
     }
 
     /// Node-domain spread-key reader for a root-consumption spread value
@@ -457,7 +457,7 @@ impl ComponentMetaQueryEngine<'_> {
                 expr,
                 ProjectionMode::Navigate,
             )
-            .value
+            .into_value_in(self.builder())
     }
 
     /// Resolve one indexed call over its evaluated callee, receiver and
@@ -483,7 +483,7 @@ impl ComponentMetaQueryEngine<'_> {
                         argument,
                         ProjectionMode::Navigate,
                     )
-                    .value?,
+                    .into_value_in(self.builder())?,
             );
         }
         // The callee's polymorphic `this` is the receiver it is read
@@ -492,7 +492,7 @@ impl ComponentMetaQueryEngine<'_> {
             dispatch
                 .owning()
                 .bind_callee_receiver(callee, receiver)
-                .value
+                .into_value_in(self.builder())
         });
         let result = dispatch
             .owning()
@@ -516,7 +516,7 @@ impl ComponentMetaQueryEngine<'_> {
                 flow: verter_type_engine::semantic_query::FlowNarrowingKey::empty(),
                 context: dispatch.resolve_call_context_for(scope_canonical_id),
             })
-            .value;
+            .into_value_in(self.builder());
         if result.is_none() {
             verter_type_engine::request_context::mark_request_result_partial();
         }

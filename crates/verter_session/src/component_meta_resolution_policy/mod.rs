@@ -279,7 +279,7 @@ fn build_policy_macro_role_identities(
     snapshot: &FileAnalysisSnapshot,
     macro_kinds: &[AnalyzedMacroKind],
 ) -> FxHashSet<ResolvedRootIdentity> {
-    let _builder = dispatch.enter_construction_scope();
+    let builder = dispatch.enter_construction_scope();
     let mut identities = FxHashSet::default();
     let mut visited_names: FxHashSet<String> = FxHashSet::default();
 
@@ -325,7 +325,7 @@ fn build_policy_macro_role_identities(
                         context: transit_ctx,
                         interior_failures: None,
                     },
-                ).value
+                ).into_value_in(&builder)
                 .at_optional_boundary();
             if let Some(hot) = payload {
                 harvest_role_bearing_refs_node(dispatch, hot.node(), |name| {
@@ -356,7 +356,7 @@ fn build_policy_macro_role_identities(
                         context: transit_ctx,
                         interior_failures: None,
                     },
-                ).value
+                ).into_value_in(&builder)
                 .at_optional_boundary();
             if let Some(hot) = shape_hot {
                 harvest_role_bearing_refs_node(dispatch, hot.node(), |name| {
@@ -406,7 +406,7 @@ fn build_policy_macro_role_identities(
                     context: transit_ctx,
                     interior_failures: None,
                 },
-            ).value
+            ).into_value_in(&builder)
             .at_optional_boundary()
         else {
             continue;

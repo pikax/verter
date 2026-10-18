@@ -1,12 +1,20 @@
 //! Construction nodes are borrowed from their owning carrier; public hot
-//! adapters cannot return a raw ordinal in a production build.
+//! adapters cannot return a raw ordinal in a production build, and a
+//! carrier's value cannot be taken from it at the call that delivers it.
 use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
 use verter_type_engine::resolver_core::ResolverCapabilities;
 use verter_type_engine::semantic_query::{HotTypeRef, ProjectionReductionContext, SemanticNodeId};
 use verter_type_engine::semantic_query_memo::node_roots::{Constructed, NodeRef};
 
 fn outlive(result: Constructed<SemanticNodeId>) -> NodeRef<'static> {
-    result.node(result.value).unwrap()
+    result.node(*result.value()).unwrap()
+}
+
+fn strip_at_the_call<C: ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
+    error: verter_type_engine::semantic_query::QueryError,
+) -> SemanticNodeId {
+    dispatch.owning().opaque(error).value
 }
 
 fn raw_hot<C: ResolverCapabilities>(

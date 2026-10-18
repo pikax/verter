@@ -103,7 +103,7 @@ pub(crate) fn lower_and_project_to_expanded_node(
     scope_owner: verter_type_expr::TopLevelOwnerId,
     expr: &TypeExpr,
 ) -> Option<AdmittedRouteProjectionNode> {
-    let _scope = dispatch.enter_construction_scope();
+    let scope = dispatch.enter_construction_scope();
     use verter_type_engine::project_semantic_dispatch::raise::node_raised_shape_for_eq_with_dispatch;
 
     use verter_type_engine::semantic_query::{
@@ -118,7 +118,7 @@ pub(crate) fn lower_and_project_to_expanded_node(
             expr,
             ProjectionMode::Expanded,
         )
-        .value?;
+        .into_value_in(&scope)?;
     let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base,
         path: std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
@@ -156,7 +156,7 @@ pub(crate) fn project_class_a_terminal_node(
     scope_owner: verter_type_expr::TopLevelOwnerId,
     expr: &TypeExpr,
 ) -> Option<AdmittedRouteProjectionNode> {
-    let _scope = dispatch.enter_construction_scope();
+    let scope = dispatch.enter_construction_scope();
     use verter_type_engine::project_semantic_dispatch::raise::node_raised_shape_facts_with_dispatch;
 
     use verter_type_engine::semantic_query::{
@@ -174,7 +174,7 @@ pub(crate) fn project_class_a_terminal_node(
                 expr,
                 ProjectionMode::Expanded,
             )
-            .value?;
+            .into_value_in(&scope)?;
         (
             base,
             std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
@@ -188,7 +188,7 @@ pub(crate) fn project_class_a_terminal_node(
                 base_expr,
                 ProjectionMode::Navigate,
             )
-            .value?;
+            .into_value_in(&scope)?;
         (base, path_segments)
     };
     let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
