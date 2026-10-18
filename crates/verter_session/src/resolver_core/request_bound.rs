@@ -11,7 +11,6 @@ use verter_session_query::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 
 use verter_session_query::inputs::indexed::IndexedInputRecord;
 use verter_session_query::inputs::indexed::IndexedInputServe;
-use verter_session_query::inputs::prepared::PreparedInputRecord;
 use verter_session_query::inputs::shallow::ShallowInputRecord;
 use verter_type_engine::resolver_core::request_ports::{
     ExecutionSubmission, IndexedInputs, RouteLookup,
@@ -154,7 +153,10 @@ impl IndexedInputs for crate::VerterHost {
     // Cache accessors -------------------------------------------------
 
     #[inline]
-    fn prepared_decl_bundle(&self, canonical_id: &str) -> Option<Arc<PreparedInputRecord>> {
+    fn prepared_decl_bundle(
+        &self,
+        canonical_id: &str,
+    ) -> Option<verter_session_query::inputs::prepared::PreparedInputRef> {
         let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
         crate::VerterHost::prepared_decl_bundle_with_store_view(self, &view, None, canonical_id)
             .map(|bundle| self.source_input_leases.retain_prepared(bundle))
@@ -332,7 +334,11 @@ impl RouteLookup for crate::VerterHost {
     fn module_export_table(
         &self,
         canonical: &str,
-    ) -> Option<Arc<verter_session_query::declarations::module_exports::ModuleExportTable>> {
+    ) -> Option<
+        verter_retention::heap_size::OwnedValue<
+            verter_session_query::declarations::module_exports::ModuleExportTable,
+        >,
+    > {
         let view = self.resolver_store_view().into_owned_view();
         self.module_export_table_with_context(self, &view, canonical)
     }
@@ -567,7 +573,7 @@ pub(crate) trait RequestBoundLifecycle {
         &self,
         ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical_id: &str,
-    ) -> Option<Arc<PreparedDeclBundle>>;
+    ) -> Option<crate::resolver_core::CachedValue<PreparedDeclBundle>>;
 
     fn prepared_type_decl(
         &self,
@@ -576,7 +582,7 @@ pub(crate) trait RequestBoundLifecycle {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<PreparedTypeDecl>>,
+        Option<verter_retention::heap_size::OwnedValue<PreparedTypeDecl>>,
         verter_session_query::inputs::prepared::PreparationFailure,
     >;
 
@@ -587,7 +593,7 @@ pub(crate) trait RequestBoundLifecycle {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<PreparedValueDecl>>,
+        Option<verter_retention::heap_size::OwnedValue<PreparedValueDecl>>,
         verter_session_query::inputs::prepared::PreparationFailure,
     >;
 
@@ -842,7 +848,10 @@ where
     }
 
     #[inline]
-    fn prepared_decl_bundle(&self, canonical_id: &str) -> Option<Arc<PreparedInputRecord>> {
+    fn prepared_decl_bundle(
+        &self,
+        canonical_id: &str,
+    ) -> Option<verter_session_query::inputs::prepared::PreparedInputRef> {
         verter_type_engine::count_resolver_context_call!("IndexedInputs::prepared_decl_bundle");
         self.0
             .prepared_decl_bundle(self, canonical_id)
@@ -993,7 +1002,11 @@ where
     fn module_export_table(
         &self,
         canonical: &str,
-    ) -> Option<Arc<verter_session_query::declarations::module_exports::ModuleExportTable>> {
+    ) -> Option<
+        verter_retention::heap_size::OwnedValue<
+            verter_session_query::declarations::module_exports::ModuleExportTable,
+        >,
+    > {
         verter_type_engine::count_resolver_context_call!("RouteLookup::module_export_table");
         self.0
             .host()

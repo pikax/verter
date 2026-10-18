@@ -112,7 +112,7 @@ impl VerterHost {
         ctx: Context<'_>,
         view: &dyn StoreView,
         canonical: &str,
-    ) -> Option<Arc<ModuleExportTable>> {
+    ) -> Option<crate::resolver_core::CachedValue<ModuleExportTable>> {
         let canonical = ctx.normalized_analysis_canonical(canonical);
         let db = &self.resolver.runtime.routes;
         let key = table_key(ctx, &canonical);
@@ -159,7 +159,7 @@ impl VerterHost {
                 verter_type_engine::cache_runtime::propagate_non_admission(reason);
             }
             if matches!(run.role, SingleflightRole::Leader) {
-                Some(Arc::clone(&run.value.table))
+                Some(run.value.table.clone())
             } else {
                 let _build = db.module_export_build_lock.lock();
                 self.build_module_export_tables(ctx, view, &canonical, || {
@@ -356,7 +356,8 @@ impl VerterHost {
     ) -> Result<ExportTableFlight, ()> {
         let db = &self.resolver.runtime.routes;
         let mut inputs: FxHashMap<String, ModuleInputs> = FxHashMap::default();
-        let mut tables: FxHashMap<String, Arc<ModuleExportTable>> = FxHashMap::default();
+        let mut tables: FxHashMap<String, crate::resolver_core::CachedValue<ModuleExportTable>> =
+            FxHashMap::default();
         let mut parents: FxHashMap<String, Vec<String>> = FxHashMap::default();
         let mut pending = vec![canonical.to_owned()];
         while let Some(module) = pending.pop() {
@@ -568,16 +569,16 @@ impl VerterHost {
                 Err(_) => None,
             };
             for module in component {
-                let table = Arc::new(ModuleExportTable {
+                let table = crate::resolver_core::CachedValue::new(ModuleExportTable {
                     bindings: bindings.remove(&module).expect("folded component member"),
                     facts: Arc::clone(&facts),
                     retention: retention.clone(),
                     owned_binding_slots: writes.get(&module).copied().unwrap_or(0),
                 });
                 if admission.is_ok() {
-                    let stored = db.module_exports.insert_arc_with_kind(
+                    let stored = db.module_exports.insert_value_with_kind(
                         table_key(ctx, &module),
-                        Arc::clone(&table),
+                        table.clone(),
                         table.facts.to_vec(),
                         "route_db.module_exports",
                     );
@@ -590,7 +591,7 @@ impl VerterHost {
             }
         }
         Ok(ExportTableFlight {
-            table: Arc::clone(&tables[canonical]),
+            table: tables[canonical].clone(),
             admission: admissions.get(canonical).copied().unwrap_or(Ok(())),
         })
     }

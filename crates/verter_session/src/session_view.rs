@@ -211,7 +211,7 @@ pub trait SessionView: Send + Sync {
     fn resolved_import_facts(
         &self,
         canonical: &str,
-    ) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>>;
+    ) -> Option<crate::resolver_core::CachedValue<crate::resolved_import_facts::ResolvedImportFacts>>;
 
     /// Stable fingerprint identifying the overlay set on this view.
     ///
@@ -366,7 +366,7 @@ fn resolved_import_facts_for_view(
     canonical: &str,
     content_hash: verter_session_query::analysis::types::Hash16,
     key_env_override: Option<&EnvHashes>,
-) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>> {
+) -> Option<crate::resolver_core::CachedValue<crate::resolved_import_facts::ResolvedImportFacts>> {
     let (view, _is_current) = base.resolver_store_view_with_currentness();
     let key = match key_env_override {
         // A caller that PINNED an explicit env bundle addresses exactly that
@@ -436,7 +436,8 @@ impl SessionView for HostView {
     fn resolved_import_facts(
         &self,
         canonical: &str,
-    ) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>> {
+    ) -> Option<crate::resolver_core::CachedValue<crate::resolved_import_facts::ResolvedImportFacts>>
+    {
         let content_hash = current_content_hash_from_scheduler(self.base.as_ref(), canonical)?;
         resolved_import_facts_for_view(
             self.base.as_ref(),
@@ -608,7 +609,8 @@ impl SessionView for OverlaidView {
     fn resolved_import_facts(
         &self,
         canonical: &str,
-    ) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>> {
+    ) -> Option<crate::resolver_core::CachedValue<crate::resolved_import_facts::ResolvedImportFacts>>
+    {
         // Overlay-aware read: when an overlay covers the canonical use
         // its precomputed hash; otherwise fall through to the base
         // host's strict scheduler-authoritative current hash.
@@ -726,7 +728,8 @@ impl SessionView for HostViewRef<'_> {
     fn resolved_import_facts(
         &self,
         canonical: &str,
-    ) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>> {
+    ) -> Option<crate::resolver_core::CachedValue<crate::resolved_import_facts::ResolvedImportFacts>>
+    {
         let content_hash = current_content_hash_from_scheduler(self.base, canonical)?;
         resolved_import_facts_for_view(
             self.base,
@@ -922,7 +925,8 @@ impl SessionView for OverlaidViewRef<'_> {
     fn resolved_import_facts(
         &self,
         canonical: &str,
-    ) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>> {
+    ) -> Option<crate::resolver_core::CachedValue<crate::resolved_import_facts::ResolvedImportFacts>>
+    {
         // Tombstoned canonicals report no resolved-import facts so
         // consumers cannot read a stale resolution past a delete.
         if self.overlay_tombstones.contains(canonical) {

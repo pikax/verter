@@ -1261,7 +1261,9 @@ fn an_isolated_component_movement_refuses_a_previously_captured_composite() {
     assert!(
         host.project_type_store().resolved_import_facts().admit(
             key,
-            Arc::new(crate::resolved_import_facts::ResolvedImportFacts::new()),
+            crate::resolver_core::CachedValue::new(
+                crate::resolved_import_facts::ResolvedImportFacts::new()
+            ),
             witness,
         ),
         "fixture invariant: the admission must succeed"

@@ -199,6 +199,9 @@ pub struct FlowGraphBundle {
     graph: Arc<FunctionFlowGraph>,
 }
 
+/// Shared owning handle: the payload charge follows every reader clone.
+pub type FlowGraphBundleRef = verter_retention::heap_size::OwnedValue<FlowGraphBundle>;
+
 impl FlowGraphBundle {
     /// Build the bundle of one keyed structure: the graph consumes the
     /// sealed prepared structure, whose binding map rides along unchanged.
@@ -240,12 +243,12 @@ impl FlowGraphBundle {
 /// never plan over one graph while naming another's body identity. There
 /// is no constructor taking a separately supplied key.
 pub struct BoundFlowGraph {
-    bundle: Arc<FlowGraphBundle>,
+    bundle: FlowGraphBundleRef,
 }
 
 impl BoundFlowGraph {
     /// The handle on a memoized keyed bundle.
-    pub fn new(bundle: Arc<FlowGraphBundle>) -> Self {
+    pub fn new(bundle: FlowGraphBundleRef) -> Self {
         Self { bundle }
     }
 

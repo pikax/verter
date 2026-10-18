@@ -30,6 +30,7 @@
     serde::Serialize,
     serde::Deserialize,
     verter_no_typeexpr::NoTypeExpr,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct ResolvedRootIdentity {
     pub canonical_id: verter_type_expr::OwnedStr,

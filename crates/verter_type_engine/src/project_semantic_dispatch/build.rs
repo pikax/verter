@@ -70,7 +70,7 @@ pub(super) type EffectivePreparedValueDecl = (
     verter_type_expr::OwnedStr,
     verter_type_expr::TopLevelOwnerId,
     verter_type_expr::OwnedStr,
-    Arc<verter_session_query::type_solver::PreparedValueDecl>,
+    verter_retention::heap_size::OwnedValue<verter_session_query::type_solver::PreparedValueDecl>,
 );
 
 /// One folded cross-file augmentation contributor: its version self-root
@@ -152,7 +152,7 @@ pub(crate) struct PlannedContributorBody {
     owner_symbol: verter_type_expr::OwnedStr,
     kind: verter_session_query::declarations::TypeDeclKind,
     type_parameters: Arc<[verter_type_expr::facts::NarrowTypeParam]>,
-    name_resolution: Arc<FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>>,
+    name_resolution: verter_session_query::type_solver::prepared::NameResolutionTable,
     binding: PlannedBinding,
     scope: NodeScopeId,
     scope_payload: Option<crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
@@ -166,7 +166,7 @@ enum PlannedBinding {
     Bound(FxHashMap<String, SemanticNodeId>),
     /// A script declaration's: its arguments bind through its declared
     /// defaults under the projecting context.
-    Declared(Arc<PreparedTypeDecl>),
+    Declared(verter_retention::heap_size::OwnedValue<PreparedTypeDecl>),
 }
 
 /// A type-body augmentation fold before projection: the ordered planned
@@ -1494,7 +1494,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             effective_canonical.clone(),
             effective_owner,
             effective_symbol.clone(),
-            Arc::clone(&prepared),
+            prepared.clone(),
         );
         if let Some(nominal) =
             self.member_nominal_typeof(value_root, path, &effective_root, Some(scope.clone()))
@@ -1745,7 +1745,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 super::locator_view_worklist::ProjectionSeam::suspending(),
                             );
                             *suspended = Some(Box::new(TypeofBuild {
-                                prepared: Arc::clone(&prepared),
+                                prepared: prepared.clone(),
                                 env: empty_env,
                                 scope,
                                 scope_payload,
@@ -5615,7 +5615,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// bindings: an enum's member union at once, else the projection of its
     /// substituted locator shape.
     fn begin_instantiated_body(&self, build: &mut InstantiateBuild) -> BodyLowering {
-        let prepared = Arc::clone(&build.prepared);
+        let prepared = build.prepared.clone();
         // An enum's type is the union of its members' literal types, read
         // off the member inventory its value declaration carries.
         if let Some(enumeration) = self.enum_declared_at(
@@ -7211,7 +7211,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         owner_symbol: verter_type_expr::OwnedStr::from(decl_name),
                         kind: prepared.kind,
                         type_parameters: Arc::from(prepared.type_parameters.as_slice()),
-                        name_resolution: Arc::clone(&prepared.name_resolution),
+                        name_resolution: prepared.name_resolution.clone(),
                         binding: PlannedBinding::Declared(prepared),
                         scope: aug_scope,
                         scope_payload: aug_scope_payload,
@@ -8497,7 +8497,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     fn prepared_type_decl(
         &self,
         identity: &crate::semantic_query::DeclIdentity,
-    ) -> Option<Arc<PreparedTypeDecl>> {
+    ) -> Option<verter_retention::heap_size::OwnedValue<PreparedTypeDecl>> {
         let scope = NodeScopeId::File {
             canonical_id: identity.canonical_id.clone(),
             owner: identity.owner,
@@ -19719,7 +19719,7 @@ pub(super) struct InstantiateBuild {
     pub(super) args: Arc<[SemanticNodeId]>,
     effective_args: Arc<[SemanticNodeId]>,
     scope: NodeScopeId,
-    prepared: Arc<PreparedTypeDecl>,
+    prepared: verter_retention::heap_size::OwnedValue<PreparedTypeDecl>,
     scope_payload: Option<crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
     shadowing: crate::resolver_core::scope_shadowing::ScopeShadowing,
     authored_resolution_debt:
@@ -19773,7 +19773,9 @@ pub(super) enum TypeofStart {
 /// steps of its frame: the lowering's scope, the projection itself, and
 /// what the build's output roots on.
 pub(super) struct TypeofBuild {
-    prepared: Arc<verter_session_query::type_solver::PreparedValueDecl>,
+    prepared: verter_retention::heap_size::OwnedValue<
+        verter_session_query::type_solver::PreparedValueDecl,
+    >,
     env: FxHashMap<String, SemanticNodeId>,
     scope: NodeScopeId,
     scope_payload: Option<crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,

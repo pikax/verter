@@ -26,7 +26,10 @@ impl<'a> ImportedRootRequestDriver<'a> {
         view: &V,
         ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         resolve: F,
-    ) -> Option<(Arc<ImportedRootResult>, Arc<[FactVersionRef]>)>
+    ) -> Option<(
+        crate::resolver_core::CachedValue<ImportedRootResult>,
+        Arc<[FactVersionRef]>,
+    )>
     where
         V: StoreView + ?Sized,
         F: Fn() -> Option<(ImportedRootResult, Vec<FactVersionRef>)>,
@@ -57,7 +60,10 @@ impl<'a> ImportedRootRequestDriver<'a> {
         view: &V,
         probe: &verter_type_engine::fact_signature_helpers::CacheabilityProbe<'_, W>,
         resolve: F,
-    ) -> Option<(Arc<ImportedRootResult>, Arc<[FactVersionRef]>)>
+    ) -> Option<(
+        crate::resolver_core::CachedValue<ImportedRootResult>,
+        Arc<[FactVersionRef]>,
+    )>
     where
         V: StoreView + ?Sized,
         F: Fn() -> Option<(ImportedRootResult, Vec<FactVersionRef>)>,
@@ -75,7 +81,7 @@ impl<'a> ImportedRootRequestDriver<'a> {
 
         let run_result = self.resolve_root_singleflight_inner(key, view, probe, resolve)?;
         Some((
-            Arc::clone(&run_result.value.root),
+            run_result.value.root.clone(),
             Arc::clone(&run_result.value.facts),
         ))
     }
@@ -139,7 +145,7 @@ impl<'a> ImportedRootRequestDriver<'a> {
             }
             match resolve() {
                 Some((result, facts)) => {
-                    let arc = Arc::new(result);
+                    let arc = crate::resolver_core::CachedValue::new(result);
                     // Admission is TWO independent gates, both fail-closed:
                     //
                     // - a non-empty fact signature (an empty one has nothing a
@@ -156,7 +162,7 @@ impl<'a> ImportedRootRequestDriver<'a> {
                     // way; only the persist is refused.
                     let admitted = !facts.is_empty() && !probe.non_cacheable();
                     if admitted {
-                        self.db.roots.insert_arc_with_kind(
+                        self.db.roots.insert_value_with_kind(
                             key.clone(),
                             arc.clone(),
                             facts.clone(),
@@ -257,7 +263,7 @@ impl<'a> RouteRequestDriver<'a> {
         view: &V,
         ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         resolve: F,
-    ) -> Option<Arc<RouteResult>>
+    ) -> Option<crate::resolver_core::CachedValue<RouteResult>>
     where
         V: StoreView + ?Sized,
         F: Fn() -> Option<(RouteResult, Vec<FactVersionRef>)>,
@@ -280,7 +286,7 @@ impl<'a> RouteRequestDriver<'a> {
         view: &V,
         probe: &verter_type_engine::fact_signature_helpers::CacheabilityProbe<'_, W>,
         resolve: F,
-    ) -> Option<Arc<RouteResult>>
+    ) -> Option<crate::resolver_core::CachedValue<RouteResult>>
     where
         V: StoreView + ?Sized,
         F: Fn() -> Option<(RouteResult, Vec<FactVersionRef>)>,
@@ -290,7 +296,7 @@ impl<'a> RouteRequestDriver<'a> {
         }
 
         let run_result = self.resolve_route_singleflight_inner(key, view, probe, resolve)?;
-        Some(Arc::clone(&run_result.value.route))
+        Some(run_result.value.route.clone())
     }
 
     pub(crate) fn get_or_resolve_route_observing_facts_with_context<V, F>(
@@ -299,7 +305,7 @@ impl<'a> RouteRequestDriver<'a> {
         view: &V,
         ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         resolve: F,
-    ) -> Option<Arc<RouteResult>>
+    ) -> Option<crate::resolver_core::CachedValue<RouteResult>>
     where
         V: StoreView + ?Sized,
         F: Fn() -> Option<(RouteResult, Vec<FactVersionRef>)>,
@@ -321,7 +327,7 @@ impl<'a> RouteRequestDriver<'a> {
         view: &V,
         probe: &verter_type_engine::fact_signature_helpers::CacheabilityProbe<'_, W>,
         resolve: F,
-    ) -> Option<Arc<RouteResult>>
+    ) -> Option<crate::resolver_core::CachedValue<RouteResult>>
     where
         V: StoreView + ?Sized,
         F: Fn() -> Option<(RouteResult, Vec<FactVersionRef>)>,
@@ -365,7 +371,7 @@ impl<'a> RouteRequestDriver<'a> {
                 }
             }
         }
-        Some(Arc::clone(&run_result.value.route))
+        Some(run_result.value.route.clone())
     }
 
     /// Shared singleflight orchestrator for the cold-path route resolve used
@@ -451,7 +457,7 @@ impl<'a> RouteRequestDriver<'a> {
             }
             match resolve() {
                 Some((result, facts)) => {
-                    let arc = Arc::new(result);
+                    let arc = crate::resolver_core::CachedValue::new(result);
                     // Admission is TWO independent gates, both fail-closed:
                     //
                     // - a non-empty fact signature (an empty one gives a warm
@@ -471,7 +477,7 @@ impl<'a> RouteRequestDriver<'a> {
                     // way; only the persist is refused.
                     let admitted = !facts.is_empty() && !probe.non_cacheable();
                     if admitted {
-                        self.db.routes.insert_arc_with_kind(
+                        self.db.routes.insert_value_with_kind(
                             key.clone(),
                             arc.clone(),
                             facts,

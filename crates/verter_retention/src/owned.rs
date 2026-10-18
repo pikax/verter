@@ -275,6 +275,17 @@ fn measure(node: &dyn Node, block_shared: bool) -> (usize, Box<[Arc<dyn Node>]>)
     (block + heap + registration_bytes(children.len()), children)
 }
 
+/// Bytes a measurement that charges nothing counts for `node`: its block —
+/// unless weak holders share its charge — and its value's heap.
+pub(crate) fn counted_in_full(node: &dyn Node, aliases: &mut AliasSet) -> usize {
+    let block = if node.slot().lock().block_share.is_some() {
+        0
+    } else {
+        node.block_bytes()
+    };
+    block + node.value_heap_bytes(aliases)
+}
+
 /// Charge `node` for its callers if no owner has yet. Locks parent before
 /// child, so it is safe under any ancestor's slot lock.
 pub(crate) fn pin_node(node: &dyn Node, ctx: ChargeCtx<'_>) {
@@ -595,12 +606,7 @@ impl<T: Measured> Owned<T> {
         if aliases.collect_child(|| Arc::clone(&self.0) as Arc<dyn Node>) {
             return 0;
         }
-        let block = if self.0.slot.lock().block_share.is_some() {
-            0
-        } else {
-            self.0.block_bytes()
-        };
-        block + self.0.value.heap_bytes(aliases)
+        counted_in_full(&*self.0, aliases)
     }
 
     /// Bytes the allocation's charge holds; `None` while no owner has

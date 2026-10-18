@@ -51,7 +51,10 @@ fn resolved_meta_reuses_resolver_cache_after_legacy_slot_is_cleared() {
     )
     .expect("resolver-owned cache hit should mirror back into the legacy slot");
 
-    assert!(Arc::ptr_eq(&first_cache, &second_cache));
+    assert!(verter_retention::heap_size::OwnedValue::ptr_eq(
+        &first_cache,
+        &second_cache
+    ));
     assert_eq!(
         provenance(&project).component_meta_resolved_state_recomputes,
         0,

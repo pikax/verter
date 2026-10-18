@@ -862,7 +862,8 @@ impl crate::session_view::SessionView for DecliningOverlayView {
     fn resolved_import_facts(
         &self,
         canonical: &str,
-    ) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>> {
+    ) -> Option<crate::resolver_core::CachedValue<crate::resolved_import_facts::ResolvedImportFacts>>
+    {
         crate::session_view::SessionView::resolved_import_facts(&self.base, canonical)
     }
 
