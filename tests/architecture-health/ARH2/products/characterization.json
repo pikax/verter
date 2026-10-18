@@ -641,6 +641,7 @@
           "crates/verter_session/src/project_semantic_dispatch_tests/tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/this_receiver_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/truthiness_domain_tests.rs",
+          "crates/verter_session/src/project_semantic_dispatch_tests/tuple_splice_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/unique_symbol_key_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/unread_marker_relation_tests.rs",
           "crates/verter_session/src/project_type_store.rs",

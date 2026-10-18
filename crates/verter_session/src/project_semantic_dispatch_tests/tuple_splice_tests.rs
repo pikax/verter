@@ -218,15 +218,15 @@ fn an_open_variadic_stays_between_the_spliced_elements() {
     };
     let open = graph.intern_node(SemanticNodeData::TypeParam {
         decl: verter_type_engine::semantic_query::DeclIdentity {
-            canonical_id: Arc::from(PROBE_FILE),
+            canonical_id: verter_type_expr::OwnedStr::from(PROBE_FILE),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: verter_type_engine::semantic_query::HashValue::default(),
-            decl_name: Arc::from("T"),
+            decl_name: verter_type_expr::OwnedStr::from("T"),
         },
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let (one, two, three) = (literal(1.0), literal(2.0), literal(3.0));
     let front = tuple(vec![element(one, false), element(two, false)]);
