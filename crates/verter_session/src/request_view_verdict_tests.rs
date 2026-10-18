@@ -379,7 +379,9 @@ fn a_refused_index_walk_settles_nothing_and_its_retry_validates() {
 
 /// A parse fact whose lazy declaration-body read misses its lease reads as
 /// absent without being absent: it fails, settles nothing, and is read
-/// again.
+/// again. That holds for the zero sentinel too: the refused read is not the
+/// consistent absence the sentinel records, so neither the request view nor
+/// the base view it reads through accepts it.
 #[test]
 fn a_parse_fact_whose_body_read_misses_its_lease_settles_nothing() {
     use verter_session_query::facts::fact_cache::ParseFactRef;
@@ -392,7 +394,11 @@ fn a_parse_fact_whose_body_read_misses_its_lease_settles_nothing() {
         .upsert(UpsertRequest {
             canonical_id: Some(ID.to_string()),
             input_id: ID.to_string(),
-            source: Arc::from("export type A = { x: number };\nexport type B = { y: string };\n"),
+            source: Arc::from(
+                "export type A = { x: number };
+export type B = { y: string };
+",
+            ),
             file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
         })
@@ -407,15 +413,104 @@ fn a_parse_fact_whose_body_read_misses_its_lease_settles_nothing() {
         .decl_bodies()
         .release_retained_snapshot_for_test();
     let base = host.resolver_store_view_read().into_owned_view();
-    let signature = [FactVersionRef::Receipt(ResultReceipt::new(vec![
-        FactVersionRef::Parse(ParseFactRef {
+    for expected_hash in [[7; 16], [0; 16]] {
+        let fact = ParseFactRef {
             canonical_id: ID.to_string(),
             key: FactKey::Export {
                 name: InternedName(Arc::from("B")),
                 space: SymbolSpace::Type,
             },
             lane: FactLane::Semantic,
-            expected_hash: [7; 16],
+            expected_hash,
+        };
+        assert!(
+            !base.validates_parse_domain(&fact),
+            "the base view rejects the refused read of {expected_hash:?}"
+        );
+        let signature = [FactVersionRef::Receipt(ResultReceipt::new(vec![
+            FactVersionRef::Parse(fact),
+        ]))];
+        let view = RequestStoreView::new(&base, overlay_through(1));
+        for probe in 0..2 {
+            assert_eq!(
+                reads(&view, &signature, &[]),
+                (Err(0), 1),
+                "probe {probe} reads the lease-missed fact recorded as {expected_hash:?}"
+            );
+        }
+        assert_eq!(view.settled_receipts_for_tests(true), 0);
+    }
+}
+
+/// A flow-body fact whose function-program index walk finds its retained
+/// snapshot's lease pin broken reads an empty index that proves nothing
+/// about the function: it fails, settles nothing, and is read again.
+#[test]
+fn a_flow_body_fact_whose_index_walk_misses_its_lease_settles_nothing() {
+    use verter_session_query::facts::fact_cache::{
+        ProgramAnalysisFactRef, ProgramAnalysisFunctionRef,
+    };
+
+    const ID: &str = "/ws/lease_missed_flow.ts";
+    const SOURCE: &str = "export type A = { x: number };
+export function alpha(n: number) {
+  return n;
+}
+";
+    let upsert = |host: &VerterHost| {
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: Some(ID.to_string()),
+                input_id: ID.to_string(),
+                source: Arc::from(SOURCE),
+                file_language: FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert must succeed");
+    };
+    let function = ProgramAnalysisFunctionRef {
+        canonical_id: verter_type_expr::OwnedStr::from(ID),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        merged_symbol_name: verter_type_expr::OwnedStr::from("alpha"),
+        symbol_space: verter_session_query::facts::SymbolSpace::Value,
+        function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+        overload_ordinal: 0,
+    };
+    let live_hash = {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        upsert(&host);
+        host.ensure_indexed_ready(ID)
+            .expect("indexed")
+            .shallow_state
+            .decl_bodies()
+            .function_program_index()
+            .value
+            .value_function(
+                function.owner,
+                "alpha",
+                &function.function_part,
+                function.overload_ordinal,
+            )
+            .expect("alpha is indexed")
+            .entry()
+            .flow_body_stable_hash()
+    };
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert(&host);
+    let indexed = host.ensure_indexed_ready(ID).expect("indexed");
+    assert!(
+        indexed.shallow_state.type_decl("A").is_some(),
+        "A lowers under a live lease, pinning the retained snapshot"
+    );
+    indexed
+        .shallow_state
+        .decl_bodies()
+        .release_retained_snapshot_for_test();
+    let base = host.resolver_store_view_read().into_owned_view();
+    let signature = [FactVersionRef::Receipt(ResultReceipt::new(vec![
+        FactVersionRef::ProgramAnalysis(ProgramAnalysisFactRef::FlowBody {
+            function,
+            flow_body_stable_hash: live_hash,
         }),
     ]))];
     let view = RequestStoreView::new(&base, overlay_through(1));
@@ -423,10 +518,14 @@ fn a_parse_fact_whose_body_read_misses_its_lease_settles_nothing() {
         assert_eq!(
             reads(&view, &signature, &[]),
             (Err(0), 1),
-            "probe {probe} reads the lease-missed fact"
+            "probe {probe} reads the lease-missed flow-body fact"
         );
     }
-    assert_eq!(view.settled_receipts_for_tests(true), 0);
+    assert_eq!(
+        view.settled_receipts_for_tests(true),
+        0,
+        "a broken lease pin is not negative validity"
+    );
 }
 
 /// Settled verdicts belong to the request: they keep the evidence they

@@ -368,13 +368,15 @@ impl FunctionIndexDemand {
             })
         }) else {
             // Broken lease pin: fail CLOSED via ReturnOnly. NEVER memoize
-            // the empty index — a retry under a live lease recovers.
+            // the empty index — a retry under a live lease recovers — and
+            // carry the refusal, so no consumer reads the empty index as the
+            // file's functions.
             tracing::error!(
                 canonical = %self.snapshot.key.canonical,
                 "decl-body lease pin broken: function_program_index's lease-only run missed \
                  the retained snapshot; failing closed to an uncached empty index (ReturnOnly)"
             );
-            return WalkedRead::clean(Arc::new(Default::default()));
+            return WalkedRead::refused(Arc::new(Default::default()));
         };
         // A missed snapshot, or a walk-stack lease refused the program's
         // index walks: an uncached empty index, never memoized. The refusal
