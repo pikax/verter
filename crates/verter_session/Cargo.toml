@@ -167,6 +167,7 @@ verter_semantic_source = { workspace = true }
 # defines the demand trait + neutral DTOs; this crate implements them in
 # `src/query_host_port.rs`. The dependency points host -> query only.
 verter_session_query = { workspace = true }
+verter_retention = { workspace = true }
 verter_type_engine = { workspace = true }
 verter_no_typeexpr = { workspace = true }
 verter_macro_dto = { workspace = true }

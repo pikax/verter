@@ -47,7 +47,7 @@ fn partial_identity_reasons_are_typed_and_carry_no_node() {
             domain: BudgetDomain::ProjectionOperation,
             limit: 1,
             actual: 2,
-            context: "identity-demand".to_string(),
+            context: "identity-demand".into(),
         })),
         SymbolIdentityDemandOutcome::Partial(PropCallableRoleUnresolvedReason::BudgetExceeded)
     );

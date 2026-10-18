@@ -253,6 +253,7 @@ pub trait ResolverContext<C: ResolverCapabilities>:
     + LiveFactValidation<Clocks = C::Clocks>
     + ExecutionSubmission<MacroMirrors = C::MacroMirrors>
     + HostAttachmentPort<HostAttachment = C::HostAttachment>
+    + Sync
 {
 }
 
@@ -267,12 +268,16 @@ pub trait ResolverCapabilities: 'static {
         + Clone
         + 'static;
     /// The workspace clock source a live aggregate sample reads.
-    type Clocks: verter_session_query::facts::clocks::WorkspaceClocks + Clone + 'static;
+    type Clocks: verter_session_query::facts::clocks::WorkspaceClocks
+        + Clone
+        + Send
+        + Sync
+        + 'static;
     /// The composition-owned attachment the host hands out beside the engine.
     /// Opaque to the engine.
-    type HostAttachment: ?Sized + 'static;
+    type HostAttachment: ?Sized + Sync + 'static;
     /// The request-retained macro hot-mirror selector an engine binding holds.
-    type MacroMirrors: crate::resolver_core::request_ports::MacroMirrorSource + 'static;
+    type MacroMirrors: crate::resolver_core::request_ports::MacroMirrorSource + Send + 'static;
 }
 
 // Sealed marker — `VerterHost` is the base implementer,

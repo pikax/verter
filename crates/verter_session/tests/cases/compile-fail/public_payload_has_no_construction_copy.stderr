@@ -1,0 +1,49 @@
+error[E0277]: the trait bound `SemanticNodeData: ConstructionCopy` is not satisfied
+  --> tests/cases/compile-fail/public_payload_has_no_construction_copy.rs:11:25
+   |
+11 |     store.copy_in_scope(payload)
+   |           ------------- ^^^^^^^ the trait `ConstructionCopy` is not implemented for `SemanticNodeData`
+   |           |
+   |           required by a bound introduced by this call
+   |
+help: the following other types implement trait `ConstructionCopy`
+  --> $WORKSPACE/crates/verter_type_engine/src/semantic_query_memo/construction_copy.rs
+   |
+   | impl ConstructionCopy for SurfaceMember {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `SurfaceMember`
+...
+   | impl ConstructionCopy for IndexSignature {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `verter_type_engine::semantic_query::IndexSignature`
+...
+   | impl ConstructionCopy for SurfaceEntry {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `SurfaceEntry`
+note: required by a bound in `construction_copy::<impl SemanticGraphStore>::copy_in_scope`
+  --> $WORKSPACE/crates/verter_type_engine/src/semantic_query_memo/construction_copy.rs
+   |
+   |     pub fn copy_in_scope<T: ConstructionCopy>(&self, value: &T) -> Option<T> {
+   |                             ^^^^^^^^^^^^^^^^ required by this bound in `construction_copy::<impl SemanticGraphStore>::copy_in_scope`
+
+error[E0277]: the trait bound `SurfaceView: ConstructionCopy` is not satisfied
+  --> tests/cases/compile-fail/public_payload_has_no_construction_copy.rs:15:25
+   |
+15 |     store.copy_in_scope(surface)
+   |           ------------- ^^^^^^^ the trait `ConstructionCopy` is not implemented for `SurfaceView`
+   |           |
+   |           required by a bound introduced by this call
+   |
+help: the following other types implement trait `ConstructionCopy`
+  --> $WORKSPACE/crates/verter_type_engine/src/semantic_query_memo/construction_copy.rs
+   |
+   | impl ConstructionCopy for SurfaceMember {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `SurfaceMember`
+...
+   | impl ConstructionCopy for IndexSignature {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `verter_type_engine::semantic_query::IndexSignature`
+...
+   | impl ConstructionCopy for SurfaceEntry {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `SurfaceEntry`
+note: required by a bound in `construction_copy::<impl SemanticGraphStore>::copy_in_scope`
+  --> $WORKSPACE/crates/verter_type_engine/src/semantic_query_memo/construction_copy.rs
+   |
+   |     pub fn copy_in_scope<T: ConstructionCopy>(&self, value: &T) -> Option<T> {
+   |                             ^^^^^^^^^^^^^^^^ required by this bound in `construction_copy::<impl SemanticGraphStore>::copy_in_scope`

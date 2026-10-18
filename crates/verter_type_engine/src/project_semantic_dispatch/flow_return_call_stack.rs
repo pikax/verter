@@ -20,6 +20,16 @@
 //! the route suspends at too ([`ResolveCallProgress::Function`]): its body
 //! evaluates from the stack of evaluators (`flow_return_nested`), not
 //! inside the route.
+//!
+//! A function-value argument the executor's second pass retypes is typed
+//! while the executor's contextual continuation holds the candidate's
+//! collector. In a flow evaluation that runs as a frame of the continuation
+//! runtime, that typing is a window ([`FlowDemandDriver::open_contextual_window`]):
+//! a read it makes that the frame must produce first stops the run, and the
+//! route is held as it stood before the callback ([`HeldContextualRoute`]),
+//! collector included. The frame's next run asks the call again with the
+//! same key and resumes the held route there instead of the executor: the
+//! callback types over the delivered reads into that same collector.
 
 use std::sync::Arc;
 use verter_session_query::source::demand::ExpressionSourceDemand as _;
@@ -81,6 +91,8 @@ pub(super) struct CallFunctionWait<'e> {
     route: RouteAt<'e>,
     mark: FunctionArgumentMark,
     demand: Option<NestedDemand>,
+    /// Whether the argument types in a contextual window.
+    window: bool,
 }
 
 impl CallFunctionWait<'_> {
@@ -131,6 +143,8 @@ pub(super) struct ResolveCallFrame<'e> {
 /// inference pass retypes.
 pub(super) struct FinishRoute {
     _serve: verter_session_query::inputs::indexed::IndexedInputServe,
+    /// The key the call was asked with first.
+    asked: crate::semantic_query::ResolveCallKey,
     key: crate::semantic_query::ResolveCallKey,
     args: Vec<crate::semantic_query::CallArgKey>,
     function_arguments: Vec<Option<SliceExpr>>,
@@ -144,6 +158,52 @@ pub(super) struct FinishRoute {
     retyped: bool,
     /// The argument being retyped.
     position: usize,
+}
+
+/// A call's executor route held across its flow frame's suspension: the
+/// route as it stood before the round whose callback stopped the run, its
+/// contextual continuation holding the candidate's collector.
+pub(in crate::project_semantic_dispatch) struct HeldContextualRoute {
+    finish: Box<FinishRoute>,
+}
+
+impl HeldContextualRoute {
+    /// The key the call was asked with first: the run that asks it again
+    /// with this key resumes the route.
+    pub(in crate::project_semantic_dispatch) fn asked(
+        &self,
+    ) -> &crate::semantic_query::ResolveCallKey {
+        &self.finish.asked
+    }
+
+    /// Release a route no run resumes: what it observed is dropped and its
+    /// held collector returns to the transaction abandoned.
+    pub(in crate::project_semantic_dispatch) fn release<
+        C: crate::resolver_core::ResolverCapabilities,
+    >(
+        self,
+        dispatch: &super::super::ProjectSemanticDispatch<'_, C>,
+    ) {
+        let FinishRoute {
+            argument_observations,
+            step_observations,
+            mut contextual,
+            ..
+        } = *self.finish;
+        for observation in argument_observations.into_iter().flatten() {
+            let _ = observation.discard();
+        }
+        let _ = step_observations.discard();
+        dispatch.release_contextual_collector(&mut contextual);
+    }
+
+    /// The held collector's session and how many deposits it holds.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(in crate::project_semantic_dispatch) fn held_collector_for_tests(
+        &self,
+    ) -> Option<(u64, usize)> {
+        self.finish.contextual.held_collector_for_tests()
+    }
 }
 
 /// One retyping round's outcome: the route's progress, or a
@@ -278,25 +338,52 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             callee,
             route,
             mark,
+            window,
             ..
         } = wait;
-        let progress = self.deliver_resolve_call_function(route, mark, value);
+        if window {
+            self.dispatch.close_contextual_window();
+        }
+        let progress = self.deliver_resolve_call_function(route, mark, value, window);
         self.continue_call_route(flight, callee, progress)
     }
 
+    /// Open the contextual window a function-value argument types in, when
+    /// its route retypes it under the executor's held collector.
+    pub(super) fn open_function_argument_window(&self, at: &RouteAt<'_>) -> bool {
+        matches!(at, RouteAt::Finishing(_)) && self.dispatch.open_contextual_window()
+    }
+
     /// Continue a call's executor route suspended at a function-value
-    /// argument with that argument's evaluated signature.
+    /// argument with that argument's evaluated signature. A callback typed
+    /// in a contextual `window` whose run now waits on a need — one its
+    /// typing read, or one relating it to the held collector's target
+    /// unwraps — holds the route as it stood before it, collector included,
+    /// for the run that resumes it; this run's call goes undecided.
     pub(super) fn deliver_resolve_call_function<'e>(
         &mut self,
         at: RouteAt<'e>,
         mark: FunctionArgumentMark,
         value: Positional<SemanticNodeId>,
+        window: bool,
     ) -> ResolveCallProgress<'e> {
         let typed = self.function_argument_value(mark, value);
         match at {
             RouteAt::Typing(mut route) => {
                 route.delivered_function = Some(typed);
                 self.advance_resolve_call(*route, None)
+            }
+            RouteAt::Finishing(finish)
+                if window
+                    && (self.dispatch.contextual_window_waits()
+                        || typed.is_some_and(|typed| {
+                            self.dispatch
+                                .contextual_delivery_waits(&finish.contextual, typed)
+                        })) =>
+            {
+                self.dispatch
+                    .hold_contextual_route(HeldContextualRoute { finish });
+                ResolveCallProgress::Done(None)
             }
             RouteAt::Finishing(finish) => self.retype_resolve_call(finish, Some(typed)),
         }
@@ -342,12 +429,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 ResolveCallProgress::Argument(route, lowered) => (route, lowered),
                 ResolveCallProgress::Function(function) => {
                     let RouteFunction { at, request } = *function;
+                    let window = self.open_function_argument_window(&at);
                     return CallStep::Function(Box::new(CallFunctionWait {
                         flight,
                         callee,
                         route: at,
                         mark: request.mark,
                         demand: Some(request.demand),
+                        window,
                     }));
                 }
                 ResolveCallProgress::Done(step) => {
@@ -659,12 +748,21 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                         FlowIndexedArgumentBinding::NonBindingExpression,
                                         Some(frame_arguments),
                                     ) => frame_arguments.get(ordinal).and_then(|frame_argument| {
-                                        let value =
-                                            self.eval_frame_call_argument(&frame_argument.value)?;
+                                        let authored_literal = argument.literal_mode
+                                            == verter_type_expr::IndexedValueLiteralMode::Widened;
+                                        let value = self.eval_frame_call_argument(
+                                            &frame_argument.value,
+                                            authored_literal,
+                                        )?;
                                         const_view = frame_argument
                                             .const_context
                                             .as_ref()
-                                            .and_then(|expr| self.eval_frame_call_argument(expr));
+                                            .and_then(|expr| {
+                                                self.eval_frame_call_argument(
+                                                    expr,
+                                                    authored_literal,
+                                                )
+                                            });
                                         Some(value)
                                     }),
                                     _ => None,
@@ -853,6 +951,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             flow: crate::semantic_query::FlowNarrowingKey::empty(),
             context: self.dispatch.resolve_call_context_for(self.canonical),
         };
+        // A route the frame's last run held for this call resumes here, its
+        // collector as it stood: the executor is not asked again.
+        if let Some(held) = self.dispatch.take_held_contextual_route(&key) {
+            return Some(self.resume_held_route(held, argument_observations));
+        }
         let mut contextual = super::super::call_resolve::ContextualCallState::default();
         let relations_before = self.dispatch.call_undecided_relations();
         let read = self.dispatch.observe_read(|| {
@@ -871,6 +974,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let step = Positional::Value(step);
         Some(Box::new(FinishRoute {
             _serve,
+            asked: key.clone(),
             key,
             args,
             function_arguments,
@@ -883,6 +987,39 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             retyped: false,
             position: 0,
         }))
+    }
+
+    /// A held route resumed by the run that asks its call again. This run
+    /// typed the call's arguments itself, so their observations are this
+    /// run's, but for an argument the held route already retyped; the
+    /// undecided relations its executor attempt observed count again, as
+    /// they would have had the run asked it.
+    fn resume_held_route(
+        &mut self,
+        held: HeldContextualRoute,
+        mut argument_observations: Vec<Option<super::super::flow_return_fact::ObservedRead<()>>>,
+    ) -> Box<FinishRoute> {
+        let mut finish = held.finish;
+        for (held, kept) in finish
+            .argument_observations
+            .iter_mut()
+            .zip(argument_observations.iter_mut())
+        {
+            match held.take() {
+                Some(stale) => {
+                    let _ = stale.discard();
+                    *held = kept.take();
+                }
+                None => {
+                    if let Some(retyped) = kept.take() {
+                        let _ = retyped.discard();
+                    }
+                }
+            }
+        }
+        self.dispatch
+            .restore_call_relation_observations(finish.undecided_relations);
+        finish
     }
 
     /// The checker's second inference pass: a context-sensitive argument

@@ -57,7 +57,7 @@ fn upsert_ts(host: &VerterHost, canonical: &str, source: &str) {
 fn node_data(
     host: &VerterHost,
     node: verter_type_engine::semantic_query::SemanticNodeId,
-) -> Arc<SemanticNodeData> {
+) -> verter_type_engine::semantic_query_memo::NodeData {
     host.project_type_store()
         .semantic_graph()
         .node_data(node)

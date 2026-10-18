@@ -14,6 +14,7 @@ struct RecordingVisitor {
     owned: usize,
     shared: Vec<usize>,
     seen: Vec<usize>,
+    handles: usize,
 }
 
 impl PayloadHeapVisitor for RecordingVisitor {
@@ -34,6 +35,7 @@ impl PayloadHeapVisitor for RecordingVisitor {
         &mut self,
         _offer: &mut dyn FnMut(&mut verter_session_query::retention::allocation::AliasSet) -> usize,
     ) {
+        self.handles += 1;
     }
 }
 
@@ -94,10 +96,10 @@ fn node_payload_footprint_payload_array_charges_its_whole_block() {
 
 #[test]
 fn node_payload_footprint_shared_array_offers_one_key_and_descends_once() {
-    let label: Arc<str> = Arc::from("label");
+    let label = verter_type_expr::OwnedStr::from("label");
     let elements: PayloadArray<TupleElement> = (0..3)
         .map(|ordinal| TupleElement {
-            label: Some(Arc::clone(&label)),
+            label: Some(label.clone()),
             value: SemanticNodeId(ordinal),
             optional: false,
             rest: false,
@@ -112,44 +114,60 @@ fn node_payload_footprint_shared_array_offers_one_key_and_descends_once() {
         readonly: true,
     };
     let array_key = arc_key(elements.as_arc());
-    let label_key = arc_key(&label);
 
     let mut visitor = RecordingVisitor::default();
     first.visit_payload_heap(&mut visitor);
-    // The array, then each element's label: the label is offered once per
-    // element of the one descent.
-    assert_eq!(
-        visitor.shared,
-        vec![array_key, label_key, label_key, label_key]
-    );
+    // The array is a shared allocation; each element's label is an owned
+    // handle, offered once per element of the one descent and never
+    // counted as payload heap.
+    assert_eq!(visitor.shared, vec![array_key]);
+    assert_eq!(visitor.handles, 3);
 
     second.visit_payload_heap(&mut visitor);
     // The second payload offers the same array key; the visitor declines to
     // descend, so no label is offered again.
-    assert_eq!(
-        visitor.shared,
-        vec![array_key, label_key, label_key, label_key, array_key]
-    );
+    assert_eq!(visitor.shared, vec![array_key, array_key]);
+    assert_eq!(visitor.handles, 3);
     assert_eq!(visitor.owned, 0);
 }
 
+/// A template's quasi list is an owned allocation: the payload counts none
+/// of it, and the list's own charge counts a repeated quasi once.
 #[test]
 fn node_payload_footprint_repeated_quasi_counts_once_per_measurement() {
-    let long: Arc<str> = Arc::from("q".repeat(10_000));
-    let other: Arc<str> = Arc::from("tail");
-    let quasis: Arc<[Arc<str>]> = Arc::from(vec![
-        Arc::clone(&long),
-        Arc::clone(&other),
-        Arc::clone(&long),
-    ]);
+    use verter_session_query::retention::owned::ChargeCtx;
+    use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
+    use verter_type_expr::{OwnedSlice, OwnedStr};
+
+    let long = OwnedStr::from("q".repeat(10_000));
+    let other = OwnedStr::from("tail");
+    let quasis = OwnedSlice::from(vec![long.clone(), other.clone(), long.clone()]);
     let template = SemanticNodeData::TemplateLiteral {
-        quasis: Arc::clone(&quasis),
+        quasis: quasis.clone(),
         expressions: PayloadArray::from(vec![SemanticNodeId(1), SemanticNodeId(2)]),
     };
+    assert_eq!(
+        payload_heap_bytes(&template),
+        arc_block_bytes(2 * std::mem::size_of::<SemanticNodeId>())
+    );
 
-    let expected = arc_block_bytes(3 * std::mem::size_of::<Arc<str>>())
-        + arc_block_bytes(10_000)
-        + arc_block_bytes(4)
-        + arc_block_bytes(2 * std::mem::size_of::<SemanticNodeId>());
-    assert_eq!(payload_heap_bytes(&template), expected);
+    let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+    quasis.pin(ChargeCtx::new(&account));
+    assert_eq!(
+        quasis.charge_bytes(),
+        Some(
+            OwnedSlice::<OwnedStr>::cell_block_bytes()
+                + heap_block_bytes(3 * std::mem::size_of::<OwnedStr>())
+                + verter_session_query::retention::owned::child_registration_bytes(2)
+        )
+    );
+    assert_eq!(long.charge_bytes(), Some(OwnedStr::charge_for_len(10_000)));
+    assert_eq!(other.charge_bytes(), Some(OwnedStr::charge_for_len(4)));
+    assert_eq!(
+        account.snapshot().pinned_bytes,
+        quasis.charge_bytes().unwrap()
+            + OwnedStr::charge_for_len(10_000)
+            + OwnedStr::charge_for_len(4),
+        "the repeated quasi is charged once"
+    );
 }

@@ -137,6 +137,7 @@ mod semantic_operand_binder_tests;
 mod semantic_operand_dead_work_tests;
 mod semantic_operand_tests;
 mod semantic_source_tests;
+mod semantic_task_tests;
 mod signature_discovery_tests;
 mod signature_epoch_tests;
 mod signature_predicate_inference_tests;

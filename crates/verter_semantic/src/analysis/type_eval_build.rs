@@ -7043,11 +7043,31 @@ fn lowered_or_unsupported(
 /// T` / `as const`), a `satisfies` narrowing, a non-null assertion, a
 /// reference, a call, a function value — and reports
 /// [`IndexedValueLiteralMode::Literal`]: its literal content is preserved
-/// exactly as authored. Only a parenthesised wrapper is transparent.
+/// exactly as authored. Only a parenthesised wrapper is transparent. A
+/// conditional whose arms are both bare literal expressions is one too:
+/// the checker types each arm as its own fresh literal
+/// (`c ? { v: "a" } : { v: "b" }`).
 pub fn indexed_literal_mode(expr: Option<&Expression<'_>>) -> IndexedValueLiteralMode {
     let mut expr = expr;
     while let Some(Expression::ParenthesizedExpression(parenthesized)) = expr {
         expr = Some(&parenthesized.expression);
+    }
+    if let Some(Expression::ConditionalExpression(conditional)) = expr {
+        let mut pending = vec![&conditional.consequent, &conditional.alternate];
+        while let Some(arm) = pending.pop() {
+            match arm {
+                Expression::ParenthesizedExpression(parenthesized) => {
+                    pending.push(&parenthesized.expression);
+                }
+                Expression::ConditionalExpression(conditional) => {
+                    pending.push(&conditional.consequent);
+                    pending.push(&conditional.alternate);
+                }
+                arm if indexed_literal_mode(Some(arm)) == IndexedValueLiteralMode::Widened => {}
+                _ => return IndexedValueLiteralMode::Literal,
+            }
+        }
+        return IndexedValueLiteralMode::Widened;
     }
     match expr {
         Some(

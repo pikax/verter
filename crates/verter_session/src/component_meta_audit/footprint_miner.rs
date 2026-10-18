@@ -558,7 +558,9 @@ fn display_label_for(data: &SemanticNodeData) -> Arc<str> {
             let (value_root, _path) = data.typeof_head().expect("TypeOf carrier head");
             Arc::from(format!("typeof {} (nominal)", value_root.name))
         }
-        SemanticNodeData::TypeParam { display_name, .. } => Arc::clone(display_name),
+        SemanticNodeData::TypeParam { display_name, .. } => {
+            std::sync::Arc::<str>::from(display_name)
+        }
         SemanticNodeData::Infer { name, .. } | SemanticNodeData::InferRef { name, .. } => {
             Arc::from(format!("infer {name}"))
         }
@@ -609,7 +611,7 @@ fn named_identity_of(data: &SemanticNodeData) -> Option<NamedIdentity> {
             decl, display_name, ..
         } => Some(NamedIdentity {
             canonical_id: std::sync::Arc::<str>::from(decl.canonical_id.as_str()),
-            symbol_name: Arc::clone(display_name),
+            symbol_name: std::sync::Arc::<str>::from(display_name),
             args_fingerprint: decl.whole_hash,
         }),
         _ => None,

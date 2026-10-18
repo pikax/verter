@@ -198,7 +198,7 @@ impl ScriptAnalysisSnapshot {
 }
 
 /// A DOM query call site found in the script.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct DomQueryCallSite {
     /// Which DOM query API was called.
     pub kind: DomQueryKind,

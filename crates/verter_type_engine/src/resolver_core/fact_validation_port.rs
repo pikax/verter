@@ -18,7 +18,9 @@ pub trait LiveFactValidation: FactValidation {
     fn request_snapshot(&self) -> &super::resolver_context::RequestSnapshot<Self::Clocks>;
 }
 
-pub trait FactValidation {
+/// `Sync`: a suspended semantic task that holds a fact tracer bound to its
+/// request's port moves between threads with it.
+pub trait FactValidation: Sync {
     fn current_external_supersession_fingerprint(&self) -> u64;
     /// The external-input fingerprint of this request's captured base,
     /// only when that base was proven current. Frozen session overlays

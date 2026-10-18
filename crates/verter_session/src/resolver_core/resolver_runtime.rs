@@ -11,8 +11,8 @@ use std::sync::Arc;
 use crate::resolver_core::{
     fallthrough_resolver::FallthroughResolverState, imported_root_db::ImportedRootDb,
     prepared_decl::PreparedDeclBundle, route_db::RouteDb, FallthroughNodeKey, ResolutionNodeKey,
-    ResolverCounters, SingleflightGroup, StableExecutionValue, ValidatedFactAdmission,
-    ValidatedFactCache,
+    ResolverCounters, SingleflightGroup, StableExecutionValue, UnmeasuredValue,
+    ValidatedFactAdmission, ValidatedFactCache,
 };
 use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_session_query::facts::store_view::StoreView;
@@ -26,7 +26,9 @@ where
     K: Eq + Hash,
     V: Clone,
 {
-    cache: ValidatedFactCache<K, V>,
+    /// Values are not measured yet (component-meta views and prepared
+    /// declaration bundles): an open owner of the allocation inventory.
+    cache: ValidatedFactCache<K, V, UnmeasuredValue>,
     singleflight: SingleflightGroup<K, StableExecutionValue<Option<V>>, ()>,
 }
 
@@ -119,7 +121,10 @@ where
         value: Arc<V>,
         facts: Vec<FactVersionRef>,
         cache_kind: &'static str,
-    ) -> Option<ValidatedFactAdmission<V>> {
+    ) -> Option<ValidatedFactAdmission<V>>
+    where
+        K: verter_retention::heap_size::HeapSize,
+    {
         self.cache
             .insert_arc_with_kind(key, value, facts, cache_kind)
     }
@@ -131,7 +136,10 @@ where
         value: Arc<V>,
         facts: Vec<FactVersionRef>,
         cache_kind: &'static str,
-    ) -> bool {
+    ) -> bool
+    where
+        K: verter_retention::heap_size::HeapSize,
+    {
         self.cache
             .resign_arc_with_kind(key, admission, value, facts, cache_kind)
     }

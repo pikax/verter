@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::super::dispatch_txn::ContextKeptLiteral;
 use super::super::inference::session::InferenceInfoSetup;
@@ -40,6 +40,63 @@ impl LiteralKind {
     }
 }
 
+/// Whether a contextual type is a literal context for a literal: it is
+/// (`Keep`), it is known not to be (`Widen`), or it holds a type this
+/// reader does not classify (`Unknown`), which decides nothing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LiteralContext {
+    Keep,
+    Widen,
+    Unknown,
+}
+
+impl LiteralContext {
+    /// The context of a union or intersection of contextual types: a
+    /// literal context when any constituent is one.
+    fn or(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Keep, _) | (_, Self::Keep) => Self::Keep,
+            (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
+            (Self::Widen, Self::Widen) => Self::Widen,
+        }
+    }
+}
+
+/// One authored position of a call argument: the expression's type, its
+/// combined contextual type (the constituents of the parameter type that
+/// type it), and whether it is the argument itself.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct ArgumentPosition {
+    node: SemanticNodeId,
+    contexts: Arc<[SemanticNodeId]>,
+    root: bool,
+}
+
+impl ArgumentPosition {
+    fn nested(node: SemanticNodeId, contexts: Arc<[SemanticNodeId]>) -> Self {
+        Self {
+            node,
+            contexts,
+            root: false,
+        }
+    }
+}
+
+/// One step of typing a call argument's authored positions: read a
+/// position, or rebuild it once its child positions (by member, element
+/// or arm index) are typed, widening its own literals when decided so.
+enum PositionStep {
+    Enter(ArgumentPosition),
+    Rebuild(ArgumentPosition, Vec<(usize, ArgumentPosition)>, bool),
+}
+
+/// The contextual types of one position, in one canonical order.
+fn combined_contexts(mut contexts: Vec<SemanticNodeId>) -> Arc<[SemanticNodeId]> {
+    contexts.sort_unstable();
+    contexts.dedup();
+    Arc::from(contexts)
+}
+
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// The inference setup of a call candidate's type parameters, each with
     /// its const policy.
@@ -52,7 +109,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .map(|decl| {
                 InferenceInfoSetup::for_call(
                     decl.param,
-                    Arc::clone(&decl.name),
+                    Arc::<str>::from(&decl.name),
                     if decl.is_const {
                         ConstParamPolicy::Const
                     } else {
@@ -64,85 +121,313 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .collect()
     }
 
-    /// The literals the bare literal argument `source` nests at authored
-    /// positions whose contextual type in the parameter type `target` is a
-    /// literal context for them (`checkExpressionForMutableLocation`
-    /// through `getWidenedLiteralLikeTypeForContextualType`). The
-    /// argument's object members and array elements are its authored
-    /// expressions, and each is decided WHOLE against its own contextual
-    /// type before any deposit composes it: `{ v: c ? "a" : 1 }` against
-    /// `{ v: T }` with `T extends string | {}` keeps `"a" | 1`, while
-    /// `["a", 1]` against `T[]` keeps `"a"` alone. `declared` supplies the
+    /// The type the bare literal argument `source` has against the
+    /// parameter type `target` under one call candidate, with the literals
+    /// it keeps (`checkExpressionForMutableLocation` through
+    /// `getWidenedLiteralLikeTypeForContextualType`). The argument's
+    /// authored object members, array elements and conditional arms are its
+    /// authored expressions, and each is decided WHOLE against its combined
+    /// contextual type (every constituent of the parameter type that types
+    /// the position) before any deposit composes it: `{ v: c ? "a" : 1 }`
+    /// against `{ v: T }` with `T extends string | {}` keeps `"a" | 1`,
+    /// while `["a", 1]` against `T[]` keeps `"a"` alone, and `{ v: "x" }`
+    /// against `{ v: T } | { v: "a" }` keeps `"x"`. `declared` supplies the
     /// constraint of a candidate type parameter whose node carries none.
     /// The argument itself is no nested position: a naked top-level
     /// deposit keeps its literal regardless.
     ///
-    /// Each kept literal is tied to the candidate type parameters its
-    /// position's contextual type names, the only parameters a deposit
-    /// from that position reaches: `{ a: "x", b: "x" }` against
-    /// `{ a: T; b: U }` with `T extends string` keeps `"x"` for `T`
-    /// alone, so `U` still infers `string`.
-    pub(in crate::project_semantic_dispatch) fn nested_literal_context_keeps(
+    /// A position whose contextual type is no literal context for its
+    /// literals has their widened type in the returned argument type, so
+    /// the decision stays with the position it was made for: `{ a: "x",
+    /// b: "x" }` against `{ a: T | "a"; b: T }` is `{ a: "x"; b: string }`.
+    /// A position whose contextual type this reader cannot classify keeps
+    /// its authored type, and its deposits widen. Each kept literal is tied
+    /// to the candidate type parameters its position's contextual type
+    /// names, the only parameters a deposit from that position reaches.
+    pub(in crate::project_semantic_dispatch) fn checked_literal_argument(
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
         declared: &[TypeParamDecl],
-    ) -> Vec<ContextKeptLiteral> {
+    ) -> (SemanticNodeId, Vec<ContextKeptLiteral>) {
         let graph = self.graph();
         let mut keeps = Vec::new();
-        let mut pending = vec![(source, target, true)];
-        let mut seen = FxHashSet::default();
-        while let Some((source, target, root)) = pending.pop() {
-            if !seen.insert((source, target)) {
-                continue;
-            }
-            let data = graph.node_data(source);
-            match data.as_deref() {
-                Some(SemanticNodeData::Object(surface)) => {
-                    let members: Vec<(AuthoredPropertyKey, SemanticNodeId)> = surface
-                        .positive_members()
-                        .iter()
-                        .map(|member| (member.key.clone(), member.value))
-                        .collect();
-                    drop(data);
-                    for (key, value) in members {
-                        for contextual in self.contextual_member_types(target, &key) {
-                            pending.push((value, contextual, false));
-                        }
+        let mut typed: FxHashMap<ArgumentPosition, SemanticNodeId> = FxHashMap::default();
+        let mut open: FxHashSet<ArgumentPosition> = FxHashSet::default();
+        let root = ArgumentPosition {
+            node: source,
+            contexts: Arc::from([target]),
+            root: true,
+        };
+        let mut steps = vec![PositionStep::Enter(root.clone())];
+        while let Some(step) = steps.pop() {
+            let (position, children, widen) = match step {
+                PositionStep::Enter(position) => {
+                    if typed.contains_key(&position) || !open.insert(position.clone()) {
+                        continue;
                     }
-                }
-                Some(SemanticNodeData::Tuple { elements, .. }) => {
-                    // A position past a spread is no longer the element's own.
-                    let values: Vec<SemanticNodeId> = elements
-                        .iter()
-                        .take_while(|element| !element.rest)
-                        .map(|element| element.value)
-                        .collect();
-                    drop(data);
-                    for (index, value) in values.into_iter().enumerate() {
-                        for contextual in self.contextual_element_types(target, index) {
-                            pending.push((value, contextual, false));
-                        }
-                    }
-                }
-                Some(SemanticNodeData::Literal(_) | SemanticNodeData::Union(_)) if !root => {
-                    drop(data);
-                    if self.literal_of_contextual_type(source, target, declared) {
-                        let literals = literal_members(graph, source);
-                        for decl in declared {
-                            if self.mentions_node(target, decl.param) {
-                                keeps.extend(literals.iter().map(|&literal| ContextKeptLiteral {
-                                    literal,
-                                    param: decl.param,
-                                }));
+                    let node = position.node;
+                    let mut children = Vec::new();
+                    let mut widen = false;
+                    let data = graph.node_data(node);
+                    match data.as_deref() {
+                        Some(SemanticNodeData::Object(surface)) => {
+                            // Only an authored member is an expression of the
+                            // argument; a spread's are its operand's.
+                            let members: Vec<(usize, AuthoredPropertyKey, SemanticNodeId)> =
+                                surface
+                                    .positive_members()
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(_, member)| {
+                                        member.excess_origin
+                                            == verter_type_expr::ExcessPropertyOrigin::FreshOwn
+                                    })
+                                    .map(|(index, member)| {
+                                        (index, member.key.clone(), member.value)
+                                    })
+                                    .collect();
+                            drop(data);
+                            for (index, key, value) in members {
+                                let contexts = combined_contexts(
+                                    position
+                                        .contexts
+                                        .iter()
+                                        .flat_map(|&contextual| {
+                                            self.contextual_member_types(contextual, &key)
+                                        })
+                                        .collect(),
+                                );
+                                children.push((index, ArgumentPosition::nested(value, contexts)));
                             }
                         }
+                        Some(SemanticNodeData::Tuple { elements, .. }) => {
+                            // A position past a spread is no longer the element's own.
+                            let values: Vec<SemanticNodeId> = elements
+                                .iter()
+                                .take_while(|element| !element.rest)
+                                .map(|element| element.value)
+                                .collect();
+                            drop(data);
+                            for (index, value) in values.into_iter().enumerate() {
+                                let contexts = combined_contexts(
+                                    position
+                                        .contexts
+                                        .iter()
+                                        .flat_map(|&contextual| {
+                                            self.contextual_element_types(contextual, index)
+                                        })
+                                        .collect(),
+                                );
+                                children.push((index, ArgumentPosition::nested(value, contexts)));
+                            }
+                        }
+                        Some(SemanticNodeData::Union(members)) => {
+                            let members: Vec<SemanticNodeId> = members.iter().copied().collect();
+                            drop(data);
+                            // A conditional's object and array arms are its
+                            // authored expressions against the same context;
+                            // its literal arms are decided together, as the
+                            // one expression they are.
+                            for (index, &member) in members.iter().enumerate() {
+                                if matches!(
+                                    graph.node_data(member).as_deref(),
+                                    Some(
+                                        SemanticNodeData::Object(_)
+                                            | SemanticNodeData::Tuple { .. }
+                                    )
+                                ) {
+                                    children.push((
+                                        index,
+                                        ArgumentPosition::nested(
+                                            member,
+                                            Arc::clone(&position.contexts),
+                                        ),
+                                    ));
+                                }
+                            }
+                            if !position.root {
+                                widen = self.decide_literal_position(
+                                    node,
+                                    &position.contexts,
+                                    declared,
+                                    &mut keeps,
+                                );
+                            }
+                        }
+                        Some(SemanticNodeData::Literal(_)) if !position.root => {
+                            drop(data);
+                            widen = self.decide_literal_position(
+                                node,
+                                &position.contexts,
+                                declared,
+                                &mut keeps,
+                            );
+                        }
+                        _ => {}
+                    }
+                    if !children.is_empty() {
+                        steps.push(PositionStep::Rebuild(position, children.clone(), widen));
+                        for (_, child) in children.into_iter().rev() {
+                            steps.push(PositionStep::Enter(child));
+                        }
+                        continue;
+                    }
+                    (position, children, widen)
+                }
+                PositionStep::Rebuild(position, children, widen) => (position, children, widen),
+            };
+            let typed_node =
+                self.rebuild_argument_position(position.node, &children, widen, |child| {
+                    typed.get(child).copied().unwrap_or(child.node)
+                });
+            open.remove(&position);
+            typed.insert(position, typed_node);
+        }
+        (typed.get(&root).copied().unwrap_or(source), keeps)
+    }
+
+    /// Decide the literals of the authored position `node` against its
+    /// combined contextual type `contexts`: a literal context records them
+    /// in `keeps` for every candidate type parameter `contexts` names.
+    /// Whether the position's literals widen in the argument's type — only
+    /// when every constituent of `contexts` is known to be no literal
+    /// context for them.
+    fn decide_literal_position(
+        &self,
+        node: SemanticNodeId,
+        contexts: &[SemanticNodeId],
+        declared: &[TypeParamDecl],
+        keeps: &mut Vec<ContextKeptLiteral>,
+    ) -> bool {
+        let literals = literal_members(self.graph(), node);
+        if literals.is_empty() || contexts.is_empty() {
+            return false;
+        }
+        match self.literal_context_of(node, contexts, declared) {
+            LiteralContext::Keep => {
+                for decl in declared {
+                    if contexts
+                        .iter()
+                        .any(|&contextual| self.mentions_node(contextual, decl.param))
+                    {
+                        keeps.extend(literals.iter().map(|&literal| ContextKeptLiteral {
+                            literal,
+                            param: decl.param,
+                        }));
                     }
                 }
-                _ => {}
+                false
+            }
+            LiteralContext::Widen => true,
+            LiteralContext::Unknown => false,
+        }
+    }
+
+    /// The type of the authored position `node` once its `children`
+    /// positions are typed (`typed_child`) and, when `widen`, its own
+    /// literals widened. `node` itself when nothing changed.
+    fn rebuild_argument_position(
+        &self,
+        node: SemanticNodeId,
+        children: &[(usize, ArgumentPosition)],
+        widen: bool,
+        typed_child: impl Fn(&ArgumentPosition) -> SemanticNodeId,
+    ) -> SemanticNodeId {
+        if children.is_empty() && !widen {
+            return node;
+        }
+        let graph = self.graph();
+        let shape = match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::Literal(_)) => PositionShape::Literal,
+            Some(SemanticNodeData::Object(surface)) => PositionShape::Object(surface.clone()),
+            Some(SemanticNodeData::Tuple { elements, readonly }) => PositionShape::Tuple(
+                elements
+                    .iter()
+                    .map(crate::semantic_query::TupleElement::copy)
+                    .collect(),
+                *readonly,
+            ),
+            Some(SemanticNodeData::Union(members)) => {
+                PositionShape::Union(members.iter().copied().collect())
+            }
+            _ => return node,
+        };
+        match shape {
+            PositionShape::Literal if widen => self.widened_literal(node),
+            PositionShape::Literal => node,
+            PositionShape::Object(surface) => {
+                let mut members: Vec<crate::semantic_query::SurfaceMember> = surface
+                    .positive_members()
+                    .iter()
+                    .map(crate::semantic_query::SurfaceMember::clone)
+                    .collect();
+                let mut changed = false;
+                for (index, child) in children {
+                    let value = typed_child(child);
+                    if members[*index].value != value {
+                        members[*index].value = value;
+                        changed = true;
+                    }
+                }
+                if !changed {
+                    return node;
+                }
+                graph.intern_preserving_scope(
+                    node,
+                    SemanticNodeData::Object(
+                        surface.with_positive_members(Arc::from(members.into_boxed_slice())),
+                    ),
+                )
+            }
+            PositionShape::Tuple(mut elements, readonly) => {
+                let mut changed = false;
+                for (index, child) in children {
+                    let value = typed_child(child);
+                    if elements[*index].value != value {
+                        elements[*index].value = value;
+                        changed = true;
+                    }
+                }
+                if !changed {
+                    return node;
+                }
+                graph.intern_preserving_scope(
+                    node,
+                    SemanticNodeData::Tuple {
+                        elements: crate::semantic_query::PayloadArray::from(
+                            elements.into_boxed_slice(),
+                        ),
+                        readonly,
+                    },
+                )
+            }
+            PositionShape::Union(mut members) => {
+                let mut changed = false;
+                for (index, child) in children {
+                    let value = typed_child(child);
+                    if members[*index] != value {
+                        members[*index] = value;
+                        changed = true;
+                    }
+                }
+                if widen {
+                    for member in &mut members {
+                        if matches!(
+                            graph.node_data(*member).as_deref(),
+                            Some(SemanticNodeData::Literal(_))
+                        ) {
+                            *member = self.widened_literal(*member);
+                            changed = true;
+                        }
+                    }
+                }
+                if !changed {
+                    return node;
+                }
+                self.intern_normalized_union_or_intersection(&members, true)
             }
         }
-        keeps
     }
 
     /// The contextual types an object literal member named `key` takes
@@ -290,6 +575,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         contextual: SemanticNodeId,
         declared: &[TypeParamDecl],
     ) -> bool {
+        self.literal_context_of(candidate, &[contextual], declared) == LiteralContext::Keep
+    }
+
+    /// [`Self::literal_of_contextual_type`] against the combined
+    /// contextual type `contexts`, telling a contextual type known to be
+    /// no literal context from one this reader does not classify.
+    fn literal_context_of(
+        &self,
+        candidate: SemanticNodeId,
+        contexts: &[SemanticNodeId],
+        declared: &[TypeParamDecl],
+    ) -> LiteralContext {
         let graph = self.graph();
         let held = literal_members(graph, candidate)
             .into_iter()
@@ -299,8 +596,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     _ => held,
                 }
             });
-        held != 0
-            && self.literal_context_admits(held, contextual, declared, &mut FxHashSet::default())
+        if held == 0 {
+            return LiteralContext::Widen;
+        }
+        let mut visited = FxHashSet::default();
+        let mut context = LiteralContext::Widen;
+        for &contextual in contexts {
+            context =
+                context.or(self.literal_context_admits(held, contextual, declared, &mut visited));
+            if context == LiteralContext::Keep {
+                break;
+            }
+        }
+        context
     }
 
     /// Whether `contextual` is a literal context for a literal of one of
@@ -314,12 +622,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         contextual: SemanticNodeId,
         declared: &[TypeParamDecl],
         visited: &mut FxHashSet<SemanticNodeId>,
-    ) -> bool {
+    ) -> LiteralContext {
         let graph = self.graph();
         let authored = contextual;
         let contextual = self.resolved_reduction_view(contextual);
         if !visited.insert(contextual) {
-            return false;
+            return LiteralContext::Widen;
         }
         let data = graph.node_data(contextual);
         let kinds = match data.as_deref() {
@@ -331,9 +639,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     .copied()
                     .collect();
                 drop(data);
-                return members
-                    .into_iter()
-                    .any(|member| self.literal_context_admits(held, member, declared, visited));
+                let mut context = LiteralContext::Widen;
+                for member in members {
+                    context =
+                        context.or(self.literal_context_admits(held, member, declared, visited));
+                    if context == LiteralContext::Keep {
+                        break;
+                    }
+                }
+                return context;
             }
             Some(SemanticNodeData::TypeParam { constraint, .. }) => {
                 let constraint = constraint.or_else(|| {
@@ -344,10 +658,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 });
                 drop(data);
                 let Some(constraint) = constraint else {
-                    return false;
+                    return LiteralContext::Widen;
                 };
-                return held & self.base_constraint_primitive_kinds(constraint, declared) != 0
-                    || self.literal_context_admits(held, constraint, declared, visited);
+                if held & self.base_constraint_primitive_kinds(constraint, declared) != 0 {
+                    return LiteralContext::Keep;
+                }
+                return self.literal_context_admits(held, constraint, declared, visited);
             }
             Some(SemanticNodeData::Literal(value)) => LiteralKind::of(value).bit(),
             Some(SemanticNodeData::TemplateLiteral { .. } | SemanticNodeData::KeyOf { .. }) => {
@@ -355,6 +671,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
             // `boolean` is the union `true | false` to the checker.
             Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => LiteralKind::Boolean.bit(),
+            // No literal context, whatever the literal.
+            Some(
+                SemanticNodeData::Primitive(_)
+                | SemanticNodeData::Object(_)
+                | SemanticNodeData::Array { .. }
+                | SemanticNodeData::Tuple { .. }
+                | SemanticNodeData::Signature { .. },
+            ) => 0,
             _ => {
                 drop(data);
                 // A string mapping (`Uppercase<string>`) is a string
@@ -364,11 +688,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 {
                     LiteralKind::String.bit()
                 } else {
-                    0
+                    return LiteralContext::Unknown;
                 }
             }
         };
-        held & kinds != 0
+        if held & kinds != 0 {
+            LiteralContext::Keep
+        } else {
+            LiteralContext::Widen
+        }
     }
 
     /// The primitive kinds `constraint`'s base constraint may be
@@ -647,4 +975,12 @@ fn literal_members(
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// The parts of an authored position's type a rebuild replaces.
+enum PositionShape {
+    Literal,
+    Object(crate::semantic_query::SurfaceView),
+    Tuple(Vec<crate::semantic_query::TupleElement>, bool),
+    Union(Vec<SemanticNodeId>),
 }

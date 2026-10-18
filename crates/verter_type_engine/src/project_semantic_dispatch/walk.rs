@@ -6223,7 +6223,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         let shape = match self.graph().node_data(value).as_deref() {
             Some(SemanticNodeData::Object(_)) => MemberShape::Inline,
             Some(data @ (SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_))) => {
-                let head_name = data.bare_ref_head().map(|(name, _)| Arc::clone(name));
+                let head_name = data.bare_ref_head().map(|(name, _)| Arc::<str>::from(name));
                 let args = data.carrier_type_args();
                 match (head_name, args.len()) {
                     (Some(name), 1)
@@ -11800,8 +11800,6 @@ mod overload_carrier_exclusion_tests {
         kind: &str,
         terminal: PrimitiveKind,
     ) -> crate::semantic_query::SemanticNodeId {
-        use std::sync::Arc;
-
         let element = graph.intern_node(SemanticNodeData::Primitive(terminal));
         let data = match kind {
             "Array" => SemanticNodeData::Array {
@@ -11821,7 +11819,9 @@ mod overload_carrier_exclusion_tests {
                 readonly: false,
             },
             "TemplateLiteral" => SemanticNodeData::TemplateLiteral {
-                quasis: Arc::from(vec![Arc::<str>::from("hello-")].into_boxed_slice()),
+                quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+                    vec![verter_type_expr::OwnedStr::from("hello-")].into_boxed_slice(),
+                ),
                 expressions: crate::semantic_query::PayloadArray::from(
                     vec![element].into_boxed_slice(),
                 ),
@@ -11876,7 +11876,7 @@ mod overload_carrier_exclusion_tests {
                 param_index: 0,
                 constraint: None,
                 default: None,
-                display_name: std::sync::Arc::from(name),
+                display_name: verter_type_expr::OwnedStr::from(name),
             })
         };
         // Adversarial interning order: the SECOND authored contributor

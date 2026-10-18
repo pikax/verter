@@ -282,6 +282,83 @@ impl Drop for ThreadSpendGuard {
     }
 }
 
+/// Capture the request operations and paid computations `body` spends, as
+/// a component-meta compute's spend log records them.
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_request_spend_capture_for_tests<R>(body: impl FnOnce() -> R) -> (R, usize, usize) {
+    let guard = ThreadSpendGuard::enter();
+    let result = body();
+    let (operations, paid) = guard.finish();
+    (result, operations, paid.len())
+}
+
+/// The request spend of a semantic task, which may be polled on a thread
+/// other than the one that lent it its request: one log standing for every
+/// log on the stack where it was lent (none when none was). Each poll
+/// installs it as the polling thread's only log, and the task's return
+/// records what it spent on the logs it was lent under.
+#[derive(Default)]
+pub(crate) struct TaskSpendCarry {
+    open: bool,
+    operations: usize,
+    paid: Vec<CostIdentity>,
+}
+
+impl TaskSpendCarry {
+    /// The carry of a task lent here: open exactly when a log is.
+    pub(crate) fn lend() -> Self {
+        Self {
+            open: THREAD_SPEND_LOGS.with(|logs| !logs.borrow().is_empty()),
+            operations: 0,
+            paid: Vec::new(),
+        }
+    }
+
+    /// Install the task's log on this thread for one poll; the returned
+    /// guard restores the thread's own logs and takes the task's back.
+    pub(crate) fn install(&mut self) -> TaskSpendInstall<'_> {
+        let task = if self.open {
+            vec![Rc::new(RefCell::new(ThreadSpendLog {
+                operations: std::mem::take(&mut self.operations),
+                paid: std::mem::take(&mut self.paid),
+            }))]
+        } else {
+            Vec::new()
+        };
+        let thread = THREAD_SPEND_LOGS.with(|logs| logs.replace(task));
+        TaskSpendInstall {
+            carry: self,
+            thread,
+        }
+    }
+
+    /// Record what the task spent on every log on this thread's stack, the
+    /// one that lent it, in the order it spent it.
+    pub(crate) fn return_to_lender(self) {
+        attribute_operations(self.operations);
+        for identity in &self.paid {
+            attribute_paid(identity);
+        }
+    }
+}
+
+/// A task's spend log installed for one poll ([`TaskSpendCarry::install`]).
+pub(crate) struct TaskSpendInstall<'c> {
+    carry: &'c mut TaskSpendCarry,
+    thread: Vec<Rc<RefCell<ThreadSpendLog>>>,
+}
+
+impl Drop for TaskSpendInstall<'_> {
+    fn drop(&mut self) {
+        let task = THREAD_SPEND_LOGS.with(|logs| logs.replace(std::mem::take(&mut self.thread)));
+        if let Some(log) = task.first() {
+            let mut log = log.borrow_mut();
+            self.carry.operations = std::mem::take(&mut log.operations);
+            self.carry.paid = std::mem::take(&mut log.paid);
+        }
+    }
+}
+
 fn attribute_operations(n: usize) {
     if n == 0 {
         return;

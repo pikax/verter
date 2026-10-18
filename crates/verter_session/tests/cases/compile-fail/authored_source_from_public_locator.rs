@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use verter_type_expr::{OwnedSlice, OwnedStr};
 
 use verter_type_expr::locators::{
     AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodySlot,
@@ -8,12 +8,12 @@ use verter_type_expr::{AuthoredTypeSource, TopLevelOwnerId};
 fn main() {
     let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from("/forged.ts"),
+            canonical_id: OwnedStr::from("/forged.ts"),
             owner: TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("Forged"),
+            symbol: OwnedStr::from("Forged"),
             space: LocatorSymbolSpace::Type,
         },
-        path: Arc::from([]),
+        path: OwnedSlice::default(),
     });
 
     let _forged = AuthoredTypeSource::from_authored_body(&locator);

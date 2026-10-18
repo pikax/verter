@@ -38,6 +38,7 @@
 //! alone, whatever was related before it.
 
 use std::sync::Arc;
+use verter_type_expr::OwnedStr;
 
 use super::relation_predicates::{assignable, result_and};
 use super::ProjectSemanticDispatch;
@@ -608,7 +609,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             param_index: position as u16,
                             constraint: None,
                             default: None,
-                            display_name: Arc::clone(name),
+                            display_name: OwnedStr::from(name),
                         },
                         declaration_scope(declaration),
                     )
@@ -646,7 +647,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 param_index: MARKER_PARAM_INDEX + 3 * index as u16 + role as u16,
                 constraint,
                 default: None,
-                display_name: Arc::from(format!("{prefix}{name}")),
+                display_name: OwnedStr::from(format!("{prefix}{name}")),
             },
             declaration_scope(declaration),
         )
