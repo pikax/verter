@@ -275,7 +275,15 @@ impl TypeDeclBody {
 }
 
 /// What kind of type declaration this is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, verter_no_typeexpr::NoTypeExpr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum TypeDeclKind {
     Alias,
     Interface,
@@ -618,7 +626,15 @@ impl ValueDeclGroup {
 }
 
 /// What kind of value declaration this is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, verter_no_typeexpr::NoTypeExpr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum ValueDeclKind {
     Const,
     Let,

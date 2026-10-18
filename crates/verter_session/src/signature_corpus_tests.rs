@@ -458,6 +458,7 @@ fn live_probe_outcome_on(row: &Row, host: &crate::VerterHost) -> LiveProbeOutcom
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     // Publication KEEPS an alias/builtin instantiation carrier: the
     // checker keeps the alias label too, and the carrier is resolved when
     // a consumer DEMANDS the structural fact behind it. The recorded

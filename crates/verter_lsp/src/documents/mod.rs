@@ -400,7 +400,9 @@ fn merge_stable_progressive_prop_definitions(
             template.prop_definitions.push(prop);
         }
     }
-    fresh.template = Some(Arc::new(template));
+    fresh.template = Some(verter_session_query::retention::heap_size::OwnedValue::new(
+        template,
+    ));
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

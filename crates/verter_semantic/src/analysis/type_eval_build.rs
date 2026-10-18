@@ -6142,15 +6142,14 @@ fn expanded_field_authority(
     exactness: verter_session_query::analysis::type_expand::ExpansionExactness,
     diagnostics: &[verter_session_query::analysis::type_expand::ExpansionDiagnostic],
 ) -> verter_type_expr::ResolvedTypeAuthority {
-    let diagnostics: Arc<[verter_type_expr::ResolutionDiagnostic]> = diagnostics
+    let diagnostics: verter_type_expr::ResolutionDiagnostics = diagnostics
         .iter()
         .map(|diagnostic| verter_type_expr::ResolutionDiagnostic {
             kind: publication_diagnostic_kind(diagnostic.reason),
-            context: Arc::from(diagnostic.context.as_str()),
-            property_name: diagnostic.property_name.as_deref().map(Arc::from),
+            context: diagnostic.context.as_str().into(),
+            property_name: diagnostic.property_name.as_deref().map(Into::into),
         })
-        .collect::<Vec<_>>()
-        .into();
+        .collect();
     verter_type_expr::ResolvedTypeAuthority::present(
         source,
         publication_exactness(exactness),

@@ -93,6 +93,7 @@ pub mod granular;
 pub mod heap_size;
 pub mod owned;
 pub mod shared;
+pub mod unshared;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};

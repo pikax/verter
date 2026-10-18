@@ -457,7 +457,7 @@ fn session_peek_output_returns_per_kind_pair() {
     let mut state = ProfileState::default();
     let mut outputs: FxHashMap<VirtualNodeKind, CachedVirtualFile> = FxHashMap::default();
     let file = CachedVirtualFile {
-        code: Arc::<str>::from("/* main */"),
+        code: verter_type_expr::OwnedStr::from("/* main */"),
         source_map: None,
         lang: None,
         meta: crate::types::VirtualMeta::default(),
@@ -744,14 +744,14 @@ fn raw_template_slot_claims_wide_signature_pages() {
             );
         }
         let mut state = DerivedRawState::default();
-        let template = Arc::new(
+        let template = verter_session_query::retention::heap_size::OwnedValue::new(
             verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                 css_var_names: vec!["color".into()],
                 ..Default::default()
             },
         );
         state.install_raw_template_analysis(
-            Arc::clone(&template),
+            template.clone(),
             RawTemplateSlotAdmission {
                 store_published: true,
                 source_version: Some(verter_scheduler::node::SourceVersion {
@@ -775,15 +775,50 @@ fn raw_template_slot_claims_wide_signature_pages() {
         assert!(pages
             .iter()
             .all(|page| page.retained_charge_class() == Some(expected)));
+        // The slot retains the template it serves as well as its evidence;
+        // a refused slot leaves the template its caller's, uncharged by it.
+        let template_charge = template.charge_bytes().unwrap_or(0);
+        if admitted {
+            assert!(
+                template_charge >= std::mem::size_of_val(&*template),
+                "the retained template is charged its whole cell"
+            );
+            assert_eq!(template.charge_class(), Some(ChargeClass::Retained));
+        } else {
+            assert_eq!(template.charge_bytes(), None);
+        }
         assert_eq!(
             account.snapshot().retained_bytes,
-            if admitted { page_bytes } else { 0 }
+            if admitted {
+                page_bytes + template_charge
+            } else {
+                0
+            }
         );
         state.clear_raw_template_analysis();
         assert!(state.raw_template_analysis().is_none());
         drop((state, pages));
         assert_eq!(account.snapshot().retained_bytes, 0);
+        assert_eq!(
+            account.snapshot().pinned_bytes,
+            template_charge,
+            "a template kept past its slot stays charged until its own drop"
+        );
+        drop(template);
+        assert_eq!(account.snapshot().total_bytes(), 0);
     }
+}
+
+/// The charge of the `Main` code cell a value's products keep: its own
+/// cell, charged its whole text and nothing else.
+fn generated_code_charge(products: &crate::types::CompileProducts) -> usize {
+    let code = &products.outputs().expect("produced")[&VirtualNodeKind::Main].code;
+    let charge = code.charge_bytes().expect("the generated code is charged");
+    assert_eq!(
+        charge,
+        verter_type_expr::OwnedStr::charge_for_len(code.len())
+    );
+    charge
 }
 
 /// A value whose products carry `len` bytes of generated code.
@@ -792,7 +827,7 @@ fn value_with_code(semantic_hash: Hash16, len: usize) -> CompileOutputValue {
     outputs.insert(
         VirtualNodeKind::Main,
         CachedVirtualFile {
-            code: Arc::from("c".repeat(len)),
+            code: verter_type_expr::OwnedStr::from("c".repeat(len)),
             source_map: None,
             lang: None,
             meta: Default::default(),
@@ -830,14 +865,14 @@ fn a_pure_content_entry_charges_its_products_and_a_peek_keeps_them_past_eviction
         let key = k("/a.vue", [7u8; 16]);
         node.publish_content(key.clone(), value_with_code([1; 16], CODE), 0);
         let peek = node.peek(&key).expect("published");
-        // The value and its products are two owned allocations, each
-        // charged by its own cell.
+        // The value, its products and the generated code are three owned
+        // allocations, each charged by its own cell.
+        let code = generated_code_charge(&peek.products);
         let products = peek
             .products
             .charge_bytes()
             .expect("the products are charged");
-        assert!(products > CODE, "the generated code is charged: {products}");
-        let value = peek.charge_bytes().expect("the value is charged") + products;
+        let value = peek.charge_bytes().expect("the value is charged") + products + code;
         assert_eq!(peek.charge_class(), Some(ChargeClass::Retained));
         assert_eq!(peek.products.charge_class(), Some(ChargeClass::Retained));
         let retained = account.snapshot().retained_bytes;
@@ -904,8 +939,8 @@ fn a_session_slot_charges_its_products_and_a_warm_hit_keeps_them_past_removal() 
     let products = hit
         .products
         .charge_bytes()
-        .expect("the products are charged");
-    assert!(products > CODE, "the generated code is charged: {products}");
+        .expect("the products are charged")
+        + generated_code_charge(&hit.products);
     assert_eq!(hit.products.charge_class(), Some(ChargeClass::Retained));
     let retained = account.snapshot().retained_bytes;
     assert!(

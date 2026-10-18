@@ -97,6 +97,11 @@ pub(crate) fn named_native_props_outcome(
     root_owner: verter_type_expr::TopLevelOwnerId,
     root_name: &str,
 ) -> ResolvedNativePropsOutcome {
+    // The projection composes construction labels across operations (the
+    // resolved base, its surface, each member's rendered display), so it
+    // holds an explicit builder owner for them; the rows it returns carry
+    // only graph-free text.
+    let _builder = dispatch.enter_construction_scope();
     let read = dispatch.execute_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
             canonical_id: verter_type_expr::OwnedStr::from(root_canonical),

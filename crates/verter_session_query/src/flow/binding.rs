@@ -42,7 +42,7 @@ pub enum FlowBindingMapError {
 
 /// A validated bijection over all value-bearing declarations of one function.
 /// Type-only skeleton bindings intentionally have no value identity.
-#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
+#[derive(Debug, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct FlowBindingMap {
     function: FunctionProgramKey,
     identities: Arc<[Option<FlowBindingIdentity>]>,
@@ -154,7 +154,7 @@ impl FlowBindingMap {
             let record = &inventory[slot as usize];
             locals[slot as usize] = Some(SkeletonBindingId::from_index(ordinal));
             identities.push(Some(FlowBindingIdentity {
-                name: Arc::clone(&record.name),
+                name: verter_type_expr::OwnedStr::from(&record.name),
                 kind,
                 defining_function: function.clone(),
                 binding_slot: slot,

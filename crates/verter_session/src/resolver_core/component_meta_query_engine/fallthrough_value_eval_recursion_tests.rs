@@ -235,6 +235,7 @@ fn consumed_bindings_key_is_uncacheable_for_override_bearing() {
             name: "bag".to_string(),
             node: SemanticNodeId(3),
         }],
+        roots: Default::default(),
     };
     let override_key = consumed_bindings_key(
         "/App.vue",

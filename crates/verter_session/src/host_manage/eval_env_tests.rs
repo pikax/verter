@@ -706,7 +706,11 @@ impl crate::resolver_core::ImportedRuntimeValueResolver for RecordingRuntimeValu
     fn prepared_value_decl(
         &self,
         source: &verter_session_query::declarations::metadata::ValueDeclIdentity,
-    ) -> Option<Arc<verter_session_query::type_solver::PreparedValueDecl>> {
+    ) -> Option<
+        verter_retention::heap_size::OwnedValue<
+            verter_session_query::type_solver::PreparedValueDecl,
+        >,
+    > {
         self.host
             .prepared_value_decl_in(&source.canonical_id, source.owner, &source.name)
     }

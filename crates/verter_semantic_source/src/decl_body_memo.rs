@@ -1322,7 +1322,7 @@ impl DeclBodyMemo {
             verter_language::default_parse_identity_for(&self.eval_source, &file_language)
                 .expect("fixture parse identity");
         verter_session_query::flow::bundle::FlowSliceFunctionKey {
-            canonical_id: Arc::clone(&self.key.canonical),
+            canonical_id: (&self.key.canonical).into(),
             function: entry.key().clone(),
             flow_body_stable_hash: entry.flow_body_stable_hash(),
             flow_body_exact_hash: entry.flow_body_exact_hash().expect("fixture exact body"),
@@ -3896,8 +3896,8 @@ impl IndexedExpressionDemand {
         {
             return WalkedRead::clean(None);
         }
-        let skeleton = Arc::clone(bound.bundle().skeleton());
-        let bindings = Arc::clone(bound.bundle().bindings());
+        let skeleton = bound.skeleton_ref();
+        let bindings = bound.bindings_ref();
         let Some(service) = self.snapshot.service.as_ref() else {
             return WalkedRead::clean(None);
         };
@@ -3942,7 +3942,7 @@ impl IndexedExpressionDemand {
                         entry,
                         selection.as_ref(),
                         &skeleton,
-                        Arc::clone(&bindings),
+                        bindings.clone(),
                         carrier_module,
                         &snapshot,
                         context.as_deref(),

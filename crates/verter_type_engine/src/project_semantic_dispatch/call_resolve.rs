@@ -303,10 +303,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         receiver.map_or(value, |receiver| self.bind_callee_receiver(value, receiver))
     }
 
-    /// The typed call-resolution authority: reentry hold, validated warm
-    /// result, then root-family or inline mixed-obligation execution.
-    pub fn execute_resolve_call(&self, key: ResolveCallKey) -> ResolveCallStep {
-        self.execute_resolve_call_with_declared_result(key).0
+    construction_ordinal_seam! {
+        /// The typed call-resolution authority: reentry hold, validated warm
+        /// result, then root-family or inline mixed-obligation execution.
+        fn execute_resolve_call(&self, key: ResolveCallKey) -> ResolveCallStep {
+            self.execute_resolve_call_with_declared_result(key).0
+        }
     }
 
     pub(super) fn execute_resolve_call_with_declared_result(

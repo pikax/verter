@@ -1543,7 +1543,7 @@ fn all_unsupported_input_families_map_to_their_exact_observation_kind() {
             function: FunctionProgramKey {
                 declaration: FunctionDeclarationRef {
                     owner: TopLevelOwnerId::ordinary_file(),
-                    name: Arc::from("flow"),
+                    name: "flow".into(),
                     space: SymbolSpace::Value,
                 },
                 part: FunctionPartIdentity::DeclarationBody,

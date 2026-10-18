@@ -2039,9 +2039,26 @@ mod cached_result_footprint {
         }
     }
 
-    fn result(props: Vec<PropAnalysis>) -> CachedComponentMetaResult {
+    /// A result's analysis and resolution template, before the analysis
+    /// becomes its shared cell.
+    type Parts = (ComponentMetaAnalysis, ResolutionTemplate);
+
+    fn assemble((analysis, resolution_template): Parts) -> CachedComponentMetaResult {
         CachedComponentMetaResult {
-            analysis: ComponentMetaAnalysis {
+            analysis: crate::component_meta_cached_result::shared_component_meta_analysis(analysis),
+            resolution_template,
+            canonical_id: Arc::from("/src/Owner.vue"),
+            whole_hash: [0u8; 16],
+        }
+    }
+
+    fn result(props: Vec<PropAnalysis>) -> CachedComponentMetaResult {
+        assemble(parts(props))
+    }
+
+    fn parts(props: Vec<PropAnalysis>) -> Parts {
+        (
+            ComponentMetaAnalysis {
                 domain_guarantees: Default::default(),
                 props,
                 events: Vec::new(),
@@ -2071,7 +2088,7 @@ mod cached_result_footprint {
                 options_api: false,
                 file_path: "/src/Owner.vue".to_string(),
             },
-            resolution_template: ResolutionTemplate {
+            ResolutionTemplate {
                 mode: verter_type_engine::semantic_query::ProjectionMode::Expanded,
                 whole_hash: [0u8; 16],
                 resolved_macros: Vec::new(),
@@ -2084,13 +2101,15 @@ mod cached_result_footprint {
                 completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
                 synthesis_should_suppress: false,
             },
-            canonical_id: Arc::from("/src/Owner.vue"),
-            whole_hash: [0u8; 16],
-        }
+        )
+    }
+
+    fn base_parts() -> Parts {
+        parts(vec![prop("d".to_string(), publication(Arc::from("/a.ts")))])
     }
 
     fn base() -> CachedComponentMetaResult {
-        result(vec![prop("d".to_string(), publication(Arc::from("/a.ts")))])
+        assemble(base_parts())
     }
 
     /// Enlarging one owned string anywhere in the payload — a surface
@@ -2099,22 +2118,22 @@ mod cached_result_footprint {
     /// count unchanged.
     #[test]
     fn enlarged_payload_text_is_charged_by_its_backing_at_equal_record_counts() {
-        type Enlarge = fn(&mut CachedComponentMetaResult, String) -> usize;
+        type Enlarge = fn(&mut Parts, String) -> usize;
         let cases: [(&str, Enlarge); 3] = [
-            ("prop description", |result, text| {
-                let slot = result.analysis.props[0].description.as_mut().unwrap();
+            ("prop description", |(analysis, _), text| {
+                let slot = analysis.props[0].description.as_mut().unwrap();
                 let small = slot.capacity();
                 *slot = text;
                 small
             }),
-            ("style class", |result, text| {
-                let slot = &mut result.analysis.styles[0].classes[0];
+            ("style class", |(analysis, _), text| {
+                let slot = &mut analysis.styles[0].classes[0];
                 let small = slot.capacity();
                 *slot = text;
                 small
             }),
-            ("registry declaration text", |result, text| {
-                let slot = result.resolution_template.resolved_type_registry_meta[0]
+            ("registry declaration text", |(_, template), text| {
+                let slot = template.resolved_type_registry_meta[0]
                     .declaration
                     .text
                     .as_mut()
@@ -2126,13 +2145,14 @@ mod cached_result_footprint {
         ];
         for (label, enlarge) in cases {
             let small_result = base();
-            let mut large_result = base();
+            let mut large_parts = base_parts();
             let text = "x".repeat(LARGE);
             let large_capacity = text.capacity();
-            let small_capacity = enlarge(&mut large_result, text);
+            let small_capacity = enlarge(&mut large_parts, text);
+            let large_result = assemble(large_parts);
             let expected = heap_block_bytes(large_capacity) - heap_block_bytes(small_capacity);
-            let small = small_result.retained_footprint_bytes();
-            let large = large_result.retained_footprint_bytes();
+            let small = charged(&small_result);
+            let large = charged(&large_result);
             assert!(
                 large >= small + expected,
                 "{label}: a {LARGE}-byte string must add at least its {expected}-byte \
@@ -2255,9 +2275,10 @@ mod cached_result_footprint {
     #[test]
     fn record_collection_is_charged_by_capacity() {
         let small_result = base();
-        let mut large_result = base();
+        let mut large_parts = base_parts();
         let small_capacity = small_result.analysis.props.capacity();
-        large_result.analysis.props.reserve_exact(4096);
+        large_parts.0.props.reserve_exact(4096);
+        let large_result = assemble(large_parts);
         let large_capacity = large_result.analysis.props.capacity();
         assert_eq!(
             large_result.analysis.props.len(),
@@ -2266,8 +2287,8 @@ mod cached_result_footprint {
         let slot = std::mem::size_of::<PropAnalysis>();
         let expected =
             heap_block_bytes(large_capacity * slot) - heap_block_bytes(small_capacity * slot);
-        let small = small_result.retained_footprint_bytes();
-        let large = large_result.retained_footprint_bytes();
+        let small = charged(&small_result);
+        let large = charged(&large_result);
         assert!(
             large >= small + expected,
             "reserving {large_capacity} prop slots must add at least {expected} bytes \
