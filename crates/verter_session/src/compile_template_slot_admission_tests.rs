@@ -298,6 +298,10 @@ fn page_retention_refusal_evicts_compile_companions_and_serves_uncached() {
     }
 }
 
+/// An IDE artifact the retention account declines to keep is still served by
+/// the compile that produced it: only the later cache peek misses, so a
+/// consumer that takes the served artifact never loses the IDE surface of a
+/// component whose output exceeds the per-entry ceiling.
 #[test]
 fn refused_ide_admission_still_serves_complete_output_on_repeated_reads() {
     use verter_session_query::facts::fact_cache::ReadSetSignature;
