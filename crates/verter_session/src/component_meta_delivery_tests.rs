@@ -12,16 +12,10 @@ use crate::VerterHost;
 /// cache's charge no longer covers.
 #[test]
 fn a_delivered_analysis_shares_the_cached_cell_and_keeps_its_charge_past_the_cache() {
-    let project = MetaProject::new(VerterHost::new_standalone_with_scheduler_config(
-        HostConfig {
-            analysis_level: crate::types::AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        verter_scheduler::scheduler::SchedulerConfig {
-            cpu_threads: 1,
-            ..verter_scheduler::scheduler::SchedulerConfig::default()
-        },
-    ));
+    let project = MetaProject::new(VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        ..HostConfig::default()
+    }));
     project
         .upsert_base(
             "/src/Comp.vue",
