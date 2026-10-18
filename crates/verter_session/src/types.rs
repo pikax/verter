@@ -2874,6 +2874,17 @@ pub struct IdeResponse {
     pub destructured_block: Option<verter_compiler::compile::types::DestructuredBlockMeta>,
 }
 
+impl From<&CachedTsx> for IdeResponse {
+    fn from(tsx: &CachedTsx) -> Self {
+        Self {
+            code: Arc::clone(&tsx.code),
+            source_map: tsx.source_map.clone(),
+            is_jsx: tsx.is_jsx,
+            destructured_block: tsx.destructured_block.clone(),
+        }
+    }
+}
+
 /// One separately addressed output of a compiled runtime product.
 ///
 /// A runtime product is not one blob: the carrier's script, its compiled

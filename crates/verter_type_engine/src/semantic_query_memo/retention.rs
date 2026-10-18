@@ -392,14 +392,16 @@ impl SemanticGraphStore {
 
     /// Bytes the store's memo bookkeeping is pinned for: its reverse
     /// indexes' own storage, the publishes waiting to enter the family
-    /// memo's index, its shared-charge registry's table and its
-    /// dependency-rail interner. A required current count.
+    /// memo's index, its shared-charge registry's table, its dependency-rail
+    /// interner and the rail blocks that interner's entries keep. A required
+    /// current count.
     pub fn bookkeeping_storage_charge_bytes(&self) -> usize {
         self.canonical_to_entries.storage_charge_bytes()
             + self.refusal_summaries.index_storage_charge_bytes()
             + self.reverse_index_pending.lock().storage_charge_bytes()
             + self.alias_charges.table_charged_bytes()
             + self.dep_signature_interner.storage_charge_bytes()
+            + self.dep_signature_interner.entry_block_charge_bytes()
             + self.derivation.lock().storage_charge_bytes()
     }
 
