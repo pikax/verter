@@ -52,7 +52,9 @@
 //! lowered node serves slice-IR demand through the same store.
 #[cfg(any(test, feature = "test-support"))]
 use verter_session_query::flow::bundle::KeyedFunctionStructure;
-use verter_session_query::flow::bundle::{BoundFlowGraph, FlowGraphBundle, FlowSliceFunctionKey};
+use verter_session_query::flow::bundle::{
+    BoundFlowGraph, FlowGraphBundle, FlowGraphBundleRef, FlowSliceFunctionKey,
+};
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -128,35 +130,43 @@ pub struct FunctionFlowGraphStore {
     retention: verter_session_query::retention::StoreAccount,
 }
 
-/// One retained bundle and the charge for keeping it: its map slot, its key
-/// and the whole bundle — skeleton, binding map and graph — pinned, never
-/// refused (a slice plan and its completeness proof address the memoized
-/// bundle, so it is evaluation storage like the graph arena), released with
-/// the entry.
+/// Cache-only slot and key bookkeeping. The shared bundle charges its own
+/// payload, pinned like the graph arena: plans and proofs must keep their
+/// evaluation storage alive even at zero headroom.
 struct GraphEntry {
-    bundle: Arc<FlowGraphBundle>,
+    bundle: FlowGraphBundleRef,
     _retention: verter_session_query::retention::RetentionCharge,
 }
 
 impl GraphEntry {
     /// Charge an entry for keeping `bundle`.
     fn admit(
-        bundle: &Arc<FlowGraphBundle>,
+        key: &FlowSliceFunctionKey,
+        bundle: &FlowGraphBundleRef,
         account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) -> Self {
-        use verter_session_query::retention::allocation::arc_block_bytes;
-        let footprint = verter_session_query::retention::heap_size::footprint(&**bundle);
-        footprint
-            .handles
+        use verter_session_query::retention::heap_size::{HeapMeter, HeapSize};
+        bundle.pin(verter_session_query::retention::owned::ChargeCtx::new(
+            account,
+        ));
+        // Equal keys need not share their allocations. Prime the meter
+        // with the bundle's payload so shared raw backing is counted once;
+        // deep copies and independently allocated equal strings still pay.
+        let mut handles = verter_session_query::retention::allocation::AliasSet::new();
+        let mut meter = HeapMeter::new(&mut handles);
+        let _ = (**bundle).heap_size(&mut meter);
+        let key_heap = key.heap_size(&mut meter);
+        drop(meter);
+        handles
+            .take_handles()
             .pin(verter_session_query::retention::owned::ChargeCtx::new(
                 account,
             ));
         let own = verter_session_query::retention::ENTRY_OVERHEAD_BYTES
             + std::mem::size_of::<(FlowSliceFunctionKey, GraphEntry)>()
-            + arc_block_bytes(std::mem::size_of::<FlowGraphBundle>())
-            + footprint.bytes;
+            + key_heap;
         Self {
-            bundle: Arc::clone(bundle),
+            bundle: bundle.clone(),
             _retention: account.pin(own),
         }
     }
@@ -167,7 +177,7 @@ impl GraphEntry {
 // Keep the inline publication guard: boxing it would add a cold-graph allocation.
 #[allow(clippy::large_enum_variant)]
 pub enum GraphClaim<'a> {
-    Read(Arc<FlowGraphBundle>),
+    Read(FlowGraphBundleRef),
     Produce(GraphPublish<'a>),
 }
 
@@ -181,13 +191,14 @@ impl GraphPublish<'_> {
     /// Publish `bundle` under the claimed key. A bundle built for any other
     /// key is refused — `None`, nothing published, the claim abandoned —
     /// so a slot only ever holds the product of its own key.
-    pub fn publish(self, bundle: FlowGraphBundle) -> Option<Arc<FlowGraphBundle>> {
+    pub fn publish(self, bundle: FlowGraphBundle) -> Option<FlowGraphBundleRef> {
         if bundle.key() != self.slot.key() {
             return None;
         }
         self.builds.fetch_add(1, Ordering::Relaxed);
-        let bundle = Arc::new(bundle);
-        self.slot.insert(GraphEntry::admit(&bundle, self.account));
+        let bundle = FlowGraphBundleRef::new(bundle);
+        let entry = GraphEntry::admit(self.slot.key(), &bundle, self.account);
+        self.slot.insert(entry);
         Some(bundle)
     }
 }
@@ -220,11 +231,11 @@ impl FunctionFlowGraphStore {
     /// source product abandons it without publishing an absence.
     pub fn claim(&self, key: &FlowSliceFunctionKey) -> GraphClaim<'_> {
         if let Some(hit) = self.entries.get(key) {
-            return GraphClaim::Read(Arc::clone(&hit.value().bundle));
+            return GraphClaim::Read(hit.value().bundle.clone());
         }
         match self.entries.entry(key.clone()) {
             dashmap::mapref::entry::Entry::Occupied(occupied) => {
-                GraphClaim::Read(Arc::clone(&occupied.get().bundle))
+                GraphClaim::Read(occupied.get().bundle.clone())
             }
             dashmap::mapref::entry::Entry::Vacant(slot) => GraphClaim::Produce(GraphPublish {
                 slot,
@@ -253,11 +264,12 @@ impl FunctionFlowGraphStore {
     ) -> BoundFlowGraph {
         let structure = KeyedFunctionStructure::bind_fixture(key.clone(), prepared);
         let bundle = match self.entries.entry(key) {
-            dashmap::mapref::entry::Entry::Occupied(occupied) => Arc::clone(&occupied.get().bundle),
+            dashmap::mapref::entry::Entry::Occupied(occupied) => occupied.get().bundle.clone(),
             dashmap::mapref::entry::Entry::Vacant(vacant) => {
-                let bundle = Arc::new(FlowGraphBundle::build(structure));
+                let bundle = FlowGraphBundleRef::new(FlowGraphBundle::build(structure));
                 self.builds.fetch_add(1, Ordering::Relaxed);
-                vacant.insert(GraphEntry::admit(&bundle, self.retention.get()));
+                let entry = GraphEntry::admit(vacant.key(), &bundle, self.retention.get());
+                vacant.insert(entry);
                 bundle
             }
         };
@@ -273,10 +285,8 @@ impl FunctionFlowGraphStore {
     /// "not yet built for this content version" — the caller drives
     /// the engine driver's blocking build to resolve it. Unavailable source
     /// versions and correspondence errors never enter this store.
-    pub fn peek(&self, key: &FlowSliceFunctionKey) -> Option<Arc<FlowGraphBundle>> {
-        self.entries
-            .get(key)
-            .map(|hit| Arc::clone(&hit.value().bundle))
+    pub fn peek(&self, key: &FlowSliceFunctionKey) -> Option<FlowGraphBundleRef> {
+        self.entries.get(key).map(|hit| hit.value().bundle.clone())
     }
 
     /// Number of retained graph bundles (retention observability).
@@ -287,10 +297,10 @@ impl FunctionFlowGraphStore {
     /// Every retained bundle (test-support): a reader a test holds past the
     /// bundles' eviction.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn retained_bundles_for_test(&self) -> Vec<Arc<FlowGraphBundle>> {
+    pub fn retained_bundles_for_test(&self) -> Vec<FlowGraphBundleRef> {
         self.entries
             .iter()
-            .map(|entry| Arc::clone(&entry.value().bundle))
+            .map(|entry| entry.value().bundle.clone())
             .collect()
     }
 

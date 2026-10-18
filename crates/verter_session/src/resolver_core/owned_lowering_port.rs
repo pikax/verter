@@ -97,7 +97,11 @@ trait SourceInputProvider {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<verter_session_query::type_solver::PreparedTypeDecl>>,
+        Option<
+            verter_retention::heap_size::OwnedValue<
+                verter_session_query::type_solver::PreparedTypeDecl,
+            >,
+        >,
         verter_session_query::inputs::prepared::PreparationFailure,
     >;
     fn raw_prepared_value_decl(
@@ -106,7 +110,11 @@ trait SourceInputProvider {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<verter_session_query::type_solver::PreparedValueDecl>>,
+        Option<
+            verter_retention::heap_size::OwnedValue<
+                verter_session_query::type_solver::PreparedValueDecl,
+            >,
+        >,
         verter_session_query::inputs::prepared::PreparationFailure,
     >;
     fn source_host(&self) -> &crate::VerterHost;
@@ -131,7 +139,7 @@ trait SourceInputProvider {
     fn prepared(
         &self,
         input: &verter_session_query::inputs::prepared::PreparedInputRecord,
-    ) -> Option<Arc<super::prepared_decl::PreparedDeclBundle>>;
+    ) -> Option<crate::resolver_core::CachedValue<super::prepared_decl::PreparedDeclBundle>>;
     fn indexed(
         &self,
         input: &verter_session_query::inputs::indexed::IndexedInputRecord,
@@ -149,7 +157,7 @@ where
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<PreparedTypeDecl>>,
+        Option<verter_retention::heap_size::OwnedValue<PreparedTypeDecl>>,
         verter_session_query::inputs::prepared::PreparationFailure,
     > {
         self.0
@@ -162,7 +170,7 @@ where
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<PreparedValueDecl>>,
+        Option<verter_retention::heap_size::OwnedValue<PreparedValueDecl>>,
         verter_session_query::inputs::prepared::PreparationFailure,
     > {
         self.0
@@ -215,7 +223,7 @@ where
     fn prepared(
         &self,
         input: &verter_session_query::inputs::prepared::PreparedInputRecord,
-    ) -> Option<Arc<super::prepared_decl::PreparedDeclBundle>> {
+    ) -> Option<crate::resolver_core::CachedValue<super::prepared_decl::PreparedDeclBundle>> {
         self.0
             .request_view()
             .overlay()
@@ -242,7 +250,7 @@ impl SourceInputProvider for crate::VerterHost {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<PreparedTypeDecl>>,
+        Option<verter_retention::heap_size::OwnedValue<PreparedTypeDecl>>,
         verter_session_query::inputs::prepared::PreparationFailure,
     > {
         let seed = crate::VerterHost::resolver_store_view(self).into_cold_seed_view();
@@ -262,7 +270,7 @@ impl SourceInputProvider for crate::VerterHost {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<PreparedValueDecl>>,
+        Option<verter_retention::heap_size::OwnedValue<PreparedValueDecl>>,
         verter_session_query::inputs::prepared::PreparationFailure,
     > {
         let seed = crate::VerterHost::resolver_store_view(self).into_cold_seed_view();
@@ -315,7 +323,7 @@ impl SourceInputProvider for crate::VerterHost {
     fn prepared(
         &self,
         input: &verter_session_query::inputs::prepared::PreparedInputRecord,
-    ) -> Option<Arc<super::prepared_decl::PreparedDeclBundle>> {
+    ) -> Option<crate::resolver_core::CachedValue<super::prepared_decl::PreparedDeclBundle>> {
         self.source_input_leases.prepared(input)
     }
     fn indexed(
@@ -578,7 +586,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 owner: verter_type_expr::TopLevelOwnerId,
                 symbol_name: &str,
             ) -> Result<
-                Option<Arc<verter_session_query::type_solver::PreparedValueDecl>>,
+                Option<verter_retention::heap_size::OwnedValue<verter_session_query::type_solver::PreparedValueDecl>>,
                 verter_session_query::inputs::prepared::PreparationFailure,
             > {
                 verter_type_engine::count_resolver_context_call!("OwnedLowering::prepared_value_decl");
@@ -591,7 +599,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 owner: verter_type_expr::TopLevelOwnerId,
                 symbol_name: &str,
             ) -> Result<
-                Option<Arc<verter_session_query::type_solver::PreparedTypeDecl>>,
+                Option<verter_retention::heap_size::OwnedValue<verter_session_query::type_solver::PreparedTypeDecl>>,
                 verter_session_query::inputs::prepared::PreparationFailure,
             > {
                 verter_type_engine::count_resolver_context_call!("OwnedLowering::prepared_type_decl");
@@ -896,7 +904,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 owner: verter_type_expr::TopLevelOwnerId,
                 name: &str,
             ) -> Result<
-                Option<Arc<verter_session_query::type_solver::PreparedTypeDecl>>,
+                Option<verter_retention::heap_size::OwnedValue<verter_session_query::type_solver::PreparedTypeDecl>>,
                 verter_session_query::inputs::prepared::PreparationFailure,
             > {
                 verter_type_engine::count_resolver_context_call!("OwnedLowering::prepared_type_from_input");

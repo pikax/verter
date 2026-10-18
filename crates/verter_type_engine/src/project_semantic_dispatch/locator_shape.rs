@@ -88,8 +88,16 @@ use crate::semantic_query::{
 /// the anchor file's own context, exactly as the augmentation stitch
 /// prepares it).
 enum AnchorPreparedDecl {
-    Type(Arc<verter_session_query::type_solver::PreparedTypeDecl>),
-    Value(Arc<verter_session_query::type_solver::PreparedValueDecl>),
+    Type(
+        verter_retention::heap_size::OwnedValue<
+            verter_session_query::type_solver::PreparedTypeDecl,
+        >,
+    ),
+    Value(
+        verter_retention::heap_size::OwnedValue<
+            verter_session_query::type_solver::PreparedValueDecl,
+        >,
+    ),
     Augmentation(Box<verter_session_query::type_solver::PreparedTypeDecl>),
 }
 

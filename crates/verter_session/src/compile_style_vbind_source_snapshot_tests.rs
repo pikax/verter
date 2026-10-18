@@ -77,7 +77,7 @@ fn compile(host: &VerterHost) -> bool {
 
 /// The published session slot's TSX — the LSP-facing surface the
 /// keep-alive lands on. `None` when no admitted slot exists.
-fn published_tsx(host: &VerterHost) -> Option<Arc<str>> {
+fn published_tsx(host: &VerterHost) -> Option<verter_type_expr::OwnedStr> {
     host.get_ide(CANONICAL, &ide_profile()).map(|r| r.code)
 }
 

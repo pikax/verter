@@ -426,8 +426,13 @@ impl<T: std::fmt::Debug> std::fmt::Debug for Tree<T> {
 }
 
 impl<T: HeapSize + Send + Sync + 'static> Measured for Tree<T> {
+    /// The tree's cell owns the raw `Arc`s the tree keeps (see the module
+    /// docs), so they are counted on a set of the tree's own; the owned
+    /// handles the tree reaches pass to the cell's set.
     fn heap_bytes(&self, aliases: &mut AliasSet) -> usize {
-        self.0.heap_size(&mut HeapMeter::new(aliases))
+        let mut tree = AliasSet::new();
+        let bytes = self.0.heap_size(&mut HeapMeter::new(&mut tree));
+        bytes + aliases.absorb(&mut tree)
     }
 }
 
@@ -563,6 +568,18 @@ impl<T: HeapSize + Send + Sync + 'static> HeapSize for OwnedValue<T> {
     fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
         self.offer(meter.handles())
     }
+}
+
+// A cached value cell owns exactly its value: it carries a type expression
+// or a stored span exactly when the value does.
+impl<T: HeapSize + Send + Sync + 'static + verter_no_typeexpr::__private::NoTypeExprWitness>
+    verter_no_typeexpr::__private::NoTypeExprWitness for OwnedValue<T>
+{
+}
+impl<
+        T: HeapSize + Send + Sync + 'static + verter_no_storedspan::__private::NoStoredSpanWitness,
+    > verter_no_storedspan::__private::NoStoredSpanWitness for OwnedValue<T>
+{
 }
 
 impl<T: HeapSize + Send + Sync + 'static> Measured for OwnedValue<T> {

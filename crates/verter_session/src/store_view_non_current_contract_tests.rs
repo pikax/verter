@@ -481,7 +481,8 @@ impl crate::session_view::SessionView for EmptyBaseSessionView {
     fn resolved_import_facts(
         &self,
         _canonical: &str,
-    ) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>> {
+    ) -> Option<crate::resolver_core::CachedValue<crate::resolved_import_facts::ResolvedImportFacts>>
+    {
         None
     }
 }
