@@ -171,8 +171,8 @@ pub(super) fn checker_diagnostics(
 
 /// The checker diagnostics riding `symbol`'s whole-return answer in
 /// `root`'s copy of `source`, each printed as `tsc --pretty false` prints
-/// its first line after the file name: `(line,col): error TS<code>:
-/// <message>`, with a one-based line and column.
+/// it after the file name: `(line,col): error TS<code>: <message>`, with a
+/// one-based line and column, then its message chain, one line each.
 pub(super) fn checker_report(
     host: &VerterHost,
     root: &str,
@@ -188,7 +188,7 @@ pub(super) fn checker_report(
             format!(
                 "({line},{column}): error TS{}: {}",
                 occurrence.code().code(),
-                occurrence.message()
+                occurrence.full_message()
             )
         })
         .collect()

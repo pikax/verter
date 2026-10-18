@@ -650,12 +650,24 @@ fn literal_members(
 }
 
 /// Whether `name` is written bare as a property name: an identifier.
-fn is_identifier_name(name: &str) -> bool {
+pub(super) fn is_identifier_name(name: &str) -> bool {
     let mut chars = name.chars();
     chars
         .next()
         .is_some_and(|first| first.is_alphabetic() || first == '_' || first == '$')
         && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+}
+
+/// A property's name as a message names it (`symbolToString`): an
+/// identifier bare, any other string double-quoted, a number as written.
+/// `None` for a symbol or computed key.
+pub(super) fn checker_property_name(key: &AuthoredPropertyKey) -> Option<String> {
+    match key {
+        AuthoredPropertyKey::String(name) if is_identifier_name(name) => Some(name.to_string()),
+        AuthoredPropertyKey::String(name) => Some(format!("{:?}", &**name)),
+        AuthoredPropertyKey::Number(number) => Some(number.to_string()),
+        AuthoredPropertyKey::UniqueSymbol(_) | AuthoredPropertyKey::Computed(_) => None,
+    }
 }
 
 /// How many levels of unions, intersections and constraints a relation's
@@ -740,6 +752,41 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         Some(format!("TS{}: {}", code.code(), code.format(&arguments)))
     }
 
+    /// Where the checker reports the diagnostic a recovery node carries
+    /// ([`Self::checker_recovery_message`]): the file and span of the node
+    /// it reports at — TS2456 at the circular alias's name. `None` for any
+    /// other node, and for a recovery carrying no such origin.
+    pub fn checker_recovery_location(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<(std::sync::Arc<str>, verter_span::Span)> {
+        let data = self.graph().node_data(node)?;
+        let SemanticNodeData::Opaque(crate::semantic_query::QueryError::CheckerRecovery {
+            diagnostic,
+            origin,
+            ..
+        }) = data.as_ref()
+        else {
+            return None;
+        };
+        if diagnostic.code != crate::semantic_query::CheckerDiagnosticCode::CircularTypeAlias {
+            return None;
+        }
+        let origin = self.graph().node_data((*origin)?)?;
+        let SemanticNodeData::DeclRef { identity } = origin.as_ref() else {
+            return None;
+        };
+        let canonical: std::sync::Arc<str> = std::sync::Arc::from(identity.canonical_id.as_ref());
+        let serve = self.ctx.ensure_indexed_ready_serve(&canonical)?;
+        let span = serve
+            .indexed
+            .shallow_state
+            .headers
+            .type_header_in(identity.owner, identity.decl_name.as_ref())?
+            .name_span;
+        Some((canonical, span))
+    }
+
     /// One type as a diagnostic message prints it.
     pub(in crate::project_semantic_dispatch) fn print_diagnostic_type(
         &self,
@@ -795,14 +842,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             {
                 continue;
             }
-            missing.push(match &member.key {
-                AuthoredPropertyKey::String(name) if is_identifier_name(name) => name.to_string(),
-                AuthoredPropertyKey::String(name) => format!("{name:?}"),
-                AuthoredPropertyKey::Number(number) => number.to_string(),
-                AuthoredPropertyKey::UniqueSymbol(_) | AuthoredPropertyKey::Computed(_) => {
-                    return None
-                }
-            });
+            missing.push(checker_property_name(&member.key)?);
         }
         Some(missing)
     }
@@ -810,7 +850,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// Whether `target` could hold a literal or other unit type at its top
     /// level (`typeCouldHaveTopLevelSingletonTypes`), read `depth` levels
     /// of unions, intersections and constraints deep; past that (a
-    /// constraint chain that comes round again) the literal is kept.
+    /// constraint chain that comes round again) the literal is kept. A
+    /// `boolean` is no such type, but inside a union the checker holds it as
+    /// `true | false`, whose members are.
     fn could_hold_top_level_singleton(&self, target: SemanticNodeId, depth: u32) -> bool {
         let Some(data) = self.graph().node_data(target) else {
             return true;
@@ -820,43 +862,57 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         };
         match data.as_ref() {
             SemanticNodeData::Primitive(PrimitiveKind::Boolean) => false,
-            SemanticNodeData::Union(members) => members
-                .iter()
-                .any(|&member| self.could_hold_top_level_singleton(member, depth)),
+            SemanticNodeData::Union(members) => members.iter().any(|&member| {
+                matches!(
+                    self.graph().node_data(member).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean))
+                ) || self.could_hold_top_level_singleton(member, depth)
+            }),
             SemanticNodeData::Intersection(members) => members
                 .iter()
                 .any(|&member| self.could_hold_top_level_singleton(member, depth)),
             SemanticNodeData::TypeParam { constraint, .. } => constraint
                 .is_some_and(|constraint| self.could_hold_top_level_singleton(constraint, depth)),
             SemanticNodeData::Literal(_)
+            | SemanticNodeData::EnumLiteral(_)
             | SemanticNodeData::Primitive(PrimitiveKind::Null | PrimitiveKind::Undefined)
-            | SemanticNodeData::TemplateLiteral { .. } => true,
+            | SemanticNodeData::TemplateLiteral { .. }
+            | SemanticNodeData::IntrinsicApplication { .. } => true,
             _ => false,
         }
     }
 
-    /// The base primitive a literal source prints as
-    /// (`getBaseTypeOfLiteralType`): each literal of a union of literals
-    /// mapped to its primitive, in order and once. `None` for any type that
-    /// is not a literal or a union of them.
+    /// The base type a literal source prints as
+    /// (`getBaseTypeOfLiteralType`): a literal's primitive, an enum member's
+    /// enum, and each member of a union of them mapped so, in order and
+    /// once. `None` for any type that is not a literal, an enum member or a
+    /// union of them.
     fn literal_base_spelling(&self, source: SemanticNodeId) -> Option<String> {
-        let base = |node: SemanticNodeId| match self.graph().node_data(node)?.as_ref() {
-            SemanticNodeData::Literal(value) => Some(match LiteralKind::of(value) {
-                LiteralKind::String => "string",
-                LiteralKind::Number => "number",
-                LiteralKind::BigInt => "bigint",
-                LiteralKind::Boolean => "boolean",
-            }),
-            _ => None,
+        let base = |node: SemanticNodeId| -> Option<String> {
+            match self.graph().node_data(node)?.as_ref() {
+                SemanticNodeData::Literal(value) => Some(
+                    match LiteralKind::of(value) {
+                        LiteralKind::String => "string",
+                        LiteralKind::Number => "number",
+                        LiteralKind::BigInt => "bigint",
+                        LiteralKind::Boolean => "boolean",
+                    }
+                    .to_owned(),
+                ),
+                SemanticNodeData::EnumLiteral(literal) => {
+                    Some(literal.enum_decl.decl_name.to_string())
+                }
+                _ => None,
+            }
         };
         if let Some(single) = base(source) {
-            return Some(single.to_owned());
+            return Some(single);
         }
         let data = self.graph().node_data(source)?;
         let SemanticNodeData::Union(members) = data.as_ref() else {
             return None;
         };
-        let mut bases: Vec<&str> = Vec::new();
+        let mut bases: Vec<String> = Vec::new();
         for &member in members.iter() {
             let spelled = base(member)?;
             if !bases.contains(&spelled) {

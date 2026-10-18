@@ -10385,15 +10385,15 @@ pub(super) trait FlowDemandDriver {
         source: SemanticNodeId,
         target: SemanticNodeId,
     ) -> (String, String);
-    /// One type as a diagnostic message prints it.
-    fn print_diagnostic_type(&self, node: SemanticNodeId) -> String;
-    /// The properties `target` requires that `source` lacks, as a
-    /// missing-properties message names them.
-    fn missing_required_properties(
+    /// The occurrences the checker reports for `source` failing `target`
+    /// at the authored expression `site` under `head`, elaborated.
+    fn checker_relation_failure(
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
-    ) -> Option<Vec<String>>;
+        head: crate::semantic_query::CheckerDiagnostic,
+        site: &verter_type_expr::IndexedReportSite,
+    ) -> Option<Vec<crate::semantic_query::CheckerDiagnosticOccurrence>>;
     fn resolve_closed_signature_utility(
         &self,
         node: SemanticNodeId,
@@ -10988,15 +10988,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     ) -> (String, String) {
         ProjectSemanticDispatch::print_relation_operands(self, source, target)
     }
-    fn print_diagnostic_type(&self, node: SemanticNodeId) -> String {
-        ProjectSemanticDispatch::print_diagnostic_type(self, node)
-    }
-    fn missing_required_properties(
+    fn checker_relation_failure(
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
-    ) -> Option<Vec<String>> {
-        ProjectSemanticDispatch::missing_required_properties(self, source, target)
+        head: crate::semantic_query::CheckerDiagnostic,
+        site: &verter_type_expr::IndexedReportSite,
+    ) -> Option<Vec<crate::semantic_query::CheckerDiagnosticOccurrence>> {
+        ProjectSemanticDispatch::checker_relation_failure(self, source, target, head, site)
     }
     fn resolve_closed_signature_utility(
         &self,
@@ -11175,9 +11174,6 @@ struct FlowDiagnosticPrinter<'p, D>(&'p D);
 impl<D: FlowDemandDriver> crate::semantic_query::CheckerDiagnosticPrinter
     for FlowDiagnosticPrinter<'_, D>
 {
-    fn diagnostic_type(&self, node: SemanticNodeId) -> String {
-        self.0.print_diagnostic_type(node)
-    }
     fn relation_operands(
         &self,
         source: SemanticNodeId,
@@ -11185,12 +11181,14 @@ impl<D: FlowDemandDriver> crate::semantic_query::CheckerDiagnosticPrinter
     ) -> (String, String) {
         self.0.print_relation_operands(source, target)
     }
-    fn missing_properties(
+    fn relation_failure(
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
-    ) -> Option<Vec<String>> {
-        self.0.missing_required_properties(source, target)
+        head: crate::semantic_query::CheckerDiagnostic,
+        site: &verter_type_expr::IndexedReportSite,
+    ) -> Option<Vec<crate::semantic_query::CheckerDiagnosticOccurrence>> {
+        self.0.checker_relation_failure(source, target, head, site)
     }
 }
 
@@ -11705,15 +11703,15 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     ) -> (String, String) {
         self.driver.print_relation_operands(source, target)
     }
-    fn print_diagnostic_type(&self, node: SemanticNodeId) -> String {
-        self.driver.print_diagnostic_type(node)
-    }
-    fn missing_required_properties(
+    fn checker_relation_failure(
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
-    ) -> Option<Vec<String>> {
-        self.driver.missing_required_properties(source, target)
+        head: crate::semantic_query::CheckerDiagnostic,
+        site: &verter_type_expr::IndexedReportSite,
+    ) -> Option<Vec<crate::semantic_query::CheckerDiagnosticOccurrence>> {
+        self.driver
+            .checker_relation_failure(source, target, head, site)
     }
     fn resolve_closed_signature_utility(
         &self,
@@ -23798,30 +23796,20 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
 
     /// Record the diagnostic `recipe` a call's result carries, bound to the
     /// call at `site`: its subject read off the report positions the
-    /// call's executor route recorded for it, its types printed now. A
-    /// call whose route recorded no positions reports at the call itself.
+    /// call's executor route recorded for it, its message printed and
+    /// elaborated now. A recipe the call's positions cannot place, or whose
+    /// elaboration is not modelled, records nothing: a diagnostic is never
+    /// moved to a position, or given a message, the checker's is not.
     fn record_call_diagnostic(
         &mut self,
         recipe: &crate::semantic_query::CheckerDiagnosticRecipe,
         site: verter_session_query::flow::slice::SliceCallSite,
     ) {
-        let fallback = crate::semantic_query::CheckerDiagnosticSite {
-            operation_start: Some(site.span().start),
-            ..Default::default()
+        let Some(positions) = self.call_diagnostic_sites.get(&site.span()) else {
+            return;
         };
-        let positions = self
-            .call_diagnostic_sites
-            .get(&site.span())
-            .unwrap_or(&fallback);
         let printer = FlowDiagnosticPrinter(self.dispatch);
-        let occurrence = recipe.bind(positions, &printer).or_else(|| {
-            crate::semantic_query::CheckerDiagnosticRecipe {
-                subject: crate::semantic_query::CheckerDiagnosticSubject::Operation,
-                ..*recipe
-            }
-            .bind(&fallback, &printer)
-        });
-        if let Some(occurrence) = occurrence {
+        for occurrence in recipe.bind(positions, &printer).into_iter().flatten() {
             self.record_checker_diagnostic(occurrence);
         }
     }
@@ -28409,8 +28397,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let step = match step {
             Some(Positional::Value(step)) => step,
             Some(Positional::Hold) => return Some(Positional::Hold),
+            // A route that cannot type the call decides nothing: a lone
+            // declared callee's caller still reads its declared return.
             Some(Positional::Unmodeled) | None => {
-                return Some(self.degraded_unrepresentable_callee())
+                return (!self.callee_is_lone_declared(callee))
+                    .then(|| self.degraded_unrepresentable_callee())
             }
         };
         match step {

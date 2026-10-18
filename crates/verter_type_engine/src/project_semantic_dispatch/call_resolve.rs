@@ -19,6 +19,8 @@ use super::ProjectSemanticDispatch;
 mod context;
 #[path = "call_resolve_contextual.rs"]
 mod contextual;
+#[path = "call_resolve_elaboration.rs"]
+mod elaboration;
 use crate::semantic_query::{
     ArgumentLiteralMode, CallArgKey, CallKind, CanonicalTypeSubstitution, ConstParamPolicy,
     ContextualInferenceMode, FreshnessKey, FunctionParam, InferenceCandidatePriority,
@@ -212,6 +214,9 @@ struct CallArgument {
     /// A context-sensitive literal as the first inference pass reads it
     /// ([`CallArgKey::Eager`]).
     first_pass: Option<SemanticNodeId>,
+    /// The authored argument this one is — the spread, for each argument a
+    /// tuple spread expands to: where the checker reports its failure.
+    authored: u32,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -1837,8 +1842,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         key: &ResolveCallKey,
     ) -> Result<Vec<CallArgument>, ResolveCallFailure> {
         let mut result = Vec::new();
-        for argument in key.args.iter() {
+        for (authored, argument) in key.args.iter().enumerate() {
             record_argument_work(1);
+            let authored = u32::try_from(authored).map_err(|_| ResolveCallFailure::Undecidable)?;
             let context_sensitive = argument.is_context_sensitive();
             let (node, spread, literal_mode, (const_view, first_pass)) = match argument {
                 CallArgKey::Eager {
@@ -1893,6 +1899,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .map(|view| self.substitute_canonical(view, &key.context.substitution)),
                     first_pass: first_pass
                         .map(|view| self.substitute_canonical(view, &key.context.substitution)),
+                    authored,
                 });
                 continue;
             }
@@ -1925,6 +1932,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         context_sensitive,
                         const_view: None,
                         first_pass: None,
+                        authored,
                     }));
                 }
                 _ => result.push(CallArgument {
@@ -1935,6 +1943,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     context_sensitive,
                     const_view: None,
                     first_pass: None,
+                    authored,
                 }),
             }
         }
@@ -2075,11 +2084,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     return CandidateVerdict::Mismatch;
                 }
             };
-            failure = Some(argument_count_recipe(
+            let mut arity = ArityEvidence::default();
+            arity.add(
                 required,
-                (!effective_rest).then_some(maximum).flatten(),
+                maximum.unwrap_or(ordinary_params.len()),
+                effective_rest,
                 arguments.len(),
-            ));
+            );
+            failure = arity.recipe(arguments);
         }
         let arguments = if too_few || too_many {
             &arguments[..0]
@@ -2329,7 +2341,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         && (visible_type_params.is_empty() || contextual_diagnostic.is_some()) =>
                 {
                     if failure.is_none() {
-                        failure = Some(self.argument_failure(index, source, target, budget));
+                        failure = Some(argument_not_assignable(argument.authored, source, target));
                     }
                 }
                 RelationStep::NotAssignable => {
@@ -2734,7 +2746,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 Ok(Some(true)) => {}
                 Ok(Some(false)) if recovery => {
                     if failure.is_none() {
-                        failure = Some(self.argument_failure(index, source, target, budget));
+                        failure = Some(argument_not_assignable(argument.authored, source, target));
                     }
                 }
                 Ok(Some(false)) => {
@@ -2746,7 +2758,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .as_ref()
                         .is_some_and(|state| state.was_context_sensitive(index))
                     {
-                        let recipe = self.argument_failure(index, source, target, budget);
+                        let recipe = argument_not_assignable(argument.authored, source, target);
                         if let Some(state) = self.dispatch_txn.borrow_mut().call.contextual.as_mut()
                         {
                             state.diagnostic = Some(recipe);
@@ -4399,10 +4411,10 @@ struct RestParam<'p> {
     shape: RestShape,
 }
 
-/// The checker's TS2345 for the argument at `index`: `source` is not
-/// assignable to its parameter's `target`.
+/// The checker's TS2345 for the authored argument at `authored`: `source`
+/// is not assignable to its parameter's `target`.
 pub(super) fn argument_not_assignable(
-    index: usize,
+    authored: u32,
     source: SemanticNodeId,
     target: SemanticNodeId,
 ) -> crate::semantic_query::CheckerDiagnosticRecipe {
@@ -4413,43 +4425,90 @@ pub(super) fn argument_not_assignable(
     CheckerDiagnosticRecipe::call(
         CheckerDiagnosticCode::ArgumentNotAssignable,
         CheckerDiagnosticArguments::Types { source, target },
-        CheckerDiagnosticSubject::Argument(u32::try_from(index).unwrap_or(u32::MAX)),
+        CheckerDiagnosticSubject::Argument(authored),
     )
 }
 
-/// The checker's arity error for a call supplying `got` arguments to a
-/// candidate accepting `required..=maximum` (`getArgumentArityError`):
-/// TS2555 where a rest parameter leaves the count unbounded and the call
-/// supplies too few, TS2554 otherwise. Too many arguments are reported from
-/// the first one the candidate does not accept; too few at the callee.
-pub(super) fn argument_count_recipe(
-    required: usize,
-    maximum: Option<usize>,
-    got: usize,
-) -> crate::semantic_query::CheckerDiagnosticRecipe {
-    use crate::semantic_query::{
-        CheckerDiagnosticArguments, CheckerDiagnosticCode, CheckerDiagnosticRecipe,
-        CheckerDiagnosticSubject,
-    };
-    let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
-    CheckerDiagnosticRecipe::call(
-        if maximum.is_none() && got < required {
-            CheckerDiagnosticCode::ArgumentCountAtLeast
-        } else {
-            CheckerDiagnosticCode::ArgumentCount
-        },
-        CheckerDiagnosticArguments::ArgumentCount {
-            min: count(required),
-            max: maximum.map(count),
-            got: count(got),
-        },
-        match maximum {
-            Some(maximum) if got > maximum => {
-                CheckerDiagnosticSubject::ExcessArguments(count(maximum))
-            }
-            _ => CheckerDiagnosticSubject::Operation,
-        },
-    )
+/// The arities of the candidates a call's argument count fits none of, as
+/// the checker's arity error reads them (`getArgumentArityError`).
+#[derive(Debug, Default, Clone, Copy)]
+struct ArityEvidence {
+    /// The fewest arguments any candidate requires.
+    min: Option<usize>,
+    /// The most parameters any candidate declares.
+    max: usize,
+    /// The most any candidate requiring fewer than the call supplies
+    /// requires.
+    max_below: Option<usize>,
+    /// The fewest parameters any candidate declaring more than the call
+    /// supplies declares.
+    min_above: Option<usize>,
+    /// Whether any candidate has an effective rest parameter.
+    rest: bool,
+}
+
+impl ArityEvidence {
+    /// Add a candidate requiring `required` arguments and declaring
+    /// `parameters`, `rest` its last, against a call supplying `got`.
+    fn add(&mut self, required: usize, parameters: usize, rest: bool, got: usize) {
+        self.min = Some(self.min.map_or(required, |min| min.min(required)));
+        self.max = self.max.max(parameters);
+        if required < got {
+            self.max_below = Some(self.max_below.map_or(required, |below| below.max(required)));
+        }
+        if got < parameters {
+            self.min_above = Some(
+                self.min_above
+                    .map_or(parameters, |above| above.min(parameters)),
+            );
+        }
+        self.rest |= rest;
+    }
+
+    /// The checker's arity error for a call supplying `arguments` (the
+    /// expanded list): TS2575 for a count between the fewest and the most
+    /// the candidates take, else TS2555 where one has a rest parameter and
+    /// TS2554 otherwise — too few reported at the callee, too many from the
+    /// first argument no candidate accepts. `None` before any candidate.
+    fn recipe(
+        &self,
+        arguments: &[CallArgument],
+    ) -> Option<crate::semantic_query::CheckerDiagnosticRecipe> {
+        use crate::semantic_query::{
+            CheckerDiagnosticArguments, CheckerDiagnosticCode, CheckerDiagnosticRecipe,
+            CheckerDiagnosticSubject,
+        };
+        let count = |n: usize| u32::try_from(n).ok();
+        let (min, got) = (self.min?, arguments.len());
+        if min < got && got < self.max {
+            return Some(CheckerDiagnosticRecipe::call(
+                CheckerDiagnosticCode::NoOverloadExpectsArgumentCount,
+                CheckerDiagnosticArguments::ArgumentCountGap {
+                    got: count(got)?,
+                    below: count(self.max_below?)?,
+                    above: count(self.min_above?)?,
+                },
+                CheckerDiagnosticSubject::Operation,
+            ));
+        }
+        Some(CheckerDiagnosticRecipe::call(
+            if self.rest {
+                CheckerDiagnosticCode::ArgumentCountAtLeast
+            } else {
+                CheckerDiagnosticCode::ArgumentCount
+            },
+            CheckerDiagnosticArguments::ArgumentCount {
+                min: count(min)?,
+                max: (!self.rest).then(|| count(self.max)).flatten(),
+                got: count(got)?,
+            },
+            if got < min {
+                CheckerDiagnosticSubject::Operation
+            } else {
+                CheckerDiagnosticSubject::ExcessArguments(arguments.get(self.max)?.authored)
+            },
+        ))
+    }
 }
 
 fn call_candidate_arity(

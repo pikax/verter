@@ -71,6 +71,7 @@ use verter_type_expr_oxc::{lower_property_key, lower_return_annotation, lower_ts
 #[path = "type_eval_build_shallow.rs"]
 mod shallow;
 
+use verter_type_expr::{IndexedElaboratedProperty, IndexedElaborationForm, IndexedReportSite};
 pub use verter_type_expr::{
     IndexedValueCall, IndexedValueCallArg, IndexedValueCallKind, IndexedValueExpression,
 };
@@ -109,9 +110,7 @@ pub fn offset_indexed_value_expression(expression: &mut IndexedValueExpression, 
                 }
                 for argument in Arc::make_mut(args) {
                     argument.point = argument.point.saturating_add(base);
-                    argument.return_point = argument
-                        .return_point
-                        .map(|point| point.saturating_add(base));
+                    argument.report.offset(base);
                     pending.push(&mut argument.expression);
                 }
             }
@@ -6853,14 +6852,14 @@ fn build_indexed_call(
         IndexedCallNode::New(_) => None,
     }
     .map(|_| Box::new(values.pop().expect("the receiver's record")));
-    let argument = |expression: &Expression<'_>, lowered, spread| IndexedValueCallArg {
+    let argument = |expression: &Expression<'_>, lowered, spread, report| IndexedValueCallArg {
         expression: lowered,
         point: expression.span().start,
         spread,
         literal_mode: indexed_literal_mode(Some(expression)),
         context_sensitive: indexed_context_sensitive(Some(expression)),
         function_return_source: None,
-        return_point: indexed_argument_return_point(expression),
+        report,
     };
     let call_arguments = |arguments: &[oxc_ast::ast::Argument<'_>], lowered: Vec<_>| {
         let args: Vec<IndexedValueCallArg> = arguments
@@ -6871,6 +6870,7 @@ fn build_indexed_call(
                     indexed_argument_expression(authored),
                     lowered,
                     matches!(authored, oxc_ast::ast::Argument::SpreadElement(_)),
+                    indexed_argument_report_site(authored),
                 )
             })
             .collect();
@@ -6912,16 +6912,16 @@ fn build_indexed_call(
                 literal_mode: IndexedValueLiteralMode::Literal,
                 context_sensitive: false,
                 function_return_source: None,
-                return_point: None,
+                report: IndexedReportSite {
+                    point: tagged.quasi.span.start,
+                    form: None,
+                },
             });
-            args.extend(
-                tagged
-                    .quasi
-                    .expressions
-                    .iter()
-                    .zip(lowered_arguments)
-                    .map(|(expression, lowered)| argument(expression, lowered, false)),
-            );
+            args.extend(tagged.quasi.expressions.iter().zip(lowered_arguments).map(
+                |(expression, lowered)| {
+                    argument(expression, lowered, false, indexed_report_site(expression))
+                },
+            ));
             IndexedValueCall {
                 point: tagged.span.start,
                 report_point: tagged.span.start,
@@ -7338,11 +7338,15 @@ fn lower_indexed_tagged_template_expression_observed(
         literal_mode: IndexedValueLiteralMode::Literal,
         context_sensitive: false,
         function_return_source: None,
-        return_point: None,
+        report: IndexedReportSite {
+            point: tagged.quasi.span.start,
+            form: None,
+        },
     });
     for (index, expression) in tagged.quasi.expressions.iter().enumerate() {
         args.push(lower_indexed_call_argument(
             expression,
+            indexed_report_site(expression),
             false,
             index + 1,
             source,
@@ -7380,6 +7384,7 @@ fn lower_indexed_call_arguments(
             match argument {
                 oxc_ast::ast::Argument::SpreadElement(spread) => lower_indexed_call_argument(
                     &spread.argument,
+                    indexed_argument_report_site(argument),
                     true,
                     ordinal,
                     source,
@@ -7388,6 +7393,7 @@ fn lower_indexed_call_arguments(
                 ),
                 argument => lower_indexed_call_argument(
                     argument.to_expression(),
+                    indexed_argument_report_site(argument),
                     false,
                     ordinal,
                     source,
@@ -7403,6 +7409,7 @@ fn lower_indexed_call_arguments(
 /// One argument position, reported to `observe` at `ordinal` exactly once.
 fn lower_indexed_call_argument(
     expression: &Expression<'_>,
+    report: IndexedReportSite,
     spread: bool,
     ordinal: usize,
     source: &str,
@@ -7438,7 +7445,7 @@ fn lower_indexed_call_argument(
         literal_mode: indexed_literal_mode(Some(expression)),
         context_sensitive: indexed_context_sensitive(Some(expression)),
         function_return_source: None,
-        return_point: indexed_argument_return_point(expression),
+        report,
     }
 }
 
@@ -7453,31 +7460,113 @@ fn indexed_call_report_point(callee: &Expression<'_>) -> u32 {
     }
 }
 
-/// Where the checker reports a failure of an argument's returned value
-/// (`elaborateArrowFunction`): the returned expression of an arrow function
-/// whose body is an expression and none of whose parameters is annotated,
-/// through parentheses around the argument.
-fn indexed_argument_return_point(mut expression: &Expression<'_>) -> Option<u32> {
+/// Where the checker reports a relation failure of one call argument: the
+/// argument node's start — a spread's `...` — and, for an argument that is
+/// not a spread, its expression's elaborated form.
+fn indexed_argument_report_site(argument: &oxc_ast::ast::Argument<'_>) -> IndexedReportSite {
+    match argument {
+        oxc_ast::ast::Argument::SpreadElement(spread) => IndexedReportSite {
+            point: spread.span.start,
+            form: None,
+        },
+        argument => indexed_report_site(argument.to_expression()),
+    }
+}
+
+/// Where the checker reports a relation failure of `expression`'s value,
+/// and the authored form it elaborates the failure into (`elaborateError`):
+/// an arrow function whose body is an expression and none of whose
+/// parameters is annotated (`elaborateArrowFunction`), an object literal
+/// (`elaborateObjectLiteral`) or an array literal (`elaborateArrayLiteral`),
+/// through parentheses.
+fn indexed_report_site(expression: &Expression<'_>) -> IndexedReportSite {
+    IndexedReportSite {
+        point: expression.span().start,
+        form: indexed_elaboration_form(expression),
+    }
+}
+
+fn indexed_elaboration_form(mut expression: &Expression<'_>) -> Option<IndexedElaborationForm> {
     while let Expression::ParenthesizedExpression(parenthesized) = expression {
         expression = &parenthesized.expression;
     }
-    let Expression::ArrowFunctionExpression(arrow) = expression else {
-        return None;
-    };
-    if arrow
-        .params
-        .items
-        .iter()
-        .any(|param| param.type_annotation.is_some())
-        || arrow
-            .params
-            .rest
-            .as_ref()
-            .is_some_and(|rest| rest.type_annotation.is_some())
-    {
-        return None;
+    match expression {
+        Expression::ArrowFunctionExpression(arrow) => {
+            if arrow
+                .params
+                .items
+                .iter()
+                .any(|param| param.type_annotation.is_some())
+                || arrow
+                    .params
+                    .rest
+                    .as_ref()
+                    .is_some_and(|rest| rest.type_annotation.is_some())
+            {
+                return None;
+            }
+            arrow
+                .get_expression()
+                .map(|body| IndexedElaborationForm::Arrow(Box::new(indexed_report_site(body))))
+        }
+        Expression::ObjectExpression(object) => {
+            let mut properties = Vec::with_capacity(object.properties.len());
+            for property in &object.properties {
+                let oxc_ast::ast::ObjectPropertyKind::ObjectProperty(property) = property else {
+                    return Some(IndexedElaborationForm::Unmodelled);
+                };
+                let name: Arc<str> = match &property.key {
+                    oxc_ast::ast::PropertyKey::StaticIdentifier(identifier) => {
+                        Arc::from(identifier.name.as_str())
+                    }
+                    oxc_ast::ast::PropertyKey::StringLiteral(literal) if !property.computed => {
+                        Arc::from(literal.value.as_str())
+                    }
+                    _ => return Some(IndexedElaborationForm::Unmodelled),
+                };
+                let value = (property.kind == oxc_ast::ast::PropertyKind::Init
+                    && !property.method
+                    && !property.shorthand)
+                    .then(|| indexed_report_site(&property.value));
+                properties.push(IndexedElaboratedProperty {
+                    name,
+                    point: property.key.span().start,
+                    value,
+                });
+            }
+            Some(IndexedElaborationForm::Object(Arc::from(
+                properties.into_boxed_slice(),
+            )))
+        }
+        Expression::ArrayExpression(array) => {
+            let mut elements = Vec::with_capacity(array.elements.len());
+            for element in &array.elements {
+                match element {
+                    oxc_ast::ast::ArrayExpressionElement::SpreadElement(_)
+                    | oxc_ast::ast::ArrayExpressionElement::Elision(_) => {
+                        return Some(IndexedElaborationForm::Unmodelled)
+                    }
+                    element => elements.push(indexed_report_site(element.to_expression())),
+                }
+            }
+            Some(IndexedElaborationForm::Array(Arc::from(
+                elements.into_boxed_slice(),
+            )))
+        }
+        Expression::TSAsExpression(assertion)
+            if matches!(
+                &assertion.type_annotation,
+                oxc_ast::ast::TSType::TSTypeReference(reference)
+                    if matches!(&reference.type_name, oxc_ast::ast::TSTypeName::IdentifierReference(name) if name.name == "const")
+            ) =>
+        {
+            Some(IndexedElaborationForm::Unmodelled)
+        }
+        Expression::AssignmentExpression(_) | Expression::SequenceExpression(_) => {
+            Some(IndexedElaborationForm::Unmodelled)
+        }
+        _ => None,
     }
-    arrow.get_expression().map(|body| body.span().start)
 }
 
 fn lower_indexed_explicit_type_arguments(

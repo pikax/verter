@@ -165,9 +165,9 @@ mod signature_predicate;
 pub use signature_predicate::{PredicateSubject, SignaturePredicate};
 mod checker_diagnostic;
 pub use checker_diagnostic::{
-    CheckerDiagnostic, CheckerDiagnosticArguments, CheckerDiagnosticCode,
-    CheckerDiagnosticOccurrence, CheckerDiagnosticOperation, CheckerDiagnosticRecipe,
-    CheckerDiagnosticSubject, RecoveryBasis,
+    CheckerDiagnostic, CheckerDiagnosticArguments, CheckerDiagnosticChainLine,
+    CheckerDiagnosticCode, CheckerDiagnosticOccurrence, CheckerDiagnosticOperation,
+    CheckerDiagnosticRecipe, CheckerDiagnosticSubject, RecoveryBasis,
 };
 pub(crate) use checker_diagnostic::{CheckerDiagnosticPrinter, CheckerDiagnosticSite};
 /// The checker compatibility policy: the limits at which the checker gives up

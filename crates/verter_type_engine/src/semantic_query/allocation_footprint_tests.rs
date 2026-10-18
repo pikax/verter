@@ -131,14 +131,17 @@ fn slice_growth<T>(count: usize) -> usize {
 struct NoTypes;
 
 impl crate::semantic_query::CheckerDiagnosticPrinter for NoTypes {
-    fn diagnostic_type(&self, _: SemanticNodeId) -> String {
-        unreachable!("the message has no type argument")
-    }
     fn relation_operands(&self, _: SemanticNodeId, _: SemanticNodeId) -> (String, String) {
         unreachable!("the message has no type argument")
     }
-    fn missing_properties(&self, _: SemanticNodeId, _: SemanticNodeId) -> Option<Vec<String>> {
-        unreachable!("the message lists no property")
+    fn relation_failure(
+        &self,
+        _: SemanticNodeId,
+        _: SemanticNodeId,
+        _: crate::semantic_query::CheckerDiagnostic,
+        _: &verter_type_expr::IndexedReportSite,
+    ) -> Option<Vec<crate::semantic_query::CheckerDiagnosticOccurrence>> {
+        unreachable!("the message reports no relation")
     }
 }
 
@@ -168,6 +171,7 @@ fn a_flow_return_is_charged_for_its_nested_backing() {
             recipe
                 .bind(&site, &NoTypes)
                 .expect("the site names the call")
+                .remove(0)
         })
         .collect();
     let long_key: Arc<str> = Arc::from("k".repeat(TEXT));

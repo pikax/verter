@@ -1081,6 +1081,35 @@ export function eg1() { return con<"a">("b"); }
 export function cc() { return [con(1), con(true)]; }
 export function c3() { return con(1); }
 export function om() { return o.m(); }
+declare function ov3(f: (x: string) => string): void;
+declare function ov3(f: (x: string) => string, b: string, c: string): void;
+declare function ovc(f: (x: string) => number, n: number): void;
+declare function ovc(f: (x: number) => boolean, n: string): void;
+declare function lit(x: { a: number; b: string }): void;
+declare function lit2(x: { color: number }): void;
+declare function nested(x: { a: { b: number } }): void;
+declare const ob2: { a: { b: string } };
+declare function arr(x: number[]): void;
+declare function cbu(f: (() => number) | ((x: string) => boolean)): void;
+declare function two2(a: number, b: number): number;
+export function gap() { return ov3((x) => x, "b"); }
+export function lo() { return ovc((x) => "s", "n"); }
+export function lo2() { return ovc((x) => x, true); }
+export function el() { return lit({ a: "x", b: 1 }); }
+export function ex() { return lit({ a: 1, b: "x", c: 1 }); }
+export function sg() { return lit2({ colour: 1 }); }
+export function np() { return nested(ob2); }
+export function ae() { return arr(["a"]); }
+export function ur() { return cbu(() => "s"); }
+export function cbb() { return cb(() => { return "s"; }); }
+export function ts1() { return two2(...[1, "bad"] as const); }
+export function ts2() { return one(...([] as const), 1); }
+export function ts3() { return one(...["a", "b"] as const); }
+export function un1() { enum Local { K = 1 } return one(Local); }
+declare enum E { A, B }
+declare function sb(x: string | boolean): void;
+export function en() { return one(E.A); }
+export function bu() { return sb(1); }
 "#;
 
 /// A call its only candidate does not accept continues with that
@@ -1128,25 +1157,30 @@ fn a_call_its_only_candidate_rejects_answers_the_checkers_recovery() {
 
 /// The diagnostics riding each function's answer, through the public
 /// audited flow-return boundary, printed as `tsc --pretty false` prints
-/// the first line of each — `(line,col): error TS<code>: <message>` — in
-/// its order. Every expected line is TypeScript 7.0.2's on this fixture,
-/// identical with `strictNullChecks` off.
+/// each — `(line,col): error TS<code>: <message>`, then its message chain
+/// indented two spaces per level — in its order. Every expected line is
+/// TypeScript 7.0.2's on this fixture, identical with `strictNullChecks`
+/// off.
 ///
-/// The positions are the checker's: an argument's start for TS2345, the
-/// first argument past the candidate's arity for too many arguments, the
-/// callee — a property access's NAME — for too few, and the returned
-/// expression of an arrow callback whose return is what fails (TS2322,
-/// `elaborateArrowFunction`). A literal argument prints as its base
-/// primitive unless the parameter could hold a literal (`"b"` against
-/// `"a"`).
+/// The positions are the checker's: an argument's start for TS2345 (a
+/// spread's `...` for every argument it expands to), the first argument
+/// past the candidates' arity for too many arguments, the callee — a
+/// property access's NAME — for too few and for TS2575, and the part of an
+/// authored argument the failure is elaborated into: an arrow callback's
+/// returned expression, an object literal's property name, an array
+/// literal's element. TS2769 is reported where its last overload's error
+/// is, with that error below it. A literal argument prints as its base
+/// primitive, and an enum member as its enum, unless the parameter could
+/// hold a literal (`"b"` against `"a"`, `1` against `string | boolean`,
+/// whose `boolean` the checker holds as `true | false`).
 ///
-/// One cached call result serves two call sites (`con(1)` in `c1` and
-/// `c3`): each reports at its own call, and two failing calls of one body
-/// (`cc`) report in source order.
+/// Two calls of one callee with equal arguments (`con(1)` in `c1` and
+/// `c3`) each report at their own call, and two failing calls of one body
+/// (`cc`) report in source order; a warm read serves the same occurrences.
 #[test]
 fn call_diagnostics_carry_the_checkers_code_message_position_and_order() {
     let rows: &[(&str, &[&str])] = &[
-        ("tu", &["(19,37): error TS2345: Argument of type '((x: unknown) => x is A) | ((x: unknown) => x is B)' is not assignable to parameter of type '(x: unknown) => x is A'."]),
+        ("tu", &["(19,37): error TS2345: Argument of type '((x: unknown) => x is A) | ((x: unknown) => x is B)' is not assignable to parameter of type '(x: unknown) => x is A'.\n  Type '(x: unknown) => x is B' is not assignable to type '(x: unknown) => x is A'.\n    Type predicate 'x is B' is not assignable to 'x is A'.\n      Property 'a' is missing in type 'B' but required in type 'A'."]),
         ("tab", &["(20,63): error TS2741: Property 'a' is missing in type '{ b: 1; }' but required in type '{ a: 1; }'."]),
         ("o1", &["(21,44): error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'."]),
         ("o2", &["(22,31): error TS2554: Expected 1 arguments, but got 0."]),
@@ -1167,6 +1201,26 @@ fn call_diagnostics_carry_the_checkers_code_message_position_and_order() {
         ),
         ("c3", &["(34,35): error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'."]),
         ("om", &["(35,33): error TS2554: Expected 1 arguments, but got 0."]),
+        ("gap", &["(47,32): error TS2575: No overload expects 2 arguments, but overloads do exist that expect either 1 or 3 arguments."]),
+        ("lo", &["(48,42): error TS2769: No overload matches this call.\n  The last overload gave the following error.\n    Type 'string' is not assignable to type 'boolean'."]),
+        (
+            "el",
+            &[
+                "(50,37): error TS2322: Type 'string' is not assignable to type 'number'.",
+                "(50,45): error TS2322: Type 'number' is not assignable to type 'string'.",
+            ],
+        ),
+        ("ex", &["(51,51): error TS2353: Object literal may only specify known properties, and 'c' does not exist in type '{ a: number; b: string; }'."]),
+        ("sg", &["(52,38): error TS2561: Object literal may only specify known properties, but 'colour' does not exist in type '{ color: number; }'. Did you mean to write 'color'?"]),
+        ("np", &["(53,38): error TS2345: Argument of type '{ a: { b: string; }; }' is not assignable to parameter of type '{ a: { b: number; }; }'.\n  The types of 'a.b' are incompatible between these types.\n    Type 'string' is not assignable to type 'number'."]),
+        ("ae", &["(54,36): error TS2322: Type 'string' is not assignable to type 'number'."]),
+        ("ur", &["(55,41): error TS2322: Type 'string' is not assignable to type 'number | boolean'."]),
+        ("cbb", &["(56,35): error TS2345: Argument of type '() => string' is not assignable to parameter of type '() => number'.\n  Type 'string' is not assignable to type 'number'."]),
+        ("ts1", &["(57,37): error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'."]),
+        ("ts2", &["(58,54): error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'."]),
+        ("ts3", &["(59,36): error TS2554: Expected 1 arguments, but got 2."]),
+        ("en", &["(63,35): error TS2345: Argument of type 'E' is not assignable to parameter of type 'string'."]),
+        ("bu", &["(64,34): error TS2345: Argument of type '1' is not assignable to parameter of type 'string | boolean'."]),
     ];
     let host = host_with(CALL_RECOVERY);
     let mut mismatches = Vec::new();
@@ -1189,6 +1243,33 @@ fn call_diagnostics_carry_the_checkers_code_message_position_and_order() {
         }
     }
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
+/// A diagnostic whose position the call's route cannot establish is not
+/// reported, never moved to another position. TypeScript 7.0.2 reports
+/// TS2769 for `lo2` at the callback's returned `x` — its last overload's
+/// FIRST failing argument — where this route rejects that overload at the
+/// later `true` before typing the callback; and TS2345 for `un1`'s
+/// argument, which the route cannot type, while the call still answers its
+/// lone signature's declared `number`.
+#[test]
+fn a_diagnostic_the_route_cannot_place_is_not_reported() {
+    let host = host_with(CALL_RECOVERY);
+    for root in [STRICT_ROOT, LOOSE_ROOT] {
+        assert_prints(&host, root, "un1", "number");
+        for function in ["lo2", "un1"] {
+            assert_eq!(
+                super::signature_predicate_inference_tests::checker_report(
+                    &host,
+                    root,
+                    function,
+                    CALL_RECOVERY,
+                ),
+                Vec::<String>::new(),
+                "`{function}` in {root}"
+            );
+        }
+    }
 }
 
 const LIB_VALUE_READS: &str = r#"

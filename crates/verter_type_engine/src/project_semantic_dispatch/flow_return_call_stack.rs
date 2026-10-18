@@ -801,11 +801,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             span,
             crate::semantic_query::CheckerDiagnosticSite {
                 operation_start: Some(call.report_point),
-                argument_starts: call.args.iter().map(|argument| argument.point).collect(),
-                argument_return_starts: call
+                arguments: call
                     .args
                     .iter()
-                    .map(|argument| argument.return_point)
+                    .map(|argument| argument.report.clone())
                     .collect(),
             },
         );
