@@ -984,7 +984,13 @@ impl VerterHost {
         if entries.is_empty() {
             None
         } else {
-            Some(crate::resolver_core::FallthroughPropOverrideSet { entries })
+            // The engine's builder still owns every entry node; the set takes
+            // its own roots before the engine closes.
+            let roots = engine
+                .builder()
+                .root_nodes(entries.iter().map(|entry| entry.node))
+                .ok()?;
+            Some(crate::resolver_core::FallthroughPropOverrideSet { entries, roots })
         }
     }
 

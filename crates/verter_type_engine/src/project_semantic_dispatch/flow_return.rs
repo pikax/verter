@@ -1689,15 +1689,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// Execute one indexed semantic call and return only a complete admitted
-    /// selected or genuine-dynamic value node.
-    pub fn execute_indexed_resolve_call(
-        &self,
-        key: crate::semantic_query::ResolveCallKey,
-    ) -> Option<crate::semantic_query::SemanticNodeId> {
-        self.execute_indexed_resolve_call_with_flow_hold(key, false)
-            .0
-            .map(|value| value.node)
+    construction_ordinal_seam! {
+        /// Execute one indexed semantic call and return only a complete admitted
+        /// selected or genuine-dynamic value node.
+        fn execute_indexed_resolve_call(
+            &self,
+            key: crate::semantic_query::ResolveCallKey,
+        ) -> Option<crate::semantic_query::SemanticNodeId> {
+            self.execute_indexed_resolve_call_with_flow_hold(key, false)
+                .0
+                .map(|value| value.node)
+        }
     }
 
     /// The flow-aware half of [`Self::execute_indexed_resolve_call`]: when
@@ -1750,16 +1752,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// Evaluate parsed indexed expression IR directly to a semantic node.
-    /// Calls route only through `ResolveCall`; a non-result is a typed miss
-    /// without a scanner/raw-expression fallback.
-    pub fn evaluate_indexed_value_expression_node(
-        &self,
-        canonical: &str,
-        owner: verter_type_expr::TopLevelOwnerId,
-        expression: &verter_type_expr::IndexedValueExpression,
-    ) -> Option<crate::semantic_query::SemanticNodeId> {
-        self.evaluate_indexed_value_expression_node_inner(canonical, owner, expression, true)
+    construction_ordinal_seam! {
+        /// Evaluate parsed indexed expression IR directly to a semantic node.
+        /// Calls route only through `ResolveCall`; a non-result is a typed miss
+        /// without a scanner/raw-expression fallback.
+        fn evaluate_indexed_value_expression_node(
+            &self,
+            canonical: &str,
+            owner: verter_type_expr::TopLevelOwnerId,
+            expression: &verter_type_expr::IndexedValueExpression,
+        ) -> Option<crate::semantic_query::SemanticNodeId> {
+            self.evaluate_indexed_value_expression_node_inner(canonical, owner, expression, true)
+        }
     }
 
     /// A TYPE-LEVEL read of an indexed expression — a declaration's
@@ -2254,39 +2258,41 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         )
     }
 
-    /// Member `name` of the value `object` an indexed expression evaluated
-    /// (`f().x`, the callee of `b.m().m()`): the shared `ProjectPath {
-    /// Navigate }` member walk, a declaration's self-reference read as the
-    /// declaration it names. None when the member does not project.
-    pub fn indexed_member_value(
-        &self,
-        canonical: &str,
-        object: crate::semantic_query::SemanticNodeId,
-        name: &Arc<str>,
-    ) -> Option<crate::semantic_query::SemanticNodeId> {
-        let object = self.self_reference_declaration(object).unwrap_or(object);
-        let _demand_scope =
-            super::LexicalDemandScopeGuard::push(&self.lexical_demand_scope, Arc::from(canonical));
-        let path: verter_type_expr::OwnedSlice<crate::semantic_query::PathSegment> =
-            verter_type_expr::OwnedSlice::from([crate::semantic_query::PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier(Arc::clone(name)),
-            )]);
-        match self.execute_type_node(crate::semantic_query::SemanticQueryKey::ProjectPath {
-            base: object,
-            path,
-            context: crate::semantic_query::ProjectionReductionContext::published(
-                crate::semantic_query::ProjectionMode::Navigate,
-            ),
-        }) {
-            crate::semantic_query::QueryResult::Value(output)
-                if !matches!(
-                    self.graph().node_data(output.value).as_deref(),
-                    Some(SemanticNodeData::Opaque(_))
-                ) =>
-            {
-                Some(output.value)
+    construction_ordinal_seam! {
+        /// Member `name` of the value `object` an indexed expression evaluated
+        /// (`f().x`, the callee of `b.m().m()`): the shared `ProjectPath {
+        /// Navigate }` member walk, a declaration's self-reference read as the
+        /// declaration it names. None when the member does not project.
+        fn indexed_member_value(
+            &self,
+            canonical: &str,
+            object: crate::semantic_query::SemanticNodeId,
+            name: &Arc<str>,
+        ) -> Option<crate::semantic_query::SemanticNodeId> {
+            let object = self.self_reference_declaration(object).unwrap_or(object);
+            let _demand_scope =
+                super::LexicalDemandScopeGuard::push(&self.lexical_demand_scope, Arc::from(canonical));
+            let path: verter_type_expr::OwnedSlice<crate::semantic_query::PathSegment> =
+                verter_type_expr::OwnedSlice::from([crate::semantic_query::PathSegment::Member(
+                    crate::semantic_query::PropertyKey::identifier(Arc::clone(name)),
+                )]);
+            match self.execute_type_node(crate::semantic_query::SemanticQueryKey::ProjectPath {
+                base: object,
+                path,
+                context: crate::semantic_query::ProjectionReductionContext::published(
+                    crate::semantic_query::ProjectionMode::Navigate,
+                ),
+            }) {
+                crate::semantic_query::QueryResult::Value(output)
+                    if !matches!(
+                        self.graph().node_data(output.value).as_deref(),
+                        Some(SemanticNodeData::Opaque(_))
+                    ) =>
+                {
+                    Some(output.value)
+                }
+                _ => None,
             }
-            _ => None,
         }
     }
 
@@ -2655,80 +2661,82 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// The ONE sealed function-return consumer entry: routes the fact's
-    /// [`verter_type_expr::facts::FunctionReturnSource`] to its producer.
-    /// `Declared` lowers through the memoized locator rail; `Flow`
-    /// constructs and executes the [`FlowReturnKey`] through
-    /// [`Self::flow_return_key_for`] (never the `None → miss_node` arm);
-    /// `Absent` reports the absent carrier.
-    pub fn execute_function_return_source(
-        &self,
-        source: &verter_type_expr::facts::FunctionReturnSource,
-        scope_canonical_id: &str,
-    ) -> FunctionReturnNode {
-        match source {
-            verter_type_expr::facts::FunctionReturnSource::Declared(locator) => {
-                match self
-                    .raise_body_slot(locator.slot(), scope_canonical_id)
-                    .at_optional_boundary()
-                {
-                    Some(hot) => FunctionReturnNode::Declared(hot),
-                    None => FunctionReturnNode::DeclaredMiss,
-                }
-            }
-            verter_type_expr::facts::FunctionReturnSource::Flow(identity) => {
-                // A DEGRADED SUCCESS stays usable — the consumer keeps
-                // the value (interning a miss would be the opposite
-                // collapse). The admission rails are NOT folded here:
-                // the `FlowReturn` build's own output carries them (the
-                // finalizer-outcome adapter in `build_flow_return`), and
-                // the universal read funnel propagates them into this
-                // enclosing composition when the read returns.
-                let key = self.flow_return_key_for(identity);
-                let read = self.observe_flow_return_value(key.clone());
-                let independent = match read.value() {
-                    FlowReturnStep::Complete(result)
-                        if result.independent_member(&key).is_some() =>
+    construction_ordinal_seam! {
+        /// The ONE sealed function-return consumer entry: routes the fact's
+        /// [`verter_type_expr::facts::FunctionReturnSource`] to its producer.
+        /// `Declared` lowers through the memoized locator rail; `Flow`
+        /// constructs and executes the [`FlowReturnKey`] through
+        /// [`Self::flow_return_key_for`] (never the `None → miss_node` arm);
+        /// `Absent` reports the absent carrier.
+        fn execute_function_return_source(
+            &self,
+            source: &verter_type_expr::facts::FunctionReturnSource,
+            scope_canonical_id: &str,
+        ) -> FunctionReturnNode {
+            match source {
+                verter_type_expr::facts::FunctionReturnSource::Declared(locator) => {
+                    match self
+                        .raise_body_slot(locator.slot(), scope_canonical_id)
+                        .at_optional_boundary()
                     {
-                        Some(result.clone())
-                    }
-                    _ => None,
-                };
-                let step = if let Some(result) = independent {
-                    match read.adopt_independent_member(self, &key) {
-                        Ok(_) => FlowReturnStep::Complete(result),
-                        Err(abort) => FlowReturnStep::Aborted(abort),
-                    }
-                } else {
-                    match read.adopt(self) {
-                        Ok(step) => step,
-                        Err(abort) => FlowReturnStep::Aborted(abort),
-                    }
-                };
-                match step {
-                    FlowReturnStep::Aborted(abort) => FunctionReturnNode::Aborted(abort),
-                    FlowReturnStep::Complete(result) => FunctionReturnNode::Flow(result),
-                    FlowReturnStep::NoValue(failure) => FunctionReturnNode::NoValue(failure),
-                    // A hold surfacing at a consumer is a demand reentering
-                    // its own in-flight component: undecided here, ReturnOnly.
-                    // The hold produces NO memo read, so the universal read
-                    // funnel cannot carry its rails: the consumption point
-                    // marks the enclosing build itself — an answer composed
-                    // around an undecided interior must not warm.
-                    FlowReturnStep::Hold(_) => {
-                        crate::request_context::mark_request_result_partial_from_read_with(
-                            NO_VALUE_REASON_CLASS,
-                        );
-                        self.fold_into_top_build_local_taint_with(
-                            true,
-                            true,
-                            NO_VALUE_REASON_CLASS,
-                        );
-                        FunctionReturnNode::NoValue(FlowReturnFailure::Unresolved)
+                        Some(hot) => FunctionReturnNode::Declared(hot),
+                        None => FunctionReturnNode::DeclaredMiss,
                     }
                 }
+                verter_type_expr::facts::FunctionReturnSource::Flow(identity) => {
+                    // A DEGRADED SUCCESS stays usable — the consumer keeps
+                    // the value (interning a miss would be the opposite
+                    // collapse). The admission rails are NOT folded here:
+                    // the `FlowReturn` build's own output carries them (the
+                    // finalizer-outcome adapter in `build_flow_return`), and
+                    // the universal read funnel propagates them into this
+                    // enclosing composition when the read returns.
+                    let key = self.flow_return_key_for(identity);
+                    let read = self.observe_flow_return_value(key.clone());
+                    let independent = match read.value() {
+                        FlowReturnStep::Complete(result)
+                            if result.independent_member(&key).is_some() =>
+                        {
+                            Some(result.clone())
+                        }
+                        _ => None,
+                    };
+                    let step = if let Some(result) = independent {
+                        match read.adopt_independent_member(self, &key) {
+                            Ok(_) => FlowReturnStep::Complete(result),
+                            Err(abort) => FlowReturnStep::Aborted(abort),
+                        }
+                    } else {
+                        match read.adopt(self) {
+                            Ok(step) => step,
+                            Err(abort) => FlowReturnStep::Aborted(abort),
+                        }
+                    };
+                    match step {
+                        FlowReturnStep::Aborted(abort) => FunctionReturnNode::Aborted(abort),
+                        FlowReturnStep::Complete(result) => FunctionReturnNode::Flow(result),
+                        FlowReturnStep::NoValue(failure) => FunctionReturnNode::NoValue(failure),
+                        // A hold surfacing at a consumer is a demand reentering
+                        // its own in-flight component: undecided here, ReturnOnly.
+                        // The hold produces NO memo read, so the universal read
+                        // funnel cannot carry its rails: the consumption point
+                        // marks the enclosing build itself — an answer composed
+                        // around an undecided interior must not warm.
+                        FlowReturnStep::Hold(_) => {
+                            crate::request_context::mark_request_result_partial_from_read_with(
+                                NO_VALUE_REASON_CLASS,
+                            );
+                            self.fold_into_top_build_local_taint_with(
+                                true,
+                                true,
+                                NO_VALUE_REASON_CLASS,
+                            );
+                            FunctionReturnNode::NoValue(FlowReturnFailure::Unresolved)
+                        }
+                    }
+                }
+                verter_type_expr::facts::FunctionReturnSource::Absent => FunctionReturnNode::Absent,
             }
-            verter_type_expr::facts::FunctionReturnSource::Absent => FunctionReturnNode::Absent,
         }
     }
 
@@ -2897,6 +2905,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         false
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn flow_return_member_projection(
         &self,
         callee_arg: SemanticNodeId,
@@ -3109,62 +3118,64 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         })
     }
 
-    /// The whole-function `FlowReturn` authority. Every whole-function
-    /// return demand enters here with the full key:
-    ///
-    /// 1. **Reentry intercept** — the exact key is already in flight on
-    ///    this transaction ⇒ record the scoped assumption edge (a
-    ///    coinductive hold — neither a contributor nor a failure) and
-    ///    return the `Hold` sentinel.
-    /// 2. **Warm read** — a validated published `Complete` result
-    ///    (carrier-validated).
-    /// 3. **Transaction reuse** — the key already completed on this
-    ///    transaction as a proven inline SCC root whose reads were
-    ///    recorded; they, and its refusal if any, are replayed into the
-    ///    scopes live now (see [`Self::reusable_completed_flow_member`]).
-    /// 4. **Instantiation transfer** — an instantiated key whose
-    ///    uninstantiated answer is already in hand (warm, or reusable on
-    ///    this transaction) is that answer under the key's substitution,
-    ///    never a re-evaluation of the body (see
-    ///    [`Self::instantiated_from_uninstantiated`]).
-    /// 5. **Cold compute** — the machinery ROOT goes through the family
-    ///    singleflight (`execute(FlowReturn)` → `build_flow_return`); a
-    ///    nested flow evaluation computes INLINE on the transaction (its
-    ///    publish is batched at its SCC's close and drained by the root).
-    pub fn execute_flow_return(&self, key: FlowReturnKey) -> FlowReturnStep {
-        use crate::semantic_query::ExecutionAbort;
-        let _validity = crate::request_context::ExecutionValidityScope::enter();
-        let _quality = crate::request_context::ColdComputeCompletenessScope::enter();
-        if self.snapshot.flags().is_cancelled() {
-            crate::request_context::observe_execution_abort(ExecutionAbort::Cancelled);
-        }
-        if let Some(abort) = crate::request_context::current_execution_abort() {
-            return FlowReturnStep::Aborted(abort);
-        }
-        let step = self.execute_flow_return_validated(key);
-        if self.snapshot.flags().is_cancelled() {
-            crate::request_context::observe_execution_abort(ExecutionAbort::Cancelled);
-        }
-        match crate::request_context::current_execution_abort() {
-            Some(abort) => FlowReturnStep::Aborted(abort),
-            None => match step {
-                FlowReturnStep::Complete(result) => {
-                    // Replayed and transferred values carry their own fact
-                    // status even when their receipt only suppresses reuse.
-                    // A consumer retaining the value adopts that status.
-                    match result.fact().status() {
-                        crate::semantic_query::FactStatus::Complete => {}
-                        crate::semantic_query::FactStatus::Approximate(causes, _)
-                        | crate::semantic_query::FactStatus::Unavailable(causes) => {
-                            self.fold_cache_read_rails(true, true, causes.get());
+    construction_ordinal_seam! {
+        /// The whole-function `FlowReturn` authority. Every whole-function
+        /// return demand enters here with the full key:
+        ///
+        /// 1. **Reentry intercept** — the exact key is already in flight on
+        ///    this transaction ⇒ record the scoped assumption edge (a
+        ///    coinductive hold — neither a contributor nor a failure) and
+        ///    return the `Hold` sentinel.
+        /// 2. **Warm read** — a validated published `Complete` result
+        ///    (carrier-validated).
+        /// 3. **Transaction reuse** — the key already completed on this
+        ///    transaction as a proven inline SCC root whose reads were
+        ///    recorded; they, and its refusal if any, are replayed into the
+        ///    scopes live now (see [`Self::reusable_completed_flow_member`]).
+        /// 4. **Instantiation transfer** — an instantiated key whose
+        ///    uninstantiated answer is already in hand (warm, or reusable on
+        ///    this transaction) is that answer under the key's substitution,
+        ///    never a re-evaluation of the body (see
+        ///    [`Self::instantiated_from_uninstantiated`]).
+        /// 5. **Cold compute** — the machinery ROOT goes through the family
+        ///    singleflight (`execute(FlowReturn)` → `build_flow_return`); a
+        ///    nested flow evaluation computes INLINE on the transaction (its
+        ///    publish is batched at its SCC's close and drained by the root).
+        fn execute_flow_return(&self, key: FlowReturnKey) -> FlowReturnStep {
+            use crate::semantic_query::ExecutionAbort;
+            let _validity = crate::request_context::ExecutionValidityScope::enter();
+            let _quality = crate::request_context::ColdComputeCompletenessScope::enter();
+            if self.snapshot.flags().is_cancelled() {
+                crate::request_context::observe_execution_abort(ExecutionAbort::Cancelled);
+            }
+            if let Some(abort) = crate::request_context::current_execution_abort() {
+                return FlowReturnStep::Aborted(abort);
+            }
+            let step = self.execute_flow_return_validated(key);
+            if self.snapshot.flags().is_cancelled() {
+                crate::request_context::observe_execution_abort(ExecutionAbort::Cancelled);
+            }
+            match crate::request_context::current_execution_abort() {
+                Some(abort) => FlowReturnStep::Aborted(abort),
+                None => match step {
+                    FlowReturnStep::Complete(result) => {
+                        // Replayed and transferred values carry their own fact
+                        // status even when their receipt only suppresses reuse.
+                        // A consumer retaining the value adopts that status.
+                        match result.fact().status() {
+                            crate::semantic_query::FactStatus::Complete => {}
+                            crate::semantic_query::FactStatus::Approximate(causes, _)
+                            | crate::semantic_query::FactStatus::Unavailable(causes) => {
+                                self.fold_cache_read_rails(true, true, causes.get());
+                            }
                         }
+                        FlowReturnStep::Complete(result.with_observed_completeness(
+                            crate::request_context::current_cold_compute_completeness(),
+                        ))
                     }
-                    FlowReturnStep::Complete(result.with_observed_completeness(
-                        crate::request_context::current_cold_compute_completeness(),
-                    ))
-                }
-                other => other,
-            },
+                    other => other,
+                },
+            }
         }
     }
 
@@ -3220,31 +3231,33 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// The warm, carrier-validated memo read of `key` under this
-    /// dispatch's view: step (2) of [`Self::execute_flow_return`].
-    pub fn warm_flow_return_read(&self, key: &FlowReturnKey) -> Option<FlowReturnResult> {
-        if let Some(served) = self.graph().get_flow_return_result(self.ctx, key) {
-            return self.admits_served(&served.receipt).then_some(served.value);
+    construction_ordinal_seam! {
+        /// The warm, carrier-validated memo read of `key` under this
+        /// dispatch's view: step (2) of [`Self::execute_flow_return`].
+        fn warm_flow_return_read(&self, key: &FlowReturnKey) -> Option<FlowReturnResult> {
+            if let Some(served) = self.graph().get_flow_return_result(self.ctx, key) {
+                return self.admits_served(&served.receipt).then_some(served.value);
+            }
+            // A completed transaction member owns its recorded reads and refusal.
+            // Let transaction reuse replay them before consulting a publication
+            // retained by this dispatcher after the shared candidate was evicted.
+            if self.dispatch_txn.borrow().flow.results.contains(key) {
+                return None;
+            }
+            // A return inferred while lowering a locator can be newer than
+            // this dispatcher's pinned view. Its own published read has the
+            // same edit fence, priced receipt and fact replay as other queries;
+            // use it when a signature utility demands that return again.
+            let (read, carrier) = self.own_published_read(
+                &SemanticQueryKey::FlowReturn(Box::new(key.clone())),
+                super::cost_receipt::Nesting::InPlace,
+            )?;
+            let QueryResult::Value(SemanticQueryValue::FlowReturn(result)) = read.value else {
+                return None;
+            };
+            crate::fact_signature_helpers::ReadSetSignatureExt::bubble_via_tls(&carrier);
+            Some((*result).clone())
         }
-        // A completed transaction member owns its recorded reads and refusal.
-        // Let transaction reuse replay them before consulting a publication
-        // retained by this dispatcher after the shared candidate was evicted.
-        if self.dispatch_txn.borrow().flow.results.contains(key) {
-            return None;
-        }
-        // A return inferred while lowering a locator can be newer than
-        // this dispatcher's pinned view. Its own published read has the
-        // same edit fence, priced receipt and fact replay as other queries;
-        // use it when a signature utility demands that return again.
-        let (read, carrier) = self.own_published_read(
-            &SemanticQueryKey::FlowReturn(Box::new(key.clone())),
-            super::cost_receipt::Nesting::InPlace,
-        )?;
-        let QueryResult::Value(SemanticQueryValue::FlowReturn(result)) = read.value else {
-            return None;
-        };
-        crate::fact_signature_helpers::ReadSetSignatureExt::bubble_via_tls(&carrier);
-        Some((*result).clone())
     }
 
     /// The proven value of `key` when it already completed on this
@@ -3895,90 +3908,92 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         result.with_inferred_predicate(predicate)
     }
 
-    /// The final IDEMPOTENT pre-seal closure of a flow result: one
-    /// canonical re-close of the whole-return node, run exactly once per
-    /// close — after the component's fixed point, the post-convergence
-    /// literal widening, and the per-key substitution, and strictly
-    /// BEFORE `finalize_flow_demand` seals the value (the proof then
-    /// covers exactly the closed value). It never runs in a forbidden
-    /// position: it touches no flow-slice hash input, no raw-evidence
-    /// storage, no `MergedDecl` or other ordered merge carrier, no
-    /// already-sealed completion, and no display path.
-    ///
-    /// Scope is deliberately the TOP-LEVEL composite only. Spread programs
-    /// retain their immutable shared operands: projecting each inferred
-    /// prefix here would copy every inherited member at every call link.
-    /// The shared spread query materialises them at the consumer demand.
-    /// The join flow
-    /// construction derives is UNION-kinded, and "normalization normalizes
-    /// only the already-demanded semantic portion". A UNION top re-closes
-    /// through the canonical authority (flatten, lattice absorption,
-    /// structural `T | T = T`) — with an O(1) canonicality test first: a
-    /// top whose payload carries the at-rest `Canonical` origin category
-    /// was minted by a COMPLETE canonicalization — the canonical builder
-    /// refuses that stamp on incomplete evidence (exhausted compare
-    /// budget, dangling arm, undecided peek all mint
-    /// `CanonicalUnproven`) — so its list IS in canonical form (a
-    /// complete canonicalization is deterministic over immutable node
-    /// data) and the closure returns it unchanged WITHOUT re-running the
-    /// pipeline — no evidence deposit and no evidence-epoch advance on
-    /// the pure no-op path. Any other tag pays the full idempotent
-    /// re-close: `CanonicalUnproven` (so a budget-degraded list
-    /// resurfacing in a later request re-deposits its `incomplete`
-    /// evidence — ReturnOnly, never warm-classified), and a
-    /// canonical-form list that first interned under a bypass mint (the
-    /// first-wins tag).
-    ///
-    /// An INTERSECTION top passes through verbatim — but NOT because flow
-    /// cannot derive one. It can: the per-key substitution inside this
-    /// same close path rebuilds intersections (`substitute.rs`), and
-    /// predicate narrowing constructs one directly. The passthrough is
-    /// sound because every flow-derived intersection top is already
-    /// closed by its constructor — predicate narrowing and the
-    /// order-safe substitution arm route through the canonical
-    /// authority, while the possibly-callable substitution arm is an
-    /// overload-ORDERED carrier the commutative route must not reorder —
-    /// and it is checker-faithful: the pinned compiler preserves the
-    /// same duplicated intersection for the composed-generic case
-    /// (`declare function tag<T>(v: T): T & (() => void)` composed over
-    /// a function argument declaration-emits
-    /// `(() => void) & (() => void)`, measured against tsc 7.0.2).
-    /// Every other shape passes through verbatim.
-    ///
-    /// Canonicalization evidence deposits ambiently through the single
-    /// disposition funnel: inspected file self-roots reach the enclosing
-    /// build's memo entry, and an `Incomplete` comparison suppresses
-    /// warm admission (ReturnOnly) without altering the value.
-    ///
-    /// The closure runs `nullability` — the `null` / `undefined` algebra of
-    /// the key being sealed — so a top proven canonical under the other
-    /// algebra is re-closed rather than skipped.
-    pub fn close_flow_result_pre_seal(
-        &self,
-        result: FlowReturnResult,
-        nullability: verter_session_query::flow::policy::NullabilityPolicy,
-    ) -> FlowReturnResult {
-        let node = result.return_type();
-        let Some(data) = self.graph().node_data(node) else {
-            return result;
-        };
-        let SemanticNodeData::Union(members) = &*data else {
-            return result;
-        };
-        if members.origin_category()
-            == crate::semantic_query::composite::CompositeOriginCategory::Canonical(nullability)
-        {
-            // O(1) canonicality: a canonical-minted list is canonical form;
-            // re-closing it is the idempotence no-op — skip the pipeline.
-            return result;
+    construction_ordinal_seam! {
+        /// The final IDEMPOTENT pre-seal closure of a flow result: one
+        /// canonical re-close of the whole-return node, run exactly once per
+        /// close — after the component's fixed point, the post-convergence
+        /// literal widening, and the per-key substitution, and strictly
+        /// BEFORE `finalize_flow_demand` seals the value (the proof then
+        /// covers exactly the closed value). It never runs in a forbidden
+        /// position: it touches no flow-slice hash input, no raw-evidence
+        /// storage, no `MergedDecl` or other ordered merge carrier, no
+        /// already-sealed completion, and no display path.
+        ///
+        /// Scope is deliberately the TOP-LEVEL composite only. Spread programs
+        /// retain their immutable shared operands: projecting each inferred
+        /// prefix here would copy every inherited member at every call link.
+        /// The shared spread query materialises them at the consumer demand.
+        /// The join flow
+        /// construction derives is UNION-kinded, and "normalization normalizes
+        /// only the already-demanded semantic portion". A UNION top re-closes
+        /// through the canonical authority (flatten, lattice absorption,
+        /// structural `T | T = T`) — with an O(1) canonicality test first: a
+        /// top whose payload carries the at-rest `Canonical` origin category
+        /// was minted by a COMPLETE canonicalization — the canonical builder
+        /// refuses that stamp on incomplete evidence (exhausted compare
+        /// budget, dangling arm, undecided peek all mint
+        /// `CanonicalUnproven`) — so its list IS in canonical form (a
+        /// complete canonicalization is deterministic over immutable node
+        /// data) and the closure returns it unchanged WITHOUT re-running the
+        /// pipeline — no evidence deposit and no evidence-epoch advance on
+        /// the pure no-op path. Any other tag pays the full idempotent
+        /// re-close: `CanonicalUnproven` (so a budget-degraded list
+        /// resurfacing in a later request re-deposits its `incomplete`
+        /// evidence — ReturnOnly, never warm-classified), and a
+        /// canonical-form list that first interned under a bypass mint (the
+        /// first-wins tag).
+        ///
+        /// An INTERSECTION top passes through verbatim — but NOT because flow
+        /// cannot derive one. It can: the per-key substitution inside this
+        /// same close path rebuilds intersections (`substitute.rs`), and
+        /// predicate narrowing constructs one directly. The passthrough is
+        /// sound because every flow-derived intersection top is already
+        /// closed by its constructor — predicate narrowing and the
+        /// order-safe substitution arm route through the canonical
+        /// authority, while the possibly-callable substitution arm is an
+        /// overload-ORDERED carrier the commutative route must not reorder —
+        /// and it is checker-faithful: the pinned compiler preserves the
+        /// same duplicated intersection for the composed-generic case
+        /// (`declare function tag<T>(v: T): T & (() => void)` composed over
+        /// a function argument declaration-emits
+        /// `(() => void) & (() => void)`, measured against tsc 7.0.2).
+        /// Every other shape passes through verbatim.
+        ///
+        /// Canonicalization evidence deposits ambiently through the single
+        /// disposition funnel: inspected file self-roots reach the enclosing
+        /// build's memo entry, and an `Incomplete` comparison suppresses
+        /// warm admission (ReturnOnly) without altering the value.
+        ///
+        /// The closure runs `nullability` — the `null` / `undefined` algebra of
+        /// the key being sealed — so a top proven canonical under the other
+        /// algebra is re-closed rather than skipped.
+        fn close_flow_result_pre_seal(
+            &self,
+            result: FlowReturnResult,
+            nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        ) -> FlowReturnResult {
+            let node = result.return_type();
+            let Some(data) = self.graph().node_data(node) else {
+                return result;
+            };
+            let SemanticNodeData::Union(members) = &*data else {
+                return result;
+            };
+            if members.origin_category()
+                == crate::semantic_query::composite::CompositeOriginCategory::Canonical(nullability)
+            {
+                // O(1) canonicality: a canonical-minted list is canonical form;
+                // re-closing it is the idempotence no-op — skip the pipeline.
+                return result;
+            }
+            let members: Vec<crate::semantic_query::SemanticNodeId> = members.iter().copied().collect();
+            drop(data);
+            let closed = self.intern_normalized_union(&members, nullability);
+            if closed == node {
+                return result;
+            }
+            result.with_return_type(self.graph().as_ref(), closed)
         }
-        let members: Vec<crate::semantic_query::SemanticNodeId> = members.iter().copied().collect();
-        drop(data);
-        let closed = self.intern_normalized_union(&members, nullability);
-        if closed == node {
-            return result;
-        }
-        result.with_return_type(self.graph().as_ref(), closed)
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -5062,192 +5077,194 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         report
     }
 
-    /// The ONE finalization driver for one evaluated flow demand: the
-    /// central application of the evaluator's typed discharge report (in
-    /// the plan's deterministic work order), the replay of the
-    /// runtime-observed component convergence into the demand's own
-    /// observation log, the seal, and the finalizer. Runs ONLY after the
-    /// component fixed point, the literal widening, and the per-key
-    /// substitution — the proof covers exactly `result`.
-    ///
-    /// Returns `None` when the frame carries no installed demand (the
-    /// demand could not be planned): unproven, never warm.
-    pub fn finalize_flow_demand(
-        &self,
-        carrier: Option<&FlowDemandCarrier>,
-        discharge: Option<&super::dispatch_txn::flow_obligation_state::FlowDischargeReport>,
-        convergence: &ObservedFlowConvergence,
-        provenance: FlowEvaluationProvenance,
-        result: &FlowReturnResult,
-    ) -> Option<FlowSolveOutcome> {
-        use super::dispatch_txn::flow_obligation_state::FlowSealError;
-        let carrier = carrier?;
-        #[cfg(any(test, feature = "test-support"))]
-        let provenance = if self
-            .binding
-            .observers
-            .flow
-            .foreign_evaluation_evidence
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            let gate = self
+    construction_ordinal_seam! {
+        /// The ONE finalization driver for one evaluated flow demand: the
+        /// central application of the evaluator's typed discharge report (in
+        /// the plan's deterministic work order), the replay of the
+        /// runtime-observed component convergence into the demand's own
+        /// observation log, the seal, and the finalizer. Runs ONLY after the
+        /// component fixed point, the literal widening, and the per-key
+        /// substitution — the proof covers exactly `result`.
+        ///
+        /// Returns `None` when the frame carries no installed demand (the
+        /// demand could not be planned): unproven, never warm.
+        fn finalize_flow_demand(
+            &self,
+            carrier: Option<&FlowDemandCarrier>,
+            discharge: Option<&super::dispatch_txn::flow_obligation_state::FlowDischargeReport>,
+            convergence: &ObservedFlowConvergence,
+            provenance: FlowEvaluationProvenance,
+            result: &FlowReturnResult,
+        ) -> Option<FlowSolveOutcome> {
+            use super::dispatch_txn::flow_obligation_state::FlowSealError;
+            let carrier = carrier?;
+            #[cfg(any(test, feature = "test-support"))]
+            let provenance = if self
                 .binding
                 .observers
                 .flow
-                .foreign_evaluation_gate
-                .lock()
-                .expect("evaluation gate")
-                .take();
-            if let Some(gate) = gate {
-                gate.wait();
-                gate.wait();
-            }
-            super::dispatch_txn::flow_obligation_state::FlowEvaluationProvenance::new(
-                u64::MAX,
-                u64::MAX,
-                u64::MAX,
-                u64::MAX,
-            )
-        } else if self
-            .binding
-            .observers
-            .flow
-            .foreign_demand_provenance
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            // A same-store, same-generation, same-runtime token of ANOTHER
-            // demand: the freshness axes pass; the demand ordinal betrays
-            // it.
-            let (store_identity, request_generation, runtime_identity) =
-                carrier.provenance.freshness_axes();
-            super::dispatch_txn::flow_obligation_state::FlowEvaluationProvenance::new(
-                store_identity,
-                request_generation,
-                runtime_identity,
-                carrier.provenance.demand_ordinal() ^ 1,
-            )
-        } else {
-            provenance
-        };
-        #[cfg(any(test, feature = "test-support"))]
-        let unobserved_convergence;
-        #[cfg(any(test, feature = "test-support"))]
-        let convergence = if self
-            .binding
-            .observers
-            .flow
-            .unobserved_convergence
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            unobserved_convergence = ObservedFlowConvergence {
-                iterations: 0,
-                stable: true,
-            };
-            &unobserved_convergence
-        } else {
-            convergence
-        };
-        let plan = &carrier.plan;
-        let basis = plan.basis().clone();
-        let partial = |reason: FlowPartialReason| {
-            Some(super::flow_solve::flow_refusal_outcome(
-                basis, reason, result,
-            ))
-        };
-        // Provenance triangulation: the evaluation's evidence token must
-        // BE the installed demand carrier's own token (the demand-unique
-        // ordinal included), and the carrier's freshness axes must equal
-        // the dispatch's CURRENT mint — a value, report, or convergence
-        // claim from another demand, another store, or a stale request
-        // generation is a typed partial, never a proof.
-        let current = self.current_flow_evaluation_provenance();
-        if provenance != carrier.provenance
-            || carrier.provenance.freshness_axes() != current.freshness_axes()
-        {
-            return partial(FlowPartialReason::ForeignProvenance);
-        }
-        let mut txn = self.dispatch_txn.borrow_mut();
-        let runtime = &mut txn.obligations;
-        #[cfg(any(test, feature = "test-support"))]
-        let dropped_claim_report;
-        #[cfg(any(test, feature = "test-support"))]
-        let discharge = match discharge {
-            Some(report)
-                if self
+                .foreign_evaluation_evidence
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                let gate = self
                     .binding
                     .observers
                     .flow
-                    .drop_last_discharge_claim
-                    .load(std::sync::atomic::Ordering::Relaxed)
-                    && !report.entries().is_empty() =>
+                    .foreign_evaluation_gate
+                    .lock()
+                    .expect("evaluation gate")
+                    .take();
+                if let Some(gate) = gate {
+                    gate.wait();
+                    gate.wait();
+                }
+                super::dispatch_txn::flow_obligation_state::FlowEvaluationProvenance::new(
+                    u64::MAX,
+                    u64::MAX,
+                    u64::MAX,
+                    u64::MAX,
+                )
+            } else if self
+                .binding
+                .observers
+                .flow
+                .foreign_demand_provenance
+                .load(std::sync::atomic::Ordering::Relaxed)
             {
-                let entries = report.entries();
-                dropped_claim_report =
-                    super::dispatch_txn::flow_obligation_state::FlowDischargeReport::new(
-                        entries[..entries.len() - 1].to_vec(),
-                    );
-                Some(&dropped_claim_report)
+                // A same-store, same-generation, same-runtime token of ANOTHER
+                // demand: the freshness axes pass; the demand ordinal betrays
+                // it.
+                let (store_identity, request_generation, runtime_identity) =
+                    carrier.provenance.freshness_axes();
+                super::dispatch_txn::flow_obligation_state::FlowEvaluationProvenance::new(
+                    store_identity,
+                    request_generation,
+                    runtime_identity,
+                    carrier.provenance.demand_ordinal() ^ 1,
+                )
+            } else {
+                provenance
+            };
+            #[cfg(any(test, feature = "test-support"))]
+            let unobserved_convergence;
+            #[cfg(any(test, feature = "test-support"))]
+            let convergence = if self
+                .binding
+                .observers
+                .flow
+                .unobserved_convergence
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                unobserved_convergence = ObservedFlowConvergence {
+                    iterations: 0,
+                    stable: true,
+                };
+                &unobserved_convergence
+            } else {
+                convergence
+            };
+            let plan = &carrier.plan;
+            let basis = plan.basis().clone();
+            let partial = |reason: FlowPartialReason| {
+                Some(super::flow_solve::flow_refusal_outcome(
+                    basis, reason, result,
+                ))
+            };
+            // Provenance triangulation: the evaluation's evidence token must
+            // BE the installed demand carrier's own token (the demand-unique
+            // ordinal included), and the carrier's freshness axes must equal
+            // the dispatch's CURRENT mint — a value, report, or convergence
+            // claim from another demand, another store, or a stale request
+            // generation is a typed partial, never a proof.
+            let current = self.current_flow_evaluation_provenance();
+            if provenance != carrier.provenance
+                || carrier.provenance.freshness_axes() != current.freshness_axes()
+            {
+                return partial(FlowPartialReason::ForeignProvenance);
             }
-            other => other,
-        };
-        // The central report application: deterministic, in the plan's
-        // work order, every claim re-validated against its spec.
-        if let Some(report) = discharge {
-            if runtime
-                .apply_flow_discharge_report(carrier.handle, plan, report)
-                .is_err()
-            {
-                return partial(unproven_flow_reason(runtime, carrier.handle));
+            let mut txn = self.dispatch_txn.borrow_mut();
+            let runtime = &mut txn.obligations;
+            #[cfg(any(test, feature = "test-support"))]
+            let dropped_claim_report;
+            #[cfg(any(test, feature = "test-support"))]
+            let discharge = match discharge {
+                Some(report)
+                    if self
+                        .binding
+                        .observers
+                        .flow
+                        .drop_last_discharge_claim
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                        && !report.entries().is_empty() =>
+                {
+                    let entries = report.entries();
+                    dropped_claim_report =
+                        super::dispatch_txn::flow_obligation_state::FlowDischargeReport::new(
+                            entries[..entries.len() - 1].to_vec(),
+                        );
+                    Some(&dropped_claim_report)
+                }
+                other => other,
+            };
+            // The central report application: deterministic, in the plan's
+            // work order, every claim re-validated against its spec.
+            if let Some(report) = discharge {
+                if runtime
+                    .apply_flow_discharge_report(carrier.handle, plan, report)
+                    .is_err()
+                {
+                    return partial(unproven_flow_reason(runtime, carrier.handle));
+                }
             }
-        }
-        // Replay the observed component convergence: the runtime counts
-        // the iterations itself, so the sealed evidence comes from the
-        // runtime's own log, never from the caller. The count itself must
-        // come from the discharge driver's real observation — every close
-        // routes its root through the fixed point, so a zero here is not
-        // evidence at all: refuse it rather than fabricate an iteration.
-        if convergence.iterations == 0 {
-            return partial(FlowPartialReason::NonConverged);
-        }
-        for _ in 1..convergence.iterations {
-            if runtime
-                .observe_flow_iteration(carrier.handle, true)
-                .is_err()
-            {
+            // Replay the observed component convergence: the runtime counts
+            // the iterations itself, so the sealed evidence comes from the
+            // runtime's own log, never from the caller. The count itself must
+            // come from the discharge driver's real observation — every close
+            // routes its root through the fixed point, so a zero here is not
+            // evidence at all: refuse it rather than fabricate an iteration.
+            if convergence.iterations == 0 {
                 return partial(FlowPartialReason::NonConverged);
             }
-        }
-        if !convergence.stable {
-            return partial(FlowPartialReason::NonConverged);
-        }
-        if let Err(error) = runtime.observe_flow_iteration(carrier.handle, false) {
-            return partial(match error {
-                super::dispatch_txn::flow_obligation_state::FlowTransitionError::ConvergenceBudget => {
-                    FlowPartialReason::NonConverged
+            for _ in 1..convergence.iterations {
+                if runtime
+                    .observe_flow_iteration(carrier.handle, true)
+                    .is_err()
+                {
+                    return partial(FlowPartialReason::NonConverged);
                 }
-                _ => unproven_flow_reason(runtime, carrier.handle),
-            });
-        }
-        match runtime.seal_flow_completion(carrier.handle, result.clone()) {
-            Ok(sealed) => Some(super::flow_solve::finalize_flow_solve(
-                runtime,
-                carrier.handle,
-                plan,
-                sealed,
-            )),
-            Err(error) => partial(match error {
-                FlowSealError::DegradedValue => FlowPartialReason::DegradedValue,
-                FlowSealError::NonConverged => FlowPartialReason::NonConverged,
-                FlowSealError::UndischargedObligations => {
-                    unproven_flow_reason(runtime, carrier.handle)
-                }
-                FlowSealError::NoDemandInstalled => FlowPartialReason::NoDemandInstalled,
-                FlowSealError::AlreadySealed => {
-                    FlowPartialReason::Failed(super::flow_solve::FlowFailure {
-                        class: super::flow_solve::FlowFailureClass::Internal,
-                    })
-                }
-            }),
+            }
+            if !convergence.stable {
+                return partial(FlowPartialReason::NonConverged);
+            }
+            if let Err(error) = runtime.observe_flow_iteration(carrier.handle, false) {
+                return partial(match error {
+                    super::dispatch_txn::flow_obligation_state::FlowTransitionError::ConvergenceBudget => {
+                        FlowPartialReason::NonConverged
+                    }
+                    _ => unproven_flow_reason(runtime, carrier.handle),
+                });
+            }
+            match runtime.seal_flow_completion(carrier.handle, result.clone()) {
+                Ok(sealed) => Some(super::flow_solve::finalize_flow_solve(
+                    runtime,
+                    carrier.handle,
+                    plan,
+                    sealed,
+                )),
+                Err(error) => partial(match error {
+                    FlowSealError::DegradedValue => FlowPartialReason::DegradedValue,
+                    FlowSealError::NonConverged => FlowPartialReason::NonConverged,
+                    FlowSealError::UndischargedObligations => {
+                        unproven_flow_reason(runtime, carrier.handle)
+                    }
+                    FlowSealError::NoDemandInstalled => FlowPartialReason::NoDemandInstalled,
+                    FlowSealError::AlreadySealed => {
+                        FlowPartialReason::Failed(super::flow_solve::FlowFailure {
+                            class: super::flow_solve::FlowFailureClass::Internal,
+                        })
+                    }
+                }),
+            }
         }
     }
 

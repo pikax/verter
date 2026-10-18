@@ -172,6 +172,7 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
     ) -> Option<HotTypeRef> {
         let dispatch = self.engine.dispatch;
         dispatch
+            .owning()
             .raise_semantic_type_source_to_hot(
                 source,
                 SourceRaiseContext {
@@ -183,6 +184,7 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
                     interior_failures: None,
                 },
             )
+            .into_value_in(self.engine.builder())
             .at_optional_boundary()
     }
 

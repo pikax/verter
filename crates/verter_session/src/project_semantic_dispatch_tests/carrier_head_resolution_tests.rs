@@ -319,6 +319,7 @@ fn bare_ref_head_resolves_workspace_owned_name() {
     let host = host();
     upsert_ts(&host, "/m.ts", "export type Foo = { a: string };\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/m.ts");
 
     let carrier = bare_ref_carrier(&dispatch, "Foo", scope, &[]);
@@ -353,6 +354,7 @@ fn bare_ref_head_resolves_and_instantiates_args() {
     let host = host();
     upsert_ts(&host, "/box.ts", "export type Box<T> = { v: T };\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/box.ts");
 
     let carrier = bare_ref_carrier(&dispatch, "Box", scope, &[PrimitiveKind::String]);
@@ -386,6 +388,7 @@ fn import_type_head_resolves_type_position() {
     upsert_ts(&host, "/dep.ts", "export type G<T> = { g: T };\n");
     upsert_ts(&host, "/owner.ts", "export const x = 1;\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/owner.ts");
 
     // `import("./dep").G` — bare (no args).
@@ -407,6 +410,7 @@ fn import_type_head_resolves_and_instantiates_args() {
     upsert_ts(&host, "/dep.ts", "export type G<T> = { g: T };\n");
     upsert_ts(&host, "/owner.ts", "export const x = 1;\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/owner.ts");
 
     let carrier = import_type_carrier(
@@ -436,6 +440,7 @@ fn import_type_head_resolves_typeof_query() {
     upsert_ts(&host, "/vals.ts", "export const k = 7;\n");
     upsert_ts(&host, "/owner.ts", "export const x = 1;\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/owner.ts");
 
     // `typeof import("./vals")` — the module's value-export namespace.
@@ -484,6 +489,7 @@ fn bare_ref_head_resolves_external_module_augmentation() {
         "import type { Cfg } from \"ext-pkg\";\nexport type U = Cfg;\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/use.ts");
 
     let carrier = bare_ref_carrier(&dispatch, "Cfg", scope, &[]);
@@ -542,6 +548,7 @@ fn carrier_head_barrel_reexport_walks_to_final_file_eager_stops_at_barrel() {
         "import type { X } from \"./barrel\";\nexport type Use = X;\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/consumer.ts");
 
     let carrier = bare_ref_carrier(&dispatch, "X", scope, &[]);
@@ -619,6 +626,7 @@ fn carrier_head_namespace_sibling_bare_name_diverges_recorded_for_producer_flip(
         "export namespace NS {\n  export type Sib = { s: string };\n  export type Member = Sib;\n}\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/ns.ts");
 
     // A bare `BareRef("Sib")` against the FILE scope — the carrier path has no
@@ -727,6 +735,7 @@ fn bare_ref_head_projects_enum_member() {
         "export enum Color { Red = \"red\", Blue = \"blue\" }\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/enum.ts");
 
     let carrier = bare_ref_carrier(&dispatch, "Color.Red", scope, &[]);
@@ -765,6 +774,7 @@ fn bare_ref_head_userland_shadow_wins_over_builtin() {
     let host = host();
     upsert_ts(&host, "/shadow.ts", "export type Partial<T> = { p: T };\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/shadow.ts");
 
     let carrier = bare_ref_carrier(&dispatch, "Partial", scope, &[PrimitiveKind::Boolean]);
@@ -808,6 +818,7 @@ fn bare_ref_head_recursive_ref_terminates_bounded() {
                 "export type Tree = { children: Tree };\n",
             );
             let dispatch = ProjectSemanticDispatch::new(&host);
+            let _builder = dispatch.enter_construction_scope();
             let scope = file_scope(&dispatch, "/tree.ts");
 
             // Push the `(canonical, name)` identity active to simulate being
@@ -864,6 +875,7 @@ fn generic_head_of_an_active_declaration_keeps_its_back_edge_where_its_position_
             let host = host();
             upsert_ts(&host, "/grow.ts", "export type G<T> = { v: T };\n");
             let dispatch = ProjectSemanticDispatch::new(&host);
+            let _builder = dispatch.enter_construction_scope();
             let scope = file_scope(&dispatch, "/grow.ts");
             let string = dispatch.graph().intern_node_with_scope(
                 SemanticNodeData::Primitive(PrimitiveKind::String),
@@ -915,6 +927,7 @@ fn nested_bare_ref_carrier_in_intersection_resolves() {
         "export type A = { a: string };\nexport type B = { b: number };\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let scope = file_scope(&dispatch, "/n.ts");
 
@@ -971,6 +984,7 @@ fn carrier_head_resolution_is_path_independent_with_eager_lowering() {
         "export type Foo = { a: string };\nexport type Box<T> = { v: T };\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/eq.ts");
 
     // B1 shape: bare `Foo`.
@@ -1033,6 +1047,7 @@ fn carrier_head_rehydrates_name_resolution_for_import_binding() {
         "import type { Lib } from \"./lib\";\nexport type C = Lib;\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/consumer.ts");
 
     // `BareRef("Lib")` in /consumer.ts — `Lib` is an import binding (the eager
@@ -1143,6 +1158,7 @@ fn normal_path_walker_reenters_carrier_normalization_behind_alias() {
     let host = host();
     upsert_ts(&host, "/aw.ts", "export type Foo = { a: string };\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let scope = file_scope(&dispatch, "/aw.ts");
 
@@ -1199,6 +1215,7 @@ fn normal_path_walker_unresolvable_carrier_behind_alias_misses() {
     let host = host();
     upsert_ts(&host, "/aw2.ts", "export type Real = { a: string };\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let scope = file_scope(&dispatch, "/aw2.ts");
 
@@ -1238,6 +1255,7 @@ fn carrier_resolver_context_drives_shared_head_resolver() {
     let host = host();
     upsert_ts(&host, "/ctx.ts", "export type Widget = { w: number };\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/ctx.ts");
 
     let env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
@@ -1299,6 +1317,7 @@ fn eager_ref_path_has_no_drift_after_shared_helper() {
     let host = host();
     upsert_ts(&host, "/drift.ts", "export type Foo = { a: string };\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     // Eager `Ref { Foo }` lowering through `shallow_lower_type_expr_with_context`
     // (the production lowering arm, now calling the shared helper) resolves to a
@@ -1373,6 +1392,7 @@ fn carrier_head_imported_builtin_name_resolves_import_not_builtin() {
         "import type { Partial } from \"./alias\";\nexport type C = Partial<number>;\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/consumer.ts");
 
     // `BareRef("Partial", [number])` in /consumer.ts. `Partial` is an import
@@ -1439,6 +1459,7 @@ fn carrier_head_preserves_local_scope_in_rehydrated_scope() {
     let host = host();
     upsert_ts(&host, "/ls.ts", "export type Foo = { a: string };\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let shallow = dispatch
         .ctx
         .shallow_file_state("/ls.ts")
@@ -1571,6 +1592,7 @@ fn navigate_unresolvable_ref_head_preserves_bare_ref_carrier_with_args() {
         "import type { ArgT } from \"./argfile\";\nexport type Unused = ArgT;\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     let expr = TypeExpr::Ref {
         name: Arc::from("Unknown"),
@@ -1637,6 +1659,7 @@ fn eager_resolvable_ref_head_still_lowers_and_applies_args() {
         "import type { ArgT } from \"./argfile2\";\nexport type Box<T> = { v: T };\nexport type Unused = Box<ArgT>;\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     let expr = TypeExpr::Ref {
         name: Arc::from("Box"),
@@ -1744,6 +1767,7 @@ defineProps<Copy<ImportedProps>>()
         .as_ref()
         .expect("fixture must publish script analysis")
         .macros[macro_index];
+    let _builder = host.project_type_store().construction_grant().enter_scope();
     let product =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host)
             .macro_type_arg_hot_ref(canonical, macro_index)
@@ -1917,6 +1941,7 @@ defineProps<{ setupOnly: string }>()
 </script>"#,
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let setup_scope = file_scope_in_owner(
         &dispatch,
         canonical,
@@ -2029,6 +2054,7 @@ fn imported_builtin_named_awaited_resolves_userland_and_never_the_awaited_relati
         );
         upsert_ts(&host, "/consumer.ts", consumer);
         let dispatch = ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
         let scope = file_scope(&dispatch, "/consumer.ts");
         let carrier = bare_ref_carrier(&dispatch, local, scope, &[PrimitiveKind::String]);
 
@@ -2107,6 +2133,7 @@ fn a_builtin_utility_build_reads_the_scope_payload_once() {
         "export type Foo = { a: string };\nexport type X = Partial<Foo>;\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/p.ts");
     let carrier = bare_ref_carrier(&dispatch, "Partial", scope, &[PrimitiveKind::String]);
     let counter = Arc::new(ScopePayloadReadCounter::default());
@@ -2156,6 +2183,7 @@ fn a_budget_trip_after_resolution_never_answers_complete() {
 ",
         );
         let dispatch = ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
         let graph = dispatch.graph();
         let literal = |text: &str| {
             graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(text.into())))

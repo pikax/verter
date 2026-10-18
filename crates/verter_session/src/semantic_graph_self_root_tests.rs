@@ -1842,6 +1842,7 @@ fn builtin_utility_instantiation_roots_on_argument_file() {
     // `c`'s file — a genuine file-derived argument for the utility.
     let source = file_derived_object_node(&host, c);
     let dispatch = host.semantic_dispatch();
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     // `Pick<Foo, 'a'>` — args are [source_object_node, key_set]. The

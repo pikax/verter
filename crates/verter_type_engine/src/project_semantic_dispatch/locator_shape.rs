@@ -755,33 +755,35 @@ enum LocatorRefPlan {
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
-    /// The carrier-only locator-shape lowering entry: intern the FIXED
-    /// authored shape of `expr` under the sealed [`LocatorShapeCtx`].
-    ///
-    /// See the module docs for the full contract: deferred operator
-    /// carriers, identity-only reference resolution, `TypeParam` shells,
-    /// role-free member stamps. This entry never dispatches a
-    /// `SemanticQueryKey` and never accepts a reducing context.
-    pub fn lower_type_expr_for_locator_shape(
-        &self,
-        expr: &TypeExpr,
-        ctx: &LocatorShapeCtx<'_>,
-    ) -> SemanticNodeId {
-        let infer_binders = match ctx.infer_source {
-            Some(source) => crate::semantic_query::InferBinderFactory::for_authored_locator(
-                ctx.scope, expr, source,
-            ),
-            None => crate::semantic_query::InferBinderFactory::new(ctx.scope, expr),
-        };
-        let work = ShapeLowerCtx {
-            scope: ctx.scope,
-            binders: ctx.binders,
-            name_resolution: ctx.name_resolution,
-            scope_payload: ctx.scope_payload,
-            infer_binders: &infer_binders,
-            infer_source: ctx.infer_source,
-        };
-        self.lower_locator_shape_node(expr, &work)
+    construction_ordinal_seam! {
+        /// The carrier-only locator-shape lowering entry: intern the FIXED
+        /// authored shape of `expr` under the sealed [`LocatorShapeCtx`].
+        ///
+        /// See the module docs for the full contract: deferred operator
+        /// carriers, identity-only reference resolution, `TypeParam` shells,
+        /// role-free member stamps. This entry never dispatches a
+        /// `SemanticQueryKey` and never accepts a reducing context.
+        fn lower_type_expr_for_locator_shape(
+            &self,
+            expr: &TypeExpr,
+            ctx: &LocatorShapeCtx<'_>,
+        ) -> SemanticNodeId {
+            let infer_binders = match ctx.infer_source {
+                Some(source) => crate::semantic_query::InferBinderFactory::for_authored_locator(
+                    ctx.scope, expr, source,
+                ),
+                None => crate::semantic_query::InferBinderFactory::new(ctx.scope, expr),
+            };
+            let work = ShapeLowerCtx {
+                scope: ctx.scope,
+                binders: ctx.binders,
+                name_resolution: ctx.name_resolution,
+                scope_payload: ctx.scope_payload,
+                infer_binders: &infer_binders,
+                infer_source: ctx.infer_source,
+            };
+            self.lower_locator_shape_node(expr, &work)
+        }
     }
 
     /// Lower one node of the fixed authored shape; every node either
@@ -2672,56 +2674,58 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         LocatorRefPlan::Carrier(RefHeadResolution::Unresolved)
     }
 
-    /// The session-private locator-shape provider: lower the fixed authored
-    /// shape of the body `locator` names, memoized under the first-class
-    /// [`SemanticQueryKey::LowerLocator`] query on the shared
-    /// multi-candidate read-set-validated substrate.
-    ///
-    /// The env-bearing slot is derived FROM the locator anchor (so the
-    /// key's anchor-match gate holds by construction) with the anchor
-    /// canonical's LIVE `parse_env_hash` / `resolve_env_hash` dimensions.
-    /// Strictly unsubstituted: substituted demands route through
-    /// `Instantiate { args }`, never through this provider.
-    ///
-    /// This is the production body source:
-    /// `lower_located_body_with_provenance` demands every declaration body
-    /// through this provider (never a prepared-body read), then owns
-    /// args-substitution and the post-substitution view projection.
-    pub fn lower_locator(&self, locator: AuthoredBodyLocator) -> QueryResult<SemanticNodeId> {
-        let anchor = match &locator {
-            AuthoredBodyLocator::DeclBody(slot) => &slot.anchor,
-            AuthoredBodyLocator::AugmentationBody(aug) => &aug.anchor,
-            AuthoredBodyLocator::JsdocTypedefBody(typedef) => &typedef.anchor,
-            AuthoredBodyLocator::MacroPayload(payload) => &payload.anchor,
-        };
-        let env = self
-            .ctx
-            .host_view_env_hashes_for(anchor.canonical_id.as_ref());
-        let slot = self
-            .finalize_slot_seed_in_env(
-                crate::semantic_query::DeclarationSlotSeed::new(
-                    anchor.canonical_id.clone(),
-                    anchor.owner,
-                    anchor.symbol.clone(),
-                    crate::semantic_query::SemanticSymbolSpace::Type,
-                ),
-                &env,
-            )
-            .with_symbol_space(semantic_space_for_locator_space(anchor.space));
-        let key = match LocatorLoweringKey::new_unsubstituted(
-            slot,
-            locator,
-            ParseEnvHash::from_env_hash(env.parse_env_hash),
-            ResolveEnvHash::from_env_hash(env.resolve_env_hash),
-        ) {
-            Ok(key) => key,
-            // Unreachable by construction — the slot is derived from the
-            // locator anchor — but a malformed identity must fail closed,
-            // never lower under the wrong slot.
-            Err(_) => return QueryResult::Error(QueryError::Miss),
-        };
-        let read = self.execute_read(SemanticQueryKey::LowerLocator { key });
-        crate::meta_resolve::emit_dispatch_dep_signature_facts(self, &read.dep_signature);
-        read.value
+    construction_ordinal_seam! {
+        /// The session-private locator-shape provider: lower the fixed authored
+        /// shape of the body `locator` names, memoized under the first-class
+        /// [`SemanticQueryKey::LowerLocator`] query on the shared
+        /// multi-candidate read-set-validated substrate.
+        ///
+        /// The env-bearing slot is derived FROM the locator anchor (so the
+        /// key's anchor-match gate holds by construction) with the anchor
+        /// canonical's LIVE `parse_env_hash` / `resolve_env_hash` dimensions.
+        /// Strictly unsubstituted: substituted demands route through
+        /// `Instantiate { args }`, never through this provider.
+        ///
+        /// This is the production body source:
+        /// `lower_located_body_with_provenance` demands every declaration body
+        /// through this provider (never a prepared-body read), then owns
+        /// args-substitution and the post-substitution view projection.
+        fn lower_locator(&self, locator: AuthoredBodyLocator) -> QueryResult<SemanticNodeId> {
+            let anchor = match &locator {
+                AuthoredBodyLocator::DeclBody(slot) => &slot.anchor,
+                AuthoredBodyLocator::AugmentationBody(aug) => &aug.anchor,
+                AuthoredBodyLocator::JsdocTypedefBody(typedef) => &typedef.anchor,
+                AuthoredBodyLocator::MacroPayload(payload) => &payload.anchor,
+            };
+            let env = self
+                .ctx
+                .host_view_env_hashes_for(anchor.canonical_id.as_ref());
+            let slot = self
+                .finalize_slot_seed_in_env(
+                    crate::semantic_query::DeclarationSlotSeed::new(
+                        anchor.canonical_id.clone(),
+                        anchor.owner,
+                        anchor.symbol.clone(),
+                        crate::semantic_query::SemanticSymbolSpace::Type,
+                    ),
+                    &env,
+                )
+                .with_symbol_space(semantic_space_for_locator_space(anchor.space));
+            let key = match LocatorLoweringKey::new_unsubstituted(
+                slot,
+                locator,
+                ParseEnvHash::from_env_hash(env.parse_env_hash),
+                ResolveEnvHash::from_env_hash(env.resolve_env_hash),
+            ) {
+                Ok(key) => key,
+                // Unreachable by construction — the slot is derived from the
+                // locator anchor — but a malformed identity must fail closed,
+                // never lower under the wrong slot.
+                Err(_) => return QueryResult::Error(QueryError::Miss),
+            };
+            let read = self.execute_read(SemanticQueryKey::LowerLocator { key });
+            crate::meta_resolve::emit_dispatch_dep_signature_facts(self, &read.dep_signature);
+            read.value
+        }
     }
 }

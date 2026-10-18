@@ -128,75 +128,77 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         receipt
     }
 
-    pub fn substitute_semantic_type_param(
-        &self,
-        node: SemanticNodeId,
-        parameter_node: SemanticNodeId,
-        arg: SemanticNodeId,
-    ) -> SemanticNodeId {
-        let _demand = self.enter_connected_demand(false).0;
-        // Top-level substitute-call telemetry. Bumped at the
-        // entry of `substitute_semantic_type_param` (the public
-        // surface), so the snapshot reflects the number of distinct
-        // top-level substitutions issued for this request — NOT the
-        // recursive `substitute_with_change_tracking` walks. Paired
-        // with `SubstituteMemoHit` (next line) to expose the
-        // hit-rate of the hash-cons memo.
-        if let Some(observer) = verter_audit::current_observer() {
-            observer.record_event(verter_audit::AuditEvent::SubstituteTopLevelCall);
-        }
-        self.enter_substitution_walk();
-        if node != parameter_node && self.binder_dependency_proves_absent(node, parameter_node) {
-            return node;
-        }
-        // Hash-cons memo. The store-owned `substitute_memo` collapses
-        // identical `(value_expr, parameter_node, arg)` triples that
-        // reach this entry-point from different call paths (per-K
-        // materialiser loops on the SAME mapped-type instance reduced
-        // from multiple components, repeated `Pick<T, K>` projections
-        // across the corpus, etc.) to a single result. The store is
-        // arena-scoped, and semantic-node ids inside one arena are
-        // content-addressed integers — so a triple of ids is a
-        // complete identity for the substitution result. Substitution
-        // has an immutable complete result for its three inputs. The memo
-        // stores only complete, priced results; a budget- or site-dependent
-        // refusal never publishes. Fact-bearing canonical work advances the
-        // separate evidence fence below.
-        if let Some(cached) = self.priced_substitution_read(node, parameter_node, arg) {
+    construction_ordinal_seam! {
+        fn substitute_semantic_type_param(
+            &self,
+            node: SemanticNodeId,
+            parameter_node: SemanticNodeId,
+            arg: SemanticNodeId,
+        ) -> SemanticNodeId {
+            let _demand = self.enter_connected_demand(false).0;
+            // Top-level substitute-call telemetry. Bumped at the
+            // entry of `substitute_semantic_type_param` (the public
+            // surface), so the snapshot reflects the number of distinct
+            // top-level substitutions issued for this request — NOT the
+            // recursive `substitute_with_change_tracking` walks. Paired
+            // with `SubstituteMemoHit` (next line) to expose the
+            // hit-rate of the hash-cons memo.
             if let Some(observer) = verter_audit::current_observer() {
-                observer.record_event(verter_audit::AuditEvent::SubstituteMemoHit);
+                observer.record_event(verter_audit::AuditEvent::SubstituteTopLevelCall);
             }
-            return cached;
+            self.enter_substitution_walk();
+            if node != parameter_node && self.binder_dependency_proves_absent(node, parameter_node) {
+                return node;
+            }
+            // Hash-cons memo. The store-owned `substitute_memo` collapses
+            // identical `(value_expr, parameter_node, arg)` triples that
+            // reach this entry-point from different call paths (per-K
+            // materialiser loops on the SAME mapped-type instance reduced
+            // from multiple components, repeated `Pick<T, K>` projections
+            // across the corpus, etc.) to a single result. The store is
+            // arena-scoped, and semantic-node ids inside one arena are
+            // content-addressed integers — so a triple of ids is a
+            // complete identity for the substitution result. Substitution
+            // has an immutable complete result for its three inputs. The memo
+            // stores only complete, priced results; a budget- or site-dependent
+            // refusal never publishes. Fact-bearing canonical work advances the
+            // separate evidence fence below.
+            if let Some(cached) = self.priced_substitution_read(node, parameter_node, arg) {
+                if let Some(observer) = verter_audit::current_observer() {
+                    observer.record_event(verter_audit::AuditEvent::SubstituteMemoHit);
+                }
+                return cached;
+            }
+            // Change-tracking through recursion. The internal helper
+            // returns (result, changed) so each branch can short-circuit
+            // the rebuild path when no descendant produced a different
+            // node id. The public signature is unchanged; callers see only
+            // the result id.
+            //
+            // Evidence-blind-replay fence: the store-owned memo is
+            // cross-request, so a walk whose canonical composite routing
+            // deposited NON-TRIVIAL evidence (file self-roots, or an
+            // incomplete comparison's warm suppression) must not be
+            // replayed to a later request that would then skip the deposit
+            // — a stale warm read served on an under-rooted entry. The
+            // epoch advancing across the walk suppresses the publish; the
+            // result itself still flows to the caller.
+            let epoch_before = self.canonical_evidence_epoch.get();
+            let recording = self.substitution_cost(
+                SubstitutionCost::Root(node, parameter_node, arg),
+                node,
+                parameter_node,
+                arg,
+            );
+            let result = self
+                .substitute_with_change_tracking(node, parameter_node, arg)
+                .0;
+            if let Some(receipt) = self.finish_substitution_cost(recording, epoch_before) {
+                self.graph()
+                    .substitute_memo_publish_priced(node, parameter_node, arg, result, receipt);
+            }
+            result
         }
-        // Change-tracking through recursion. The internal helper
-        // returns (result, changed) so each branch can short-circuit
-        // the rebuild path when no descendant produced a different
-        // node id. The public signature is unchanged; callers see only
-        // the result id.
-        //
-        // Evidence-blind-replay fence: the store-owned memo is
-        // cross-request, so a walk whose canonical composite routing
-        // deposited NON-TRIVIAL evidence (file self-roots, or an
-        // incomplete comparison's warm suppression) must not be
-        // replayed to a later request that would then skip the deposit
-        // — a stale warm read served on an under-rooted entry. The
-        // epoch advancing across the walk suppresses the publish; the
-        // result itself still flows to the caller.
-        let epoch_before = self.canonical_evidence_epoch.get();
-        let recording = self.substitution_cost(
-            SubstitutionCost::Root(node, parameter_node, arg),
-            node,
-            parameter_node,
-            arg,
-        );
-        let result = self
-            .substitute_with_change_tracking(node, parameter_node, arg)
-            .0;
-        if let Some(receipt) = self.finish_substitution_cost(recording, epoch_before) {
-            self.graph()
-                .substitute_memo_publish_priced(node, parameter_node, arg, result, receipt);
-        }
-        result
     }
 
     /// A class's polymorphic `this` type as a class member body reads it:
@@ -462,21 +464,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         found
     }
 
-    /// `callee` read through `receiver`: its polymorphic `this` — a class
-    /// member's `this` binder and a declared member's bare `this` — bound to
-    /// the receiver, the checker's instantiation of a member's `this` type
-    /// with the reference it is accessed through.
-    pub fn bind_callee_receiver(
-        &self,
-        callee: SemanticNodeId,
-        receiver: SemanticNodeId,
-    ) -> SemanticNodeId {
-        let bound = self.bind_this_receiver(callee, receiver);
-        self.receiver_this_types(bound)
-            .into_iter()
-            .fold(bound, |result, this| {
-                self.substitute_semantic_type_param(result, this, receiver)
-            })
+    construction_ordinal_seam! {
+        /// `callee` read through `receiver`: its polymorphic `this` — a class
+        /// member's `this` binder and a declared member's bare `this` — bound to
+        /// the receiver, the checker's instantiation of a member's `this` type
+        /// with the reference it is accessed through.
+        fn bind_callee_receiver(
+            &self,
+            callee: SemanticNodeId,
+            receiver: SemanticNodeId,
+        ) -> SemanticNodeId {
+            let bound = self.bind_this_receiver(callee, receiver);
+            self.receiver_this_types(bound)
+                .into_iter()
+                .fold(bound, |result, this| {
+                    self.substitute_semantic_type_param(result, this, receiver)
+                })
+        }
     }
 
     /// Rebind the ENCLOSING type parameters a body-derived return mentions
@@ -712,21 +716,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         result
     }
 
-    pub fn apply_conditional_branch_pending(
-        &self,
-        node: SemanticNodeId,
-        pending: Option<&ConditionalPendingSubstitution>,
-        true_branch: bool,
-    ) -> SemanticNodeId {
-        let Some(pending) = pending else {
-            return node;
-        };
-        let frame = if true_branch {
-            pending.true_branch()
-        } else {
-            pending.false_branch()
-        };
-        self.apply_pending_substitution_frame(node, frame)
+    construction_ordinal_seam! {
+        fn apply_conditional_branch_pending(
+            &self,
+            node: SemanticNodeId,
+            pending: Option<&ConditionalPendingSubstitution>,
+            true_branch: bool,
+        ) -> SemanticNodeId {
+            let Some(pending) = pending else {
+                return node;
+            };
+            let frame = if true_branch {
+                pending.true_branch()
+            } else {
+                pending.false_branch()
+            };
+            self.apply_pending_substitution_frame(node, frame)
+        }
     }
 
     /// Change-tracking internal helper for

@@ -431,6 +431,7 @@ fn finite_batch_reads_match_single_keys_across_projection_modes() {
         .resolve_named_symbol("/read.ts", "Values", Some(ProjectionMode::Navigate))
         .expect("object subject");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     // Supply the accessor kind directly at the surface boundary: this
     // control isolates the consumer from authored signature-kind lowering.
@@ -713,6 +714,7 @@ fn merged_global_instantiation_preserves_approximation_from_every_declaration() 
             host.ensure_indexed_ready(file).unwrap();
         }
         let dispatch = ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
         let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
         let mut first = None;
         for file in ["/a.ts", "/b.ts", "/a.ts"] {

@@ -346,48 +346,50 @@ impl Drop for TraversalCredit<'_, '_> {
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
-    /// Spread-normalise a tuple TYPE's element list (the shared
-    /// normalize-on-intern rule for every tuple intern site that can
-    /// receive substituted / signature-derived elements):
-    ///
-    /// 1. **Variadic splice** — a `rest: true` element whose value is a
-    ///    settled `Tuple` (through transparent aliases) splices that
-    ///    tuple's elements in place, preserving the inner labels /
-    ///    optional / rest markers. This is what makes a userland
-    ///    `Concat<A, B> = [...A, ...B]` concatenate once `A` / `B`
-    ///    substitute to concrete tuples — no utility name special-casing.
-    ///    Splicing reaches nested `[...[...T]]` shapes at any depth. A
-    ///    splice of the list reaching the checker's tuple-size limit makes
-    ///    the whole tuple the checker's recovery — TS2799, or TS2800 while
-    ///    an expression is checked ([`CheckingSite`]); a spliced tuple
-    ///    whose own splice reaches it is that tuple's recovery in its
-    ///    place; a product the connected demand cannot pay for returns a
-    ///    typed incomplete node (see the module documentation).
-    /// 2. **Non-trailing optional reconciliation** — an `optional` marker
-    ///    followed anywhere later by a REQUIRED (non-optional, non-rest)
-    ///    element converts to a REQUIRED `T | undefined` slot.
-    ///    Optional-before-required is unrepresentable TS (TS1257); the
-    ///    pinned tsgo materialises `[...[a?: number], string]` as
-    ///    `[number | undefined, string]` (length 2). A trailing optional
-    ///    run — including one followed only by a rest tail, which IS
-    ///    legal (`[a?: number, ...boolean[]]`) — keeps its `?`.
-    /// 3. **Sole-rest collapse** — a tuple consisting SOLELY of one
-    ///    rest-of-array element IS that array (`[...E[]]` ≡ `E[]`,
-    ///    the `(...args: E[])` parameters surface). The collapsed
-    ///    array's `readonly` mirrors the OUTER tuple (`readonly`
-    ///    parameter — pinned tsgo: `readonly [...number[]]` ≡
-    ///    `readonly number[]`; `[...(readonly number[])]` ≡ MUTABLE
-    ///    `number[]`), never the inner array's flag.
-    ///
-    /// A rest element whose value is open / unresolved (a generic, a
-    /// carrier, anything not a settled tuple/array) is preserved
-    /// verbatim — normalization never forces materialisation.
-    pub fn normalize_tuple_spread(
-        &self,
-        elements: &[TupleElement],
-        readonly: bool,
-    ) -> NormalizedTupleShape {
-        self.normalize_tuple_spread_at(elements, readonly, self.checking_site.get())
+    construction_ordinal_seam! {
+        /// Spread-normalise a tuple TYPE's element list (the shared
+        /// normalize-on-intern rule for every tuple intern site that can
+        /// receive substituted / signature-derived elements):
+        ///
+        /// 1. **Variadic splice** — a `rest: true` element whose value is a
+        ///    settled `Tuple` (through transparent aliases) splices that
+        ///    tuple's elements in place, preserving the inner labels /
+        ///    optional / rest markers. This is what makes a userland
+        ///    `Concat<A, B> = [...A, ...B]` concatenate once `A` / `B`
+        ///    substitute to concrete tuples — no utility name special-casing.
+        ///    Splicing reaches nested `[...[...T]]` shapes at any depth. A
+        ///    splice of the list reaching the checker's tuple-size limit makes
+        ///    the whole tuple the checker's recovery — TS2799, or TS2800 while
+        ///    an expression is checked ([`CheckingSite`]); a spliced tuple
+        ///    whose own splice reaches it is that tuple's recovery in its
+        ///    place; a product the connected demand cannot pay for returns a
+        ///    typed incomplete node (see the module documentation).
+        /// 2. **Non-trailing optional reconciliation** — an `optional` marker
+        ///    followed anywhere later by a REQUIRED (non-optional, non-rest)
+        ///    element converts to a REQUIRED `T | undefined` slot.
+        ///    Optional-before-required is unrepresentable TS (TS1257); the
+        ///    pinned tsgo materialises `[...[a?: number], string]` as
+        ///    `[number | undefined, string]` (length 2). A trailing optional
+        ///    run — including one followed only by a rest tail, which IS
+        ///    legal (`[a?: number, ...boolean[]]`) — keeps its `?`.
+        /// 3. **Sole-rest collapse** — a tuple consisting SOLELY of one
+        ///    rest-of-array element IS that array (`[...E[]]` ≡ `E[]`,
+        ///    the `(...args: E[])` parameters surface). The collapsed
+        ///    array's `readonly` mirrors the OUTER tuple (`readonly`
+        ///    parameter — pinned tsgo: `readonly [...number[]]` ≡
+        ///    `readonly number[]`; `[...(readonly number[])]` ≡ MUTABLE
+        ///    `number[]`), never the inner array's flag.
+        ///
+        /// A rest element whose value is open / unresolved (a generic, a
+        /// carrier, anything not a settled tuple/array) is preserved
+        /// verbatim — normalization never forces materialisation.
+        fn normalize_tuple_spread(
+            &self,
+            elements: &[TupleElement],
+            readonly: bool,
+        ) -> NormalizedTupleShape {
+            self.normalize_tuple_spread_at(elements, readonly, self.checking_site.get())
+        }
     }
 
     /// [`Self::normalize_tuple_spread`] for the tuple an expression

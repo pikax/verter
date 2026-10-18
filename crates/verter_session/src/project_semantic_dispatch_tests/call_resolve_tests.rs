@@ -115,6 +115,7 @@ fn signature_with_carrier(
 fn relation_only_assumption_replays_but_own_return_assumption_refuses() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let declared = signature(
@@ -434,6 +435,7 @@ fn selected_query(
 fn ordinary_nested_call_does_not_consume_a_suspended_contextual_candidate() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -513,6 +515,7 @@ fn ordinary_nested_call_does_not_consume_a_suspended_contextual_candidate() {
 fn first_fully_applicable_literal_overload_wins() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let literal_a = graph.intern_node(SemanticNodeData::Literal(
         verter_type_expr::LiteralValue::String("a".into()),
@@ -613,6 +616,7 @@ fn first_fully_applicable_literal_overload_wins() {
 fn bucket_arity_rest_and_spread_mapping_are_decisive() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -735,6 +739,7 @@ fn bucket_arity_rest_and_spread_mapping_are_decisive() {
 fn authored_this_is_receiver_only() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -772,6 +777,7 @@ fn authored_this_is_receiver_only() {
 fn mixed_const_policy_is_applied_per_parameter() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let t = graph.intern_node(SemanticNodeData::TypeParam {
         decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("T"),
@@ -891,6 +897,7 @@ fn mixed_const_policy_is_applied_per_parameter() {
 fn constraint_rejection_rolls_back_and_commits_only_the_winner() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -983,6 +990,7 @@ fn constraint_rejection_rolls_back_and_commits_only_the_winner() {
 fn declared_return_uses_the_final_substitution() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let t = graph.intern_node(SemanticNodeData::TypeParam {
@@ -1047,6 +1055,7 @@ fn body_derived_return_uses_the_final_substitution() {
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let t = graph.intern_node(SemanticNodeData::TypeParam {
@@ -1115,6 +1124,7 @@ fn degraded_inline_flow_return_never_warms_the_enclosing_call() {
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
@@ -1189,6 +1199,7 @@ fn degraded_inline_flow_return_never_warms_the_enclosing_call() {
 fn call_resolution_budget_exceeded_admits_nothing() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     dispatch.connected_demand().set_limits_for_tests(256, 24);
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -1383,6 +1394,7 @@ fn anonymous_signature(
 fn anonymous_candidate_pairs_with_its_own_instantiation() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let t = graph.intern_node(SemanticNodeData::TypeParam {
@@ -1431,6 +1443,7 @@ fn anonymous_candidate_pairs_with_its_own_instantiation() {
 fn admission_follows_the_dependency_proof_not_the_winners_origin() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let anonymous = anonymous_signature(
@@ -1512,6 +1525,7 @@ fn admission_follows_the_dependency_proof_not_the_winners_origin() {
 fn unrootable_call_is_served_but_never_admitted() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let anonymous = anonymous_signature(
@@ -1575,6 +1589,7 @@ fn unrootable_call_is_served_but_never_admitted() {
 fn incomplete_nested_call_proof_refuses_component_admission() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let root_sig = anonymous_signature(
@@ -1644,6 +1659,7 @@ fn incomplete_nested_call_proof_refuses_component_admission() {
 fn incomplete_independent_nested_call_taints_enclosing_build() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
@@ -1726,6 +1742,7 @@ fn incomplete_independent_nested_call_taints_enclosing_build() {
 fn context_sensitive_argument_is_withheld_from_the_first_inference_pass() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
     let literal = graph.intern_node(SemanticNodeData::Literal(
@@ -1869,6 +1886,7 @@ fn context_sensitive_argument_is_withheld_from_the_first_inference_pass() {
 fn receiverless_call_admits_only_a_this_that_accepts_undefined() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -1980,6 +1998,7 @@ fn receiverless_call_admits_only_a_this_that_accepts_undefined() {
 fn generic_rest_infers_a_tuple_candidate_and_never_caps_arity() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -2123,6 +2142,7 @@ fn generic_rest_infers_a_tuple_candidate_and_never_caps_arity() {
 fn excess_property_checking_is_an_argument_position_rule() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -2327,6 +2347,7 @@ fn with_overload_dispatch<R>(
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     f(&dispatch)
 }
 
@@ -2680,6 +2701,7 @@ fn explicit_type_args_pair_the_surviving_candidate_with_its_own_raw_form() {
 fn explicit_type_args_rejected_by_every_candidate_keep_the_callee_callable() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -2927,6 +2949,7 @@ fn plain_decl(param: SemanticNodeId, name: &str) -> TypeParamDecl {
 fn tuple_argument_literal_elements_select_concrete_tuple_targets() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3023,6 +3046,7 @@ fn tuple_argument_literal_elements_select_concrete_tuple_targets() {
 fn generic_tuple_parameter_decides_from_element_deposits() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3126,6 +3150,7 @@ fn generic_tuple_parameter_decides_from_element_deposits() {
 fn required_arity_ends_at_last_required_position() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3186,6 +3211,7 @@ fn required_arity_ends_at_last_required_position() {
 fn rest_tuple_required_elements_count_all_fixed_params() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3359,6 +3385,7 @@ fn a_source_call_infers_from_every_argument_position() {
 fn deposits_select_number(counts: &[usize]) {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let one = graph.intern_node(SemanticNodeData::Literal(
@@ -3412,6 +3439,7 @@ fn deposits_select_number(counts: &[usize]) {
 fn applicability_relations_have_no_call_quota() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3551,6 +3579,7 @@ fn approximate_spread_mapping_degrades_instead_of_selecting_weaker_overload() {
 fn exact_arity_mismatch_still_selects_the_later_overload() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let first_ret = graph.intern_node(SemanticNodeData::Literal(
@@ -3702,6 +3731,7 @@ fn union_callee(
 fn union_callee_selects_every_arm_and_unions_returns() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let one = graph.intern_node(SemanticNodeData::Literal(
         verter_type_engine::semantic_query::LiteralValue::Number(1.0),
@@ -3751,6 +3781,7 @@ fn union_callee_selects_every_arm_and_unions_returns() {
 fn union_of_identical_arms_collapses_the_return_union() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let arm_a = signature(
@@ -3796,6 +3827,7 @@ fn union_of_identical_arms_collapses_the_return_union() {
 fn union_arm_overload_order_is_per_arm_not_cross_arm() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -3870,6 +3902,7 @@ fn union_arm_overload_order_is_per_arm_not_cross_arm() {
 fn union_partial_applicability_answers_the_synthesized_signatures_recovery() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -3930,6 +3963,7 @@ fn union_partial_applicability_answers_the_synthesized_signatures_recovery() {
 fn union_non_callable_arm_is_not_callable() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let one = graph.intern_node(SemanticNodeData::Literal(
         verter_type_engine::semantic_query::LiteralValue::Number(1.0),
@@ -3974,6 +4008,7 @@ fn union_non_callable_arm_is_not_callable() {
 fn incomplete_opaque_callee_is_not_classified_not_callable() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let missing = graph.intern_node(SemanticNodeData::Opaque(
         verter_type_engine::semantic_query::QueryError::Miss,
@@ -4095,6 +4130,7 @@ fn union_undecidable_arm_degrades_the_whole_call() {
 fn unsettled_construct_bucket_never_degrades_a_call() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let one = graph.intern_node(SemanticNodeData::Literal(
         verter_type_engine::semantic_query::LiteralValue::Number(1.0),
@@ -4198,6 +4234,7 @@ fn unsettled_construct_bucket_never_degrades_a_call() {
 fn anonymous_overload_set_and_call_admit_on_their_dependency_proof() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let one = graph.intern_node(SemanticNodeData::Literal(
         verter_type_engine::semantic_query::LiteralValue::Number(1.0),
@@ -4503,6 +4540,7 @@ fn global_union_callee_call_admits_rooted_on_every_arm_file() {
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
 
     let arm_a = typeof_value_node(&dispatch, INLINE_DECL_A, "inlineA");
@@ -4578,6 +4616,7 @@ fn overload_set_of_global_union_admits_rooted_on_every_arm_file() {
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
 
     let arm_a = typeof_value_node(&dispatch, INLINE_DECL_A, "inlineA");
@@ -4636,6 +4675,7 @@ fn overload_set_of_global_union_admits_rooted_on_every_arm_file() {
 fn call_utility_and_flow_consumers_read_one_signature_list() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -4763,6 +4803,7 @@ fn call_utility_and_flow_consumers_read_one_signature_list() {
 fn a_partial_closed_operator_leaves_the_enclosing_call_partial_and_cold() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let data_object = graph.intern_node(SemanticNodeData::Object(
@@ -4883,6 +4924,7 @@ fn binder_reach_through_an_alias_chain(query_depth: u16) -> super::call_resolve:
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     dispatch.set_connected_limits_for_tests(
         super::connected_demand::MAX_CONNECTED_PROJECTION_WORK,
         query_depth,

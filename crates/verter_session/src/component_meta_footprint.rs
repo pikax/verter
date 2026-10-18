@@ -52,13 +52,25 @@ pub(crate) fn cached_result_footprint(
         whole_hash,
     } = result;
     let mut aliases = AliasSet::new();
+    let analysis = analysis.offer(&mut aliases);
     let mut meter = Meter::new(&mut aliases);
     let m = &mut meter;
-    let bytes =
-        analysis.heap(m) + resolution_template.heap(m) + canonical_id.heap(m) + inline(whole_hash);
+    let bytes = analysis + resolution_template.heap(m) + canonical_id.heap(m) + inline(whole_hash);
     verter_session_query::retention::Footprint {
         bytes,
         handles: aliases.take_handles(),
+    }
+}
+
+/// A shared component-meta analysis cell's value, measured whole.
+impl verter_retention::heap_size::HeapSize
+    for crate::component_meta_cached_result::ComponentMetaAnalysisCell
+{
+    fn heap_size<'t>(
+        &'t self,
+        meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+    ) -> usize {
+        self.0.heap(&mut Meter::new(meter.handles()))
     }
 }
 

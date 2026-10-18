@@ -56,16 +56,31 @@ fn budget_evicts_oldest_first_past_cap() {
 /// does not return it.
 #[test]
 fn budget_forget_key_drops_key_from_ledger() {
-    let budget: GlobalRetentionBudget<u32> = GlobalRetentionBudget::new(2);
-    let _ = budget.record_admission(1, 100);
-    let _ = budget.record_admission(2, 101);
-    budget.forget_key_under_exclusive_lock(&100);
-    assert_eq!(budget.tracked_len(), 1, "forget removed key 100");
-    // Next admission does NOT overflow (only one tracked entry left).
-    assert!(
-        budget.record_admission(3, 102).is_empty(),
-        "after forget the ledger is within cap again",
-    );
+    for batch in [false, true] {
+        let budget: GlobalRetentionBudget<u32> = GlobalRetentionBudget::new(2);
+        let _ = budget.record_admission(1, 100);
+        let _ = budget.record_admission(2, 101);
+        if batch {
+            let mut examined = 0;
+            budget.retain_keys_under_exclusive_lock(|key| {
+                examined += 1;
+                *key != 100
+            });
+            assert_eq!(examined, 2, "the batch visits each admission once");
+        } else {
+            budget.forget_key_under_exclusive_lock(&100);
+        }
+        assert_eq!(budget.tracked_len(), 1, "forget removed key 100");
+        assert!(
+            budget.record_admission(3, 102).is_empty(),
+            "after forget the ledger is within cap again"
+        );
+        assert_eq!(
+            budget.record_admission(4, 103),
+            vec![(2, 101)],
+            "surviving admissions keep their FIFO order"
+        );
+    }
 }
 
 /// `forget_seq` drops EXACTLY one admission by its seq — a

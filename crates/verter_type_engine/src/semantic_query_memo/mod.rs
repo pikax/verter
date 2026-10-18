@@ -425,8 +425,7 @@ pub struct SemanticGraphStore {
     /// the bound existed (re-walking the same structure per SCC fixpoint
     /// iteration) instead of trading correctness for it. ONE per-node sidecar:
     /// the entry holds every bit memoized for the id, released together.
-    unresolved_reach:
-        Arc<release::SidecarMutex<FxHashMap<SemanticNodeId, unresolved_reach::NodeStructureBits>>>,
+    unresolved_reach: Arc<release::SidecarMutex<unresolved_reach::StructureBits>>,
     /// The `VerterStableV1` member view of each union built in this store's
     /// arena, keyed by the store's OWN node ids. Ownership, lifetime and the
     /// contract with a payload-retiring holder: `union_views.rs`.
@@ -799,6 +798,9 @@ impl SemanticGraphStore {
             retention_account.get(),
         ));
         let dep_signature_interner = DepSignatureInterner::charged(retention_account.get());
+        let unresolved_reach = Arc::new(release::SidecarMutex::new(
+            unresolved_reach::StructureBits::new(retention_account.get()),
+        ));
         let store = Self {
             operand_identity: Default::default(),
             arena,
@@ -816,7 +818,7 @@ impl SemanticGraphStore {
             retention_account,
             alias_charges: Default::default(),
             force_cold_abort_sweep: Default::default(),
-            unresolved_reach: Default::default(),
+            unresolved_reach,
             union_views: Default::default(),
             key_classes: Default::default(),
             #[cfg(any(test, feature = "test-support"))]

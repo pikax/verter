@@ -490,41 +490,45 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     // The sole relation authority
     // ──────────────────────────────────────────────────────────────────
 
-    /// Ergonomic pair constructor (design Decision 5 — a pure-delegation
-    /// helper, owning ZERO memoization / cycle / assumption / admission
-    /// logic): constructs the full default assignability key for
-    /// `(source, target)` and delegates to [`Self::execute_relate`].
-    ///
-    /// A pair question is pure assignability (`isTypeAssignableTo`): it
-    /// never deposits into an inference session open around it. A type
-    /// parameter an enclosing session infers is rigid here; a relation
-    /// whose own key carries an inference context still opens its own
-    /// session. Candidate collection enters through the inference owner.
-    pub fn execute_relate_pair(
-        &self,
-        source: SemanticNodeId,
-        target: SemanticNodeId,
-    ) -> RelationStep {
-        if let Some(step) = self.literal_pair_relation_of(source, target) {
-            self.graph().record_relation_check();
-            return step;
+    construction_ordinal_seam! {
+        /// Ergonomic pair constructor (design Decision 5 — a pure-delegation
+        /// helper, owning ZERO memoization / cycle / assumption / admission
+        /// logic): constructs the full default assignability key for
+        /// `(source, target)` and delegates to [`Self::execute_relate`].
+        ///
+        /// A pair question is pure assignability (`isTypeAssignableTo`): it
+        /// never deposits into an inference session open around it. A type
+        /// parameter an enclosing session infers is rigid here; a relation
+        /// whose own key carries an inference context still opens its own
+        /// session. Candidate collection enters through the inference owner.
+        fn execute_relate_pair(
+            &self,
+            source: SemanticNodeId,
+            target: SemanticNodeId,
+        ) -> RelationStep {
+            if let Some(step) = self.literal_pair_relation_of(source, target) {
+                self.graph().record_relation_check();
+                return step;
+            }
+            self.execute_relate_without_binding(self.relate_key_for(source, target))
         }
-        self.execute_relate_without_binding(self.relate_key_for(source, target))
     }
 
-    /// [`Self::execute_relate_pair`] for a NON-default relation kind — the
-    /// same pure-delegation helper, keyed on the asked relation.
-    pub fn execute_relate_pair_kind(
-        &self,
-        source: SemanticNodeId,
-        target: SemanticNodeId,
-        relation: RelationKind,
-    ) -> RelationStep {
-        if let Some(step) = self.literal_pair_relation_of(source, target) {
-            self.graph().record_relation_check();
-            return step;
+    construction_ordinal_seam! {
+        /// [`Self::execute_relate_pair`] for a NON-default relation kind — the
+        /// same pure-delegation helper, keyed on the asked relation.
+        fn execute_relate_pair_kind(
+            &self,
+            source: SemanticNodeId,
+            target: SemanticNodeId,
+            relation: RelationKind,
+        ) -> RelationStep {
+            if let Some(step) = self.literal_pair_relation_of(source, target) {
+                self.graph().record_relation_check();
+                return step;
+            }
+            self.execute_relate_without_binding(self.relate_key_for_kind(source, target, relation))
         }
-        self.execute_relate_without_binding(self.relate_key_for_kind(source, target, relation))
     }
 
     /// [`Self::execute_relate`] behind a binding barrier: no session open
@@ -1163,21 +1167,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.relation_environment().strict
     }
 
-    /// THE relation authority (design §2.1–§2.3). Every relation judgement
-    /// enters here with a full §2.7 identity:
-    ///
-    /// 1. **Reentry intercept** — the identity is already in flight on
-    ///    this transaction ⇒ record the scoped assumption edge and return
-    ///    the `Assumed` sentinel (no recompute, no self-await, no warm
-    ///    consult — the coinductive "assume it holds" step).
-    /// 2. **Warm read** — a validated published payload (decided binary
-    ///    outcomes only; `BudgetExceeded` / `Unknown` are never warm).
-    /// 3. **Cold compute** — the machinery ROOT goes through the family
-    ///    singleflight (`execute(Relate)` → `build_relate`); a nested
-    ///    sub-relation computes INLINE on the transaction (its publish is
-    ///    batched at its SCC's close and drained by the root).
-    pub fn execute_relate(&self, key: RelateMemoKey) -> RelationStep {
-        self.execute_relate_with_occurrence(key, InferenceOccurrence::ARGUMENT_COVARIANT)
+    construction_ordinal_seam! {
+        /// THE relation authority (design §2.1–§2.3). Every relation judgement
+        /// enters here with a full §2.7 identity:
+        ///
+        /// 1. **Reentry intercept** — the identity is already in flight on
+        ///    this transaction ⇒ record the scoped assumption edge and return
+        ///    the `Assumed` sentinel (no recompute, no self-await, no warm
+        ///    consult — the coinductive "assume it holds" step).
+        /// 2. **Warm read** — a validated published payload (decided binary
+        ///    outcomes only; `BudgetExceeded` / `Unknown` are never warm).
+        /// 3. **Cold compute** — the machinery ROOT goes through the family
+        ///    singleflight (`execute(Relate)` → `build_relate`); a nested
+        ///    sub-relation computes INLINE on the transaction (its publish is
+        ///    batched at its SCC's close and drained by the root).
+        fn execute_relate(&self, key: RelateMemoKey) -> RelationStep {
+            self.execute_relate_with_occurrence(key, InferenceOccurrence::ARGUMENT_COVARIANT)
+        }
     }
 
     /// Execute one relation under a transient inference occurrence. The
@@ -3185,100 +3191,82 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// The relation-member half of a tagged SCC close (the generic
-    /// coordinator's discharge step, design §2.3 steps 3–4): build the
-    /// discharged set from the optional relation root plus the drained
-    /// relation members, gate binding members on their session's drain,
-    /// redischarge deepest-first/root-last against the ONE tagged
-    /// provisional substitution table, and route every decided member —
-    /// and every completed flow member — into the batched publish queue.
-    ///
-    /// `root_relation = None` is the FLOW-rooted shape: the close's root
-    /// is a flow frame, so every relation member routes to the completed
-    /// batch (no self publish, no self step) and the flow root publishes
-    /// through its own family.
-    ///
-    /// Returns `Err(cap)` when the component releases WITHOUT publish
-    /// (abandoned session, lost ledger member, non-stable redischarge, or
-    /// a poisoned relation member); `cap` carries the budget edge when
-    /// one drove the abort. The helper aborts every flight it owns; the
-    /// caller aborts its own root flight.
-    ///
-    /// Flow members are proof-gated HERE: each drained flow member
-    /// finalizes against its own installed demand (its typed discharge
-    /// report applied centrally, the component's observed convergence
-    /// replayed, the seal, the finalizer) and enters the publish queue
-    /// ONLY with its own `CompleteFlowResult`. One unproven member refuses
-    /// the WHOLE member batch — the torn-component rule — while the
-    /// root's own admission is unaffected.
-    #[allow(clippy::type_complexity)]
-    pub fn relation_discharge_and_route(
-        &self,
-        machinery_root: bool,
-        root_relation: Option<(
-            RelateMemoKey,
-            InferenceOccurrence,
-            PendingVerdict,
-            bool,
-            bool,
-            Option<super::dispatch_txn::SessionId>,
-            Option<InlineMemberFlight>,
-            super::dispatch_txn::ClosedRelationRecursion,
-        )>,
-        members: Vec<DrainedRelationMember>,
-        flow_members: Vec<DrainedFlowReturnMember>,
-        provisional_call_root: Option<(
-            crate::semantic_query::ResolveCallKey,
-            crate::semantic_query::ResolvedCallResult,
-            Option<super::dispatch_txn::SessionId>,
-        )>,
-        call_members: Vec<(
-            crate::semantic_query::ResolveCallKey,
-            ResolveCallPendingState,
-            crate::semantic_query::ResolvedCallResult,
-        )>,
-        cyclic: bool,
-        flow_convergence: &super::dispatch_txn::flow_obligation_state::ObservedFlowConvergence,
-    ) -> Result<RelationDischargeOutcome, Option<RecursionOrBudgetCap>> {
-        // Discharge verdicts — a member recorded POSITIVE that consumed
-        // assumptions re-discharges against the converged state when ANY
-        // member closed NEGATIVE (the collapsed-back-edge case, design
-        // §2.3 step 3); a non-stable re-discharge (a flip to Unknown)
-        // releases the whole batch without publish. Each record carries
-        // the member's session-delta flag (row 7: a session-local delta
-        // never publishes) and its opened-session token (a binding
-        // member admits only through its session's
-        // `SessionAdmissionLedger` drain below).
-        let any_negative = root_relation
-            .as_ref()
-            .is_some_and(|(_, _, pending, _, _, _, _, _)| {
-                matches!(pending, PendingVerdict::NotAssignable)
-            })
-            || members
-                .iter()
-                .any(|m| matches!(m.verdict, PendingVerdict::NotAssignable));
-        let mut discharged: Vec<DischargedMember> = Vec::new();
-        let mut recursion_uses: Vec<super::dispatch_txn::ClosedRelationRecursion> = Vec::new();
-        if let Some((
-            key,
-            occurrence,
-            pending,
-            self_assumptive,
-            session_delta,
-            opened_session,
-            flight,
-            recursion,
-        )) = root_relation
-        {
-            recursion_uses.push(recursion);
-            if let Some(sid) = opened_session {
-                self.dispatch_txn
-                    .borrow_mut()
-                    .relation
-                    .session_admission
-                    .defer(sid, key.clone());
-            }
-            discharged.push((
+    construction_ordinal_seam! {
+        /// The relation-member half of a tagged SCC close (the generic
+        /// coordinator's discharge step, design §2.3 steps 3–4): build the
+        /// discharged set from the optional relation root plus the drained
+        /// relation members, gate binding members on their session's drain,
+        /// redischarge deepest-first/root-last against the ONE tagged
+        /// provisional substitution table, and route every decided member —
+        /// and every completed flow member — into the batched publish queue.
+        ///
+        /// `root_relation = None` is the FLOW-rooted shape: the close's root
+        /// is a flow frame, so every relation member routes to the completed
+        /// batch (no self publish, no self step) and the flow root publishes
+        /// through its own family.
+        ///
+        /// Returns `Err(cap)` when the component releases WITHOUT publish
+        /// (abandoned session, lost ledger member, non-stable redischarge, or
+        /// a poisoned relation member); `cap` carries the budget edge when
+        /// one drove the abort. The helper aborts every flight it owns; the
+        /// caller aborts its own root flight.
+        ///
+        /// Flow members are proof-gated HERE: each drained flow member
+        /// finalizes against its own installed demand (its typed discharge
+        /// report applied centrally, the component's observed convergence
+        /// replayed, the seal, the finalizer) and enters the publish queue
+        /// ONLY with its own `CompleteFlowResult`. One unproven member refuses
+        /// the WHOLE member batch — the torn-component rule — while the
+        /// root's own admission is unaffected.
+        #[allow(clippy::type_complexity)]
+        fn relation_discharge_and_route(
+            &self,
+            machinery_root: bool,
+            root_relation: Option<(
+                RelateMemoKey,
+                InferenceOccurrence,
+                PendingVerdict,
+                bool,
+                bool,
+                Option<super::dispatch_txn::SessionId>,
+                Option<InlineMemberFlight>,
+                super::dispatch_txn::ClosedRelationRecursion,
+            )>,
+            members: Vec<DrainedRelationMember>,
+            flow_members: Vec<DrainedFlowReturnMember>,
+            provisional_call_root: Option<(
+                crate::semantic_query::ResolveCallKey,
+                crate::semantic_query::ResolvedCallResult,
+                Option<super::dispatch_txn::SessionId>,
+            )>,
+            call_members: Vec<(
+                crate::semantic_query::ResolveCallKey,
+                ResolveCallPendingState,
+                crate::semantic_query::ResolvedCallResult,
+            )>,
+            cyclic: bool,
+            flow_convergence: &super::dispatch_txn::flow_obligation_state::ObservedFlowConvergence,
+        ) -> Result<RelationDischargeOutcome, Option<RecursionOrBudgetCap>> {
+            // Discharge verdicts — a member recorded POSITIVE that consumed
+            // assumptions re-discharges against the converged state when ANY
+            // member closed NEGATIVE (the collapsed-back-edge case, design
+            // §2.3 step 3); a non-stable re-discharge (a flip to Unknown)
+            // releases the whole batch without publish. Each record carries
+            // the member's session-delta flag (row 7: a session-local delta
+            // never publishes) and its opened-session token (a binding
+            // member admits only through its session's
+            // `SessionAdmissionLedger` drain below).
+            let any_negative = root_relation
+                .as_ref()
+                .is_some_and(|(_, _, pending, _, _, _, _, _)| {
+                    matches!(pending, PendingVerdict::NotAssignable)
+                })
+                || members
+                    .iter()
+                    .any(|m| matches!(m.verdict, PendingVerdict::NotAssignable));
+            let mut discharged: Vec<DischargedMember> = Vec::new();
+            let mut recursion_uses: Vec<super::dispatch_txn::ClosedRelationRecursion> = Vec::new();
+            if let Some((
                 key,
                 occurrence,
                 pending,
@@ -3286,466 +3274,474 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 session_delta,
                 opened_session,
                 flight,
-            ));
-        }
-        let has_relation_root = !discharged.is_empty();
-        for member in members {
-            recursion_uses.push(member.recursion);
-            discharged.push((
-                member.key,
-                member.occurrence,
-                member.verdict,
-                true,
-                member.session_delta,
-                member.opened_session,
-                member.inline_flight,
-            ));
-        }
-        let has_binding_member = discharged
-            .iter()
-            .any(|(key, _, _, _, _, opened_session, _)| {
-                opened_session.is_some() || key.inference_context.is_some()
-            });
-        let has_return_member =
-            !flow_members.is_empty() || provisional_call_root.is_some() || !call_members.is_empty();
-        // Re-discharge is an SCC-close operation. A redischarge itself
-        // opens an ordinary acyclic frame; allowing a merely-negative
-        // binding result to enter this branch again would recursively
-        // redischarge forever.
-        if cyclic && (any_negative || has_binding_member || has_return_member) {
-            let mut substitution: ProvisionalSubstitution = discharged
-                .iter()
-                .map(|(key, occurrence, verdict, _, _, _, _)| {
-                    (
-                        ObligationIdentity::Relate {
-                            key: key.clone(),
-                            occurrence: *occurrence,
-                        },
-                        ProvisionalVerdict::Relate(relation_step_from_pending(verdict)),
-                    )
-                })
-                .collect();
-            substitution.extend(call_members.iter().map(|(key, _, result)| {
-                (
-                    ObligationIdentity::ResolveCall(key.clone()),
-                    ProvisionalVerdict::ResolveCall(result.clone()),
-                )
-            }));
-            substitution.extend(provisional_call_root.iter().map(|(key, result, _)| {
-                (
-                    ObligationIdentity::ResolveCall(key.clone()),
-                    ProvisionalVerdict::ResolveCall(result.clone()),
-                )
-            }));
-            // Bottom-up over the condensation: re-discharge the POSITIVE
-            // assumption-consuming members DEEPEST-FIRST so a shallower
-            // member re-runs against the FINAL deeper verdicts. Layout:
-            // `discharged[0]` is the SCC root (shallowest) when there is
-            // a relation root; `discharged[1..]` are the drained members
-            // in POP order — deepest-popped first — so deepest-first is
-            // positions `1..len` in order, with the root LAST. With no
-            // relation root the drained members themselves already run
-            // deepest-first and none is privileged. (The reversed scan
-            // froze a shallow member against a stale provisional deep
-            // `Assignable` before the deep member flipped on its
-            // collapsed back-edge.)
-            let order: Vec<usize> = if has_relation_root {
-                (1..discharged.len()).chain(std::iter::once(0)).collect()
-            } else {
-                (0..discharged.len()).collect()
-            };
-            for position in order {
-                let (key, occurrence, verdict, assumptive, _, opened_session, _) =
-                    &discharged[position];
-                let binding_member = opened_session.is_some() || key.inference_context.is_some();
-                let must_redischarge = if has_binding_member || has_return_member {
-                    true
-                } else {
-                    *assumptive && matches!(verdict, PendingVerdict::Assignable { .. })
-                };
-                if !binding_member && !must_redischarge {
-                    continue;
+                recursion,
+            )) = root_relation
+            {
+                recursion_uses.push(recursion);
+                if let Some(sid) = opened_session {
+                    self.dispatch_txn
+                        .borrow_mut()
+                        .relation
+                        .session_admission
+                        .defer(sid, key.clone());
                 }
-                let key = key.clone();
-                let occurrence = *occurrence;
-                let rerun = self.relation_redischarge(&key, occurrence, &substitution);
-                match rerun {
-                    PendingVerdict::Unknown => {
-                        // Non-stable re-discharge ⇒ release the whole batch
-                        // WITHOUT publish (joiners recompute).
-                        self.relation_abort_discharged_flights(&discharged);
-                        self.flow_return_abort_drained_flights(&flow_members);
-                        self.resolve_call_abort_drained_flights(&call_members);
-                        return Err(None);
+                discharged.push((
+                    key,
+                    occurrence,
+                    pending,
+                    self_assumptive,
+                    session_delta,
+                    opened_session,
+                    flight,
+                ));
+            }
+            let has_relation_root = !discharged.is_empty();
+            for member in members {
+                recursion_uses.push(member.recursion);
+                discharged.push((
+                    member.key,
+                    member.occurrence,
+                    member.verdict,
+                    true,
+                    member.session_delta,
+                    member.opened_session,
+                    member.inline_flight,
+                ));
+            }
+            let has_binding_member = discharged
+                .iter()
+                .any(|(key, _, _, _, _, opened_session, _)| {
+                    opened_session.is_some() || key.inference_context.is_some()
+                });
+            let has_return_member =
+                !flow_members.is_empty() || provisional_call_root.is_some() || !call_members.is_empty();
+            // Re-discharge is an SCC-close operation. A redischarge itself
+            // opens an ordinary acyclic frame; allowing a merely-negative
+            // binding result to enter this branch again would recursively
+            // redischarge forever.
+            if cyclic && (any_negative || has_binding_member || has_return_member) {
+                let mut substitution: ProvisionalSubstitution = discharged
+                    .iter()
+                    .map(|(key, occurrence, verdict, _, _, _, _)| {
+                        (
+                            ObligationIdentity::Relate {
+                                key: key.clone(),
+                                occurrence: *occurrence,
+                            },
+                            ProvisionalVerdict::Relate(relation_step_from_pending(verdict)),
+                        )
+                    })
+                    .collect();
+                substitution.extend(call_members.iter().map(|(key, _, result)| {
+                    (
+                        ObligationIdentity::ResolveCall(key.clone()),
+                        ProvisionalVerdict::ResolveCall(result.clone()),
+                    )
+                }));
+                substitution.extend(provisional_call_root.iter().map(|(key, result, _)| {
+                    (
+                        ObligationIdentity::ResolveCall(key.clone()),
+                        ProvisionalVerdict::ResolveCall(result.clone()),
+                    )
+                }));
+                // Bottom-up over the condensation: re-discharge the POSITIVE
+                // assumption-consuming members DEEPEST-FIRST so a shallower
+                // member re-runs against the FINAL deeper verdicts. Layout:
+                // `discharged[0]` is the SCC root (shallowest) when there is
+                // a relation root; `discharged[1..]` are the drained members
+                // in POP order — deepest-popped first — so deepest-first is
+                // positions `1..len` in order, with the root LAST. With no
+                // relation root the drained members themselves already run
+                // deepest-first and none is privileged. (The reversed scan
+                // froze a shallow member against a stale provisional deep
+                // `Assignable` before the deep member flipped on its
+                // collapsed back-edge.)
+                let order: Vec<usize> = if has_relation_root {
+                    (1..discharged.len()).chain(std::iter::once(0)).collect()
+                } else {
+                    (0..discharged.len()).collect()
+                };
+                for position in order {
+                    let (key, occurrence, verdict, assumptive, _, opened_session, _) =
+                        &discharged[position];
+                    let binding_member = opened_session.is_some() || key.inference_context.is_some();
+                    let must_redischarge = if has_binding_member || has_return_member {
+                        true
+                    } else {
+                        *assumptive && matches!(verdict, PendingVerdict::Assignable { .. })
+                    };
+                    if !binding_member && !must_redischarge {
+                        continue;
                     }
-                    PendingVerdict::BudgetExceeded(cap) => {
-                        self.relation_abort_discharged_flights(&discharged);
-                        self.flow_return_abort_drained_flights(&flow_members);
-                        self.resolve_call_abort_drained_flights(&call_members);
-                        return Err(Some(cap));
-                    }
-                    stable => {
-                        if (has_binding_member || has_return_member)
-                            && !redischarge_is_stable(verdict, &stable)
-                        {
-                            // A binding SCC may publish only when every
-                            // member retains its provisional polarity and the
-                            // binding members retain their complete fixed
-                            // binding snapshot. Pure non-binding SCCs instead
-                            // converge bottom-up: a provisional positive may
-                            // legitimately collapse to the final negative
-                            // verdict carried by its dependency.
+                    let key = key.clone();
+                    let occurrence = *occurrence;
+                    let rerun = self.relation_redischarge(&key, occurrence, &substitution);
+                    match rerun {
+                        PendingVerdict::Unknown => {
+                            // Non-stable re-discharge ⇒ release the whole batch
+                            // WITHOUT publish (joiners recompute).
                             self.relation_abort_discharged_flights(&discharged);
                             self.flow_return_abort_drained_flights(&flow_members);
                             self.resolve_call_abort_drained_flights(&call_members);
                             return Err(None);
                         }
-                        substitution.insert(
-                            ObligationIdentity::Relate {
-                                key: key.clone(),
-                                occurrence,
-                            },
-                            ProvisionalVerdict::Relate(relation_step_from_pending(&stable)),
-                        );
-                        discharged[position].2 = stable;
+                        PendingVerdict::BudgetExceeded(cap) => {
+                            self.relation_abort_discharged_flights(&discharged);
+                            self.flow_return_abort_drained_flights(&flow_members);
+                            self.resolve_call_abort_drained_flights(&call_members);
+                            return Err(Some(cap));
+                        }
+                        stable => {
+                            if (has_binding_member || has_return_member)
+                                && !redischarge_is_stable(verdict, &stable)
+                            {
+                                // A binding SCC may publish only when every
+                                // member retains its provisional polarity and the
+                                // binding members retain their complete fixed
+                                // binding snapshot. Pure non-binding SCCs instead
+                                // converge bottom-up: a provisional positive may
+                                // legitimately collapse to the final negative
+                                // verdict carried by its dependency.
+                                self.relation_abort_discharged_flights(&discharged);
+                                self.flow_return_abort_drained_flights(&flow_members);
+                                self.resolve_call_abort_drained_flights(&call_members);
+                                return Err(None);
+                            }
+                            substitution.insert(
+                                ObligationIdentity::Relate {
+                                    key: key.clone(),
+                                    occurrence,
+                                },
+                                ProvisionalVerdict::Relate(relation_step_from_pending(&stable)),
+                            );
+                            discharged[position].2 = stable;
+                        }
                     }
                 }
             }
-        }
 
-        let deferred_relation_sessions = discharged
-            .iter()
-            .filter_map(|(key, _, _, _, _, opened_session, _)| {
-                opened_session.map(|session| (session, key.clone()))
-            })
-            .collect::<Vec<_>>();
-        // Validate without consuming. From call-session commit through the
-        // ledger drain and completed-member enqueue, no semantic work runs.
-        let ledgers_ready = {
-            let txn = self.dispatch_txn.borrow();
-            deferred_relation_sessions.iter().all(|(session, key)| {
-                let session_ok = txn.relation.session(*session).is_some_and(|candidate| {
-                    candidate.state == InferenceSessionState::CommittedDeterministic
-                });
-                session_ok && txn.relation.session_admission.contains(*session, key)
-            })
-        };
-        if !ledgers_ready {
-            self.relation_abort_discharged_flights(&discharged);
-            self.flow_return_abort_drained_flights(&flow_members);
-            self.resolve_call_abort_drained_flights(&call_members);
-            return Err(None);
-        }
-
-        // Publish routing (design §2.3 step 4): decided members queue for
-        // the root's batched publish onto the SCC-union carrier; a
-        // session-local delta (row 7) never publishes.
-        let footprints =
-            Self::relation_publication_footprints(&recursion_uses, cyclic, has_relation_root);
-        #[cfg(feature = "semantic-observe")]
-        let cycle_members: Option<Arc<[super::relation_explanation::LeasedRelatePair]>> = cyclic
-            .then(|| {
-                discharged
-                    .iter()
-                    .map(|(key, _, _, _, _, _, _)| self.lease_relate_pair(key))
-                    .collect()
-            });
-        let mut self_publish: Option<RelationPayload> = None;
-        let mut self_step: Option<RelationStep> = None;
-        let mut completed: Vec<CompletedSccMember> = Vec::new();
-        // The completed members whose answers are cold, by position.
-        let mut settles: Vec<bool> = Vec::new();
-        for (position, (key, _, verdict, _, session_delta, _, inline_flight)) in
-            discharged.into_iter().enumerate()
-        {
-            let is_self = has_relation_root && position == 0;
-            let mut payload = match &verdict {
-                PendingVerdict::Assignable { bindings } => {
-                    #[cfg(feature = "semantic-observe")]
-                    self.record_relation_explanation(match &cycle_members {
-                        Some(members) => RelationExplanation::CoinductiveCycle {
-                            pair: self.lease_relate_pair(&key),
-                            members: Arc::clone(members),
-                        },
-                        None => RelationExplanation::Assignable {
-                            pair: self.lease_relate_pair(&key),
-                        },
+            let deferred_relation_sessions = discharged
+                .iter()
+                .filter_map(|(key, _, _, _, _, opened_session, _)| {
+                    opened_session.map(|session| (session, key.clone()))
+                })
+                .collect::<Vec<_>>();
+            // Validate without consuming. From call-session commit through the
+            // ledger drain and completed-member enqueue, no semantic work runs.
+            let ledgers_ready = {
+                let txn = self.dispatch_txn.borrow();
+                deferred_relation_sessions.iter().all(|(session, key)| {
+                    let session_ok = txn.relation.session(*session).is_some_and(|candidate| {
+                        candidate.state == InferenceSessionState::CommittedDeterministic
                     });
-                    self.relation_payload(RelationOutcome::Assignable, Arc::clone(bindings))
-                }
-                PendingVerdict::NotAssignable => {
-                    #[cfg(feature = "semantic-observe")]
-                    self.record_relation_explanation(RelationExplanation::NotAssignable {
-                        pair: self.lease_relate_pair(&key),
-                    });
-                    self.relation_payload(
-                        RelationOutcome::NotAssignable,
-                        Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
-                    )
-                }
-                PendingVerdict::Unknown | PendingVerdict::BudgetExceeded(_) => {
-                    unreachable!("poisoned SCCs return before the publish routing")
-                }
+                    session_ok && txn.relation.session_admission.contains(*session, key)
+                })
             };
-            payload.recursion = footprints[position].clone();
-            if is_self {
-                if session_delta {
-                    // Admission row 7: a session-local delta never
-                    // publishes — the caller gets the computed step.
-                    self.abort_inline_flight(inline_flight.as_ref());
-                    self_step = Some(relation_step_from_payload(&payload));
-                } else if machinery_root {
-                    // The machinery root publishes through the family
-                    // singleflight (its build output IS this payload).
-                    self_publish = Some(payload);
-                } else {
-                    // An inline SCC root: its payload batch-publishes with
-                    // the SCC (drained by the machinery root); the caller
-                    // consumes the computed step.
-                    self_step = Some(relation_step_from_payload(&payload));
-                    settles.push(!recursion_uses[position].context_dependent);
-                    completed.push(
-                        CompletedSccMember {
+            if !ledgers_ready {
+                self.relation_abort_discharged_flights(&discharged);
+                self.flow_return_abort_drained_flights(&flow_members);
+                self.resolve_call_abort_drained_flights(&call_members);
+                return Err(None);
+            }
+
+            // Publish routing (design §2.3 step 4): decided members queue for
+            // the root's batched publish onto the SCC-union carrier; a
+            // session-local delta (row 7) never publishes.
+            let footprints =
+                Self::relation_publication_footprints(&recursion_uses, cyclic, has_relation_root);
+            #[cfg(feature = "semantic-observe")]
+            let cycle_members: Option<Arc<[super::relation_explanation::LeasedRelatePair]>> = cyclic
+                .then(|| {
+                    discharged
+                        .iter()
+                        .map(|(key, _, _, _, _, _, _)| self.lease_relate_pair(key))
+                        .collect()
+                });
+            let mut self_publish: Option<RelationPayload> = None;
+            let mut self_step: Option<RelationStep> = None;
+            let mut completed: Vec<CompletedSccMember> = Vec::new();
+            // The completed members whose answers are cold, by position.
+            let mut settles: Vec<bool> = Vec::new();
+            for (position, (key, _, verdict, _, session_delta, _, inline_flight)) in
+                discharged.into_iter().enumerate()
+            {
+                let is_self = has_relation_root && position == 0;
+                let mut payload = match &verdict {
+                    PendingVerdict::Assignable { bindings } => {
+                        #[cfg(feature = "semantic-observe")]
+                        self.record_relation_explanation(match &cycle_members {
+                            Some(members) => RelationExplanation::CoinductiveCycle {
+                                pair: self.lease_relate_pair(&key),
+                                members: Arc::clone(members),
+                            },
+                            None => RelationExplanation::Assignable {
+                                pair: self.lease_relate_pair(&key),
+                            },
+                        });
+                        self.relation_payload(RelationOutcome::Assignable, Arc::clone(bindings))
+                    }
+                    PendingVerdict::NotAssignable => {
+                        #[cfg(feature = "semantic-observe")]
+                        self.record_relation_explanation(RelationExplanation::NotAssignable {
+                            pair: self.lease_relate_pair(&key),
+                        });
+                        self.relation_payload(
+                            RelationOutcome::NotAssignable,
+                            Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
+                        )
+                    }
+                    PendingVerdict::Unknown | PendingVerdict::BudgetExceeded(_) => {
+                        unreachable!("poisoned SCCs return before the publish routing")
+                    }
+                };
+                payload.recursion = footprints[position].clone();
+                if is_self {
+                    if session_delta {
+                        // Admission row 7: a session-local delta never
+                        // publishes — the caller gets the computed step.
+                        self.abort_inline_flight(inline_flight.as_ref());
+                        self_step = Some(relation_step_from_payload(&payload));
+                    } else if machinery_root {
+                        // The machinery root publishes through the family
+                        // singleflight (its build output IS this payload).
+                        self_publish = Some(payload);
+                    } else {
+                        // An inline SCC root: its payload batch-publishes with
+                        // the SCC (drained by the machinery root); the caller
+                        // consumes the computed step.
+                        self_step = Some(relation_step_from_payload(&payload));
+                        settles.push(!recursion_uses[position].context_dependent);
+                        completed.push(CompletedSccMember {
                             key,
                             payload,
                             inline_flight,
-                        }
-                        .held(self.graph()),
-                    );
-                }
-            } else if !session_delta {
-                settles.push(!recursion_uses[position].context_dependent);
-                completed.push(
-                    CompletedSccMember {
+                        }.held(self.graph()));
+                    }
+                } else if !session_delta {
+                    settles.push(!recursion_uses[position].context_dependent);
+                    completed.push(CompletedSccMember {
                         key,
                         payload,
                         inline_flight,
+                    }.held(self.graph()));
+                } else {
+                    self.abort_inline_flight(inline_flight.as_ref());
+                }
+            }
+            // The call sessions commit before the flow members finalize: the
+            // session state feeds this transaction's remaining work regardless
+            // of how the flow members close.
+            let staged_call_sessions = call_members
+                .iter()
+                .filter_map(|(_, state, _)| state.staged_session)
+                .chain(
+                    provisional_call_root
+                        .iter()
+                        .filter_map(|(_, _, session)| *session),
+                )
+                .collect::<Vec<_>>();
+            if !self.commit_call_sessions(&staged_call_sessions) {
+                for member in &completed {
+                    self.abort_inline_flight(member.inline_flight.as_ref());
+                }
+                self.flow_return_abort_drained_flights(&flow_members);
+                self.resolve_call_abort_drained_flights(&call_members);
+                return Err(None);
+            }
+            // Proof-gate the flow members BEFORE anything queues: each member
+            // finalizes against its OWN installed demand (its typed discharge
+            // report applied centrally, the component's observed convergence
+            // replayed, the seal, the finalizer) and enters the publish queue
+            // ONLY with its own `CompleteFlowResult`. One unproven member
+            // refuses the WHOLE member batch (the torn-component rule): every
+            // member flight aborts, nothing queues, and the ROOT's outcome is
+            // marked non-admissible too — the mixed equation consumed the
+            // members' evaluated values, so the root's verdict may still flow
+            // to the caller but must never warm (`ReturnOnly`).
+            let mut proven_flow_members = Vec::with_capacity(flow_members.len());
+            let mut flow_batch_unproven = false;
+            let mut flow_batch_partial_reasons = crate::semantic_query::PartialReasonSet::default();
+            for member in flow_members {
+                // Read before the outcome moves: the cause survives the
+                // member, because the close is where it is finally needed.
+                let member_plan_refusal = member.plan_refusal;
+                // The member's per-key substitution applies BEFORE its value
+                // leaves the component: the pop substituted only the
+                // caller-return clone, so the value channel, the finalizer's
+                // proof, and the publish all carry the INSTANTIATED value —
+                // exactly as the root's own close substitutes before it
+                // finalizes.
+                let outcome = match member.outcome {
+                    FlowReturnPendingOutcome::EvaluatedValue(result) => {
+                        // Per-key substitution, then the final idempotent
+                        // pre-seal closure — the member's proof, the value
+                        // channel and the batch publish all see the closed
+                        // value — and the function-kind wrap materializes
+                        // last, exactly as the root's own close orders it.
+                        FlowReturnPendingOutcome::EvaluatedValue(self.materialize_flow_return_wrap(
+                            self.close_flow_result_pre_seal(
+                                self.apply_frame_key_substitution(&member.key, result),
+                                member.key.context.policy.nullability,
+                            ),
+                        ))
                     }
-                    .held(self.graph()),
-                );
-            } else {
-                self.abort_inline_flight(inline_flight.as_ref());
-            }
-        }
-        // The call sessions commit before the flow members finalize: the
-        // session state feeds this transaction's remaining work regardless
-        // of how the flow members close.
-        let staged_call_sessions = call_members
-            .iter()
-            .filter_map(|(_, state, _)| state.staged_session)
-            .chain(
-                provisional_call_root
-                    .iter()
-                    .filter_map(|(_, _, session)| *session),
-            )
-            .collect::<Vec<_>>();
-        if !self.commit_call_sessions(&staged_call_sessions) {
-            for member in &completed {
-                self.abort_inline_flight(member.inline_flight.as_ref());
-            }
-            self.flow_return_abort_drained_flights(&flow_members);
-            self.resolve_call_abort_drained_flights(&call_members);
-            return Err(None);
-        }
-        // Proof-gate the flow members BEFORE anything queues: each member
-        // finalizes against its OWN installed demand (its typed discharge
-        // report applied centrally, the component's observed convergence
-        // replayed, the seal, the finalizer) and enters the publish queue
-        // ONLY with its own `CompleteFlowResult`. One unproven member
-        // refuses the WHOLE member batch (the torn-component rule): every
-        // member flight aborts, nothing queues, and the ROOT's outcome is
-        // marked non-admissible too — the mixed equation consumed the
-        // members' evaluated values, so the root's verdict may still flow
-        // to the caller but must never warm (`ReturnOnly`).
-        let mut proven_flow_members = Vec::with_capacity(flow_members.len());
-        let mut flow_batch_unproven = false;
-        let mut flow_batch_partial_reasons = crate::semantic_query::PartialReasonSet::default();
-        for member in flow_members {
-            // Read before the outcome moves: the cause survives the
-            // member, because the close is where it is finally needed.
-            let member_plan_refusal = member.plan_refusal;
-            // The member's per-key substitution applies BEFORE its value
-            // leaves the component: the pop substituted only the
-            // caller-return clone, so the value channel, the finalizer's
-            // proof, and the publish all carry the INSTANTIATED value —
-            // exactly as the root's own close substitutes before it
-            // finalizes.
-            let outcome = match member.outcome {
-                FlowReturnPendingOutcome::EvaluatedValue(result) => {
-                    // Per-key substitution, then the final idempotent
-                    // pre-seal closure — the member's proof, the value
-                    // channel and the batch publish all see the closed
-                    // value — and the function-kind wrap materializes
-                    // last, exactly as the root's own close orders it.
-                    FlowReturnPendingOutcome::EvaluatedValue(self.materialize_flow_return_wrap(
-                        self.close_flow_result_pre_seal(
-                            self.apply_frame_key_substitution(&member.key, result),
-                            member.key.context.policy.nullability,
-                        ),
-                    ))
-                }
-                no_value => no_value,
-            };
-            let verdict = match &outcome {
-                FlowReturnPendingOutcome::EvaluatedValue(result) => {
-                    // The member's OWN evaluation provenance, carried
-                    // through the deferral — never reconstructed from the
-                    // demand carrier, which would trivialize the
-                    // triangulation.
-                    self.finalize_flow_demand(
-                        member.flow_demand.as_ref(),
-                        member.discharge.as_ref(),
-                        flow_convergence,
-                        member.provenance,
+                    no_value => no_value,
+                };
+                let verdict = match &outcome {
+                    FlowReturnPendingOutcome::EvaluatedValue(result) => {
+                        // The member's OWN evaluation provenance, carried
+                        // through the deferral — never reconstructed from the
+                        // demand carrier, which would trivialize the
+                        // triangulation.
+                        self.finalize_flow_demand(
+                            member.flow_demand.as_ref(),
+                            member.discharge.as_ref(),
+                            flow_convergence,
+                            member.provenance,
+                            result,
+                        )
+                    }
+                    // A no-value member fails the component at the close
+                    // (both close paths poison it before routing); it never
+                    // enters the publish queue regardless.
+                    FlowReturnPendingOutcome::NoValue { failure, .. } => {
+                        let _ = self.fail_flow_demand(member.flow_demand.as_ref(), *failure);
+                        None
+                    }
+                };
+                // The value channel owns the finalized disposition, its source
+                // roots and reuse refusal before any equation can consume it.
+                if let FlowReturnPendingOutcome::EvaluatedValue(result) = &outcome {
+                    let result = self.flow_value_at_close(
+                        result.clone(),
+                        &verdict,
+                        member_plan_refusal,
+                        crate::semantic_query::PartialReasonSet::default(),
+                    );
+                    self.record_closed_flow_value(
+                        member.key.clone(),
                         result,
-                    )
+                        &verdict,
+                        member.self_roots.clone(),
+                    );
                 }
-                // A no-value member fails the component at the close
-                // (both close paths poison it before routing); it never
-                // enters the publish queue regardless.
-                FlowReturnPendingOutcome::NoValue { failure, .. } => {
-                    let _ = self.fail_flow_demand(member.flow_demand.as_ref(), *failure);
-                    None
-                }
-            };
-            // The value channel owns the finalized disposition, its source
-            // roots and reuse refusal before any equation can consume it.
-            if let FlowReturnPendingOutcome::EvaluatedValue(result) = &outcome {
-                let result = self.flow_value_at_close(
-                    result.clone(),
-                    &verdict,
-                    member_plan_refusal,
-                    crate::semantic_query::PartialReasonSet::default(),
-                );
-                self.record_closed_flow_value(
-                    member.key.clone(),
-                    result,
-                    &verdict,
-                    member.self_roots.clone(),
-                );
-            }
-            match verdict {
-                Some(super::flow_solve::FlowSolveOutcome::Complete(proof)) => {
-                    proven_flow_members.push(
-                        super::dispatch_txn::CompletedFlowReturnMember {
+                match verdict {
+                    Some(super::flow_solve::FlowSolveOutcome::Complete(proof)) => {
+                        proven_flow_members.push(super::dispatch_txn::CompletedFlowReturnMember {
                             key: member.key,
                             result: proof,
                             inline_flight: member.inline_flight,
                             self_roots: member.self_roots,
                             materialized: member.materialized,
-                        }
-                        .held(self.graph()),
-                    );
-                }
-                unproven => {
-                    flow_batch_unproven = true;
-                    // The member's OWN cause, unioned rather than
-                    // ranked: two members refused for different reasons
-                    // leave the batch both over budget and unstable, and
-                    // picking one would drop a class a consumer needs.
-                    // Both cause channels are read — the recorded plan
-                    // refusal FIRST (it is the member's primary cause and
-                    // the finalizer's undischarged echo must not shadow
-                    // it), then the finalizer's typed partial. Two member
-                    // states deliberately contribute NO class of their
-                    // own: a cleanly-planned member whose obligations
-                    // were merely left pending carries the batch close's
-                    // OWN withholding signature (`IncompleteObligations`
-                    // — a genuinely budget-refused obligation reaches
-                    // here as a typed `Failed` budget record instead),
-                    // and a NO-VALUE member is already represented
-                    // POSITIONALLY in the value the root consumed (its
-                    // typed marker names the exact position; blanketing
-                    // the frame-wide missing-surface class here would
-                    // erase the faithfully-typed sibling members a
-                    // value-deriving consumer can still serve). The batch
-                    // stays unproven either way — nothing warms.
-                    let member_reasons = if member_plan_refusal.is_some() {
-                        super::flow_return::plan_refusal_reason_class(member_plan_refusal)
-                    } else {
-                        match &unproven {
-                            Some(super::flow_solve::FlowSolveOutcome::Partial(partial)) => {
-                                match &partial.reason {
-                                    super::flow_solve::FlowPartialReason::IncompleteObligations => {
-                                        crate::semantic_query::PartialReasonSet::default()
+                        }.held(self.graph()));
+                    }
+                    unproven => {
+                        flow_batch_unproven = true;
+                        // The member's OWN cause, unioned rather than
+                        // ranked: two members refused for different reasons
+                        // leave the batch both over budget and unstable, and
+                        // picking one would drop a class a consumer needs.
+                        // Both cause channels are read — the recorded plan
+                        // refusal FIRST (it is the member's primary cause and
+                        // the finalizer's undischarged echo must not shadow
+                        // it), then the finalizer's typed partial. Two member
+                        // states deliberately contribute NO class of their
+                        // own: a cleanly-planned member whose obligations
+                        // were merely left pending carries the batch close's
+                        // OWN withholding signature (`IncompleteObligations`
+                        // — a genuinely budget-refused obligation reaches
+                        // here as a typed `Failed` budget record instead),
+                        // and a NO-VALUE member is already represented
+                        // POSITIONALLY in the value the root consumed (its
+                        // typed marker names the exact position; blanketing
+                        // the frame-wide missing-surface class here would
+                        // erase the faithfully-typed sibling members a
+                        // value-deriving consumer can still serve). The batch
+                        // stays unproven either way — nothing warms.
+                        let member_reasons = if member_plan_refusal.is_some() {
+                            super::flow_return::plan_refusal_reason_class(member_plan_refusal)
+                        } else {
+                            match &unproven {
+                                Some(super::flow_solve::FlowSolveOutcome::Partial(partial)) => {
+                                    match &partial.reason {
+                                        super::flow_solve::FlowPartialReason::IncompleteObligations => {
+                                            crate::semantic_query::PartialReasonSet::default()
+                                        }
+                                        _ => super::flow_return::flow_partial_reason_class(
+                                            &partial.reason,
+                                            partial.value.degradation(),
+                                        ),
                                     }
-                                    _ => super::flow_return::flow_partial_reason_class(
-                                        &partial.reason,
-                                        partial.value.degradation(),
-                                    ),
+                                }
+                                Some(super::flow_solve::FlowSolveOutcome::Aborted(_))
+                                | Some(super::flow_solve::FlowSolveOutcome::NoValue(_))
+                                | None => crate::semantic_query::PartialReasonSet::default(),
+                                // Matched by the arm above.
+                                Some(super::flow_solve::FlowSolveOutcome::Complete(_)) => {
+                                    unreachable!()
                                 }
                             }
-                            Some(super::flow_solve::FlowSolveOutcome::Aborted(_))
-                            | Some(super::flow_solve::FlowSolveOutcome::NoValue(_))
-                            | None => crate::semantic_query::PartialReasonSet::default(),
-                            // Matched by the arm above.
-                            Some(super::flow_solve::FlowSolveOutcome::Complete(_)) => {
-                                unreachable!()
-                            }
-                        }
-                    };
-                    flow_batch_partial_reasons = flow_batch_partial_reasons.union(member_reasons);
+                        };
+                        flow_batch_partial_reasons = flow_batch_partial_reasons.union(member_reasons);
+                        self.abort_inline_flight(member.inline_flight.as_ref());
+                    }
+                }
+            }
+            if flow_batch_unproven {
+                for member in &completed {
                     self.abort_inline_flight(member.inline_flight.as_ref());
                 }
-            }
-        }
-        if flow_batch_unproven {
-            for member in &completed {
-                self.abort_inline_flight(member.inline_flight.as_ref());
-            }
-            for member in &proven_flow_members {
-                self.abort_inline_flight(member.inline_flight.as_ref());
-            }
-            self.resolve_call_abort_drained_flights(&call_members);
-            return Ok(RelationDischargeOutcome {
-                self_publish,
-                self_step,
-                flow_batch_unproven: true,
-                flow_batch_partial_reasons,
-            });
-        }
-        let mut rootless_flights = Vec::new();
-        {
-            let mut txn = self.dispatch_txn.borrow_mut();
-            for (session, _) in deferred_relation_sessions {
-                let _ = txn.relation.session_admission.drain(session);
-            }
-            for (member, settles) in completed.iter().zip(settles) {
-                if settles && member.key.inference_context.is_none() {
-                    txn.relation
-                        .settled
-                        .insert(member.key.clone(), member.payload.clone());
+                for member in &proven_flow_members {
+                    self.abort_inline_flight(member.inline_flight.as_ref());
                 }
+                self.resolve_call_abort_drained_flights(&call_members);
+                return Ok(RelationDischargeOutcome {
+                    self_publish,
+                    self_step,
+                    flow_batch_unproven: true,
+                    flow_batch_partial_reasons,
+                });
             }
-            txn.relation.completed_members.extend(completed);
-            txn.flow.completed_members.extend(proven_flow_members);
-            for (key, state, result) in call_members {
-                // Incomplete proof stays transaction-local. Origin is
-                // provenance and is not the admission oracle.
-                match crate::semantic_query::AdmissibleCallResult::new(result, state.proof_complete)
-                {
-                    Some(result) => txn.call.completed_members.push(
-                        CompletedResolveCallMember {
+            let mut rootless_flights = Vec::new();
+            {
+                let mut txn = self.dispatch_txn.borrow_mut();
+                for (session, _) in deferred_relation_sessions {
+                    let _ = txn.relation.session_admission.drain(session);
+                }
+                for (member, settles) in completed.iter().zip(settles) {
+                    if settles && member.key.inference_context.is_none() {
+                        txn.relation
+                            .settled
+                            .insert(member.key.clone(), member.payload.clone());
+                    }
+                }
+                txn.relation.completed_members.extend(completed);
+                txn.flow.completed_members.extend(proven_flow_members);
+                for (key, state, result) in call_members {
+                    // Incomplete proof stays transaction-local. Origin is
+                    // provenance and is not the admission oracle.
+                    match crate::semantic_query::AdmissibleCallResult::new(result, state.proof_complete)
+                    {
+                        Some(result) => txn.call.completed_members.push(CompletedResolveCallMember {
                             key,
                             result,
                             inline_flight: state.inline_flight,
                             self_roots: state.self_roots,
-                        }
-                        .held(self.graph()),
-                    ),
-                    _ => rootless_flights.push(state.inline_flight),
+                        }.held(self.graph())),
+                        _ => rootless_flights.push(state.inline_flight),
+                    }
                 }
             }
+            for flight in rootless_flights {
+                self.abort_inline_flight(flight.as_ref());
+            }
+            Ok(RelationDischargeOutcome {
+                self_publish,
+                self_step,
+                flow_batch_unproven: false,
+                flow_batch_partial_reasons: crate::semantic_query::PartialReasonSet::default(),
+            })
         }
-        for flight in rootless_flights {
-            self.abort_inline_flight(flight.as_ref());
-        }
-        Ok(RelationDischargeOutcome {
-            self_publish,
-            self_step,
-            flow_batch_unproven: false,
-            flow_batch_partial_reasons: crate::semantic_query::PartialReasonSet::default(),
-        })
     }
 
     /// Re-discharge ONE member of a negatively-closed SCC against the
@@ -9869,27 +9865,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     // shapes; recursion re-enters the authority)
     // ──────────────────────────────────────────────────────────────────
 
-    /// Instantiate a decl identity carrier into its concrete shape for
-    /// relation dispatch through `execute(Instantiate{…})` — the shared
-    /// dispatch, never a private instantiation path.
-    /// `node` through its transparent aliases, merged declarations and
-    /// declaration carriers, one step at a time
-    /// ([`Self::unwrap_identity_carrier_one_step`]) however long the chain:
-    /// the first node that is none of them. `None` when a carrier cannot be
-    /// resolved — a carrier read the connected ledger refuses included, so a
-    /// chain that grows without end stops on the ledger's trip — or when the
-    /// chain returns to a node it passed.
-    pub fn settle_through_carriers(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
-        let mut current = node;
-        let mut passed = FxHashSet::default();
-        loop {
-            if !passed.insert(current) {
-                return None;
-            }
-            match self.unwrap_identity_carrier_one_step(current) {
-                IdentityCarrierUnwrap::Concrete(next) if next == current => return Some(current),
-                IdentityCarrierUnwrap::Concrete(next) => current = next,
-                IdentityCarrierUnwrap::Unresolvable => return None,
+    construction_ordinal_seam! {
+        /// Instantiate a decl identity carrier into its concrete shape for
+        /// relation dispatch through `execute(Instantiate{…})` — the shared
+        /// dispatch, never a private instantiation path.
+        /// `node` through its transparent aliases, merged declarations and
+        /// declaration carriers, one step at a time
+        /// ([`Self::unwrap_identity_carrier_one_step`]) however long the chain:
+        /// the first node that is none of them. `None` when a carrier cannot be
+        /// resolved — a carrier read the connected ledger refuses included, so a
+        /// chain that grows without end stops on the ledger's trip — or when the
+        /// chain returns to a node it passed.
+        fn settle_through_carriers(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+            let mut current = node;
+            let mut passed = FxHashSet::default();
+            loop {
+                if !passed.insert(current) {
+                    return None;
+                }
+                match self.unwrap_identity_carrier_one_step(current) {
+                    IdentityCarrierUnwrap::Concrete(next) if next == current => return Some(current),
+                    IdentityCarrierUnwrap::Concrete(next) => current = next,
+                    IdentityCarrierUnwrap::Unresolvable => return None,
+                }
             }
         }
     }
@@ -10030,224 +10028,226 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         None
     }
 
-    /// Fully unwrap an identity carrier for ordinary structural relation.
-    pub fn unwrap_identity_carrier_for_relation(
-        &self,
-        id: SemanticNodeId,
-    ) -> IdentityCarrierUnwrap {
-        let graph = self.graph();
-        let transit = ProjectionReductionContext::structural_transit();
-        let mut current = id;
-        let mut seen = FxHashSet::default();
-        while seen.insert(current) {
-            let Some(data) = graph.node_data(current) else {
-                return IdentityCarrierUnwrap::Unresolvable;
-            };
-            let (identity, args): (DeclIdentity, Arc<[SemanticNodeId]>) = match &*data {
-                SemanticNodeData::Alias(inner) => {
-                    current = *inner;
-                    continue;
-                }
-                // A class expression's instance relates through its surface.
-                SemanticNodeData::ClassExpressionInstance { surface, .. } => {
-                    let surface = *surface;
-                    drop(data);
-                    current = self
-                        .class_expression_read_surface(current)
-                        .unwrap_or(surface);
-                    continue;
-                }
-                SemanticNodeData::MergedDecl { contributors } => {
-                    let contributors = Arc::clone(contributors.as_arc());
-                    drop(data);
-                    current = super::walk::reduce_merged_decl_with_graph(graph, &contributors);
-                    continue;
-                }
-                SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
-                    canonical_id,
-                    owner,
-                    name,
-                    whole_hash,
-                }) => (
-                    DeclIdentity {
-                        canonical_id: canonical_id.clone(),
-                        owner: *owner,
-                        whole_hash: *whole_hash,
-                        decl_name: name.clone(),
-                    },
-                    Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                ),
-                // A lowering-time self-reference sentinel (`interface Num {
-                // compareTo(other: Num): number }` — the `Num` inside its
-                // own body) names its declaration but not its file; the
-                // node's origin scope, recorded at intern time, supplies
-                // it. Resolving through the shared `Instantiate` dispatch
-                // makes the sentinel relate exactly like the `DeclRef` the
-                // same reference lowers to from any OTHER file position; a
-                // genuinely in-flight cycle re-enters the relation whose
-                // identity is already open and closes coinductively. A
-                // scope-less sentinel stays concrete (fail-closed Unknown
-                // downstream, never a fabricated verdict).
-                SemanticNodeData::Opaque(QueryError::RecursiveRef { name, args }) => {
-                    let Some(crate::semantic_query::NodeScopeId::File {
+    construction_ordinal_seam! {
+        /// Fully unwrap an identity carrier for ordinary structural relation.
+        fn unwrap_identity_carrier_for_relation(
+            &self,
+            id: SemanticNodeId,
+        ) -> IdentityCarrierUnwrap {
+            let graph = self.graph();
+            let transit = ProjectionReductionContext::structural_transit();
+            let mut current = id;
+            let mut seen = FxHashSet::default();
+            while seen.insert(current) {
+                let Some(data) = graph.node_data(current) else {
+                    return IdentityCarrierUnwrap::Unresolvable;
+                };
+                let (identity, args): (DeclIdentity, Arc<[SemanticNodeId]>) = match &*data {
+                    SemanticNodeData::Alias(inner) => {
+                        current = *inner;
+                        continue;
+                    }
+                    // A class expression's instance relates through its surface.
+                    SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                        let surface = *surface;
+                        drop(data);
+                        current = self
+                            .class_expression_read_surface(current)
+                            .unwrap_or(surface);
+                        continue;
+                    }
+                    SemanticNodeData::MergedDecl { contributors } => {
+                        let contributors = Arc::clone(contributors.as_arc());
+                        drop(data);
+                        current = super::walk::reduce_merged_decl_with_graph(graph, &contributors);
+                        continue;
+                    }
+                    SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
                         canonical_id,
                         owner,
+                        name,
                         whole_hash,
-                        ..
-                    }) = graph.node_scope(current)
-                    else {
-                        return IdentityCarrierUnwrap::Concrete(current);
-                    };
-                    (
+                    }) => (
                         DeclIdentity {
+                            canonical_id: canonical_id.clone(),
+                            owner: *owner,
+                            whole_hash: *whole_hash,
+                            decl_name: name.clone(),
+                        },
+                        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                    ),
+                    // A lowering-time self-reference sentinel (`interface Num {
+                    // compareTo(other: Num): number }` — the `Num` inside its
+                    // own body) names its declaration but not its file; the
+                    // node's origin scope, recorded at intern time, supplies
+                    // it. Resolving through the shared `Instantiate` dispatch
+                    // makes the sentinel relate exactly like the `DeclRef` the
+                    // same reference lowers to from any OTHER file position; a
+                    // genuinely in-flight cycle re-enters the relation whose
+                    // identity is already open and closes coinductively. A
+                    // scope-less sentinel stays concrete (fail-closed Unknown
+                    // downstream, never a fabricated verdict).
+                    SemanticNodeData::Opaque(QueryError::RecursiveRef { name, args }) => {
+                        let Some(crate::semantic_query::NodeScopeId::File {
                             canonical_id,
                             owner,
                             whole_hash,
-                            decl_name: name.clone(),
-                        },
-                        Arc::from(args.operands()),
-                    )
-                }
-                SemanticNodeData::DeclRef { identity } => (
-                    identity.clone(),
-                    Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                ),
-                SemanticNodeData::InstantiationRef { base, args } => {
-                    (base.clone(), Arc::clone(args.as_arc()))
-                }
-                // An indexed access over a type that is not generic is the
-                // property type it reads (`Box['lit']` IS `2`, and an
-                // optional `opt?: 3` reads `3 | undefined`): the checker
-                // resolves it where it is written, so a relation compares
-                // that type. One the deferred evaluator cannot read further
-                // (`T['k']` over an open `T`) stays the operand it is.
-                SemanticNodeData::DeferredCallable(_) => {
-                    drop(data);
-                    let materialized = self.materialize_returned_callable(current);
-                    if materialized == current {
-                        return IdentityCarrierUnwrap::Unresolvable;
+                            ..
+                        }) = graph.node_scope(current)
+                        else {
+                            return IdentityCarrierUnwrap::Concrete(current);
+                        };
+                        (
+                            DeclIdentity {
+                                canonical_id,
+                                owner,
+                                whole_hash,
+                                decl_name: name.clone(),
+                            },
+                            Arc::from(args.operands()),
+                        )
                     }
-                    current = materialized;
-                    continue;
-                }
-                SemanticNodeData::IndexedAccess { .. } => {
-                    drop(data);
-                    let read = self
-                        .evaluate_deferred_semantic_node_with_context(current, transit)
-                        .into_active_query_build_node(self);
-                    if read == current {
-                        return IdentityCarrierUnwrap::Concrete(current);
+                    SemanticNodeData::DeclRef { identity } => (
+                        identity.clone(),
+                        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                    ),
+                    SemanticNodeData::InstantiationRef { base, args } => {
+                        (base.clone(), Arc::clone(args.as_arc()))
                     }
-                    current = read;
-                    continue;
-                }
-                // `keyof` over a type whose keys settle is that key set
-                // (`keyof Face` IS `"a" | "b"`), whichever carrier prints it.
-                SemanticNodeData::KeyOf { base } => {
-                    let base = *base;
-                    drop(data);
-                    match self.key_set_of(base) {
-                        Some(keys) if keys != current => {
-                            current = keys;
-                            continue;
+                    // An indexed access over a type that is not generic is the
+                    // property type it reads (`Box['lit']` IS `2`, and an
+                    // optional `opt?: 3` reads `3 | undefined`): the checker
+                    // resolves it where it is written, so a relation compares
+                    // that type. One the deferred evaluator cannot read further
+                    // (`T['k']` over an open `T`) stays the operand it is.
+                    SemanticNodeData::DeferredCallable(_) => {
+                        drop(data);
+                        let materialized = self.materialize_returned_callable(current);
+                        if materialized == current {
+                            return IdentityCarrierUnwrap::Unresolvable;
                         }
-                        _ => return IdentityCarrierUnwrap::Concrete(current),
+                        current = materialized;
+                        continue;
                     }
-                }
-                // A written intersection is the type the checker constructs
-                // from it (`1 & (1 | 2)` IS `1`) when that differs from it.
-                SemanticNodeData::Intersection(_) => {
-                    drop(data);
-                    match self.reduced_authored_relation_pair(current, current) {
-                        Some((reduced, _)) if reduced != current => {
-                            current = reduced;
-                            continue;
+                    SemanticNodeData::IndexedAccess { .. } => {
+                        drop(data);
+                        let read = self
+                            .evaluate_deferred_semantic_node_with_context(current, transit)
+                            .into_active_query_build_node(self);
+                        if read == current {
+                            return IdentityCarrierUnwrap::Concrete(current);
                         }
-                        _ => return IdentityCarrierUnwrap::Concrete(current),
+                        current = read;
+                        continue;
                     }
-                }
-                // A homomorphic mapped type over a closed object is the
-                // object its keys map to (`Partial<Face>` IS `{ a?: 1 }`):
-                // the checker resolves its members, so a relation compares
-                // them. Any other mapped type stays the operand it is.
-                SemanticNodeData::Mapped { source, mapper } => {
-                    let (source, mapper) = (*source, mapper.clone());
-                    drop(data);
-                    match self
-                        .identity_mapped_object_for_relation(source, &mapper)
-                        .or_else(|| self.index_key_mapped_object_for_relation(&mapper, transit))
-                    {
-                        Some(object) if object != current => {
-                            current = object;
-                            continue;
+                    // `keyof` over a type whose keys settle is that key set
+                    // (`keyof Face` IS `"a" | "b"`), whichever carrier prints it.
+                    SemanticNodeData::KeyOf { base } => {
+                        let base = *base;
+                        drop(data);
+                        match self.key_set_of(base) {
+                            Some(keys) if keys != current => {
+                                current = keys;
+                                continue;
+                            }
+                            _ => return IdentityCarrierUnwrap::Concrete(current),
                         }
-                        _ => return IdentityCarrierUnwrap::Concrete(current),
                     }
-                }
-                _ => return IdentityCarrierUnwrap::Concrete(current),
-            };
-            drop(data);
-            // The lib `Function` global's carrier is its own terminal
-            // identity for relations: the `__builtin__` base names no
-            // declaration the Instantiate dispatch can serve, so the
-            // dispatch would MISS non-cacheably and taint every
-            // enclosing build's warm admission for a carrier the
-            // checker publishes as an ordinary type (`typeof x ===
-            // "function"` over `object` narrows to `Function`). Relations
-            // decide it by identity / tag, never by a body it does not
-            // have. Every OTHER non-file base (the remaining runtime
-            // nominals, the global sentinel) keeps dispatching — its
-            // Unresolvable verdict is the measured relation behavior
-            // those carriers' consumers pin.
-            if self.runtime_nominal_identity(&identity)
-                == Some(crate::intrinsic_registry::RuntimeNominal::Function)
-            {
-                return IdentityCarrierUnwrap::Concrete(current);
-            }
-            // A string mapping the reducer keeps (`Uppercase<string>`) is
-            // the checker's string mapping type itself: relations decide it
-            // by the mapping ([`Self::string_mapping_relation`]), never by a
-            // body it does not have.
-            if self.string_mapping_of(current).is_some() {
-                return IdentityCarrierUnwrap::Concrete(current);
-            }
-            let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-                self.type_slot_for(
-                    identity.canonical_id.clone(),
-                    identity.owner,
-                    identity.decl_name.clone(),
-                ),
-                args,
-                self.instantiate_context_for(&identity.canonical_id, transit),
-            ));
-            // `execute_type_node` IS the shared read boundary (dispatch
-            // counters + the universal build-local taint fold); a bespoke
-            // re-fold here would double-count the same read.
-            let unwrapped = match self.execute_type_node(key) {
-                QueryResult::Value(SemanticQueryOutput {
-                    value: unwrapped, ..
-                }) => {
-                    // A nominal `typeof` carrier IS the type it denotes, so
-                    // the deferred evaluator must not be handed it: that
-                    // evaluator's job is to resolve a shell to its content,
-                    // and this carrier's content is the widened `symbol`
-                    // primitive, which is exactly the declaring identity the
-                    // relation is about to read.
-                    if self.node_is_nominal_typeof(unwrapped) {
-                        unwrapped
-                    } else {
-                        self.evaluate_deferred_semantic_node_with_context(unwrapped, transit)
-                            .into_active_query_build_node(self)
+                    // A written intersection is the type the checker constructs
+                    // from it (`1 & (1 | 2)` IS `1`) when that differs from it.
+                    SemanticNodeData::Intersection(_) => {
+                        drop(data);
+                        match self.reduced_authored_relation_pair(current, current) {
+                            Some((reduced, _)) if reduced != current => {
+                                current = reduced;
+                                continue;
+                            }
+                            _ => return IdentityCarrierUnwrap::Concrete(current),
+                        }
                     }
+                    // A homomorphic mapped type over a closed object is the
+                    // object its keys map to (`Partial<Face>` IS `{ a?: 1 }`):
+                    // the checker resolves its members, so a relation compares
+                    // them. Any other mapped type stays the operand it is.
+                    SemanticNodeData::Mapped { source, mapper } => {
+                        let (source, mapper) = (*source, mapper.clone());
+                        drop(data);
+                        match self
+                            .identity_mapped_object_for_relation(source, &mapper)
+                            .or_else(|| self.index_key_mapped_object_for_relation(&mapper, transit))
+                        {
+                            Some(object) if object != current => {
+                                current = object;
+                                continue;
+                            }
+                            _ => return IdentityCarrierUnwrap::Concrete(current),
+                        }
+                    }
+                    _ => return IdentityCarrierUnwrap::Concrete(current),
+                };
+                drop(data);
+                // The lib `Function` global's carrier is its own terminal
+                // identity for relations: the `__builtin__` base names no
+                // declaration the Instantiate dispatch can serve, so the
+                // dispatch would MISS non-cacheably and taint every
+                // enclosing build's warm admission for a carrier the
+                // checker publishes as an ordinary type (`typeof x ===
+                // "function"` over `object` narrows to `Function`). Relations
+                // decide it by identity / tag, never by a body it does not
+                // have. Every OTHER non-file base (the remaining runtime
+                // nominals, the global sentinel) keeps dispatching — its
+                // Unresolvable verdict is the measured relation behavior
+                // those carriers' consumers pin.
+                if self.runtime_nominal_identity(&identity)
+                    == Some(crate::intrinsic_registry::RuntimeNominal::Function)
+                {
+                    return IdentityCarrierUnwrap::Concrete(current);
                 }
-                _ => return IdentityCarrierUnwrap::Unresolvable,
-            };
-            if unwrapped == current {
-                return IdentityCarrierUnwrap::Unresolvable;
+                // A string mapping the reducer keeps (`Uppercase<string>`) is
+                // the checker's string mapping type itself: relations decide it
+                // by the mapping ([`Self::string_mapping_relation`]), never by a
+                // body it does not have.
+                if self.string_mapping_of(current).is_some() {
+                    return IdentityCarrierUnwrap::Concrete(current);
+                }
+                let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                    self.type_slot_for(
+                        identity.canonical_id.clone(),
+                        identity.owner,
+                        identity.decl_name.clone(),
+                    ),
+                    args,
+                    self.instantiate_context_for(&identity.canonical_id, transit),
+                ));
+                // `execute_type_node` IS the shared read boundary (dispatch
+                // counters + the universal build-local taint fold); a bespoke
+                // re-fold here would double-count the same read.
+                let unwrapped = match self.execute_type_node(key) {
+                    QueryResult::Value(SemanticQueryOutput {
+                        value: unwrapped, ..
+                    }) => {
+                        // A nominal `typeof` carrier IS the type it denotes, so
+                        // the deferred evaluator must not be handed it: that
+                        // evaluator's job is to resolve a shell to its content,
+                        // and this carrier's content is the widened `symbol`
+                        // primitive, which is exactly the declaring identity the
+                        // relation is about to read.
+                        if self.node_is_nominal_typeof(unwrapped) {
+                            unwrapped
+                        } else {
+                            self.evaluate_deferred_semantic_node_with_context(unwrapped, transit)
+                                .into_active_query_build_node(self)
+                        }
+                    }
+                    _ => return IdentityCarrierUnwrap::Unresolvable,
+                };
+                if unwrapped == current {
+                    return IdentityCarrierUnwrap::Unresolvable;
+                }
+                current = unwrapped;
             }
-            current = unwrapped;
+            IdentityCarrierUnwrap::Unresolvable
         }
-        IdentityCarrierUnwrap::Unresolvable
     }
 
     /// The object an identity mapped type over a closed object surface

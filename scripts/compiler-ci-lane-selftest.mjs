@@ -49,6 +49,26 @@ test("compile-contract runner fetches the locked workspace before trybuild goes 
   assert.ok(fetch < firstOwner, "the fetch must finish before trybuild starts any owner");
 });
 
+test("compile-contract cache uses immutable restore and save without target pruning", () => {
+  const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
+  const job = yamlJob(workflow, "compiler-contracts");
+  const actions = [...job.matchAll(/uses: actions\/cache\/(restore|save)@([a-f0-9]{40})\b/g)];
+
+  assert.deepEqual(
+    actions.map((match) => match[1]),
+    ["restore", "save"],
+  );
+  assert.equal(actions[0][2], actions[1][2], "restore and save use the same reviewed dependency");
+  assert.doesNotMatch(job, /Swatinem\/rust-cache|continue-on-error/);
+  assert.match(job, /github\.ref == 'refs\/heads\/main'.*cache-hit != 'true'/);
+  assert.match(job, /steps\.compiler-contract-cache\.outputs\.cache-primary-key/);
+  assert.equal((job.match(/target\/tests\/trybuild/g) ?? []).length, 2);
+  assert.ok(
+    job.indexOf("uses: actions/cache/save@") > job.indexOf("cargo test -p verter_compiler --lib"),
+    "cache saving follows every required compiler check",
+  );
+});
+
 // @ai-generated - Guards workflow prerequisites for generated Svelte conformance artifacts.
 test("Svelte conformance runs for golden-generator changes", () => {
   const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
