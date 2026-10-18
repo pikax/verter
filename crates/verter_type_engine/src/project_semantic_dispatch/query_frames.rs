@@ -35,10 +35,11 @@
 //! of the transaction, and resumes with the same session once each is
 //! delivered: a call's inference spans the frame's suspensions.
 //!
-//! A function's return evaluated outside any drive is a frame as well, run
-//! as a decision is: an instantiation or a `typeof` its own body reads that
-//! must be computed becomes the frame's need, and the run that reached it is
-//! dropped and runs again once it is delivered. When the read is made while a
+//! A function's return evaluated outside any drive, whose body calls with a
+//! function value among the arguments, is a frame as well, run as a decision
+//! is: an instantiation or a `typeof` its own body reads that must be
+//! computed becomes the frame's need, and the run that reached it is dropped
+//! and runs again once it is delivered. When the read is made while a
 //! contextual call in the body types a callback — the call's candidate
 //! collector held out of the transaction meanwhile — the call's route is
 //! held as it stood before the callback, with its collector, and the next
@@ -1021,9 +1022,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let family = match key {
             SemanticQueryKey::Instantiate(_) | SemanticQueryKey::TypeOf { .. } => true,
             // A function's return evaluated as a machinery root, outside
-            // every open obligation.
-            SemanticQueryKey::FlowReturn(_) => {
+            // every open obligation, whose body types callbacks under a held
+            // collector. Any other evaluates synchronously, its reads each
+            // driven where it makes them.
+            SemanticQueryKey::FlowReturn(flow) => {
                 self.dispatch_txn.borrow().obligations.decides_root()
+                    && self.flow_body_types_callbacks(flow)
             }
             _ => false,
         };
