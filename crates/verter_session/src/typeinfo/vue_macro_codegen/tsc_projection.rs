@@ -956,7 +956,7 @@ fn inferred_class_members(
                 verter_type_engine::project_semantic_dispatch::flow_return::FunctionReturnNode::NoValue(
                     verter_type_engine::semantic_query::FlowReturnFailure::Budget(reason),
                 ) => {
-                    return Err(ClassInferenceFailure::InferenceUnavailable(reason.clone()));
+                    return Err(ClassInferenceFailure::InferenceUnavailable(*reason));
                 }
                 // A call in the body did not resolve: the member is typed
                 // UNSUPPORTED and suppresses admission — never widened

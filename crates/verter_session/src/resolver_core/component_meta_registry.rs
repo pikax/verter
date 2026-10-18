@@ -840,7 +840,7 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
                 .is_some_and(|prepared| {
                     prepared_body_root_node(dispatch, prepared.as_ref())
                         .value()
-                        .is_some_and(|root| satisfies(root))
+                        .is_some_and(satisfies)
                 })
         };
     let skip_direct_plain_ref =

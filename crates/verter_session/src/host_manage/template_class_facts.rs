@@ -684,8 +684,7 @@ fn classify_node(
                 }
             }
             TerminalSymbolInstantiationDemandOutcome::Partial(reason) => {
-                let (domain_reason, wrapper_reason) =
-                    unresolved_reasons_from_identity(reason.clone());
+                let (domain_reason, wrapper_reason) = unresolved_reasons_from_identity(*reason);
                 return unresolved_row(subject, domain_reason, wrapper_reason);
             }
             TerminalSymbolInstantiationDemandOutcome::Complete(None) => {}
@@ -737,7 +736,7 @@ fn classify_closed_domain(
         StructuralFactDemandOutcome::Recovered { reasons, .. }
         | StructuralFactDemandOutcome::Partial(reasons) => {
             return ClosedLiteralDomain::Unresolved {
-                reason: unresolved_reasons_from_partial(reasons.clone()).0,
+                reason: unresolved_reasons_from_partial(*reasons).0,
                 exactness: ResolutionExactness::Incomplete,
             };
         }
@@ -791,7 +790,7 @@ fn classify_normalized_domain(
                     StructuralFactDemandOutcome::Recovered { reasons, .. }
                     | StructuralFactDemandOutcome::Partial(reasons) => {
                         unresolved = Some(ClosedLiteralDomain::Unresolved {
-                            reason: unresolved_reasons_from_partial(reasons.clone()).0,
+                            reason: unresolved_reasons_from_partial(*reasons).0,
                             exactness: ResolutionExactness::Incomplete,
                         });
                         break;
