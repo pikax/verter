@@ -12,6 +12,7 @@ use super::sealed::Sealed;
 use super::ResolverObservation;
 use std::sync::Arc;
 use verter_session_query::analysis::types::Hash16;
+use verter_session_query::flow::bundle::SkeletonRef;
 use verter_session_query::flow::skeleton::{FunctionBodyKind, FunctionBodySkeleton};
 use verter_session_query::resolution::{
     AttemptOutcome, AugmentationTargetKey, CanonicalId, EnvHashes, FlowFunctionObservationKey,
@@ -68,8 +69,7 @@ struct TestDouble {
     /// `NeedInputs`); `Some(None)` = demanded and a typed miss (the
     /// pinned version does not serve this position, `Complete(None)`);
     /// `Some(Some(skeleton))` = built and memoized (`Complete(Some(..))`).
-    flow_function_skeleton_by_key:
-        HashMap<FlowFunctionObservationKey, Option<Arc<FunctionBodySkeleton>>>,
+    flow_function_skeleton_by_key: HashMap<FlowFunctionObservationKey, Option<SkeletonRef>>,
     /// Entry absent = not yet observed (drives `NeedInputs`); entry
     /// present = the stable classification (`Complete`), including
     /// `PathProbe::Unknown`/`Inaccessible` as themselves stable facts.
@@ -219,7 +219,7 @@ impl ResolverObservation for TestDouble {
     fn function_body_skeleton(
         &self,
         key: &FlowFunctionObservationKey,
-    ) -> AttemptOutcome<Option<Arc<FunctionBodySkeleton>>> {
+    ) -> AttemptOutcome<Option<SkeletonRef>> {
         match self.flow_function_skeleton_by_key.get(key) {
             Some(skeleton) => AttemptOutcome::Complete(skeleton.clone()),
             None => AttemptOutcome::NeedInputs(verter_session_query::resolution::LoadSet::new(
@@ -587,7 +587,7 @@ fn flow_function_key(byte: u8) -> FlowFunctionObservationKey {
         function: FunctionProgramKey {
             declaration: FunctionDeclarationRef {
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                name: Arc::from("f"),
+                name: "f".into(),
                 space: verter_session_query::facts::SymbolSpace::Value,
             },
             part: FunctionPartIdentity::DeclarationBody,
@@ -602,14 +602,14 @@ fn flow_function_key(byte: u8) -> FlowFunctionObservationKey {
 fn empty_skeleton() -> FunctionBodySkeleton {
     FunctionBodySkeleton {
         kind: FunctionBodyKind::Plain,
-        names: Arc::from([]),
-        regions: Arc::from([]),
-        bindings: Arc::from([]),
-        expr_sites: Arc::from([]),
-        return_sites: Arc::from([]),
-        yield_sites: Arc::from([]),
-        writes: Arc::from([]),
-        closure_assignments: Arc::from([]),
+        names: Default::default(),
+        regions: Default::default(),
+        bindings: Default::default(),
+        expr_sites: Default::default(),
+        return_sites: Default::default(),
+        yield_sites: Default::default(),
+        writes: Default::default(),
+        closure_assignments: Default::default(),
         span_index: Default::default(),
         name_index: Default::default(),
     }
@@ -671,7 +671,7 @@ fn function_body_skeleton_reports_stable_complete_none_for_a_built_typed_miss() 
 fn function_body_skeleton_reports_the_memoized_skeleton_when_built() {
     let mut double = TestDouble::default();
     let key = flow_function_key(3);
-    let skeleton = Arc::new(empty_skeleton());
+    let skeleton = SkeletonRef::fixture(flow_function_key(3).function, empty_skeleton());
     double
         .flow_function_skeleton_by_key
         .insert(key.clone(), Some(skeleton.clone()));

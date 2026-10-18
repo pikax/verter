@@ -264,7 +264,7 @@ impl VerterHost {
             }
 
             // 4. The cold payload.
-            let payload = Arc::new(ResolvedImportFacts {
+            let payload = crate::resolver_core::CachedValue::new(ResolvedImportFacts {
                 import_clauses,
                 reexport_bindings: Vec::new(),
                 specifier_resolutions,

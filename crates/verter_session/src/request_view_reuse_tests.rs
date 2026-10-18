@@ -287,7 +287,9 @@ fn session_overlay_rooting_runs_once_per_request() {
         fn resolved_import_facts(
             &self,
             _canonical: &str,
-        ) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>> {
+        ) -> Option<
+            crate::resolver_core::CachedValue<crate::resolved_import_facts::ResolvedImportFacts>,
+        > {
             None
         }
     }
@@ -922,7 +924,9 @@ fn terminal_macro_inventory_preserves_indexed_absence_and_paired_base_fallback()
         fn resolved_import_facts(
             &self,
             _: &str,
-        ) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>> {
+        ) -> Option<
+            crate::resolver_core::CachedValue<crate::resolved_import_facts::ResolvedImportFacts>,
+        > {
             None
         }
     }

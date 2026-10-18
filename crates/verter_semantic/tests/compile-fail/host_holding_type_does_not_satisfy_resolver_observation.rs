@@ -86,9 +86,7 @@ impl ResolverObservation for FakeHostHandle {
     fn function_body_skeleton(
         &self,
         _key: &FlowFunctionObservationKey,
-    ) -> AttemptOutcome<
-        Option<std::sync::Arc<verter_session_query::flow::skeleton::FunctionBodySkeleton>>,
-    > {
+    ) -> AttemptOutcome<Option<verter_session_query::flow::bundle::SkeletonRef>> {
         unimplemented!()
     }
 

@@ -199,12 +199,12 @@ fn node_root_identity(
         Action::Recurse(next) => node_root_identity(dispatch, next, depth + 1),
         Action::Identity(identity) => Some(identity),
         Action::ResolveBare => {
-            let resolved = dispatch.resolve_carrier_subject_node(
+            let resolved = dispatch.owning().resolve_carrier_subject_node(
                 node,
                 ProjectionReductionContext::published(ProjectionMode::Navigate),
             );
-            if resolved != node {
-                node_root_identity(dispatch, resolved, depth + 1)
+            if *resolved.value() != node {
+                node_root_identity(dispatch, *resolved.value(), depth + 1)
             } else {
                 None
             }
@@ -334,12 +334,18 @@ fn collect_node_root_identities(
             }
         }
         Step::ResolveBare => {
-            let resolved = dispatch.resolve_carrier_subject_node(
+            let resolved = dispatch.owning().resolve_carrier_subject_node(
                 node,
                 ProjectionReductionContext::published(ProjectionMode::Navigate),
             );
-            if resolved != node {
-                collect_node_root_identities(dispatch, resolved, depth + 1, out, truncated);
+            if *resolved.value() != node {
+                collect_node_root_identities(
+                    dispatch,
+                    *resolved.value(),
+                    depth + 1,
+                    out,
+                    truncated,
+                );
             }
         }
         Step::Stop => {}

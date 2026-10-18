@@ -546,23 +546,48 @@ impl VerterHost {
         FileAnalysisSnapshot {
             imports: script_analysis.imports,
             bindings: script_analysis.bindings,
-            module_references: Arc::new(script_analysis.module_references),
-            macros: Arc::new(script_analysis.macros),
-            macro_type_deps: Arc::new(script_analysis.macro_type_deps),
+            module_references: verter_session_query::analysis::file_analysis::SharedList::new(
+                script_analysis.module_references,
+            ),
+            macros: verter_session_query::analysis::file_analysis::SharedList::new(
+                script_analysis.macros,
+            ),
+            macro_type_deps: verter_session_query::analysis::file_analysis::SharedList::new(
+                script_analysis.macro_type_deps,
+            ),
             script_flags: script_analysis.flags.bits(),
-            styles: Arc::new(parse.style_analyses),
+            styles: verter_session_query::analysis::file_analysis::SharedList::new(
+                parse.style_analyses,
+            ),
             template: None,
-            vue_api_calls: Arc::new(script_analysis.vue_api_calls),
-            dom_query_calls: Arc::new(script_analysis.dom_query_calls),
-            css_var_manipulations: Arc::new(script_analysis.css_var_manipulations),
-            script_binding_occurrences: Arc::new(script_analysis.script_binding_occurrences),
+            vue_api_calls: verter_session_query::analysis::file_analysis::SharedList::new(
+                script_analysis.vue_api_calls,
+            ),
+            dom_query_calls: verter_session_query::analysis::file_analysis::SharedList::new(
+                script_analysis.dom_query_calls,
+            ),
+            css_var_manipulations: verter_session_query::analysis::file_analysis::SharedList::new(
+                script_analysis.css_var_manipulations,
+            ),
+            script_binding_occurrences:
+                verter_session_query::analysis::file_analysis::SharedList::new(
+                    script_analysis.script_binding_occurrences,
+                ),
             macro_usage: script_analysis.macro_usage,
             style_vbind_roots: script_analysis.style_vbind_roots,
-            markup_class_tokens: Arc::new(parse.markup_class_tokens),
-            export_signatures: Arc::new(parse.export_signatures),
+            markup_class_tokens: verter_session_query::analysis::file_analysis::SharedList::new(
+                parse.markup_class_tokens,
+            ),
+            export_signatures: verter_session_query::analysis::file_analysis::SharedList::new(
+                parse.export_signatures,
+            ),
             options_api: script_analysis.options_api,
-            store_usages: Arc::new(script_analysis.store_usages),
-            store_definitions: Arc::new(script_analysis.store_definitions),
+            store_usages: verter_session_query::analysis::file_analysis::SharedList::new(
+                script_analysis.store_usages,
+            ),
+            store_definitions: verter_session_query::analysis::file_analysis::SharedList::new(
+                script_analysis.store_definitions,
+            ),
             is_typescript: script_analysis.is_typescript,
             anchor_revision,
         }

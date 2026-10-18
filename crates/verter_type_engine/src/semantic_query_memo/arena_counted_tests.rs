@@ -332,6 +332,10 @@ fn production_constructor_destroys_a_node_on_its_last_release() {
 #[test]
 fn only_sidecar_described_slots_enter_the_destroyed_log() {
     let arena = NodeArena::default();
+    let account = verter_session_query::retention::SemanticRetentionAccount::new(
+        verter_session_query::retention::RetentionLimits::defaults(),
+    );
+    arena.core.bind_retention_account(&account);
     let described = arena.intern_owned(
         SemanticNodeData::Literal(LiteralValue::String("described".into())),
         NodeScopeId::Global,
@@ -345,7 +349,19 @@ fn only_sidecar_described_slots_enter_the_destroyed_log() {
     drop(described);
     drop(plain);
     assert_eq!(arena.pending_destroyed(), 1);
-    assert_eq!(arena.drain_destroyed(), vec![described_id]);
+    let charged = account.snapshot().pinned_bytes;
+    let destroyed = arena.drain_destroyed();
+    assert_eq!(&*destroyed, &[described_id]);
+    assert_eq!(
+        account.snapshot().pinned_bytes,
+        charged,
+        "a drained batch keeps its backing charged through cleanup"
+    );
+    drop(destroyed);
+    assert!(
+        account.snapshot().pinned_bytes < charged,
+        "dropping the batch frees its backing charge"
+    );
     assert_eq!(arena.pending_destroyed(), 0);
     assert!(
         !arena.track_sidecar(plain_id),

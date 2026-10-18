@@ -319,6 +319,44 @@ fn one_call_compiles_a_registered_source_from_its_canonical_request() {
         .any(|n| matches!(n.node, VirtualNodeKind::Style { index: 0 })));
 }
 
+#[test]
+fn canonical_request_generated_texts_are_pinned_for_their_readers() {
+    use verter_session_query::retention::ChargeClass;
+    let host = new_host();
+    upsert(&host, "/src/Owned.vue", VUE_SFC);
+    let response = host
+        .compile_request(
+            "/src/Owned.vue",
+            vue_request(vec![runtime_client(true), ide(true)]),
+        )
+        .expect("complete runtime and IDE products");
+    let mut texts = Vec::new();
+    for product in response.products {
+        match product {
+            CompiledProduct::Runtime { nodes, .. } => {
+                for node in nodes {
+                    texts.push(node.code);
+                    texts.extend(node.source_map);
+                }
+            }
+            CompiledProduct::Ide(ide) => {
+                texts.push(ide.code);
+                texts.extend(ide.source_map);
+            }
+            CompiledProduct::Analysis(_) => panic!("analysis was not requested"),
+        }
+    }
+    drop(host);
+    assert!(texts.len() >= 3, "runtime and IDE payloads were checked");
+    for text in texts {
+        assert_eq!(text.charge_class(), Some(ChargeClass::Pinned));
+        assert_eq!(
+            text.charge_bytes(),
+            Some(verter_type_expr::OwnedStr::charge_for_len(text.len()))
+        );
+    }
+}
+
 /// An alias resolves ONCE, at the entry: the response reports the
 /// canonical id the request executed against, not the spelling the
 /// caller used.

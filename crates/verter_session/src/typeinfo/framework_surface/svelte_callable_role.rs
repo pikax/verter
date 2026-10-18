@@ -69,6 +69,7 @@ mod tests {
     fn empty_snippet_inventory_still_demands_carrier_completeness() {
         let host = crate::VerterHost::new_standalone(crate::types::HostConfig::default());
         let dispatch = ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
         let unresolved = dispatch
             .graph()
             .intern_node(SemanticNodeData::Opaque(QueryError::Miss));

@@ -391,6 +391,7 @@ struct TaskAccounting {
     spans: super::connected_demand::TaskSpanCarry,
     spend: crate::request_budget::TaskSpendCarry,
     refusals: crate::fact_tracing::refusal_scope::TaskRefusalCarry,
+    completeness: crate::request_context::TaskCompletenessCarry,
 }
 
 impl TaskAccounting {
@@ -399,6 +400,7 @@ impl TaskAccounting {
             spans: super::connected_demand::TaskSpanCarry::lend(),
             spend: crate::request_budget::TaskSpendCarry::lend(),
             refusals: crate::fact_tracing::refusal_scope::TaskRefusalCarry::lend(),
+            completeness: crate::request_context::TaskCompletenessCarry::lend(),
         }
     }
 
@@ -406,6 +408,7 @@ impl TaskAccounting {
         self.spans.return_to_lender();
         self.spend.return_to_lender();
         self.refusals.return_to_lender();
+        self.completeness.return_to_lender();
     }
 }
 
@@ -422,7 +425,10 @@ struct UnreturnedTask<'a, C: crate::resolver_core::ResolverCapabilities> {
 impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> SemanticTask<'p, 'a, C> {
     /// Advance the task as far as it can go: `Ready` with its root's
     /// delivery (`Err` when a stop abandoned it), or `Pending` once it
-    /// waits on a producer outside it that will wake `waker`.
+    /// waits on a producer outside it that will wake `waker`. Cancelling
+    /// the request wakes nothing: the stop is seen at the next poll, so the
+    /// executor re-polls or drops a pending task its request cancelled
+    /// ([`crate::semantic_execution::SemanticExecution::poll`]).
     pub(super) fn poll(
         &mut self,
         waker: &std::task::Waker,
@@ -444,6 +450,7 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> SemanticTask<'p,
         let _spans = self.accounting.spans.install();
         let _spend = self.accounting.spend.install();
         let _refusals = self.accounting.refusals.install();
+        let _completeness = self.accounting.completeness.install();
         self.execution.poll(program, self.root.take(), waker)
     }
 

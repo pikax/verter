@@ -67,10 +67,14 @@ fn overlay_view(host: &Arc<VerterHost>) -> OverlaidView {
 
 fn persisted_template(
     host: &VerterHost,
-) -> Option<Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>> {
+) -> Option<
+    verter_session_query::retention::heap_size::OwnedValue<
+        verter_session_query::analysis::template::TemplateAnalysisSnapshot,
+    >,
+> {
     host.derived_raw_cache().get(CANONICAL).and_then(|d| {
         d.raw_template_analysis()
-            .map(|entry| Arc::clone(&entry.template))
+            .map(|entry| entry.template.clone())
     })
 }
 

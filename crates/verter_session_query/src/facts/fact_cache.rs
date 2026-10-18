@@ -16,6 +16,12 @@ use crate::resolution::ResolutionPopulation;
 pub use crate::facts::receipt::{
     drop_subsumed_receipts, EvidenceKind, ReceiptVerdict, ReceiptWalk, ResultReceipt,
 };
+
+/// A fact signature as a reader receives it: a sealed, self-charged list.
+/// Every clone shares the list's one charge, so a signature a reader keeps
+/// after the cache that recorded it let go stays charged until the
+/// reader's own last clone drops, and no accessor exposes the raw `Arc`.
+pub type OwnedFactSignature = crate::retention::owned::OwnedSlice<FactVersionRef>;
 pub use crate::facts::version::{
     compaction_domain, AggregatePopulation, AggregateStamp, CompactionDomain,
     CompletionOverlayState, DerivedFactKind, DomainGenerationFact, FactAttribution, FactHash16,

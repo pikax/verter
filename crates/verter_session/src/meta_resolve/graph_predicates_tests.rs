@@ -29,6 +29,7 @@ mod node_root_gate_tests {
     /// once the lowering dispatcher is gone.
     fn lower(host: &VerterHost, scope: &str, expr: &TypeExpr) -> SemanticNodeId {
         let dispatch = ProjectSemanticDispatch::new(host);
+        let builder = dispatch.enter_construction_scope();
         let node = dispatch
             .lower_type_expr_in_scope_with_mode(scope, expr, ProjectionMode::Navigate)
             .expect("expr must lower");
@@ -37,6 +38,7 @@ mod node_root_gate_tests {
             .semantic_graph()
             .root_nodes([node])
             .expect("the lowered node is live");
+        drop(builder);
         drop(dispatch);
         roots.retain_for_construction();
         node
@@ -422,6 +424,7 @@ mod node_root_gate_tests {
                 TypeExpr::string_literal("a"),
             ],
         );
+        let _builder = host.project_type_store().construction_grant().enter_scope();
         let node = lower(&host, scope, &imported_pick);
 
         let fixture_dispatch_4 =

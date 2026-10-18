@@ -81,6 +81,7 @@ fn input_side_no_poison_gate_reads_typed_whole_tree_miss_fact() {
     let _store_view = host.resolver_store_view_read().into_owned_view();
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host;
     let dispatch = ProjectSemanticDispatch::new(ctx);
+    let _builder = dispatch.enter_construction_scope();
     let transit =
         ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
 
@@ -146,6 +147,7 @@ fn sealed_carrier_none_arm_splits_unraisable_failure_from_genuine_absence() {
         verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     // (1) PRESENT-BUT-UNRAISABLE: the union node mints but a member id is
     // absent — degrades to the typed `Miss` carrier (partial; `semanticMiss`

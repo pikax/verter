@@ -193,13 +193,15 @@ pub struct BarrelRouteSurface {
 /// follower detect that and re-resolve against fresh state.
 #[derive(Debug)]
 pub(crate) struct RouteFlightOutcome {
-    pub(crate) route: Arc<RouteResult>,
+    pub(crate) route: crate::resolver_core::CachedValue<RouteResult>,
     pub(crate) admitted: bool,
 }
 
 #[derive(Debug)]
 pub(crate) struct ExportTableFlight {
-    pub(crate) table: Arc<verter_session_query::declarations::module_exports::ModuleExportTable>,
+    pub(crate) table: crate::resolver_core::CachedValue<
+        verter_session_query::declarations::module_exports::ModuleExportTable,
+    >,
     pub(crate) admission: Result<(), verter_audit::NonAdmissionReason>,
 }
 
@@ -230,7 +232,11 @@ pub struct RouteDb {
     pub(crate) route_singleflight: SingleflightGroup<RouteNameKey, RouteFlightOutcome, ()>,
     /// [`BarrelSurfaceKey`] → full wildcard route surface (lazy, built once).
     barrel_surfaces: ValidatedFactCache<BarrelSurfaceKey, BarrelRouteSurface>,
-    barrel_singleflight: SingleflightGroup<BarrelSurfaceKey, Arc<BarrelRouteSurface>, ()>,
+    barrel_singleflight: SingleflightGroup<
+        BarrelSurfaceKey,
+        crate::resolver_core::CachedValue<BarrelRouteSurface>,
+        (),
+    >,
     /// Test-only provenance counter — bumped each time
     /// [`Self::get_or_resolve_route_observing_facts`] returns through
     /// the warm-hit branch (validated cache lookup succeeded). Pairs
@@ -314,7 +320,7 @@ impl RouteDb {
         &self,
         key: &RouteNameKey,
         view: &V,
-    ) -> Option<Arc<RouteResult>> {
+    ) -> Option<crate::resolver_core::CachedValue<RouteResult>> {
         let result = self.routes.get_if_valid(key, view);
         if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
             if result.is_some() {
@@ -334,7 +340,10 @@ impl RouteDb {
 
     /// Permissive route lookup without store-view validation.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn get_route_any(&self, key: &RouteNameKey) -> Option<Arc<RouteResult>> {
+    pub fn get_route_any(
+        &self,
+        key: &RouteNameKey,
+    ) -> Option<crate::resolver_core::CachedValue<RouteResult>> {
         let result = self.routes.get_if_valid(key, &PermissiveStoreView);
         if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
             if result.is_some() {
@@ -360,7 +369,7 @@ impl RouteDb {
         view: &V,
         host: &crate::VerterHost,
         resolve: F,
-    ) -> Option<Arc<RouteResult>>
+    ) -> Option<crate::resolver_core::CachedValue<RouteResult>>
     where
         V: StoreView + ?Sized,
         F: Fn() -> Option<(RouteResult, Vec<FactVersionRef>)>,
@@ -440,7 +449,10 @@ impl RouteDb {
         &self,
         key: &RouteNameKey,
         view: &V,
-    ) -> Option<(Arc<RouteResult>, Arc<[FactVersionRef]>)> {
+    ) -> Option<(
+        crate::resolver_core::CachedValue<RouteResult>,
+        crate::resolver_core::OwnedFactSignature,
+    )> {
         self.routes.get_if_valid_with_facts(key, view)
     }
 
@@ -469,7 +481,7 @@ impl RouteDb {
         view: &V,
         host: &crate::VerterHost,
         resolve: F,
-    ) -> Option<Arc<RouteResult>>
+    ) -> Option<crate::resolver_core::CachedValue<RouteResult>>
     where
         V: StoreView + ?Sized,
         F: Fn() -> Option<(RouteResult, Vec<FactVersionRef>)>,
@@ -493,7 +505,7 @@ impl RouteDb {
         key: RouteNameKey,
         view: &V,
         resolve: F,
-    ) -> Option<Arc<RouteResult>>
+    ) -> Option<crate::resolver_core::CachedValue<RouteResult>>
     where
         V: StoreView + ?Sized,
         F: Fn() -> Option<(RouteResult, Vec<FactVersionRef>)>,
@@ -508,7 +520,7 @@ impl RouteDb {
         key: BarrelSurfaceKey,
         view: &V,
         build: F,
-    ) -> Option<Arc<BarrelRouteSurface>>
+    ) -> Option<crate::resolver_core::CachedValue<BarrelRouteSurface>>
     where
         V: StoreView,
         F: FnOnce() -> Option<BarrelRouteSurface>,
@@ -576,7 +588,7 @@ impl RouteDb {
         &self,
         key: &BarrelSurfaceKey,
         view: &V,
-    ) -> Option<Arc<BarrelRouteSurface>> {
+    ) -> Option<crate::resolver_core::CachedValue<BarrelRouteSurface>> {
         self.barrel_surfaces.get_if_valid(key, view)
     }
 
@@ -588,7 +600,7 @@ impl RouteDb {
         view: &V,
         host: &crate::VerterHost,
         build: F,
-    ) -> Option<Arc<BarrelRouteSurface>>
+    ) -> Option<crate::resolver_core::CachedValue<BarrelRouteSurface>>
     where
         V: StoreView,
         F: FnOnce() -> Option<BarrelRouteSurface>,
@@ -611,7 +623,7 @@ impl RouteDb {
         view: &V,
         probe: &verter_type_engine::fact_signature_helpers::CacheabilityProbe<'_, W>,
         build: F,
-    ) -> Option<Arc<BarrelRouteSurface>>
+    ) -> Option<crate::resolver_core::CachedValue<BarrelRouteSurface>>
     where
         V: StoreView,
         F: FnOnce() -> Option<BarrelRouteSurface>,
@@ -628,7 +640,7 @@ impl RouteDb {
                 }
                 match build() {
                     Some(surface) => {
-                        let arc = Arc::new(surface);
+                        let arc = crate::resolver_core::CachedValue::new(surface);
                         let facts = self.barrel_validation_facts(&arc);
                         // Strict admission, TWO fail-closed gates: a non-empty
                         // fact-dep signature (an empty one gives a warm read
@@ -640,7 +652,7 @@ impl RouteDb {
                         // so the entry would validate forever. The surface is
                         // still returned; only the persist is refused.
                         if !facts.is_empty() && !probe.non_cacheable() {
-                            self.barrel_surfaces.insert_arc_with_kind(
+                            self.barrel_surfaces.insert_value_with_kind(
                                 key.clone(),
                                 arc.clone(),
                                 facts,
@@ -668,9 +680,9 @@ impl RouteDb {
 
     /// R20 instrumentation: total `admission_refused_count` across
     /// every backing `ValidatedFactCache` on this `RouteDb`.
-    /// Producers that admit via the loose `insert_arc` path keep
+    /// Producers that admit via the loose `insert_value` path keep
     /// this counter at 0; only strict-mode admissions via
-    /// `insert_arc_with_kind` advance it.
+    /// `insert_value_with_kind` advance it.
     #[must_use]
     pub fn admission_refused_count(&self) -> u64 {
         self.routes.admission_refused_count()
@@ -717,7 +729,7 @@ impl RouteDb {
     /// validation oracle for the surface — it was finalised at
     /// admission time. This helper exists for callers that need to
     /// thread the existing signature into a higher-tier
-    /// `insert_arc(..., facts)` call (the `ValidatedFactCache` API
+    /// `insert_value(..., facts)` call (the `ValidatedFactCache` API
     /// takes `Vec<FactVersionRef>`, not the immutable `Arc<[...]>`
     /// the candidate stores). For warm-hit observation onto the
     /// active tracer use `observe_borrowed_signature(...)` instead.
@@ -849,6 +861,48 @@ mod tests {
     /// Build a zero-env barrel-surface key (see [`rk`]).
     fn bk(barrel: &str) -> BarrelSurfaceKey {
         BarrelSurfaceKey::new(barrel, ProjectIdentity([0u8; 16]), [0u8; 16], [0u8; 16])
+    }
+
+    /// A resolved route the cache does not admit — its signature is empty
+    /// — still reaches its caller charged, pinned, past the database's
+    /// teardown, and its final drop restores the baseline.
+    #[test]
+    fn an_unadmitted_route_is_charged_to_the_caller_keeping_it() {
+        use verter_session_query::retention::{
+            ChargeClass, RetentionLimits, SemanticRetentionAccount, StoreAccount,
+        };
+        let canonical = format!("/{}.ts", "delivered_route_".repeat(1024));
+        let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+        let db = RouteDb {
+            routes: ValidatedFactCache::with_retention_account(StoreAccount::new(Arc::clone(
+                &account,
+            ))),
+            ..RouteDb::new()
+        };
+        let route = db
+            .get_or_resolve_route_with_facts_probe_for_test(
+                rk("/index.ts", "Route"),
+                &TestView::accepting_all(1),
+                || {
+                    Some((
+                        RouteResult::Resolved {
+                            defining_canonical: canonical.clone(),
+                            defining_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                            defining_symbol: "Route".to_owned(),
+                        },
+                        Vec::new(),
+                    ))
+                },
+            )
+            .expect("the resolved route is delivered");
+        assert_eq!(route.charge_class(), Some(ChargeClass::Pinned));
+        let charge = route.charge_bytes().expect("a delivered route is charged");
+        assert!(charge >= canonical.len());
+        drop(db);
+        let kept = account.snapshot();
+        assert_eq!((kept.retained_bytes, kept.pinned_bytes), (0, charge));
+        drop(route);
+        assert_eq!(account.snapshot().total_bytes(), 0);
     }
 
     #[test]

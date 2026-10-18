@@ -3221,7 +3221,7 @@ impl verter_session_query::facts::store_view::StoreView for HostStoreView {
     /// parse_env_hash, resolve_env_hash, resolver_version }` from the fact's
     /// `canonical_id`, the view's root-backed content hash, and the view's
     /// environment hashes. Look up the matching
-    /// `Arc<ResolvedImportFacts>` from the captured
+    /// `crate::resolver_core::CachedValue<ResolvedImportFacts>` from the captured
     /// `ResolvedImportFactsDb` handle and compare the per-binding
     /// `semantic_hash` / `display_hash` (per `fact.lane`) of the
     /// matching `ResolvedImportClauseEntry` or
@@ -3476,7 +3476,7 @@ impl HostStoreView {
                                 declaration:
                                     verter_session_query::function_program::FunctionDeclarationRef {
                                         owner: function.owner,
-                                        name: Arc::from(function.merged_symbol_name.as_str()),
+                                        name: function.merged_symbol_name.as_str().into(),
                                         space: function.symbol_space,
                                     },
                                 part: function.function_part.clone(),

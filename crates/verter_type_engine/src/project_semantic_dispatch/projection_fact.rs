@@ -231,12 +231,14 @@ impl<T> crate::semantic_query::CacheRead<QueryResult<T>> {
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'_, C> {
-    pub fn execute_fact(
-        &self,
-        key: SemanticQueryKey,
-    ) -> Result<FactResult<SemanticQueryValue>, ExecutionAbort> {
-        self.record_dispatch_intent_counters(&key);
-        self.execute_via_cold_build_helper(key).into_fact()
+    construction_ordinal_seam! {
+        fn execute_fact(
+            &self,
+            key: SemanticQueryKey,
+        ) -> Result<FactResult<SemanticQueryValue>, ExecutionAbort> {
+            self.record_dispatch_intent_counters(&key);
+            self.execute_via_cold_build_helper(key).into_fact()
+        }
     }
 }
 
