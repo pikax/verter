@@ -11069,7 +11069,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         /// operands are this graph's; the canonical evidence the union merge
         /// gathers is deposited on this dispatcher. `Err` with the connected
         /// demand's trip when it cannot pay to read the alternatives.
-        #[must_use]
         fn spread_formula_positive_members_for_macro(
             &self,
             formula: &crate::semantic_query::ObjectProjectionFormula,

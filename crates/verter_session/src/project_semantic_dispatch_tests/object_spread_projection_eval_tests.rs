@@ -895,6 +895,7 @@ fn a_refused_spread_key_read_cannot_leave_the_intersection_keyof_exact() {
         // intersection's domain.
         let host = host();
         let dispatch = ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
         let graph = host.project_type_store().semantic_graph();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let left = object(graph, [surface_member("a", number, false)]);
@@ -928,6 +929,7 @@ fn a_refused_spread_key_read_cannot_leave_the_intersection_keyof_exact() {
         // refusal, not an empty or unenumerable arm.
         let host = host();
         let dispatch = ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
         let graph = host.project_type_store().semantic_graph();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let left = object(graph, [surface_member("a", number, false)]);
@@ -5044,6 +5046,7 @@ fn literal_value(
 fn stress_products_keep_each_alternative_correlated_and_overwritten() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     for widths in [vec![369usize, 271], vec![50, 50, 39]] {
@@ -5159,6 +5162,7 @@ fn a_selected_key_read_grows_with_the_arms_not_their_product() {
     let work = |arms: usize| {
         let host = host();
         let dispatch = ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
         let graph = host.project_type_store().semantic_graph();
         let root = program(
             graph,
@@ -5203,6 +5207,7 @@ fn a_selected_key_read_over_distinct_arms_stays_linear() {
     let work_and_width = |arms: usize| {
         let host = host();
         let dispatch = ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
         let graph = host.project_type_store().semantic_graph();
         let keyed = |index: usize| {
             object(
@@ -5263,6 +5268,7 @@ fn a_relation_shape_read_over_long_common_prefixes_stays_linear() {
     let work_and_width = |arms: usize| {
         let host = host();
         let dispatch = ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
         let graph = host.project_type_store().semantic_graph();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let arm = |index: usize| {
@@ -5329,6 +5335,7 @@ fn a_relation_shape_read_over_long_common_prefixes_stays_linear() {
 fn narrowing_dedup_resolves_fingerprint_collisions_with_structural_equality() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let one = graph.intern_node(SemanticNodeData::Literal(
@@ -5420,6 +5427,10 @@ fn a_tight_allowance_stops_a_distinct_arm_read_before_its_narrowing_work() {
     }
 
     let full_host = host();
+    let _full_scope = full_host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let (dispatch, root) = make(&full_host, arms);
     let (result, full) =
         verter_type_engine::project_semantic_dispatch::connected_demand::with_connected_work_capture_for_tests(
@@ -5444,6 +5455,10 @@ fn a_tight_allowance_stops_a_distinct_arm_read_before_its_narrowing_work() {
     assert!(full.work > 0);
 
     let tight_host = host();
+    let _tight_scope = tight_host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let (dispatch, root) = make(&tight_host, arms);
     let allowance = full.work / 2;
     dispatch
@@ -5485,6 +5500,7 @@ fn a_retained_formula_grows_with_its_arms_not_their_product() {
     let owned = |widths: &[usize]| -> (u64, usize) {
         let host = host();
         let dispatch = ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
         let graph = host.project_type_store().semantic_graph();
         let effects = widths
             .iter()
@@ -5555,6 +5571,7 @@ fn a_nested_property_spread_chain_is_charged_before_it_is_built() {
     let work = |links: usize| {
         let host = host();
         let dispatch = ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
         let root = chain(&host, links);
         let (result, usage) =
             verter_type_engine::project_semantic_dispatch::connected_demand::with_connected_work_capture_for_tests(
