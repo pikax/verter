@@ -44,7 +44,11 @@ pub(super) struct FreeTypeVariables {
 /// rooted, whose payloads therefore do not change while it holds them, so
 /// a kept summary does not go stale. A node whose last owner releases it
 /// reads as the shared placeholder afterwards; its id is never asked about
-/// again by a dispatcher that did not root it.
+/// again by a dispatcher that did not root it. The summaries are request
+/// state: a semantic task the dispatcher lends its state to inherits them
+/// and whatever it composes comes back to the lender with the rest of the
+/// state ([`ProjectSemanticDispatch::exchange_request_state`]), so reuse
+/// spans the task lifecycle instead of restarting per drive.
 pub(super) type FreeTypeVariableSummaries =
     rustc_hash::FxHashMap<SemanticNodeId, FreeTypeVariables>;
 
