@@ -17,6 +17,7 @@ use super::{
 std::thread_local! {
     static MEMBER_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static COLLISION_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static NARROWING_DEDUP_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 pub(crate) fn note_member_visit() {
@@ -27,6 +28,13 @@ pub(crate) fn note_member_visit() {
 pub(crate) fn note_collision_comparison() {
     #[cfg(any(test, feature = "test-support"))]
     COLLISION_COMPARISONS.with(|count| count.set(count.get() + 1));
+}
+
+/// One structural comparison between narrowed product arms that share a
+/// fingerprint, on this thread. Test-support only.
+pub(crate) fn note_narrowing_dedup_comparison() {
+    #[cfg(any(test, feature = "test-support"))]
+    NARROWING_DEDUP_COMPARISONS.with(|count| count.set(count.get() + 1));
 }
 
 /// The finite selector vocabulary of [`super::SemanticQueryKey::ProjectObjectSpread`].
@@ -1218,6 +1226,12 @@ pub mod test_support {
             MEMBER_VISITS.with(std::cell::Cell::get),
             COLLISION_COMPARISONS.with(std::cell::Cell::get),
         )
+    }
+
+    /// Structural comparisons between narrowed product arms that share a
+    /// fingerprint, on this thread.
+    pub fn narrowing_dedup_comparisons() -> usize {
+        NARROWING_DEDUP_COMPARISONS.with(std::cell::Cell::get)
     }
 
     #[must_use]

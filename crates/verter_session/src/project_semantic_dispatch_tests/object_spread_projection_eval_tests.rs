@@ -873,6 +873,79 @@ fn keyof_and_substitution_consume_the_canonical_program() {
     );
 }
 
+/// A refused spread-key read inside an intersection must not leave the
+/// other arm's keys as an exact `keyof` domain: a demand refusal says the
+/// arm's keys were not paid for, not that the arm has none. The same
+/// intersection under an adequate demand mints both arms' keys, proving
+/// the non-exact verdict comes from the refusal, not an empty arm.
+#[test]
+fn a_refused_spread_key_read_cannot_leave_the_intersection_keyof_exact() {
+    {
+        // A demand too small to pay for the spread arm's keys: `keyof
+        // (A & S)` must stay non-exact — `A`'s keys alone are not the
+        // intersection's domain.
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = host.project_type_store().semantic_graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let left = object(graph, [surface_member("a", number, false)]);
+        let spread = program(
+            graph,
+            [
+                ObjectConstructionEffect::Spread(keyed_union(graph, "k", 64)),
+                property("shared", number, false),
+            ],
+        );
+        let intersection = graph.intern_node(SemanticNodeData::Intersection(
+            verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                [left, spread],
+            )),
+        ));
+        dispatch.connected_demand().set_limits_for_tests(1, 8);
+        let (_guard, _) = dispatch.enter_connected_demand(false);
+        let _frame = verter_type_engine::project_semantic_dispatch::BuildLocalTaintGuard::push(
+            &dispatch.build_local_taint,
+        );
+        assert_eq!(
+            dispatch.key_names_from_base_node(intersection),
+            None,
+            "a refused spread arm must poison the intersection key domain"
+        );
+    }
+
+    {
+        // The same intersection under an adequate demand mints the union
+        // of both arms' keys: the non-exact verdict above comes from the
+        // refusal, not an empty or unenumerable arm.
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = host.project_type_store().semantic_graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let left = object(graph, [surface_member("a", number, false)]);
+        let spread = program(
+            graph,
+            [
+                ObjectConstructionEffect::Spread(keyed_union(graph, "k", 64)),
+                property("shared", number, false),
+            ],
+        );
+        let intersection = graph.intern_node(SemanticNodeData::Intersection(
+            verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                [left, spread],
+            )),
+        ));
+        let (_guard, _) = dispatch.enter_connected_demand(false);
+        let names = dispatch
+            .key_names_from_base_node(intersection)
+            .expect("an adequate demand enumerates both arms");
+        assert_eq!(
+            names,
+            vec![key("a"), key("shared")],
+            "the paid read unions the spread's exact keys with the plain arm"
+        );
+    }
+}
+
 #[test]
 fn relation_quantifies_correlated_alternatives_and_never_shortcuts_open_identity() {
     let host = host();
@@ -5063,6 +5136,285 @@ fn a_selected_key_read_grows_with_the_arms_not_their_product() {
     assert!(
         large * 10 <= small * 25,
         "doubling the arms must keep the read linear: {small} -> {large}"
+    );
+}
+
+/// Selecting a key that every arm of the union still carries: no arm
+/// collapses, so the narrowing deduplication must decide `arms` distinct
+/// contributions while its charged work stays linear in the arms — a
+/// pairwise scan of every kept arm would charge quadratically.
+#[test]
+fn a_selected_key_read_over_distinct_arms_stays_linear() {
+    let work_and_width = |arms: usize| {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = host.project_type_store().semantic_graph();
+        let keyed = |index: usize| {
+            object(
+                graph,
+                [surface_member(
+                    "k",
+                    graph.intern_node(SemanticNodeData::Literal(
+                        verter_type_engine::semantic_query::LiteralValue::Number(index as f64),
+                    )),
+                    false,
+                )],
+            )
+        };
+        let union = graph.intern_node(SemanticNodeData::Union(
+            verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                (0..arms).map(keyed).collect::<Vec<_>>(),
+            )),
+        ));
+        let root = program(graph, [ObjectConstructionEffect::Spread(union)]);
+        let (result, usage) =
+            verter_type_engine::project_semantic_dispatch::connected_demand::with_connected_work_capture_for_tests(
+                || {
+                    dispatch.execute(SemanticQueryKey::ProjectObjectSpread {
+                        program: root,
+                        selector: ObjectProjectionSelector::Key(key("k")),
+                        context: context(ExactOptionalPropertyPolicy::Disabled),
+                    })
+                },
+            );
+        match result {
+            QueryResult::Value(SemanticQueryOutput {
+                value: SemanticQueryValue::ObjectProjection(formula),
+                ..
+            }) => assert_eq!(
+                formula.width(),
+                arms as u64,
+                "every arm carries the selected key, so every arm stays distinct"
+            ),
+            other => panic!("the selected read builds, got {other:?}"),
+        }
+        assert!(usage.work > 0, "the read is charged");
+        usage.work
+    };
+    let (small, large) = (work_and_width(60), work_and_width(120));
+    assert!(
+        large * 10 <= small * 25,
+        "doubling the distinct arms must keep the read linear: {small} -> {large}"
+    );
+}
+
+/// A `RelationShape` read over arms that share a long member prefix: the
+/// fingerprint hashing walks each arm's whole kept structure, so the work
+/// must stay linear in the arms — and arms distinct in a read fact never
+/// collapse.
+#[test]
+fn a_relation_shape_read_over_long_common_prefixes_stays_linear() {
+    let prefix = 40;
+    let work_and_width = |arms: usize| {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = host.project_type_store().semantic_graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let arm = |index: usize| {
+            let mut members: Vec<SurfaceMember> = (0..prefix)
+                .map(|shared| surface_member(&format!("p{shared}"), number, false))
+                .collect();
+            members.push(surface_member(
+                "t",
+                graph.intern_node(SemanticNodeData::Literal(
+                    verter_type_engine::semantic_query::LiteralValue::Number(index as f64),
+                )),
+                false,
+            ));
+            object(graph, members)
+        };
+        let union = graph.intern_node(SemanticNodeData::Union(
+            verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                (0..arms).map(arm).collect::<Vec<_>>(),
+            )),
+        ));
+        let root = program(graph, [ObjectConstructionEffect::Spread(union)]);
+        let mut keys: Vec<PropertyKey> = (0..prefix)
+            .map(|shared| key(&format!("p{shared}")))
+            .collect();
+        keys.push(key("t"));
+        let (result, usage) =
+            verter_type_engine::project_semantic_dispatch::connected_demand::with_connected_work_capture_for_tests(
+                || {
+                    dispatch.execute(SemanticQueryKey::ProjectObjectSpread {
+                        program: root,
+                        selector: ObjectProjectionSelector::RelationShape(
+                            verter_type_expr::OwnedSlice::from(keys.clone()),
+                        ),
+                        context: context(ExactOptionalPropertyPolicy::Disabled),
+                    })
+                },
+            );
+        match result {
+            QueryResult::Value(SemanticQueryOutput {
+                value: SemanticQueryValue::ObjectProjection(formula),
+                ..
+            }) => assert_eq!(
+                formula.width(),
+                arms as u64,
+                "arms distinct in the read tail never collapse"
+            ),
+            other => panic!("the relation-shape read builds, got {other:?}"),
+        }
+        assert!(usage.work > 0, "the read is charged");
+        usage.work
+    };
+    let (small, large) = (work_and_width(60), work_and_width(120));
+    assert!(
+        large * 10 <= small * 25,
+        "doubling the arms must keep the read linear over long common prefixes: {small} -> {large}"
+    );
+}
+
+/// Fingerprint-collision correctness: arms that narrow to equal
+/// contributions still collapse through the index (the structural
+/// comparison runs and settles the collision), while arms distinct in a
+/// read fact stay distinct.
+#[test]
+fn narrowing_dedup_resolves_fingerprint_collisions_with_structural_equality() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let one = graph.intern_node(SemanticNodeData::Literal(
+        verter_type_engine::semantic_query::LiteralValue::Number(1.0),
+    ));
+    let two = graph.intern_node(SemanticNodeData::Literal(
+        verter_type_engine::semantic_query::LiteralValue::Number(2.0),
+    ));
+    // `{k:1, pad0}` and `{k:1, pad1}` are distinct union operands whose
+    // selected-key narrowings are equal; `{k:2, pad0}` narrows apart.
+    let arm = |value: SemanticNodeId, pad: usize| {
+        object(
+            graph,
+            [
+                surface_member("k", value, false),
+                surface_member(&format!("pad{pad}"), number, false),
+            ],
+        )
+    };
+    let union =
+        graph.intern_node(SemanticNodeData::Union(
+            verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                [arm(one, 0), arm(one, 1), arm(two, 0)],
+            )),
+        ));
+    let root = program(graph, [ObjectConstructionEffect::Spread(union)]);
+    let comparisons_before = test_support::narrowing_dedup_comparisons();
+    let result = dispatch.execute(SemanticQueryKey::ProjectObjectSpread {
+        program: root,
+        selector: ObjectProjectionSelector::Key(key("k")),
+        context: context(ExactOptionalPropertyPolicy::Disabled),
+    });
+    match result {
+        QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::ObjectProjection(formula),
+            ..
+        }) => assert_eq!(
+            formula.width(),
+            2,
+            "the equal narrowings collapse; the distinct one stays"
+        ),
+        other => panic!("the selected read builds, got {other:?}"),
+    }
+    assert!(
+        test_support::narrowing_dedup_comparisons() > comparisons_before,
+        "the duplicate arm reaches the structural comparison through its fingerprint"
+    );
+}
+
+/// A tight allowance stops a distinct-arm selected read before its
+/// narrowing work runs: half the read's full charged cost refuses the
+/// query with the typed projection partial, having charged no more than
+/// the allowance — the hashing, probing and storage of the dedup are
+/// paid before they happen, never after.
+#[test]
+fn a_tight_allowance_stops_a_distinct_arm_read_before_its_narrowing_work() {
+    let arms = 400usize;
+    fn make(
+        host: &VerterHost,
+        arms: usize,
+    ) -> (
+        verter_type_engine::project_semantic_dispatch::ThreadDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities,
+        >,
+        SemanticNodeId,
+    ) {
+        let dispatch = ProjectSemanticDispatch::new(host);
+        let graph = host.project_type_store().semantic_graph();
+        let keyed = |index: usize| {
+            object(
+                graph,
+                [surface_member(
+                    "k",
+                    graph.intern_node(SemanticNodeData::Literal(
+                        verter_type_engine::semantic_query::LiteralValue::Number(index as f64),
+                    )),
+                    false,
+                )],
+            )
+        };
+        let union = graph.intern_node(SemanticNodeData::Union(
+            verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                (0..arms).map(keyed).collect::<Vec<_>>(),
+            )),
+        ));
+        let root = program(graph, [ObjectConstructionEffect::Spread(union)]);
+        (dispatch, root)
+    }
+
+    let full_host = host();
+    let (dispatch, root) = make(&full_host, arms);
+    let (result, full) =
+        verter_type_engine::project_semantic_dispatch::connected_demand::with_connected_work_capture_for_tests(
+            || {
+                dispatch.execute(SemanticQueryKey::ProjectObjectSpread {
+                    program: root,
+                    selector: ObjectProjectionSelector::Key(key("k")),
+                    context: context(ExactOptionalPropertyPolicy::Disabled),
+                })
+            },
+        );
+    assert!(
+        matches!(
+            result,
+            QueryResult::Value(SemanticQueryOutput {
+                value: SemanticQueryValue::ObjectProjection(_),
+                ..
+            })
+        ),
+        "the unconstrained read builds, got {result:?}"
+    );
+    assert!(full.work > 0);
+
+    let tight_host = host();
+    let (dispatch, root) = make(&tight_host, arms);
+    let allowance = full.work / 2;
+    dispatch
+        .connected_demand()
+        .set_limits_for_tests(allowance, 24);
+    let (result, used) =
+        verter_type_engine::project_semantic_dispatch::connected_demand::with_connected_work_capture_for_tests(
+            || {
+                dispatch.execute(SemanticQueryKey::ProjectObjectSpread {
+                    program: root,
+                    selector: ObjectProjectionSelector::Key(key("k")),
+                    context: context(ExactOptionalPropertyPolicy::Disabled),
+                })
+            },
+        );
+    assert!(
+        matches!(
+            result,
+            QueryResult::Error(verter_type_engine::semantic_query::QueryError::BudgetExceeded(_))
+        ),
+        "half the full cost refuses the read with the typed partial, got {result:?}"
+    );
+    assert!(
+        used.work <= allowance,
+        "the refusal charged no more than the allowance: {} > {allowance}",
+        used.work
     );
 }
 

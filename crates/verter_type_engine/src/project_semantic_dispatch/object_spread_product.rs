@@ -30,7 +30,7 @@
 
 use std::sync::Arc;
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use verter_session_query::retention::allocation::{arc_block_bytes, heap_block_bytes, AliasSet};
 
 use super::ProjectSemanticDispatch;
@@ -349,12 +349,43 @@ impl ProductNode {
                 _ => self.clone(),
             },
             Self::Choice(arms) => {
+                // Ordered first-occurrence deduplication through a
+                // structural fingerprint index: each arm pays its own
+                // hashing, one index probe and its storage growth, and
+                // only a fingerprint collision pays a structural
+                // comparison — never a scan of every kept arm.
                 let mut distinct: Vec<ProductNode> = Vec::new();
+                let mut kept_by_fingerprint: FxHashMap<u64, Vec<usize>> = FxHashMap::default();
                 for arm in arms.nodes.iter() {
                     let arm = arm.narrowed(narrow, nested, charge)?;
-                    // Deduplication compares against every kept arm.
-                    charge(1 + distinct.len())?;
-                    if !distinct.contains(&arm) {
+                    let bounds = arm.bounds();
+                    // Hashing and the index probe are paid before either
+                    // runs: the digest walks the arm's whole structure, so
+                    // the charge carries its path length and fact width.
+                    charge(2 + bounds.units + bounds.facts)?;
+                    let fingerprint = arm.structural_fingerprint();
+                    let mut duplicate = false;
+                    if let Some(kept) = kept_by_fingerprint.get(&fingerprint) {
+                        for index in kept {
+                            // Only a fingerprint collision reaches the
+                            // structural comparison, and pays for it
+                            // before it runs.
+                            charge(1 + bounds.units + bounds.facts)?;
+                            crate::semantic_query::object_spread_projection::note_narrowing_dedup_comparison();
+                            if distinct[*index] == arm {
+                                duplicate = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !duplicate {
+                        // The kept arm's storage growth is paid before
+                        // the push.
+                        charge(1)?;
+                        kept_by_fingerprint
+                            .entry(fingerprint)
+                            .or_default()
+                            .push(distinct.len());
                         distinct.push(arm);
                     }
                 }
@@ -369,6 +400,93 @@ impl ProductNode {
             Self::Nested(inner) => nested(inner)?,
             Self::Finished(_) => self.clone(),
         })
+    }
+
+    /// A faithful digest of the node's compared structure: every
+    /// ingredient is a pure function of the data [`PartialEq`] compares,
+    /// so equal nodes always produce equal fingerprints and the digest can
+    /// index deduplication. It hashes a subset of the compared data —
+    /// different nodes may share a fingerprint, never the reverse — so a
+    /// collision is settled by the structural comparison itself.
+    fn structural_fingerprint(&self) -> u64 {
+        use std::hash::Hasher as _;
+        let mut hasher = rustc_hash::FxHasher::default();
+        self.hash_structure(&mut hasher);
+        hasher.finish()
+    }
+
+    fn hash_structure(&self, hasher: &mut rustc_hash::FxHasher) {
+        use std::hash::{Hash as _, Hasher as _};
+        match self {
+            Self::Leaf(leaf) => {
+                hasher.write_u8(0);
+                match leaf.as_ref() {
+                    ProductLeaf::Direct {
+                        program,
+                        effect,
+                        closed,
+                    } => {
+                        hasher.write_u8(0);
+                        program.hash(hasher);
+                        effect.hash(hasher);
+                        closed.hash(hasher);
+                    }
+                    ProductLeaf::Spread(fragment) => {
+                        hasher.write_u8(1);
+                        hasher.write_usize(fragment.members.len());
+                        for member in fragment.members.iter() {
+                            member.key.hash(hasher);
+                            member.presence.hash(hasher);
+                            member.value.hash(hasher);
+                            member.facets.hash(hasher);
+                        }
+                        hasher.write_usize(fragment.indices.len());
+                        fragment.indices.hash(hasher);
+                        fragment.residual.hash(hasher);
+                    }
+                    ProductLeaf::CopiedWrites { programs, writes } => {
+                        hasher.write_u8(2);
+                        programs.hash(hasher);
+                        writes.hash(hasher);
+                    }
+                    ProductLeaf::Residual { operand, class } => {
+                        hasher.write_u8(3);
+                        operand.hash(hasher);
+                        std::mem::discriminant(class).hash(hasher);
+                    }
+                }
+            }
+            Self::Choice(arms) => {
+                hasher.write_u8(1);
+                hasher.write_usize(arms.nodes.len());
+                for node in arms.nodes.iter() {
+                    node.hash_structure(hasher);
+                }
+            }
+            Self::Overlay(arms) => {
+                hasher.write_u8(2);
+                hasher.write_usize(arms.nodes.len());
+                for node in arms.nodes.iter() {
+                    node.hash_structure(hasher);
+                }
+            }
+            Self::Nested(nested) => {
+                hasher.write_u8(3);
+                nested.operand.hash(hasher);
+                let product = nested.formula.product();
+                product.selector.hash(hasher);
+                product.policy.hash(hasher);
+                product.root.hash_structure(hasher);
+            }
+            Self::Finished(alternative) => {
+                hasher.write_u8(4);
+                hasher.write_usize(alternative.fact_count());
+                alternative.closed().is_some().hash(hasher);
+                alternative.positive().visit(|fact| fact.hash(hasher));
+                alternative.indices().hash(hasher);
+                alternative.excess().hash(hasher);
+            }
+        }
     }
 
     pub(super) fn for_each_retained_node(&self, visit: &mut dyn FnMut(SemanticNodeId)) {
