@@ -18,6 +18,7 @@ use crate::{ResolutionExactness, ResolutionProvenance, TopLevelOwnerId};
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedSymbolIdentity {
@@ -41,6 +42,7 @@ pub struct ResolvedSymbolIdentity {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 #[serde(rename_all = "camelCase")]
 pub enum PropCallableRoleUnresolvedReason {
@@ -71,6 +73,7 @@ pub enum PropCallableRoleUnresolvedReason {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum PropCallableRole {

@@ -608,7 +608,7 @@ fn mapped_type_renders_modifiers_and_name_remap() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
     let key_space = store.intern_node(SemanticNodeData::KeyOf { base: t });
 
@@ -663,7 +663,7 @@ fn function_type_parameters_render_constraint_and_default() {
         param_index: 0,
         constraint: Some(string_id),
         default: Some(number_id),
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
 
     let func = store.intern_node(SemanticNodeData::Signature {
@@ -677,7 +677,7 @@ fn function_type_parameters_render_constraint_and_default() {
             void_id,
         ),
         type_parameters: verter_type_engine::semantic_query::PayloadArray::from([TypeParamDecl {
-            name: Arc::from("T"),
+            name: verter_type_expr::OwnedStr::from("T"),
             param: t_decl_param,
             constraint: Some(string_id),
             default: Some(number_id),
@@ -702,7 +702,7 @@ fn function_type_parameters_render_constraint_and_default() {
         param_index: 0,
         constraint: Some(string_id),
         default: Some(number_id),
-        display_name: Arc::from("U"),
+        display_name: verter_type_expr::OwnedStr::from("U"),
     });
     assert_eq!(render(&store, tref), "U");
 }
@@ -739,7 +739,9 @@ fn string_and_template_literals_are_escaped() {
     // prints `` `a\`b${string}` `` and `` `x${string}\\` ``. A quasi holding a
     // backtick and a backslash renders both escaped.
     let tmpl = store.intern_node(SemanticNodeData::TemplateLiteral {
-        quasis: Arc::from([Arc::from("a`b\\c") as Arc<str>]),
+        quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from([
+            verter_type_expr::OwnedStr::from("a`b\\c"),
+        ]),
         expressions: verter_type_engine::semantic_query::PayloadArray::from(
             Vec::new().into_boxed_slice(),
         ),

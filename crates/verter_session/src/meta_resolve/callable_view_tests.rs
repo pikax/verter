@@ -111,7 +111,7 @@ fn tuple(graph: &SemanticGraphStore, elements: Vec<TupleElement>) -> SemanticNod
 
 fn tuple_element(label: Option<&str>, value: SemanticNodeId) -> TupleElement {
     TupleElement {
-        label: label.map(Arc::from),
+        label: label.map(verter_type_expr::OwnedStr::from),
         value,
         optional: false,
         rest: false,
@@ -179,7 +179,7 @@ fn typeparam(graph: &SemanticGraphStore, name: &str) -> SemanticNodeId {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from(name),
+        display_name: verter_type_expr::OwnedStr::from(name),
     })
 }
 

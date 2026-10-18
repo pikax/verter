@@ -611,7 +611,7 @@ fn prepared_member_reference_head_participates_in_member_fact_identity() {
         method_kind: None,
         has_implementation_body: false,
         visibility: MemberVisibility::Public,
-        declaration_origin: DeclarationOrigin::Declared(std::sync::Arc::from("/ws/props.ts")),
+        declaration_origin: DeclarationOrigin::Declared(crate::OwnedStr::from("/ws/props.ts")),
         ty: slot(),
         span_origin: member_origin(0),
         reference_head: head,
@@ -1536,7 +1536,7 @@ fn fact_carriers_round_trip_through_serde() {
         has_implementation_body: false,
         visibility: MemberVisibility::Public,
         declared_in_macro_type_arg: true,
-        declaration_origin: DeclarationOrigin::Declared(std::sync::Arc::from("/ws/types.ts")),
+        declaration_origin: DeclarationOrigin::Declared(crate::OwnedStr::from("/ws/types.ts")),
         ty: TypeBodySlot {
             anchor: AuthoredAnchor {
                 canonical_id: OwnedStr::from(std::sync::Arc::from("/ws/types.ts")),

@@ -104,18 +104,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .prepared_value_decl_return_only(canonical, owner, symbol)?;
         Self::enum_declaration_of(
             self,
-            Arc::from(canonical),
+            verter_type_expr::OwnedStr::from(canonical),
             owner,
-            Arc::from(symbol),
+            verter_type_expr::OwnedStr::from(symbol),
             &prepared,
         )
     }
 
     pub(super) fn enum_declaration_of(
         &self,
-        declaring_canonical: Arc<str>,
+        declaring_canonical: verter_type_expr::OwnedStr,
         declaring_owner: verter_type_expr::TopLevelOwnerId,
-        declaring_symbol: Arc<str>,
+        declaring_symbol: verter_type_expr::OwnedStr,
         prepared: &verter_session_query::type_solver::PreparedValueDecl,
     ) -> Option<EnumDeclaration> {
         let enumeration = self.enum_blocks(
@@ -608,9 +608,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// enum's own file, and for a global enum every script's.
     fn enum_blocks(
         &self,
-        canonical: Arc<str>,
+        canonical: verter_type_expr::OwnedStr,
         owner: verter_type_expr::TopLevelOwnerId,
-        symbol: Arc<str>,
+        symbol: verter_type_expr::OwnedStr,
         prepared: &verter_session_query::type_solver::PreparedValueDecl,
     ) -> Option<EnumDeclaration> {
         use super::build::AugmentationContribution;
@@ -622,6 +622,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         if prepared.kind != ValueDeclKind::Enum {
             return None;
         }
+        // The enum's own blocks and augmentations name it by raw shared
+        // strings; only an enum pays for the copy.
+        let canonical: Arc<str> = Arc::from(canonical.as_str());
+        let symbol: Arc<str> = Arc::from(symbol.as_str());
         let own_members = Arc::clone(&prepared.enum_members.as_ref()?.members);
         let indexed = self
             .ctx
@@ -649,7 +653,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     let _ = self.ctx.ensure_indexed_ready_serve(&rdep);
                 }
                 Some(AugmentationTargetKind::ResolvedRelativeCanonical(
-                    Arc::clone(&canonical),
+                    canonical.clone(),
                 ))
             }
             Some(AugmentationScopeKind::Global) => Some(AugmentationTargetKind::GlobalAugmentation),
@@ -657,7 +661,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         };
         let is_global = matches!(target, Some(AugmentationTargetKind::GlobalAugmentation));
         let own_block = super::build::EnumContribution {
-            canonical: Arc::clone(&canonical),
+            canonical: canonical.clone(),
             owner,
             scope: own_scope.clone(),
             members: own_members,
@@ -874,12 +878,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let path: Arc<[Arc<str>]> = Arc::from(Vec::new().into_boxed_slice());
         let value_root = ValueRootKey {
             scope: crate::semantic_query::ScopeId {
-                canonical_id: verter_type_expr::OwnedStr::from(canonical),
+                canonical_id: canonical,
                 owner,
                 local_scope: None,
                 binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(owner),
             },
-            name: verter_type_expr::OwnedStr::from(symbol),
+            name: symbol,
         };
         let QueryResult::Value(crate::semantic_query::SemanticQueryOutput { value, .. }) = self
             .execute_type_node(self.typeof_key_with_path(
@@ -1287,9 +1291,9 @@ impl EnumEvaluation {
         ENUM_ASSEMBLY_WORK.with(|count| count.set(count.get() + 1));
         self.declared_at
             .get(&(
-                verter_type_expr::OwnedStr::from(identity.canonical_id.clone()),
+                identity.canonical_id.clone(),
                 identity.owner,
-                verter_type_expr::OwnedStr::from(identity.symbol_name.clone()),
+                identity.symbol_name.clone(),
             ))
             .cloned()
     }

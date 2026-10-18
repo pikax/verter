@@ -111,6 +111,13 @@ pub(super) struct MemoEntry {
     /// `warm_publish_one_if_absent` / the test publish helpers — the
     /// only paths that create a `MemoEntry`.
     pub(super) admission_seq: u64,
+    /// Whether this candidate's registrations are in the store's reverse
+    /// index. A published candidate is registered the first time the
+    /// reverse index is read
+    /// ([`SemanticGraphStore::index_unregistered_candidates_locked`]), so a
+    /// candidate displaced or evicted before then has no registration to
+    /// prune.
+    pub(super) reverse_indexed: bool,
     /// What computing this candidate cost: the receipt every read of it
     /// replays, so a warm read charges its consumer what the cold build
     /// charged. Shared by the backfills and SCC members the same build
@@ -254,7 +261,7 @@ pub enum FamilyKey {
     },
     ProjectMember {
         base: SemanticNodeId,
-        member: Arc<str>,
+        member: verter_type_expr::OwnedStr,
     },
     IndexedAccess {
         base: SemanticNodeId,
@@ -295,7 +302,11 @@ pub enum FamilyKey {
         true_branch: SemanticNodeId,
         false_branch: SemanticNodeId,
         distributive: bool,
-        pending: Option<Arc<crate::semantic_query::ConditionalPendingSubstitution>>,
+        pending: Option<
+            verter_session_query::retention::owned::Owned<
+                crate::semantic_query::ConditionalPendingSubstitution,
+            >,
+        >,
     },
     /// `value_root` is the env-bearing, content-free
     /// [`crate::semantic_query::ValueRootSlotIdentity`] (R6 — carries the
@@ -513,7 +524,7 @@ pub enum FamilyKey {
     /// dims ride here ON the family key (env hashes, R6-clean). LIVE
     /// producer (build folds via the shared deferred evaluator).
     TemplateLiteralReduce {
-        pattern: Arc<[Arc<str>]>,
+        pattern: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
         args: Arc<[SemanticNodeId]>,
         resolve_env_hash: crate::semantic_query::HashValue,
         type_env_hash: crate::semantic_query::HashValue,
@@ -1843,6 +1854,18 @@ impl FamilySlots {
     /// accounting). Used by `invalidate_canonical` to drop only those
     /// candidates whose fact rail genuinely references the touched
     /// canonical, leaving unrelated overlay candidates intact.
+    /// Visit every candidate in every slot, mutably, with its slot.
+    pub(super) fn for_each_candidate_mut(
+        &mut self,
+        mut visit: impl FnMut(ModeSlot, &mut MemoEntry),
+    ) {
+        for slot in ALL_MODE_SLOTS {
+            for entry in self.slot_list_mut(*slot).iter_mut() {
+                visit(*slot, entry);
+            }
+        }
+    }
+
     pub(super) fn retain_candidates_in_slot_mut<F>(&mut self, slot: ModeSlot, mut keep: F)
     where
         F: FnMut(&MemoEntry) -> bool,
@@ -2130,7 +2153,7 @@ pub(crate) fn family_and_slot_in(
         SemanticQueryKey::ProjectMember { base, member, mode } => (
             FamilyKey::ProjectMember {
                 base: *base,
-                member: std::sync::Arc::<str>::from(member.as_str()),
+                member: member.clone(),
             },
             mode_to_slot(*mode),
         ),
@@ -2416,7 +2439,7 @@ pub(crate) fn family_and_slot_in(
             context,
         } => (
             FamilyKey::TemplateLiteralReduce {
-                pattern: Arc::clone(pattern),
+                pattern: pattern.clone(),
                 args: Arc::clone(args),
                 resolve_env_hash: context.resolve_env_hash,
                 type_env_hash: context.type_env_hash,

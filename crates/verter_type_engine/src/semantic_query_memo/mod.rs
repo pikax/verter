@@ -57,6 +57,7 @@ pub mod family;
 mod family_footprint;
 mod family_intern;
 mod family_retention;
+mod fingerprint_hasher;
 mod flow_return_memo;
 #[cfg(any(test, feature = "test-support"))]
 pub mod graph_fixture;
@@ -85,7 +86,7 @@ mod signature_epoch;
 pub mod union_views;
 pub mod unresolved_reach;
 
-pub use arena::UNALLOCATABLE_ID_FLOOR;
+pub use arena::{NodeData, UNALLOCATABLE_ID_FLOOR};
 pub(crate) use inflight::InlineMemberFlight;
 pub use intern_table::{IdentityIndexSnapshot, InternIndexOccupancy};
 pub use producer::{
@@ -356,7 +357,7 @@ pub struct SemanticGraphStore {
     /// snapshots share allocations. Origin edges are bounded best-effort
     /// provenance for the audit origin-graph trace, NOT an invalidation
     /// source — see the `derivation` module docs.
-    pub(super) derivation: Arc<Mutex<DerivationStore>>,
+    pub(super) derivation: Arc<release::SidecarMutex<DerivationStore>>,
     /// Lock-free telemetry counters. Read via [`Self::stats_snapshot`]
     /// into the public [`SemanticGraphStats`] surface.
     pub(super) stats: AtomicSemanticGraphStats,
@@ -421,14 +422,15 @@ pub struct SemanticGraphStore {
     /// the bound existed (re-walking the same structure per SCC fixpoint
     /// iteration) instead of trading correctness for it. ONE per-node sidecar:
     /// the entry holds every bit memoized for the id, released together.
-    unresolved_reach: Arc<Mutex<FxHashMap<SemanticNodeId, unresolved_reach::NodeStructureBits>>>,
+    unresolved_reach:
+        Arc<release::SidecarMutex<FxHashMap<SemanticNodeId, unresolved_reach::NodeStructureBits>>>,
     /// The `VerterStableV1` member view of each union built in this store's
     /// arena, keyed by the store's OWN node ids. Ownership, lifetime and the
     /// contract with a payload-retiring holder: `union_views.rs`.
     union_views: Mutex<union_views::UnionViews>,
     /// The stable-key classes of this store's nodes. Ownership, lifetime and
     /// release: [`crate::semantic_query::stable_key::KeyClasses`].
-    key_classes: Arc<Mutex<crate::semantic_query::stable_key::KeyClasses>>,
+    key_classes: Arc<release::SidecarMutex<crate::semantic_query::stable_key::KeyClasses>>,
     /// Test-only: order union members by DESCENDING stable key. Reversing the
     /// one union order in a fresh store — an isolated cache namespace, its
     /// views and memo entries included — is the §5.8 counterfactual that
@@ -600,6 +602,12 @@ pub struct SemanticGraphStore {
     /// the production cooperative-wait path is unchanged.
     #[cfg(any(test, feature = "test-support"))]
     joiner_on_condvar_count: std::sync::atomic::AtomicUsize,
+    /// Candidates a reverse-index read inspected while registering the
+    /// unindexed ones. Read via
+    /// [`Self::test_reverse_index_registration_visits`]; per-store and
+    /// absent from release builds, like the counter above.
+    #[cfg(any(test, feature = "test-support"))]
+    reverse_index_registration_visits: std::sync::atomic::AtomicUsize,
     /// Reverse index. For each canonical id,
     /// holds the set of `(family, slot)` pairs whose published
     /// dep_signature references it, paired with the dep_signature
@@ -631,6 +639,10 @@ pub struct SemanticGraphStore {
     /// takes only shard mutexes and never re-enters `entries`, so the
     /// order holds.
     canonical_to_entries: CanonicalToEntries,
+    /// The candidates published since the reverse index was last read,
+    /// which that read registers. Locked only under the `entries` lock
+    /// (`entries → reverse_index_pending`; nothing takes it first).
+    reverse_index_pending: Mutex<reverse_index::PendingRegistrations>,
     /// Store-owned hash-cons pool for dispatch dependency signatures.
     /// Every warm candidate passes through this pool before admission, so
     /// equivalent signatures share one allocation while live candidates keep
@@ -730,7 +742,7 @@ pub struct SemanticGraphStore {
     pub(super) member_ordinal_index_memo:
         Arc<DashMap<SemanticNodeId, Arc<member_index::MemberOrdinalIndex>>>,
     pub(super) member_ordinal_index_fifo:
-        Arc<parking_lot::Mutex<std::collections::VecDeque<SemanticNodeId>>>,
+        Arc<release::SidecarMutex<std::collections::VecDeque<SemanticNodeId>>>,
     /// Sealed refusals of isolated root demands — see `refusal_summary`.
     pub(super) refusal_summaries: refusal_summary::RefusalSummaryTable,
     /// Test-only: run by a dispatch's synchronous entry once it holds a
@@ -780,6 +792,9 @@ impl SemanticGraphStore {
         signatures.bind_graph(&arena.core);
         signatures.bind_retention_account(retention_account.get());
         let canonical_to_entries = CanonicalToEntries::charged(retention_account.get());
+        let reverse_index_pending = Mutex::new(reverse_index::PendingRegistrations::charged(
+            retention_account.get(),
+        ));
         let dep_signature_interner = DepSignatureInterner::charged(retention_account.get());
         let store = Self {
             operand_identity: Default::default(),
@@ -789,7 +804,9 @@ impl SemanticGraphStore {
             inflight: Default::default(),
             task_registry: Default::default(),
             independent_inflight: Default::default(),
-            derivation: Default::default(),
+            derivation: Arc::new(release::SidecarMutex::new(DerivationStore::charged(
+                retention_account.get(),
+            ))),
             stats: Default::default(),
             provenance: Default::default(),
             retention_account,
@@ -826,7 +843,10 @@ impl SemanticGraphStore {
             invalidate_canonical_inflight_abort_gate: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
             joiner_on_condvar_count: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            reverse_index_registration_visits: Default::default(),
             canonical_to_entries,
+            reverse_index_pending,
             dep_signature_interner,
             memo_budget: Default::default(),
             candidate_admission_seq: Default::default(),
@@ -1078,6 +1098,8 @@ impl SemanticGraphStore {
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn canonical_to_entries_shard_count_for_test(&self) -> usize {
+        let mut entries = self.entries_lock_diagnosed();
+        self.index_unregistered_candidates_locked(&mut entries);
         self.canonical_to_entries.len()
     }
 
@@ -1254,10 +1276,96 @@ impl SemanticGraphStore {
     /// canonical is not present. Test/diagnostic accessor.
     #[must_use]
     pub fn canonical_to_entries_count(&self, canonical_id: &str) -> usize {
+        let mut entries = self.entries_lock_diagnosed();
+        self.index_unregistered_candidates_locked(&mut entries);
         self.canonical_to_entries
             .get(canonical_id)
             .map(|shard| shard.value().lock().len())
             .unwrap_or(0)
+    }
+
+    /// Note that the candidate `admission_seq` was published into `family`
+    /// unindexed: the next read of the reverse index registers it. Called
+    /// under the `entries` lock, with the memo's resident family count.
+    fn defer_reverse_index_registration(
+        &self,
+        family: &FamilyKey,
+        admission_seq: u64,
+        resident_families: usize,
+    ) {
+        self.reverse_index_pending
+            .lock()
+            .note(family, admission_seq, resident_families);
+    }
+
+    /// Register every resident candidate the reverse index does not hold
+    /// yet — the candidates published since the previous read — under the
+    /// caller's `entries` lock hold, so the read that follows sees every
+    /// resident candidate's registrations.
+    pub(super) fn index_unregistered_candidates_locked(
+        &self,
+        entries: &mut FxHashMap<FamilyKey, FamilySlots>,
+    ) {
+        let work = self.reverse_index_pending.lock().take();
+        let timing_on = verter_execution::request_context::current_timing_enabled();
+        match work {
+            reverse_index::PendingWork::None => {}
+            reverse_index::PendingWork::Published(published) => {
+                for (family, admission_seq) in published {
+                    let Some(slots) = entries.get_mut(&family) else {
+                        continue;
+                    };
+                    let mut family = Some(family);
+                    self.register_unindexed_candidates(
+                        slots,
+                        Some(admission_seq),
+                        &mut || Arc::new(family.take().expect("a family is shared once")),
+                        timing_on,
+                    );
+                }
+            }
+            reverse_index::PendingWork::All => {
+                for (family, slots) in entries.iter_mut() {
+                    self.register_unindexed_candidates(
+                        slots,
+                        None,
+                        &mut || Arc::new(family.clone()),
+                        timing_on,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Register `slots`' unindexed candidates — only the one admitted as
+    /// `admission_seq` (in each slot it occupies) when given — under the
+    /// family `share` mints once for all of them.
+    fn register_unindexed_candidates(
+        &self,
+        slots: &mut FamilySlots,
+        admission_seq: Option<u64>,
+        share: &mut dyn FnMut() -> Arc<FamilyKey>,
+        timing_on: bool,
+    ) {
+        let mut shared_family: Option<Arc<FamilyKey>> = None;
+        slots.for_each_candidate_mut(|slot, entry| {
+            #[cfg(any(test, feature = "test-support"))]
+            self.reverse_index_registration_visits
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if entry.reverse_indexed || admission_seq.is_some_and(|seq| seq != entry.admission_seq)
+            {
+                return;
+            }
+            let family = shared_family.get_or_insert_with(&mut *share);
+            reverse_index::register_candidate(
+                &self.canonical_to_entries,
+                family,
+                slot,
+                entry,
+                timing_on,
+            );
+            entry.reverse_indexed = true;
+        });
     }
 
     /// Invalidate every warm memo slot whose stored `DepSignature`
@@ -1321,6 +1429,9 @@ impl SemanticGraphStore {
         {
             let timing_on = verter_execution::request_context::current_timing_enabled();
             let mut entries = self.entries_lock_diagnosed();
+            // The drain reads the reverse index: every resident candidate
+            // is registered first, under this same hold.
+            self.index_unregistered_candidates_locked(&mut entries);
 
             // Drain the per-canonical `(family, slot) → registered fact
             // rail` map for `canonical_id`, UNDER the held `entries`
@@ -1787,6 +1898,7 @@ impl SemanticGraphStore {
                 }
             }
             self.canonical_to_entries.clear_shards();
+            let _ = self.reverse_index_pending.lock().take();
             count
         };
         // Test-only injection point: a barrier armed by
@@ -2229,16 +2341,20 @@ impl SemanticGraphStore {
         // failing any is skipped without bubbling. `validated_at_generation`
         // is recency metadata only.
         let requested = prepared.requested_point();
-        let entry: MemoEntry = snapshot?
+        let snapshot = snapshot?;
+        let candidates = snapshot.len();
+        let (position, entry): (usize, MemoEntry) = snapshot
             .into_iter()
-            .find(|e| self.warm_candidate_serves(e, requested, ctx))?;
+            .enumerate()
+            .find(|(_, e)| self.warm_candidate_serves(e, requested, ctx))?;
         // Brief LRU bookkeeping — reacquire ONLY to move the matching
         // candidate to the back of the slot's LRU order so subsequent
         // lookups treat it as freshest. The match is by discriminant
         // identity; if a concurrent invalidation drained it between
         // snapshot and here, the update is a no-op (the caller still
-        // gets the cloned entry from the snapshot).
-        {
+        // gets the cloned entry from the snapshot). A candidate the
+        // snapshot already held at the back is the freshest already.
+        if position + 1 < candidates {
             let mut entries = self.entries.lock();
             if let Some(slots) = entries.get_mut(family) {
                 slots.mark_validated_freshest(slot, &entry);
@@ -2291,20 +2407,6 @@ impl SemanticGraphStore {
             ?key,
             "memo_miss"
         );
-    }
-
-    /// The observations of a lookup of `key` a dispatcher answers from a
-    /// result it already holds, in place of a family-memo lookup: the
-    /// lookup entry, then the warm hit a lookup of a result the memo holds
-    /// (`resident`) makes, else the miss a lookup of a result completed for
-    /// one request alone makes.
-    pub(crate) fn note_replayed_lookup(&self, key: &SemanticQueryKey, resident: bool) {
-        self.note_lookup_entry();
-        if resident {
-            self.note_warm_hit(key);
-        } else {
-            self.note_lookup_miss(key);
-        }
     }
 
     /// The observations a family-memo lookup answered warm for `key` makes.
@@ -2484,8 +2586,8 @@ impl SemanticGraphStore {
         // verbatim; it never reconstructs facts from the legacy fence.
         let read_set_signature = read_set_signature.clone();
         let dispatch_dep_signature = self.dep_signature_interner.intern(dispatch_dep_signature);
-        let reverse_index_inputs =
-            reverse_index::ReverseIndexInputs::new(&read_set_signature, &dispatch_dep_signature);
+        let registered_canonicals =
+            reverse_index::registered_canonical_count(&read_set_signature, &dispatch_dep_signature);
         let validated_at_generation = flags.current_project_generation();
         let admission_seq = self.alloc_candidate_admission_seq();
         let mut entry = MemoEntry {
@@ -2509,6 +2611,7 @@ impl SemanticGraphStore {
             retention: None,
             validated_at_generation,
             admission_seq,
+            reverse_indexed: false,
             cost_receipt: Arc::clone(cost_receipt),
         };
         // Aggregate retention admission, BEFORE the per-family cap plan:
@@ -2522,7 +2625,7 @@ impl SemanticGraphStore {
             &entry,
             family,
             populated_slots,
-            reverse_index_inputs.canonical_count(),
+            registered_canonicals,
         ) {
             Ok(retention) => retention,
             Err(_) => return WarmPublishOutcome::Skipped,
@@ -2621,14 +2724,11 @@ impl SemanticGraphStore {
         // `entries` lock, keeping the live memo slot and its
         // reverse-index registration atomic against a concurrent
         // `invalidate_all`. See `register_reverse_index`'s docstring.
-        reverse_index::register_reverse_index(
-            &self.canonical_to_entries,
-            family,
-            &populated_slots,
-            &reverse_index_inputs,
-            admission_seq,
-        );
-        drop(reverse_index_inputs);
+        // The candidate enters the reverse index when the index is next
+        // read, under the `entries` lock as this publish holds it.
+        if !populated_slots.is_empty() {
+            self.defer_reverse_index_registration(family, admission_seq, entries.len());
+        }
         let published = PublishedMemoCandidate {
             read_set_signature,
             self_root_canonicals: Arc::clone(self_root_canonicals),
@@ -2739,11 +2839,8 @@ impl SemanticGraphStore {
         // result into an empty narrower sibling slot.
         verter_audit::attribute!(CacheCandidateCopy);
         let dispatch_dep_signature = self.dep_signature_interner.intern(&dispatch_dep_signature);
-        let dispatch_dep_signature_clone = dispatch_dep_signature.clone();
-        let reverse_index_inputs = reverse_index::ReverseIndexInputs::new(
-            &read_set_signature,
-            &dispatch_dep_signature_clone,
-        );
+        let registered_canonicals =
+            reverse_index::registered_canonical_count(&read_set_signature, &dispatch_dep_signature);
         let validated_at_generation = flags.current_project_generation();
         let admission_seq = self.alloc_candidate_admission_seq();
         let mut entry = MemoEntry {
@@ -2761,6 +2858,7 @@ impl SemanticGraphStore {
             retention: None,
             validated_at_generation,
             admission_seq,
+            reverse_indexed: false,
             cost_receipt,
         };
         entry.lease = match self.lease_candidate(
@@ -2782,12 +2880,7 @@ impl SemanticGraphStore {
         // narrow request recomputes.
         let populated_slots =
             family::publication_slot_bound(slot, &entry.satisfied_projection, requested_path);
-        match self.reserve_memo_candidate(
-            &entry,
-            family,
-            populated_slots,
-            reverse_index_inputs.canonical_count(),
-        ) {
+        match self.reserve_memo_candidate(&entry, family, populated_slots, registered_canonicals) {
             Ok(retention) => entry.retention = Some(retention),
             Err(_) => return false,
         }
@@ -2851,16 +2944,11 @@ impl SemanticGraphStore {
         if family_was_new && !populated_slots.is_empty() {
             self.record_family_admission_locked(&mut entries, family);
         }
-        // Carrier-aware reverse-index registration — runs UNDER the held
-        // `entries` lock; see `warm_publish_one` for the full carrier and
-        // lock-order rationale.
-        reverse_index::register_reverse_index(
-            &self.canonical_to_entries,
-            family,
-            &populated_slots,
-            &reverse_index_inputs,
-            admission_seq,
-        );
+        // The candidate enters the reverse index when the index is next
+        // read; see `warm_publish_one`.
+        if !populated_slots.is_empty() {
+            self.defer_reverse_index_registration(family, admission_seq, entries.len());
+        }
         let admitted = !populated_slots.is_empty();
         drop(entries);
         admitted

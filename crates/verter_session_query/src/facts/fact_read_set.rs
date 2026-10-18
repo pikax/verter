@@ -2,7 +2,7 @@
 //!
 //! ## What this module owns
 //!
-//! - [`FactReadSet`] — `!Send + !Sync` accumulator that collects
+//! - [`FactReadSet`] — `!Sync` accumulator that collects
 //!   [`FactVersionRef`] observations made during one cold compute and
 //!   produces an immutable `Arc<[FactVersionRef]>` ready to install as
 //!   a `Candidate::fact_dep_signature`.
@@ -55,13 +55,15 @@
 //! overwhelming majority of real-world cold computes (typical
 //! `fact_dep_signature` lengths land between 4 and 12).
 //!
-//! ## Single-thread, single-compute lifetime
+//! ## Single-compute lifetime
 //!
-//! A [`FactReadSetCell`] is `!Send + !Sync` by construction: it
-//! cannot leak across a task boundary even by accident. The
-//! installer lives on the calling thread for the duration of one
-//! cold compute. This makes the tracer a true per-compute substrate,
-//! not a shared accumulator that readers race on.
+//! A [`FactReadSetCell`] is `!Sync` by construction: it is never shared
+//! between threads, so readers never race on it. It is installed on the
+//! thread a compute runs on for that compute's extent — a compute that
+//! suspends owns its cell between steps and installs it only while one of
+//! its steps runs, so the cell moves with its task (it is `Send`) but is
+//! never installed on two threads at once. This makes the tracer a true
+//! per-compute substrate, not a shared accumulator.
 //!
 //! ## Nesting is supported
 //!
@@ -316,9 +318,11 @@ pub enum NonCacheablePropagation {
 /// Unbounded in width: finalisation pages a canonical set wider than
 /// [`FACT_PAGE_WIDTH`] instead of refusing it.
 ///
-/// `!Send + !Sync` by design: the tracer is per-compute, per-thread
-/// state and must never cross a task boundary. The `PhantomData<*const ()>`
-/// marker enforces this at compile time.
+/// `!Sync` by design: the tracer is one compute's state and is never shared.
+/// It is `Send` so a suspended compute that owns its tracer between steps
+/// moves with its task to whichever thread runs the next step, installed
+/// there for that step alone. The `PhantomData<Cell<()>>` marker enforces
+/// this at compile time.
 pub struct FactReadSet {
     observations: SmallVec<[FactVersionRef; INLINE_CAPACITY]>,
     /// Already-canonical signatures absorbed wholesale from a completed
@@ -359,7 +363,7 @@ pub struct FactReadSet {
     /// place. An [`ObservationMark`] taken before a rewrite no longer
     /// addresses a suffix of what was observed after it.
     rewrites: u32,
-    _not_send_sync: PhantomData<*const ()>,
+    _not_sync: PhantomData<std::cell::Cell<()>>,
 }
 
 /// Where a scope's observations stood at one instant: two marks, taken when
@@ -401,7 +405,7 @@ impl FactReadSet {
             aggregate_basis: AggregateGenerations::default(),
             mutation_unstable: false,
             rewrites: 0,
-            _not_send_sync: PhantomData,
+            _not_sync: PhantomData,
         }
     }
 
@@ -686,6 +690,49 @@ impl FactReadSet {
         self.observations.is_empty() && self.canonical_runs.is_empty()
     }
 
+    /// The absorbed run that holds every fact this scope observed, when its
+    /// own seal reproduces it ([`seals_unchanged`]): the widest run, every
+    /// other run a subset of it and every local observation in it.
+    fn covering_run(&self) -> Option<usize> {
+        let mut widest = 0;
+        let mut index = 1;
+        while index < self.canonical_runs.len() {
+            if self.canonical_runs[index].len() > self.canonical_runs[widest].len() {
+                widest = index;
+            }
+            index += 1;
+        }
+        let run = self.canonical_runs.get(widest)?;
+        if !seals_unchanged(run) {
+            return None;
+        }
+        let mut compared = 0;
+        let mut covered = true;
+        for observed in &self.observations {
+            match run.binary_search_by(|held| {
+                compared += 1;
+                held.cmp(observed)
+            }) {
+                Ok(_) => {}
+                Err(_) => {
+                    covered = false;
+                    break;
+                }
+            }
+        }
+        let mut other = 0;
+        while covered && other < self.canonical_runs.len() {
+            if other != widest {
+                let (contained, work) = run_contains(run, &self.canonical_runs[other]);
+                compared += work;
+                covered = contained;
+            }
+            other += 1;
+        }
+        record_signature_work(compared);
+        covered.then_some(widest)
+    }
+
     /// Collapse the tracer into ONE strictly-increasing observation vector:
     /// sort + dedup the local observations, then merge every absorbed
     /// canonical run into them.
@@ -729,13 +776,11 @@ impl FactReadSet {
         if self.mutation_unstable {
             return FactReadSetFinalise::MutationUnstable;
         }
-        // A scope that only replayed one completed witness seals as that
-        // witness: canonicalising it again would rebuild the same facts.
-        if self.observations.is_empty()
-            && self.canonical_runs.len() == 1
-            && seals_unchanged(&self.canonical_runs[0])
-        {
-            let arc = self.canonical_runs.pop().expect("exactly one absorbed run");
+        // A scope whose every observation lies in one completed witness it
+        // replayed seals as that witness: the union is the witness, and
+        // canonicalising it again would rebuild the same facts.
+        if let Some(widest) = self.covering_run() {
+            let arc = self.canonical_runs.swap_remove(widest);
             return if self.non_cacheable_propagation.is_some() {
                 FactReadSetFinalise::NonCacheable(arc)
             } else {
@@ -982,6 +1027,34 @@ fn seals_unchanged(run: &[FactVersionRef]) -> bool {
             .any(|fact| matches!(fact, FactVersionRef::DomainGeneration(_)))
 }
 
+/// Whether every fact of the canonical `part` is in the canonical `whole`,
+/// with the comparisons the walk made. Both are strictly increasing, so one
+/// forward walk over each decides it.
+fn run_contains(whole: &[FactVersionRef], part: &[FactVersionRef]) -> (bool, usize) {
+    if part.len() > whole.len() {
+        return (false, 0);
+    }
+    let mut compared = 0;
+    let mut at = 0;
+    for fact in part {
+        loop {
+            let Some(held) = whole.get(at) else {
+                return (false, compared);
+            };
+            compared += 1;
+            match held.cmp(fact) {
+                std::cmp::Ordering::Less => at += 1,
+                std::cmp::Ordering::Equal => {
+                    at += 1;
+                    break;
+                }
+                std::cmp::Ordering::Greater => return (false, compared),
+            }
+        }
+    }
+    (true, compared)
+}
+
 fn page_canonical(entries: Vec<FactVersionRef>) -> Vec<FactVersionRef> {
     page_canonical_at_width(entries, FACT_PAGE_WIDTH)
 }
@@ -1011,10 +1084,41 @@ fn page_canonical_at_width(mut entries: Vec<FactVersionRef>, width: usize) -> Ve
 /// tracer. It never compacts: compaction needs a tracer's live basis.
 #[must_use]
 pub fn seal_canonical_signature(mut facts: Vec<FactVersionRef>) -> Arc<[FactVersionRef]> {
-    facts.sort_unstable_by(compare_fact_refs);
-    facts.dedup();
+    sort_dedup_facts(&mut facts);
     crate::facts::fact_cache::drop_subsumed_receipts(&mut facts);
     Arc::from(page_canonical(facts))
+}
+
+/// The most facts appended past a canonical prefix that are placed into it
+/// one by one rather than by sorting the whole collection.
+const APPENDED_TAIL_MAX: usize = 8;
+
+/// Sort `facts` into canonical order and drop duplicates. A hand-assembled
+/// signature is usually a canonical set with a few facts appended (a
+/// self-root beside the traced set): those are placed into the strictly
+/// increasing prefix by binary search, which is the same set in the same
+/// order as a full sort and deduplication.
+fn sort_dedup_facts(facts: &mut Vec<FactVersionRef>) {
+    let mut prefix = facts.len().min(1);
+    while prefix < facts.len()
+        && compare_fact_refs(&facts[prefix - 1], &facts[prefix]) == std::cmp::Ordering::Less
+    {
+        prefix += 1;
+    }
+    if prefix == facts.len() {
+        return;
+    }
+    if facts.len() - prefix > APPENDED_TAIL_MAX {
+        facts.sort_unstable_by(compare_fact_refs);
+        facts.dedup();
+        return;
+    }
+    let tail = facts.split_off(prefix);
+    for fact in tail {
+        if let Err(at) = facts.binary_search_by(|held| compare_fact_refs(held, &fact)) {
+            facts.insert(at, fact);
+        }
+    }
 }
 
 /// Canonical ordering for [`FactVersionRef`] values. Used by
@@ -1080,8 +1184,14 @@ pub fn signature_work_for_tests() -> usize {
 /// lane verifies the precondition it depends on and a non-canonical input
 /// falls back to the ordinary observation path, which sorts it.
 fn is_canonical_run(run: &[FactVersionRef]) -> bool {
-    run.windows(2)
-        .all(|pair| compare_fact_refs(&pair[0], &pair[1]) == std::cmp::Ordering::Less)
+    let mut index = 1;
+    while index < run.len() {
+        if compare_fact_refs(&run[index - 1], &run[index]) != std::cmp::Ordering::Less {
+            return false;
+        }
+        index += 1;
+    }
+    true
 }
 
 /// A signature verified to be a canonical run — strictly increasing under

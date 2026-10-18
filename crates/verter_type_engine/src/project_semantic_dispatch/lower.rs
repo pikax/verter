@@ -19,6 +19,7 @@
 //! query-free structural producer `fn lower_type_expr_structural`.
 
 use std::sync::Arc;
+use verter_type_expr::OwnedStr;
 
 use rustc_hash::FxHashMap;
 use verter_session_query::type_solver::host::ResolvedRootIdentity;
@@ -46,7 +47,7 @@ struct TypeExprLowering<'a> {
     infer_binders: &'a crate::semantic_query::InferBinderFactory,
     env: &'a FxHashMap<String, SemanticNodeId>,
     scope: &'a NodeScopeId,
-    name_resolution: &'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+    name_resolution: &'a FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
     scope_payload: Option<&'a DeclarationScopePayload>,
     shadowing: &'a ScopeShadowing,
 }
@@ -229,7 +230,11 @@ enum UniqueSymbolMemberCertification {
     /// annotation resolved to — anchoring on either value would mint two
     /// nominal types where the checker sees one. Carries the resolved
     /// `(canonical, owner, symbol)` of the certifying type declaration.
-    NamedType(Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>),
+    NamedType(
+        verter_type_expr::OwnedStr,
+        verter_type_expr::TopLevelOwnerId,
+        verter_type_expr::OwnedStr,
+    ),
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
@@ -429,11 +434,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // type through it, exactly as the checker unifies them.
             if let Some((id_canonical, id_owner, id_symbol)) =
                 match self.unique_symbol_member_certification(&prepared, segment.as_ref()) {
-                    Some(UniqueSymbolMemberCertification::OwnAnnotation) => Some((
-                        Arc::clone(&eff_canonical),
-                        eff_owner,
-                        Arc::clone(&eff_symbol),
-                    )),
+                    Some(UniqueSymbolMemberCertification::OwnAnnotation) => {
+                        Some((eff_canonical.clone(), eff_owner, eff_symbol.clone()))
+                    }
                     Some(UniqueSymbolMemberCertification::NamedType(canonical, owner, symbol)) => {
                         Some((canonical, owner, symbol))
                     }
@@ -441,9 +444,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             {
                 let identity = verter_type_expr::facts::ValueDeclIdentityPart {
-                    canonical_id: verter_type_expr::OwnedStr::from(id_canonical),
+                    canonical_id: id_canonical,
                     owner: id_owner,
-                    symbol: verter_type_expr::OwnedStr::from(id_symbol),
+                    symbol: id_symbol,
                     member_path: verter_type_expr::OwnedSlice::from(
                         vec![segment.to_string()].into_boxed_slice(),
                     ),
@@ -482,11 +485,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             for (base_canonical, base_owner, base_name, _args) in
                 self.class_heritage_bases(eff_canonical.as_ref(), eff_owner, eff_symbol.as_ref())
             {
-                worklist.push((
-                    verter_type_expr::OwnedStr::from(base_canonical),
-                    base_owner,
-                    verter_type_expr::OwnedStr::from(base_name),
-                ));
+                worklist.push((base_canonical, base_owner, base_name));
             }
         }
         None
@@ -529,9 +528,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .is_some_and(|ty| ty.unique_symbol_members.iter().any(|name| name == member))
             .then(|| {
                 UniqueSymbolMemberCertification::NamedType(
-                    Arc::clone(&root.canonical_id),
+                    root.canonical_id.clone(),
                     root.owner,
-                    Arc::clone(&root.symbol_name),
+                    root.symbol_name.clone(),
                 )
             })
     }
@@ -574,7 +573,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         infer_binders: &crate::semantic_query::InferBinderFactory,
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
-        name_resolution: &FxHashMap<Arc<str>, ResolvedRootIdentity>,
+        name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
         shadowing: &ScopeShadowing,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
@@ -617,7 +616,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         infer_binders: &crate::semantic_query::InferBinderFactory,
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
-        name_resolution: &FxHashMap<Arc<str>, ResolvedRootIdentity>,
+        name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
         shadowing: &ScopeShadowing,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
@@ -684,7 +683,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         scope_canonical: &str,
         scope_owner: verter_type_expr::TopLevelOwnerId,
-        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+        name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
         dotted_name: &str,
     ) -> Option<SemanticNodeId> {
@@ -772,7 +771,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         binding: &verter_session_query::inputs::prepared::TypeParamBinding,
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
-        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+        name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
         shadowing: &ScopeShadowing,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
@@ -883,7 +882,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 param_index: binding.ordinal,
                 constraint,
                 default,
-                display_name: Arc::clone(&binding.name),
+                display_name: OwnedStr::from(&binding.name),
             },
             scope.clone(),
         )
@@ -988,7 +987,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         expr: &TypeExpr,
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
-        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+        name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
         shadowing: &ScopeShadowing,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
@@ -1019,7 +1018,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         expr: &TypeExpr,
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
-        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+        name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
         shadowing: &ScopeShadowing,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
@@ -1046,7 +1045,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         locator: &verter_type_expr::locators::AuthoredBodyLocator,
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
-        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+        name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
         shadowing: &ScopeShadowing,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
@@ -1092,7 +1091,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         expr: &TypeExpr,
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
-        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+        name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
         shadowing: &ScopeShadowing,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
@@ -1493,7 +1492,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             } => {
                 let element = &elements[lowered.len()];
                 lowered.push(TupleElement {
-                    label: element.label.as_deref().map(Arc::<str>::from),
+                    label: element.label.as_deref().map(OwnedStr::from),
                     value,
                     optional: element.optional,
                     rest: element.rest,
@@ -1930,13 +1929,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         lowered_expressions: Vec<SemanticNodeId>,
         scope: &NodeScopeId,
     ) -> SemanticNodeId {
-        let lowered_quasis: Vec<Arc<str>> = quasis
-            .iter()
-            .map(|q| Arc::<str>::from(q.as_str()))
-            .collect();
+        let lowered_quasis: Vec<OwnedStr> =
+            quasis.iter().map(|q| OwnedStr::from(q.as_str())).collect();
         self.graph().intern_node_with_scope(
             SemanticNodeData::TemplateLiteral {
-                quasis: Arc::from(lowered_quasis.into_boxed_slice()),
+                quasis: verter_type_expr::OwnedSlice::from(lowered_quasis),
                 expressions: crate::semantic_query::PayloadArray::from(
                     lowered_expressions.into_boxed_slice(),
                 ),
@@ -2031,7 +2028,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         expr: &TypeExpr,
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
-        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+        name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
         shadowing: &ScopeShadowing,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
@@ -2080,7 +2077,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             reduction_context,
                         )
                     });
-                    let display_name: Arc<str> = Arc::from(param.name.as_str());
+                    let display_name = OwnedStr::from(param.name.as_str());
                     // Unresolved `TypeParameter` path uses
                     // **file-scoped name-keyed identity**:
                     // `decl_name = reference.name` (NOT the owning
@@ -2096,7 +2093,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // `(name → ordinal)` map.
                     let decl = crate::semantic_query::DeclIdentity::from_scope(
                         scope,
-                        Arc::clone(&display_name),
+                        display_name.clone(),
                     );
                     graph.intern_node_with_scope(
                         SemanticNodeData::TypeParam {
@@ -2327,7 +2324,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         // `[K in S]` binding, not via `T extends` on K.
                         constraint: None,
                         default: None,
-                        display_name: Arc::clone(&mapper_display_name),
+                        display_name: OwnedStr::from(&mapper_display_name),
                     },
                     scope.clone(),
                 );
@@ -2403,7 +2400,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         };
                         let base_infer = match graph.node_data(inner_id).as_deref() {
                             Some(SemanticNodeData::Infer { name, binder, .. }) => {
-                                Some((Arc::clone(name), binder.clone()))
+                                Some((Arc::<str>::from(name), binder.clone()))
                             }
                             _ => None,
                         };
@@ -2436,7 +2433,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if let Some((base_infer_name, binder)) = base_infer_name {
                     let reference = graph.intern_node_with_scope(
                         SemanticNodeData::InferRef {
-                            name: Arc::clone(&base_infer_name),
+                            name: OwnedStr::from(&base_infer_name),
                             binder,
                         },
                         scope.clone(),
@@ -2651,7 +2648,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         });
                         let declaration = graph.intern_node_with_scope(
                             SemanticNodeData::Infer {
-                                name: Arc::clone(&site.name),
+                                name: OwnedStr::from(&site.name),
                                 binder: binder.clone(),
                                 constraint,
                             },
@@ -2704,7 +2701,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             for (name, binder) in &declarations {
                                 let reference = graph.intern_node_with_scope(
                                     SemanticNodeData::InferRef {
-                                        name: Arc::clone(name),
+                                        name: OwnedStr::from(name),
                                         binder: binder.clone(),
                                     },
                                     scope.clone(),
@@ -2826,7 +2823,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 } else {
                     let mut scoped = env.clone();
                     for tp in &func.type_parameters {
-                        let display_name: Arc<str> = Arc::from(tp.name.as_str());
+                        let display_name = OwnedStr::from(tp.name.as_str());
                         // Constraint / default lower under the OUTER env
                         // (a constraint referencing an outer generic must
                         // still substitute; the own binder is not in
@@ -2859,7 +2856,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         });
                         let decl = crate::semantic_query::DeclIdentity::from_scope(
                             scope,
-                            Arc::clone(&display_name),
+                            display_name.clone(),
                         );
                         let binder = graph.intern_node_with_scope(
                             SemanticNodeData::TypeParam {
@@ -2883,7 +2880,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .parameters
                     .iter()
                     .map(|param| FunctionParam {
-                        name: param.name.as_deref().map(Arc::<str>::from),
+                        name: param.name.as_deref().map(OwnedStr::from),
                         ty: self.lower_type_expr_with_infer_factory(
                             infer_binders,
                             &param.ty,
@@ -3000,7 +2997,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .type_parameters
                     .iter()
                     .map(|tp| TypeParamDecl {
-                        name: Arc::from(tp.name.as_str()),
+                        name: OwnedStr::from(tp.name.as_str()),
                         // The exact binder node interned above for this own
                         // parameter — the identity inference binds.
                         param: env
@@ -3107,7 +3104,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 } else {
                     graph.intern_node_with_scope(
                         SemanticNodeData::Infer {
-                            name: Arc::from(name.as_str()),
+                            name: OwnedStr::from(name.as_str()),
                             binder: infer_binders.binder_for_expr(expr),
                             constraint: None,
                         },

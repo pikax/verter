@@ -228,6 +228,43 @@ fn call_initializer_chains_500_deep_answer_cold_and_warm_on_a_one_mebibyte_stack
     });
 }
 
+/// Chains of 500 values whose member reads the same member of the one
+/// before — object literals, and classes' statics — evaluate on a 1 MiB
+/// thread, cold and warm alike: a member path's `typeof` lowers the member
+/// where the value declares it as its frame's projection, which needs the
+/// member-path `typeof` its value names from the runtime instead of
+/// evaluating it in place.
+///
+/// TypeScript 7.0.2, `--strict` and with `strictNullChecks` and
+/// `noImplicitAny` off: `typeof y500.v` and `typeof C500.v` are `"ok"`.
+#[test]
+fn member_path_typeof_chains_500_deep_answer_cold_and_warm_on_a_one_mebibyte_stack() {
+    in_a_fresh_process(test_path!(), || {
+        let mut literals = String::from("const y0 = { v: \"ok\" as const };\n");
+        let mut statics = String::from("class C0 { static v = \"ok\" as const; }\n");
+        for level in 1..=500 {
+            literals.push_str(&format!("const y{level} = {{ v: y{}.v }};\n", level - 1));
+            statics.push_str(&format!(
+                "class C{level} {{ static v = C{}.v; }}\n",
+                level - 1
+            ));
+        }
+        let displays = on_a_one_mebibyte_stack(move || {
+            [(literals, "typeof y500.v"), (statics, "typeof C500.v")].map(|(source, probe)| {
+                assert_eq!(
+                    evaluated_mismatches(&source, &[(probe, "\"ok\"")]),
+                    Vec::<String>::new(),
+                    "{probe}"
+                );
+                (probe, cold_and_warm_displays(&source, probe))
+            })
+        });
+        for (probe, [cold, warm]) in displays {
+            assert_eq!(cold, warm, "{probe}: cold and warm answer alike");
+        }
+    });
+}
+
 /// A chain of 500 functions each returning the type the one before returns
 /// evaluates on a 1 MiB thread, cold and warm alike: a function's `typeof`
 /// lowers its signatures one at a time as its frame's projections, which

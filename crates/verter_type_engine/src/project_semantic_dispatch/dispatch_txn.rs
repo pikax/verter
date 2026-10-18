@@ -3003,6 +3003,22 @@ impl CheckerDispatchTransaction {
         id
     }
 
+    /// The sessions that may still collect: on the transaction and
+    /// collecting, or taken out of it by a continuation that holds them.
+    /// Test-only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn collecting_sessions_for_tests(&self) -> usize {
+        self.relation
+            .collecting_ids
+            .iter()
+            .filter(|&&id| {
+                self.relation.session_position(id).is_none_or(|position| {
+                    self.relation.sessions[position].state == InferenceSessionState::Collecting
+                })
+            })
+            .count()
+    }
+
     /// The active (innermost `Collecting`) session, if any.
     pub(crate) fn active_session_mut(&mut self) -> Option<&mut InferenceSession> {
         self.relation.prune_finished_collecting();

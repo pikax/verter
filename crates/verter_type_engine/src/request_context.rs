@@ -36,7 +36,11 @@ use crate::request_footprint::RequestFootprintAccumulator;
 /// [`RequestContext`].
 #[must_use]
 pub fn current_request_budget() -> Option<Arc<RequestBudget>> {
-    current_request_context().map(|ctx| Arc::clone(&ctx.projection_budget))
+    CURRENT_REQUEST_CONTEXT.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|ctx| Arc::clone(&ctx.projection_budget))
+    })
 }
 
 /// Return the stable cancellation token carried by the active request.
@@ -93,6 +97,57 @@ impl Drop for ExecutionValidityScope {
                 }
             }
         });
+    }
+}
+
+/// The execution validity of a semantic task that may run on any thread: the
+/// abort its polls observed, which it inherits from the execution that began
+/// it and hands back to the execution it returns to
+/// ([`Self::bubble`]). Each poll installs it as the innermost validity scope
+/// of the polling thread ([`Self::install`]).
+#[derive(Default)]
+pub(crate) struct TaskExecutionValidity {
+    abort: Option<crate::semantic_query::ExecutionAbort>,
+}
+
+impl TaskExecutionValidity {
+    /// The validity of a task begun under the execution active now.
+    pub(crate) fn inherit() -> Self {
+        Self {
+            abort: current_execution_abort(),
+        }
+    }
+
+    /// Make this the innermost validity scope on this thread until the
+    /// returned installation drops, unwinding included.
+    pub(crate) fn install(&mut self) -> InstalledTaskValidity<'_> {
+        EXECUTION_ABORTS.with(|stack| stack.borrow_mut().push(self.abort));
+        InstalledTaskValidity {
+            owner: self,
+            _thread: std::marker::PhantomData,
+        }
+    }
+
+    /// Hand the abort the task observed to the execution active now.
+    pub(crate) fn bubble(&self) {
+        if let Some(abort) = self.abort {
+            observe_execution_abort(abort);
+        }
+    }
+}
+
+/// One poll's installation of a [`TaskExecutionValidity`].
+pub(crate) struct InstalledTaskValidity<'t> {
+    owner: &'t mut TaskExecutionValidity,
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl Drop for InstalledTaskValidity<'_> {
+    fn drop(&mut self) {
+        let observed = EXECUTION_ABORTS
+            .with(|stack| stack.borrow_mut().pop())
+            .flatten();
+        self.owner.abort = self.owner.abort.or(observed);
     }
 }
 
@@ -2442,6 +2497,15 @@ pub fn install_clear_tls_hook() {
 #[must_use]
 pub fn current_request_context() -> Option<Arc<RequestContext>> {
     CURRENT_REQUEST_CONTEXT.with(|c| c.borrow().as_ref().map(Arc::clone))
+}
+
+/// Run `read` against the request context installed on this thread, in
+/// place: `None` when none is installed. For a caller that only reads or
+/// records into the context, so the context's handle is not cloned.
+pub(crate) fn with_current_request_context<R>(
+    read: impl FnOnce(&RequestContext) -> R,
+) -> Option<R> {
+    CURRENT_REQUEST_CONTEXT.with(|c| c.borrow().as_deref().map(read))
 }
 
 /// The canonical id the currently installed request resolves for — the

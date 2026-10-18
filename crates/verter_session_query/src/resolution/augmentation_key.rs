@@ -40,7 +40,9 @@ use crate::facts::registry::{InternedGlobPattern, InternedSpecifier};
 ///
 /// Byte-ordered (`PartialOrd`/`Ord` over the 16 hash bytes) so ordered sets
 /// of project identities have one canonical deterministic order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, verter_retention::heap_size::HeapSize,
+)]
 pub struct ProjectIdentity(pub Hash16);
 
 impl ProjectIdentity {

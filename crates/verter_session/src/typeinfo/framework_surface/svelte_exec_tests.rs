@@ -931,7 +931,7 @@ fn ntuple(
         .into_iter()
         .map(
             |(label, value)| verter_type_engine::semantic_query::TupleElement {
-                label: label.map(Arc::from),
+                label: label.map(verter_type_expr::OwnedStr::from),
                 value,
                 optional: false,
                 rest: false,
@@ -1138,7 +1138,7 @@ fn snippet_carrier_open_generic_params_is_present_bindingless() {
             param_index: 0,
             constraint: None,
             default: None,
-            display_name: Arc::from("Params"),
+            display_name: verter_type_expr::OwnedStr::from("Params"),
         },
     );
     let snippet = nsnippet(&graph, vec![open]);
@@ -2420,9 +2420,7 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
     };
     let args_data = graph.node_data(*args_node).expect("Args graph node");
     assert_eq!(
-        args_data
-            .bare_ref_head()
-            .map(|(name, _scope)| name.as_ref()),
+        args_data.bare_ref_head().map(|(name, _scope)| name),
         Some("Args"),
         "the unresolved exact-owner import stays an authored BareRef"
     );

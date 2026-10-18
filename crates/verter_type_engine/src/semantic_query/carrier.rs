@@ -56,27 +56,21 @@ use std::sync::Arc;
 
 use super::{NodeScopeId, SemanticNodeData, SemanticNodeId, ValueRootKey};
 use verter_type_expr::facts::ValueDeclIdentityPart;
+use verter_type_expr::{OwnedSlice, OwnedStr};
 
 /// Borrowed head view of a [`SemanticNodeData::TypeOf`] or
 /// [`SemanticNodeData::TypeOfNominal`] carrier — `(value_root, path)`,
 /// NEVER the deferred carrier's `type_args` (descend those through
 /// [`SemanticNodeData::carrier_type_args`]).
-pub(crate) type TypeOfHead<'a> = (
-    &'a ValueRootKey,
-    &'a verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
-);
+pub(crate) type TypeOfHead<'a> = (&'a ValueRootKey, &'a OwnedSlice<OwnedStr>);
 
 /// Borrowed head view of a [`SemanticNodeData::BareRef`] carrier —
 /// `(name, scope)`, NEVER its `type_args`.
-pub(crate) type BareRefHead<'a> = (&'a Arc<str>, &'a NodeScopeId);
+pub(crate) type BareRefHead<'a> = (&'a str, &'a NodeScopeId);
 
 /// Borrowed head view of a [`SemanticNodeData::ImportType`] carrier —
 /// `(specifier, qualifier, typeof_query)`, NEVER its `type_args`.
-pub(crate) type ImportTypeHead<'a> = (
-    &'a Arc<str>,
-    &'a verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
-    bool,
-);
+pub(crate) type ImportTypeHead<'a> = (&'a str, &'a OwnedSlice<OwnedStr>, bool);
 
 /// Deferred `typeof value.path<args>` carrier payload.
 ///
@@ -86,17 +80,18 @@ pub(crate) type ImportTypeHead<'a> = (
 /// each already structurally lowered. Empty `type_args` is a bare `typeof`.
 /// Mirrors [`verter_type_expr::ValueRef::type_args`]; carried unresolved so
 /// the structural lowerer applies no instantiation at lowering time.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+/// No public copy: its argument list is lent only by borrow.
+#[derive(PartialEq, Eq, Hash, Debug)]
 pub struct TypeOfCarrier {
     value_root: ValueRootKey,
-    path: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
+    path: OwnedSlice<OwnedStr>,
     type_args: Arc<[SemanticNodeId]>,
 }
 
 impl TypeOfCarrier {
     fn new(
         value_root: ValueRootKey,
-        path: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
+        path: OwnedSlice<OwnedStr>,
         type_args: Arc<[SemanticNodeId]>,
     ) -> Self {
         Self {
@@ -110,7 +105,7 @@ impl TypeOfCarrier {
         &self.value_root
     }
 
-    fn path(&self) -> &verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr> {
+    fn path(&self) -> &OwnedSlice<OwnedStr> {
         &self.path
     }
 
@@ -153,14 +148,14 @@ impl TypeOfCarrier {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct TypeOfNominalCarrier {
     value_root: ValueRootKey,
-    path: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
+    path: OwnedSlice<OwnedStr>,
     identity: ValueDeclIdentityPart,
 }
 
 impl TypeOfNominalCarrier {
     fn new(
         value_root: ValueRootKey,
-        path: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
+        path: OwnedSlice<OwnedStr>,
         identity: ValueDeclIdentityPart,
     ) -> Self {
         Self {
@@ -174,7 +169,7 @@ impl TypeOfNominalCarrier {
         &self.value_root
     }
 
-    fn path(&self) -> &verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr> {
+    fn path(&self) -> &OwnedSlice<OwnedStr> {
         &self.path
     }
 
@@ -193,7 +188,8 @@ impl TypeOfNominalCarrier {
 /// structurally lowered (empty for a bare `Foo`). Carried unresolved so the
 /// query-free structural lowerer can represent `Foo<Arg>` without performing
 /// the eager `InstantiationRef` resolution.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+/// No public copy: its name and argument list are lent only by borrow.
+#[derive(PartialEq, Eq, Hash, Debug)]
 pub struct BareRefCarrier {
     name: Arc<str>,
     scope: NodeScopeId,
@@ -209,7 +205,7 @@ impl BareRefCarrier {
         }
     }
 
-    fn name(&self) -> &Arc<str> {
+    fn name(&self) -> &str {
         &self.name
     }
 
@@ -241,10 +237,11 @@ impl BareRefCarrier {
 /// value-export namespace), `false` for `import("…")` in type position.
 /// Carried unresolved so the structural graph never performs module
 /// resolution at lowering time.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+/// No public copy: its specifier and argument list are lent only by borrow.
+#[derive(PartialEq, Eq, Hash, Debug)]
 pub struct ImportTypeCarrier {
     specifier: Arc<str>,
-    qualifier: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
+    qualifier: OwnedSlice<OwnedStr>,
     type_args: Arc<[SemanticNodeId]>,
     typeof_query: bool,
 }
@@ -252,7 +249,7 @@ pub struct ImportTypeCarrier {
 impl ImportTypeCarrier {
     fn new(
         specifier: Arc<str>,
-        qualifier: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
+        qualifier: OwnedSlice<OwnedStr>,
         type_args: Arc<[SemanticNodeId]>,
         typeof_query: bool,
     ) -> Self {
@@ -264,11 +261,11 @@ impl ImportTypeCarrier {
         }
     }
 
-    fn specifier(&self) -> &Arc<str> {
+    fn specifier(&self) -> &str {
         &self.specifier
     }
 
-    fn qualifier(&self) -> &verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr> {
+    fn qualifier(&self) -> &OwnedSlice<OwnedStr> {
         &self.qualifier
     }
 
@@ -374,7 +371,7 @@ impl SemanticNodeData {
     #[must_use]
     pub fn new_typeof(
         value_root: ValueRootKey,
-        path: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
+        path: OwnedSlice<OwnedStr>,
         type_args: Arc<[SemanticNodeId]>,
     ) -> Self {
         Self::TypeOf(TypeOfCarrier::new(value_root, path, type_args))
@@ -387,7 +384,7 @@ impl SemanticNodeData {
     #[must_use]
     pub(crate) fn new_nominal_typeof(
         value_root: ValueRootKey,
-        path: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
+        path: OwnedSlice<OwnedStr>,
         nominal_identity: ValueDeclIdentityPart,
     ) -> Self {
         Self::TypeOfNominal(TypeOfNominalCarrier::new(
@@ -412,7 +409,7 @@ impl SemanticNodeData {
     #[must_use]
     pub fn new_import_type(
         specifier: Arc<str>,
-        qualifier: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
+        qualifier: OwnedSlice<OwnedStr>,
         type_args: Arc<[SemanticNodeId]>,
         typeof_query: bool,
     ) -> Self {

@@ -52,7 +52,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .map(|decl| {
                 InferenceInfoSetup::for_call(
                     decl.param,
-                    Arc::clone(&decl.name),
+                    Arc::<str>::from(&decl.name),
                     if decl.is_const {
                         ConstParamPolicy::Const
                     } else {

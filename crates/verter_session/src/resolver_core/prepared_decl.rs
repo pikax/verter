@@ -65,7 +65,7 @@ type OwnerNameResolutionBases =
 /// resolved root identities): built once per prepared-decl cache and shared
 /// via `Arc` by every non-namespaced prepared decl of the defining file. See
 /// `PreparedTypeDecl::name_resolution` for the sharing + interning contract.
-type SharedNameResolutionBase = Arc<FxHashMap<Arc<str>, ResolvedRootIdentity>>;
+type SharedNameResolutionBase = Arc<FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>>;
 
 /// FINAL defining-file canonicalization of a file's import targets, computed
 /// at bundle materialization through the SAME route authority the carrier
@@ -168,7 +168,7 @@ pub(crate) fn prepare_local_type_decl_in(
 /// result as genuine declaration absence. `prepare_local_type_decl` collapses
 /// the two for direct/standalone callers that do not admit into that slot.
 pub(crate) fn prepare_local_type_decl_outcome(
-    canonical_id: &Arc<str>,
+    canonical_id: &verter_type_expr::OwnedStr,
     state: &ShallowFileState,
     owner: verter_type_expr::TopLevelOwnerId,
     symbol_name: &str,
@@ -195,7 +195,7 @@ pub(crate) fn prepare_local_type_decl_outcome(
 /// every non-namespaced decl of the file; `None` builds the table fresh —
 /// the pre-split per-call behavior for standalone entry points.
 fn prepare_local_type_decl_outcome_with_base(
-    canonical_id: &Arc<str>,
+    canonical_id: &verter_type_expr::OwnedStr,
     state: &ShallowFileState,
     owner: verter_type_expr::TopLevelOwnerId,
     symbol_name: &str,
@@ -343,7 +343,7 @@ pub fn prepare_augmentation_type_decl_in(
 /// surfaces the DISTINCT `LeaseMiss` so cross-file stitching cannot warm-admit
 /// an under-merged surface.
 pub(crate) fn prepare_augmentation_type_decl_outcome_in(
-    canonical_id: &Arc<str>,
+    canonical_id: &verter_type_expr::OwnedStr,
     state: &ShallowFileState,
     scope: &verter_session_query::declarations::AugmentationScopeKind,
     owner: verter_type_expr::TopLevelOwnerId,
@@ -405,7 +405,7 @@ pub(crate) fn prepare_augmentation_type_decl_outcome_in(
 /// cannot drift between the two representations.
 #[allow(clippy::too_many_arguments)]
 fn finish_prepared_type_decl(
-    canonical_id: &Arc<str>,
+    canonical_id: &verter_type_expr::OwnedStr,
     state: &ShallowFileState,
     owner: verter_type_expr::TopLevelOwnerId,
     symbol_name: &str,
@@ -417,7 +417,7 @@ fn finish_prepared_type_decl(
 ) -> Result<PreparedTypeDecl, PreparationFailure> {
     let mut prepared = PreparedTypeDecl::new(
         ResolvedRootIdentity::new_in_owner(
-            Arc::clone(canonical_id),
+            canonical_id.clone(),
             owner,
             interner.intern(symbol_name),
         ),
@@ -533,7 +533,7 @@ pub fn prepare_local_value_decl(
 /// broken-lease demand from committing a body-less value decl into the
 /// write-once slot cache ([`PreparedValueDeclCache::get`]).
 pub(crate) fn prepare_local_value_decl_outcome(
-    canonical_id: &Arc<str>,
+    canonical_id: &verter_type_expr::OwnedStr,
     state: &ShallowFileState,
     symbol_name: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
@@ -552,7 +552,7 @@ pub(crate) fn prepare_local_value_decl_outcome(
 }
 
 pub(crate) fn prepare_local_value_decl_outcome_in(
-    canonical_id: &Arc<str>,
+    canonical_id: &verter_type_expr::OwnedStr,
     state: &ShallowFileState,
     owner: verter_type_expr::TopLevelOwnerId,
     symbol_name: &str,
@@ -590,7 +590,7 @@ fn push_unique_external_dep(edges: &mut Vec<PreparedExternalDep>, edge: Prepared
 }
 
 fn prepare_local_value_decl_outcome_with_base(
-    canonical_id: &Arc<str>,
+    canonical_id: &verter_type_expr::OwnedStr,
     state: &ShallowFileState,
     owner: verter_type_expr::TopLevelOwnerId,
     symbol_name: &str,
@@ -624,7 +624,7 @@ fn prepare_local_value_decl_outcome_with_base(
 
     let mut prepared = PreparedValueDecl::new(
         ResolvedRootIdentity::new_in_owner(
-            Arc::clone(canonical_id),
+            canonical_id.clone(),
             owner,
             interner.intern(symbol_name),
         ),
@@ -779,7 +779,7 @@ pub fn prepare_exported_value_decl(
 
 #[derive(Clone)]
 pub struct PreparedTypeDeclCache {
-    canonical_id: Arc<str>,
+    canonical_id: verter_type_expr::OwnedStr,
     state: Arc<ShallowFileState>,
     dep_edges: Arc<FxHashMap<String, String>>,
     import_canonicalization: Arc<ImportCanonicalization>,
@@ -963,7 +963,7 @@ impl PreparedTypeDeclCache {
         symbol_name: &str,
     ) -> PreparedTypeDeclResolution {
         let root_identity = ResolvedRootIdentity::new_in_owner(
-            Arc::clone(&self.canonical_id),
+            self.canonical_id.clone(),
             owner,
             self.interner.intern(symbol_name),
         );
@@ -1027,7 +1027,7 @@ impl PreparedTypeDeclCache {
 
 #[derive(Clone)]
 pub struct PreparedValueDeclCache {
-    canonical_id: Arc<str>,
+    canonical_id: verter_type_expr::OwnedStr,
     state: Arc<ShallowFileState>,
     dep_edges: Arc<FxHashMap<String, String>>,
     import_canonicalization: Arc<ImportCanonicalization>,
@@ -1084,7 +1084,7 @@ impl PreparedValueDeclCache {
         };
         let mut prepared = PreparedValueDecl::new(
             ResolvedRootIdentity::new_in_owner(
-                Arc::clone(&self.canonical_id),
+                self.canonical_id.clone(),
                 owner,
                 self.interner.intern(symbol_name),
             ),

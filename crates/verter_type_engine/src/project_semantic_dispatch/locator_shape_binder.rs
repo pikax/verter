@@ -9,6 +9,7 @@
 
 use super::*;
 use crate::fact_tracing::PreparedDeclOutcomeFold;
+use verter_type_expr::OwnedStr;
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     /// The ONE shared binder-frame constructor for declared type-parameter
@@ -124,7 +125,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         param_index,
                         constraint: None,
                         default: None,
-                        display_name: Arc::clone(&spec.name),
+                        display_name: OwnedStr::from(&spec.name),
                     },
                     scope.clone(),
                 );
@@ -220,7 +221,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         param_index,
                         constraint,
                         default,
-                        display_name: Arc::clone(&spec.name),
+                        display_name: OwnedStr::from(&spec.name),
                     },
                     scope.clone(),
                 )

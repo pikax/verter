@@ -8,6 +8,7 @@
 //! ENTRIES, strict-raise sink, and locator absolutization stay in the parent module.
 
 use std::sync::Arc;
+use verter_type_expr::OwnedStr;
 
 use verter_type_expr::facts::{
     FactOrLocator, FunctionSignatureFact, IndexedAccessFact, LeafTypeFact, ObjectMemberFact,
@@ -731,7 +732,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .iter()
             .enumerate()
             .map(|(ordinal, param)| crate::semantic_query::FunctionParam {
-                name: param.name.as_deref().map(Arc::from),
+                name: param.name.as_deref().map(OwnedStr::from),
                 ty: match param.ty.as_ref() {
                     Some(slot) => self.raise_required_interior(
                         ctx,
@@ -856,12 +857,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             },
                         )
                     });
-                    let display_name: Arc<str> = Arc::from(param.name.as_str());
+                    let display_name = OwnedStr::from(param.name.as_str());
                     let param_node = self.graph().intern_node_with_scope(
                         SemanticNodeData::TypeParam {
                             decl: crate::semantic_query::DeclIdentity::from_scope(
                                 &scope,
-                                Arc::clone(&display_name),
+                                display_name.clone(),
                             ),
                             // The shared signature-scoped binder convention
                             // (`BinderIdentityMode::Signature`): display-name-keyed
@@ -869,7 +870,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             param_index: 0,
                             constraint,
                             default,
-                            display_name: Arc::clone(&display_name),
+                            display_name: OwnedStr::from(&display_name),
                         },
                         scope.clone(),
                     );
@@ -888,7 +889,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     source.with_bindings(
                         type_parameters
                             .iter()
-                            .map(|parameter| (parameter.name.clone(), parameter.param)),
+                            .map(|parameter| (Arc::<str>::from(&parameter.name), parameter.param)),
                     ),
                 )
             }
@@ -938,7 +939,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .iter()
             .enumerate()
             .map(|(ordinal, element)| TupleElement {
-                label: element.label.as_deref().map(Arc::from),
+                label: element.label.as_deref().map(OwnedStr::from),
                 value: ctx.with_interior_step(
                     crate::project_semantic_dispatch::interior_source::InteriorSourceStep::TupleElement {
                         ordinal: ordinal as u32,
