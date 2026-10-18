@@ -780,7 +780,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     self.deposit_canonical_evidence(evidence);
                     if argument.context_sensitive {
                         progress.deferred.push((position, target));
-                        if let Some(first_pass) = argument.first_pass {
+                        if let Some(first_pass) = argument
+                            .first_pass
+                            .filter(|_| self.first_pass_infers_into(target, &declared))
+                        {
                             let checkpoint = self.relation_session_checkpoint();
                             let view = CallArgument {
                                 node: first_pass,

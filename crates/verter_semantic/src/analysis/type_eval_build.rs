@@ -26,8 +26,8 @@ use oxc_ast::ast::{
     Statement, TSAccessibility, TSEnumDeclaration, TSExternalModuleDeclaration,
     TSInterfaceDeclaration, TSModuleBlock, TSNamespaceDeclaration, TSNamespaceDeclarationBody,
     TSSignature, TSThisParameter, TSType, TSTypeAliasDeclaration, TSTypeName,
-    TSTypeOperatorOperator, TSTypeParameterDeclaration, UnaryOperator, VariableDeclarationKind,
-    VariableDeclarator,
+    TSTypeOperatorOperator, TSTypeParameterDeclaration, UnaryExpression, UnaryOperator,
+    VariableDeclarationKind, VariableDeclarator,
 };
 use oxc_ast_visit::Visit;
 use verter_session_query::analysis::fact_projection::{
@@ -4948,15 +4948,7 @@ fn initializer_literal_freshness(init: &Expression<'_>) -> DeclaredLiteralFreshn
         Expression::TemplateLiteral(template) if template.expressions.is_empty() => {
             DeclaredLiteralFreshness::Widening
         }
-        Expression::UnaryExpression(unary)
-            if matches!(
-                (unary.operator, &unary.argument),
-                (
-                    UnaryOperator::UnaryNegation | UnaryOperator::UnaryPlus,
-                    Expression::NumericLiteral(_)
-                ) | (UnaryOperator::UnaryNegation, Expression::BigIntLiteral(_))
-            ) =>
-        {
+        Expression::UnaryExpression(unary) if signed_literal(unary) => {
             DeclaredLiteralFreshness::Widening
         }
         Expression::ConditionalExpression(conditional) => {
@@ -7074,18 +7066,34 @@ pub fn indexed_literal_mode(expr: Option<&Expression<'_>>) -> IndexedValueLitera
     }
 }
 
-/// Whether one unwrapped expression is a bare literal — a scalar literal, a
-/// template, an object literal or an array literal.
+/// Whether one unwrapped expression is a bare literal — a scalar literal
+/// (a signed numeric or negated bigint literal among them), a template, an
+/// object literal or an array literal.
 fn bare_literal_expression(expr: &Expression<'_>) -> bool {
-    matches!(
-        expr,
+    match expr {
         Expression::StringLiteral(_)
-            | Expression::NumericLiteral(_)
-            | Expression::BooleanLiteral(_)
-            | Expression::BigIntLiteral(_)
-            | Expression::TemplateLiteral(_)
-            | Expression::ObjectExpression(_)
-            | Expression::ArrayExpression(_)
+        | Expression::NumericLiteral(_)
+        | Expression::BooleanLiteral(_)
+        | Expression::BigIntLiteral(_)
+        | Expression::TemplateLiteral(_)
+        | Expression::ObjectExpression(_)
+        | Expression::ArrayExpression(_) => true,
+        Expression::UnaryExpression(unary) => signed_literal(unary),
+        _ => false,
+    }
+}
+
+/// Whether a unary expression spells a literal of its own value: a signed
+/// numeric literal (`-1`, `+1`) or a negated bigint literal (`-1n`). The
+/// checker types it as the fresh literal it spells
+/// (`checkPrefixUnaryExpression`).
+fn signed_literal(unary: &UnaryExpression<'_>) -> bool {
+    matches!(
+        (unary.operator, &unary.argument),
+        (
+            UnaryOperator::UnaryNegation | UnaryOperator::UnaryPlus,
+            Expression::NumericLiteral(_)
+        ) | (UnaryOperator::UnaryNegation, Expression::BigIntLiteral(_))
     )
 }
 

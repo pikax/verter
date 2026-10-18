@@ -64,21 +64,37 @@ impl LiteralContext {
 
 /// One authored position of a call argument: the expression's type, its
 /// combined contextual type (the constituents of the parameter type that
-/// type it), and whether it is the argument itself.
+/// type it), the type parameters whose constraints that contextual type
+/// was read through, and whether it is the argument itself.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct ArgumentPosition {
     node: SemanticNodeId,
     contexts: Arc<[SemanticNodeId]>,
+    through: Arc<[SemanticNodeId]>,
     root: bool,
 }
 
 impl ArgumentPosition {
-    fn nested(node: SemanticNodeId, contexts: Arc<[SemanticNodeId]>) -> Self {
+    fn nested(
+        node: SemanticNodeId,
+        contexts: Arc<[SemanticNodeId]>,
+        through: Arc<[SemanticNodeId]>,
+    ) -> Self {
         Self {
             node,
             contexts,
+            through,
             root: false,
         }
+    }
+
+    /// The type parameters a child position's contextual type was read
+    /// through: this position's, and those its own read crossed.
+    fn child_through(&self, crossed: FxHashSet<SemanticNodeId>) -> Arc<[SemanticNodeId]> {
+        if crossed.is_empty() {
+            return Arc::clone(&self.through);
+        }
+        combined_contexts(self.through.iter().copied().chain(crossed).collect())
     }
 }
 
@@ -88,6 +104,23 @@ impl ArgumentPosition {
 enum PositionStep {
     Enter(ArgumentPosition),
     Rebuild(ArgumentPosition, Vec<(usize, ArgumentPosition)>, bool),
+}
+
+/// The constraint a nested position reads the type parameter `param`
+/// through: the one its node carries, else its declaration's in
+/// `declared`. None for a `const` type parameter: every position under it
+/// is a const context (`isConstContext`), whose literals stay as written
+/// whatever its constraint says.
+fn contextual_constraint(
+    param: SemanticNodeId,
+    constraint: Option<SemanticNodeId>,
+    declared: &[TypeParamDecl],
+) -> Option<SemanticNodeId> {
+    let decl = declared.iter().find(|decl| decl.param == param);
+    if decl.is_some_and(|decl| decl.is_const) {
+        return None;
+    }
+    constraint.or_else(|| decl.and_then(|decl| decl.constraint))
 }
 
 /// The contextual types of one position, in one canonical order.
@@ -157,6 +190,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let root = ArgumentPosition {
             node: source,
             contexts: Arc::from([target]),
+            through: Arc::from([]),
             root: true,
         };
         let mut steps = vec![PositionStep::Enter(root.clone())];
@@ -189,16 +223,26 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                     .collect();
                             drop(data);
                             for (index, key, value) in members {
+                                let mut crossed = FxHashSet::default();
                                 let contexts = combined_contexts(
                                     position
                                         .contexts
                                         .iter()
                                         .flat_map(|&contextual| {
-                                            self.contextual_member_types(contextual, &key)
+                                            self.contextual_member_types(
+                                                contextual,
+                                                &key,
+                                                declared,
+                                                &mut crossed,
+                                            )
                                         })
                                         .collect(),
                                 );
-                                children.push((index, ArgumentPosition::nested(value, contexts)));
+                                let through = position.child_through(crossed);
+                                children.push((
+                                    index,
+                                    ArgumentPosition::nested(value, contexts, through),
+                                ));
                             }
                         }
                         Some(SemanticNodeData::Tuple { elements, .. }) => {
@@ -210,16 +254,26 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                 .collect();
                             drop(data);
                             for (index, value) in values.into_iter().enumerate() {
+                                let mut crossed = FxHashSet::default();
                                 let contexts = combined_contexts(
                                     position
                                         .contexts
                                         .iter()
                                         .flat_map(|&contextual| {
-                                            self.contextual_element_types(contextual, index)
+                                            self.contextual_element_types(
+                                                contextual,
+                                                index,
+                                                declared,
+                                                &mut crossed,
+                                            )
                                         })
                                         .collect(),
                                 );
-                                children.push((index, ArgumentPosition::nested(value, contexts)));
+                                let through = position.child_through(crossed);
+                                children.push((
+                                    index,
+                                    ArgumentPosition::nested(value, contexts, through),
+                                ));
                             }
                         }
                         Some(SemanticNodeData::Union(members)) => {
@@ -242,27 +296,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                         ArgumentPosition::nested(
                                             member,
                                             Arc::clone(&position.contexts),
+                                            Arc::clone(&position.through),
                                         ),
                                     ));
                                 }
                             }
                             if !position.root {
-                                widen = self.decide_literal_position(
-                                    node,
-                                    &position.contexts,
-                                    declared,
-                                    &mut keeps,
-                                );
+                                widen =
+                                    self.decide_literal_position(&position, declared, &mut keeps);
                             }
                         }
                         Some(SemanticNodeData::Literal(_)) if !position.root => {
                             drop(data);
-                            widen = self.decide_literal_position(
-                                node,
-                                &position.contexts,
-                                declared,
-                                &mut keeps,
-                            );
+                            widen = self.decide_literal_position(&position, declared, &mut keeps);
                         }
                         _ => {}
                     }
@@ -287,19 +333,20 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         (typed.get(&root).copied().unwrap_or(source), keeps)
     }
 
-    /// Decide the literals of the authored position `node` against its
-    /// combined contextual type `contexts`: a literal context records them
-    /// in `keeps` for every candidate type parameter `contexts` names.
-    /// Whether the position's literals widen in the argument's type — only
-    /// when every constituent of `contexts` is known to be no literal
-    /// context for them.
+    /// Decide the literals of the authored `position` against its combined
+    /// contextual type: a literal context records them in `keeps` for every
+    /// candidate type parameter the contextual type names or was read
+    /// through (`{ v: "a" }` against `T extends { v: "a" | "b" }` keeps
+    /// `"a"` for `T`). Whether the position's literals widen in the
+    /// argument's type — only when every constituent of its contextual
+    /// type is known to be no literal context for them.
     fn decide_literal_position(
         &self,
-        node: SemanticNodeId,
-        contexts: &[SemanticNodeId],
+        position: &ArgumentPosition,
         declared: &[TypeParamDecl],
         keeps: &mut Vec<ContextKeptLiteral>,
     ) -> bool {
+        let (node, contexts) = (position.node, &position.contexts);
         let literals = literal_members(self.graph(), node);
         if literals.is_empty() || contexts.is_empty() {
             return false;
@@ -307,9 +354,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         match self.literal_context_of(node, contexts, declared) {
             LiteralContext::Keep => {
                 for decl in declared {
-                    if contexts
-                        .iter()
-                        .any(|&contextual| self.mentions_node(contextual, decl.param))
+                    if position.through.contains(&decl.param)
+                        || contexts
+                            .iter()
+                            .any(|&contextual| self.mentions_node(contextual, decl.param))
                     {
                         keeps.extend(literals.iter().map(|&literal| ContextKeptLiteral {
                             literal,
@@ -432,14 +480,21 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     /// The contextual types an object literal member named `key` takes
     /// from `contextual` (`getTypeOfPropertyOfContextualType`): the
-    /// declared member of each constituent that lists it, else the value
-    /// type of the constituent's index signatures applicable to the key
+    /// declared member of each constituent that lists it under JS property
+    /// identity (`1` and `"1"` name one property), else the value type of
+    /// the constituent's index signatures applicable to the key
     /// (`findApplicableIndexInfo`: a non-`string` one — `number` for a
-    /// numeric name — before a `string` one).
+    /// numeric name — before a `string` one). A type parameter types it
+    /// through its base constraint, as the checker reads the apparent type
+    /// of a contextual type (`getApparentTypeOfContextualType`); `visited`
+    /// holds the type parameters already read, so a circular constraint
+    /// contributes nothing.
     fn contextual_member_types(
         &self,
         contextual: SemanticNodeId,
         key: &AuthoredPropertyKey,
+        declared: &[TypeParamDecl],
+        visited: &mut FxHashSet<SemanticNodeId>,
     ) -> Vec<SemanticNodeId> {
         let graph = self.graph();
         let contextual = self.resolved_reduction_view(contextual);
@@ -455,15 +510,24 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 drop(data);
                 return members
                     .into_iter()
-                    .flat_map(|member| self.contextual_member_types(member, key))
+                    .flat_map(|member| self.contextual_member_types(member, key, declared, visited))
                     .collect();
             }
             Some(SemanticNodeData::Object(surface)) => surface.clone(),
+            Some(SemanticNodeData::TypeParam { constraint, .. }) => {
+                let constraint = contextual_constraint(contextual, *constraint, declared);
+                drop(data);
+                return match constraint {
+                    Some(constraint) if visited.insert(contextual) => {
+                        self.contextual_member_types(constraint, key, declared, visited)
+                    }
+                    _ => Vec::new(),
+                };
+            }
             None
             | Some(
                 SemanticNodeData::Primitive(_)
                 | SemanticNodeData::Literal(_)
-                | SemanticNodeData::TypeParam { .. }
                 | SemanticNodeData::Tuple { .. }
                 | SemanticNodeData::Array { .. },
             ) => return Vec::new(),
@@ -478,16 +542,22 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 }
             }
         };
+        let known = key.cloned_known();
         let named: Vec<SemanticNodeId> = surface
             .positive_members()
             .iter()
-            .filter(|member| member.key == *key)
+            .filter(|member| {
+                member.key == *key
+                    || member.key.as_known().zip(known.as_ref()).is_some_and(
+                        |(member_key, known)| member_key.element_access_collides(&known.as_ref()),
+                    )
+            })
             .map(|member| member.value)
             .collect();
         if !named.is_empty() {
             return named;
         }
-        let Some(known) = key.cloned_known() else {
+        let Some(known) = known else {
             return Vec::new();
         };
         let applicable: Vec<(bool, SemanticNodeId)> = surface
@@ -519,11 +589,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// The contextual types the array literal element at `index` takes
     /// from `contextual` (`getContextualTypeForElementExpression`): an
     /// array's element type, or a tuple's element at the position (its
-    /// rest element's type past its fixed elements), per constituent.
+    /// rest element's type past its fixed elements), per constituent; a
+    /// type parameter's through its base constraint, as
+    /// [`Self::contextual_member_types`] reads it.
     fn contextual_element_types(
         &self,
         contextual: SemanticNodeId,
         index: usize,
+        declared: &[TypeParamDecl],
+        visited: &mut FxHashSet<SemanticNodeId>,
     ) -> Vec<SemanticNodeId> {
         let graph = self.graph();
         let contextual = self.resolved_reduction_view(contextual);
@@ -539,8 +613,20 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 drop(data);
                 members
                     .into_iter()
-                    .flat_map(|member| self.contextual_element_types(member, index))
+                    .flat_map(|member| {
+                        self.contextual_element_types(member, index, declared, visited)
+                    })
                     .collect()
+            }
+            Some(SemanticNodeData::TypeParam { constraint, .. }) => {
+                let constraint = contextual_constraint(contextual, *constraint, declared);
+                drop(data);
+                match constraint {
+                    Some(constraint) if visited.insert(contextual) => {
+                        self.contextual_element_types(constraint, index, declared, visited)
+                    }
+                    _ => Vec::new(),
+                }
             }
             Some(SemanticNodeData::Array { element, .. }) => vec![*element],
             Some(SemanticNodeData::Tuple { elements, .. }) => {
@@ -558,6 +644,22 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
             _ => Vec::new(),
         }
+    }
+
+    /// Whether a context-sensitive argument's first-pass reading infers
+    /// into its parameter type `target`: not when `target` is itself one
+    /// of the candidate's type parameters (`declared`). The reading's
+    /// withheld members make it non-inferrable (`NonInferrableType`), which
+    /// the checker never deposits into a naked type parameter; the
+    /// parameter then stays its constraint for the second pass's contextual
+    /// typing.
+    pub(super) fn first_pass_infers_into(
+        &self,
+        target: SemanticNodeId,
+        declared: &[TypeParamDecl],
+    ) -> bool {
+        let target = self.resolved_reduction_view(target);
+        !declared.iter().any(|decl| decl.param == target)
     }
 
     /// The checker's `isLiteralOfContextualType`: whether `contextual`
@@ -764,8 +866,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         kinds
     }
 
-    /// The candidate a NESTED call-argument deposit takes: each literal
-    /// the argument's contextual typing kept (`keeps`) as written, every
+    /// The candidate a call-argument deposit that is no naked literal
+    /// takes: each literal the argument's contextual typing kept (`keeps`)
+    /// as written — nested in a whole object or array argument too — every
     /// other literal widened under `policy`, a union member by member.
     pub(in crate::project_semantic_dispatch) fn contextual_literal_candidate(
         &self,
@@ -788,7 +891,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             Some(SemanticNodeData::Union(members)) if members.iter().any(|m| kept(*m)) => {
                 members.iter().copied().collect::<Vec<_>>()
             }
-            _ => return self.call_inference_candidate(bound, policy),
+            _ => return self.call_inference_candidate_keeping(bound, policy, keeps),
         };
         let members: Vec<SemanticNodeId> = members
             .into_iter()
@@ -796,7 +899,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 if kept(member) {
                     member
                 } else {
-                    self.call_inference_candidate(member, policy)
+                    self.call_inference_candidate_keeping(member, policy, keeps)
                 }
             })
             .collect();

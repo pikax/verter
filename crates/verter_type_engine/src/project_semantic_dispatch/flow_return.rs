@@ -15033,7 +15033,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// literal typed by `contextual` (`getTypeOfPropertyOfContextualType`):
     /// per constituent of a union, the declared property, else a tuple's
     /// element at a numeric name, else an applicable index signature's
-    /// value. `None` when no constituent types the property.
+    /// value; a constrained type parameter's through its constraint (the
+    /// apparent type `getApparentTypeOfContextualType` reads). `None` when
+    /// no constituent types the property.
     fn contextual_property_type(
         &self,
         contextual: SemanticNodeId,
@@ -15056,6 +15058,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 drop(data);
                 let index = name.parse::<usize>().ok()?;
                 self.contextual_element_type(contextual, index, false)
+            }
+            SemanticNodeData::TypeParam {
+                constraint: Some(constraint),
+                ..
+            } => {
+                let constraint = *constraint;
+                drop(data);
+                self.contextual_property_type(constraint, name)
             }
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
@@ -15096,7 +15106,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// (`getContextualTypeForElementExpression`): per constituent of a
     /// union, a tuple's element at the position while no spread came
     /// before it (its rest element's type past its fixed elements), an
-    /// array's element type, or the object's numeric property or index.
+    /// array's element type, or the object's numeric property or index; a
+    /// constrained type parameter's through its constraint.
     fn contextual_element_type(
         &self,
         contextual: SemanticNodeId,
@@ -15129,6 +15140,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     Some(SemanticNodeData::Array { element, .. }) => Some(*element),
                     _ => None,
                 }
+            }
+            SemanticNodeData::TypeParam {
+                constraint: Some(constraint),
+                ..
+            } => {
+                let constraint = *constraint;
+                drop(data);
+                self.contextual_element_type(constraint, position, after_spread)
             }
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)

@@ -368,26 +368,16 @@ fn value<'a>(
         }
         // A signed numeric literal (`-1`, `+1`) and a negated bigint literal
         // (`-1n`) are literals of their own value.
-        Expression::UnaryExpression(unary)
-            if matches!(
-                (unary.operator, &unary.argument),
-                (
-                    UnaryOperator::UnaryNegation | UnaryOperator::UnaryPlus,
-                    Expression::NumericLiteral(_)
-                ) | (UnaryOperator::UnaryNegation, Expression::BigIntLiteral(_))
-            ) =>
-        {
-            match &unary.argument {
-                Expression::NumericLiteral(n) if unary.operator == UnaryOperator::UnaryNegation => {
-                    TypeExpr::number_literal(-n.value)
-                }
-                Expression::NumericLiteral(n) => TypeExpr::number_literal(n.value),
-                Expression::BigIntLiteral(b) => TypeExpr::Literal(
-                    verter_type_expr::LiteralValue::BigInt(format!("-{}", b.value)),
-                ),
-                _ => unreachable!("the guard admits only numeric and bigint literal operands"),
+        Expression::UnaryExpression(unary) if signed_literal(unary) => match &unary.argument {
+            Expression::NumericLiteral(n) if unary.operator == UnaryOperator::UnaryNegation => {
+                TypeExpr::number_literal(-n.value)
             }
-        }
+            Expression::NumericLiteral(n) => TypeExpr::number_literal(n.value),
+            Expression::BigIntLiteral(b) => TypeExpr::Literal(
+                verter_type_expr::LiteralValue::BigInt(format!("-{}", b.value)),
+            ),
+            _ => unreachable!("the guard admits only numeric and bigint literal operands"),
+        },
         Expression::BooleanLiteral(b) => TypeExpr::boolean_literal(b.value),
         Expression::NullLiteral(_) => TypeExpr::Primitive(PrimitiveName::Null),
         // `void x` evaluates its operand and produces `undefined`.
