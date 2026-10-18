@@ -2165,11 +2165,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 &prepared,
                 is_class,
                 std::mem::take(&mut global_peers),
-                (
-                    effective_canonical.clone(),
-                    effective_owner,
-                    effective_symbol.clone(),
-                ),
             );
             match self.lower_value_signatures_or_suspend(
                 signatures,
@@ -2416,23 +2411,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if let Some(job) = signatures.jobs.pop_front() {
                 signatures.lowering = Some((job.block, job.opens_declaration));
                 return Some(Some(job));
-            }
-            // A module's function merges the declarations every
-            // `declare module` block augmenting that module adds, after its
-            // own, in declaration order.
-            if let Some((canonical, symbol)) = signatures.augmentation_peers_of.take() {
-                for block in self.module_file_augmentation_blocks(canonical.as_ref()) {
-                    if self.ambient_block_declares_value(&block, symbol.as_ref()) {
-                        signatures
-                            .peers
-                            .push_back(ResolvedRootIdentity::new_in_owner(
-                                Arc::clone(&block.canonical),
-                                block.owner,
-                                symbol.as_ref(),
-                            ));
-                    }
-                }
-                continue;
             }
             let Some(peer) = signatures.peers.pop_front() else {
                 return Some(None);
@@ -7873,32 +7851,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from(specifier)),
             specifier,
             |_, block_scope| *block_scope == scope,
-        )
-    }
-
-    /// The `declare module "…"` blocks that augment the module FILE
-    /// `module` — a block whose specifier, resolved from the file declaring
-    /// it, is `module` — in declaration precedence order. The files that
-    /// can augment it depend on it, so they are indexed first, and the
-    /// augmenter set is observed as [`Self::ambient_module_blocks`]
-    /// observes it.
-    pub(super) fn module_file_augmentation_blocks(&self, module: &str) -> Vec<AmbientModuleBlock> {
-        use verter_session_query::declarations::AugmentationScopeKind;
-        use verter_session_query::resolution::AugmentationTargetKind;
-        for rdep in self.ctx.reverse_dependency_canonicals(module) {
-            let _ = self.transaction_indexed_record(&rdep);
-        }
-        self.module_augmentation_blocks(
-            module,
-            AugmentationTargetKind::ResolvedRelativeCanonical(Arc::from(module)),
-            module,
-            |augmenter, block_scope| match block_scope {
-                AugmentationScopeKind::Module(specifier) => self
-                    .ctx
-                    .resolve_type_dependency_canonical(augmenter, specifier)
-                    .is_some_and(|resolved| resolved == module),
-                AugmentationScopeKind::Global => false,
-            },
         )
     }
 
@@ -20175,9 +20127,8 @@ pub(super) struct MemberLowering {
 }
 
 /// A function value's signatures, lowering one at a time: its own
-/// declaration's, then those of every declaration it merges — a later
-/// file's declaration of a global function, a `declare module` block's of a
-/// module's function — each read as its turn comes.
+/// declaration's, then those of each later file's declaration of a global
+/// function. Module augmentations join once in `finish_value_signatures`.
 pub(super) struct SignatureLowering {
     /// The function's own declaration.
     own: Arc<verter_session_query::type_solver::PreparedValueDecl>,
@@ -20186,9 +20137,6 @@ pub(super) struct SignatureLowering {
     jobs: std::collections::VecDeque<SignatureJob>,
     /// The merged declarations whose signatures follow, not yet read.
     peers: std::collections::VecDeque<ResolvedRootIdentity>,
-    /// The module function whose augmenting blocks' declarations join
-    /// `peers` once its own and its global peers' signatures are queued.
-    augmentation_peers_of: Option<(OwnedStr, OwnedStr)>,
     /// The signature groups lowered so far, one per declaration block.
     groups: Vec<Vec<SemanticNodeId>>,
     /// The block of the last signature grouped.
@@ -20227,31 +20175,18 @@ enum SignaturesLowered {
 }
 
 impl SignatureLowering {
-    /// The signatures of `own` and of the declarations it merges: its
-    /// `global_peers`, then — for a module's function with no global peer
-    /// — every `declare module` block's declaration of `effective`.
+    /// The signatures of `own` and its merged global declarations.
     fn new<C: crate::resolver_core::ResolverCapabilities>(
         dispatch: &ProjectSemanticDispatch<'_, C>,
         own: &Arc<verter_session_query::type_solver::PreparedValueDecl>,
         is_class: bool,
         global_peers: Vec<ResolvedRootIdentity>,
-        (effective_canonical, effective_owner, effective_symbol): (
-            OwnedStr,
-            verter_type_expr::TopLevelOwnerId,
-            OwnedStr,
-        ),
     ) -> Self {
-        let augmentation_peers_of = (!is_class
-            && global_peers.is_empty()
-            && effective_owner == verter_type_expr::TopLevelOwnerId::ordinary_file()
-            && !effective_symbol.contains('.'))
-        .then_some((effective_canonical, effective_symbol));
         Self {
             own: Arc::clone(own),
             is_class,
             jobs: dispatch.value_signature_jobs(own).into(),
             peers: global_peers.into(),
-            augmentation_peers_of,
             groups: Vec::new(),
             current_block: None,
             lowering: None,

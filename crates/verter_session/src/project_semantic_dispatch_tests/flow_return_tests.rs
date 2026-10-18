@@ -8233,6 +8233,12 @@ export function pick(x: string | number) {
 /// `viaImport` (importing it) both return `1` on 7.0.2, complete.
 #[test]
 fn a_call_to_an_augmented_export_resolves_through_the_merged_overloads() {
+    use verter_type_engine::semantic_query::{
+        ProjectionMode, ProjectionReductionContext, QueryOutcome, Ready, ScopeId,
+        SemanticContextId, SignatureKind, ValueRootKey,
+    };
+    use verter_type_engine::signature_kernel::{BorrowedSet, SemanticReadView};
+
     const MAIN_CANONICAL: &str = "/ws/call-merge/main.ts";
     const MAIN_FIXTURE: &str = "export function conv(x: string): number { return 1; }\n\
                                 export function viaCall(x: string) { return conv(x); }\n";
@@ -8247,6 +8253,42 @@ fn a_call_to_an_augmented_export_resolves_through_the_merged_overloads() {
     upsert_ts(&host, AUG_CANONICAL, AUG_FIXTURE);
     upsert_ts(&host, USE_CANONICAL, USE_FIXTURE);
     with_dispatch(&host, |dispatch| {
+        let key = dispatch.typeof_key_for(
+            ValueRootKey {
+                scope: ScopeId::file(
+                    MAIN_CANONICAL,
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
+                name: "conv".into(),
+            },
+            ProjectionReductionContext::published(ProjectionMode::Navigate),
+        );
+        let read = dispatch.execute_read(key.clone());
+        let QueryResult::Value(node) = read.value() else {
+            panic!("the exported function has a type: {:?}", read.value());
+        };
+        let store = dispatch.graph().signature_store();
+        let QueryOutcome::Ready(Ready { value: set, .. }) = dispatch.signatures_of_type(
+            store,
+            *node,
+            SignatureKind::Call,
+            SemanticContextId::production(),
+        ) else {
+            panic!("the exported function has complete signatures");
+        };
+        let view = SemanticReadView::pin(store);
+        let BorrowedSet::Many(signatures) = view.read_set(set).expect("the signature set is live")
+        else {
+            panic!("the original and augmenting signatures both stay");
+        };
+        assert_eq!(signatures.len(), 2, "each declaration contributes once");
+        let roots = dispatch
+            .graph()
+            .entry_self_root_canonicals_for_tests(&key)
+            .expect("the merged function is published");
+        for file in [MAIN_CANONICAL, AUG_CANONICAL] {
+            assert!(roots.iter().any(|root| root.as_ref() == file), "{roots:?}");
+        }
         for (canonical, name) in [(MAIN_CANONICAL, "viaCall"), (USE_CANONICAL, "viaImport")] {
             let result = flow_result_value(dispatch, whole_return_key(dispatch, canonical, name));
             let expr = host
