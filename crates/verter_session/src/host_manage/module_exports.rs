@@ -527,7 +527,9 @@ impl VerterHost {
                 admission = admission.and(admissions.get(&dependency).copied().unwrap_or(Ok(())));
             }
             let receipt = ResultReceipt::retained_join(receipts, db.module_export_account.get());
-            let facts: Arc<[FactVersionRef]> = Arc::from([FactVersionRef::Receipt(receipt)]);
+            let facts = verter_session_query::declarations::module_exports::ModuleExportFacts::new(
+                Box::from([FactVersionRef::Receipt(receipt)]),
+            );
             let mut own_bytes = std::mem::size_of::<ModuleExportRetention>()
                 + dependency_charges.len() * std::mem::size_of::<Arc<ModuleExportRetention>>();
             for module in &component {
@@ -622,7 +624,7 @@ impl VerterHost {
             for module in component {
                 let table = crate::resolver_core::CachedValue::new(ModuleExportTable {
                     bindings: bindings.remove(&module).expect("folded component member"),
-                    facts: Arc::clone(&facts),
+                    facts: facts.clone(),
                     retention: retention.clone(),
                     owned_binding_slots: writes.get(&module).copied().unwrap_or(0),
                 });

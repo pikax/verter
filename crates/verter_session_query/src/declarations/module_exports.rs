@@ -23,7 +23,9 @@ pub struct ModuleExportTable {
     /// `None` is an ambiguous star binding. Retaining it makes ambiguity
     /// propagate through later barrels; absence alone would lose that fact.
     pub bindings: ModuleExportBindings,
-    pub facts: Arc<[FactVersionRef]>,
+    /// The table's proof, one self-charged cell every table of its
+    /// component shares: charged once, by its own cell.
+    pub facts: ModuleExportFacts,
     /// The charge follows the shared HAMT nodes, including nodes inherited
     /// from dependency tables after their cache entries have been evicted.
     pub retention: Option<Arc<ModuleExportRetention>>,
@@ -31,6 +33,9 @@ pub struct ModuleExportTable {
     /// child structure shared unchanged. Used for footprint/work evidence.
     pub owned_binding_slots: usize,
 }
+
+/// A component's shared export-table proof.
+pub type ModuleExportFacts = verter_retention::heap_size::OwnedValue<Box<[FactVersionRef]>>;
 
 #[derive(Debug)]
 pub struct ModuleExportRetention {
@@ -166,7 +171,7 @@ pub enum ModuleExportBinding {
 }
 
 impl verter_retention::heap_size::HeapSize for ModuleExportTable {
-    /// The fact slice; the persistent binding structure is charged by the
+    /// The shared proof cell; the persistent binding structure is charged by the
     /// table's retention record, which follows the shared nodes, and a table
     /// without one is estimated by the binding slots it wrote.
     fn heap_size<'t>(
@@ -182,7 +187,7 @@ impl verter_retention::heap_size::HeapSize for ModuleExportTable {
                     ),
             )
         };
-        bindings + crate::retention::allocation::fact_slice_bytes(&self.facts, meter.handles())
+        bindings + self.facts.heap_size(meter)
     }
 }
 
