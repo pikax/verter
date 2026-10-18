@@ -4522,20 +4522,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 )
             }
             Some(SemanticNodeData::Union(members)) => {
-                let mut transformed: Vec<SemanticNodeId> = Vec::with_capacity(members.len());
-                for member in members.iter() {
-                    let member = self.call_shape_transform(*member, policy, memo);
-                    // Arms the widening made one object shape are one type
-                    // (`c ? { a: 1 } : { a: 2 }` is `{ a: number }`, the
-                    // checker's subtype reduction of its arms).
-                    if !transformed
-                        .iter()
-                        .any(|&kept| same_object_shape(graph, kept, member))
-                    {
-                        transformed.push(member);
+                let transformed = members
+                    .iter()
+                    .map(|member| self.call_shape_transform(*member, policy, memo))
+                    .collect::<Vec<_>>();
+                let widened = transformed
+                    .iter()
+                    .zip(members.iter())
+                    .any(|(arm, member)| arm != member);
+                if widened && transformed.len() >= 2 {
+                    // Arms the widening made alike reduce as the checker
+                    // reduces its conditional's arms: under the shared
+                    // strict subtype relation (`c ? { a: 1 } : { a: 2 }`
+                    // is `{ a: number }`). An undecided pair keeps every
+                    // arm and leaves the result partial.
+                    let nullability =
+                        verter_session_query::flow::policy::NullabilityPolicy::from_strict_null_checks(
+                            self.relation_strict_config().strict_null_checks,
+                        );
+                    let reduced = self.subtype_reduced_union(&transformed, nullability);
+                    if reduced.incomplete {
+                        crate::request_context::mark_request_result_partial();
                     }
+                    reduced.node
+                } else {
+                    self.relation_combine_candidates(&transformed, VariancePhase::Covariant)
                 }
-                self.relation_combine_candidates(&transformed, VariancePhase::Covariant)
             }
             Some(SemanticNodeData::Intersection(members)) => {
                 let category = members.origin_category();
@@ -4598,47 +4610,6 @@ enum CallCandidates {
     AllDropped,
     /// The bucket did not settle; nothing here proves the callee either way.
     Incomplete(crate::semantic_query::IncompleteReason),
-}
-
-/// Whether `a` and `b` are object types of one shape: the same members
-/// (key, value, optionality, mutability, method form) in the same order and
-/// the same signatures and index signatures. Where each was authored does
-/// not enter the type.
-fn same_object_shape(
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
-    a: SemanticNodeId,
-    b: SemanticNodeId,
-) -> bool {
-    if a == b {
-        return true;
-    }
-    let (Some(left), Some(right)) = (graph.node_data(a), graph.node_data(b)) else {
-        return false;
-    };
-    let (SemanticNodeData::Object(left), SemanticNodeData::Object(right)) = (&*left, &*right)
-    else {
-        return false;
-    };
-    let (left_members, right_members) = (left.positive_members(), right.positive_members());
-    left_members.len() == right_members.len()
-        && left_members.iter().zip(right_members.iter()).all(|(l, r)| {
-            l.key == r.key
-                && l.value == r.value
-                && l.optional == r.optional
-                && l.readonly == r.readonly
-                && l.method_kind == r.method_kind
-        })
-        && left.call_signatures() == right.call_signatures()
-        && left.construct_signatures() == right.construct_signatures()
-        && left.keyspace() == right.keyspace()
-        && left.index_signatures().len() == right.index_signatures().len()
-        && left
-            .index_signatures()
-            .iter()
-            .zip(right.index_signatures().iter())
-            .all(|(l, r)| {
-                l.key_type == r.key_type && l.value_type == r.value_type && l.readonly == r.readonly
-            })
 }
 
 /// The signature bucket a call site demands.

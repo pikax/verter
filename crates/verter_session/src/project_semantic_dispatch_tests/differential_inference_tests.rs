@@ -1946,6 +1946,224 @@ fn candidate_literal_contexts() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+const AUTHORED_LITERAL_OCCURRENCES: &str = r##"
+declare const c: boolean;
+declare function pu<T>(x: { v: T }): T;
+declare function pw<T extends string>(a: { v: T }): T;
+declare function tu<T>(x: [T, T]): T;
+declare function kc<const T>(x: { v: T }): T;
+declare function kcn<const T>(x: T): T;
+declare function kcc<const T extends readonly unknown[]>(x: { v: T }): T;
+declare function pa<T>(x: T[]): T;
+const s = "a";
+let sl: "a" = "a";
+const so = { v: "a" } as const;
+export function n1() { return pu({ v: "a" as "a" }); }
+export function n2() { return pu({ v: s }); }
+export function n3() { return pu({ v: sl }); }
+export function n4() { return pu({ v: c ? "a" : ("b" as "b") }); }
+export function n5() { return pu({ v: c ? "a" : sl }); }
+export function n6() { return tu(["a" as "a", "a"]); }
+export function n7() { return pw({ v: c ? "a" : sl }); }
+export function n8() { return kc({ v: { w: "a", n: [1, 2] } }); }
+export function n9() { return kcn({ v: { w: "a" } }); }
+export function n10() { return kcc({ v: ["a", { b: 1 }] }); }
+export function n11() { return pa(["a", "a" as "a"]); }
+export function n12() { return pa([c ? "a" : sl, "b"]); }
+export function n13() { return pu(so); }
+export function n14() { return pu({ v: (("a")) }); }
+export function n15() { return pa([c ? { v: "a" } : { v: sl }]); }
+export function n16() { return pu(c ? { v: "a" } : { v: sl }); }
+export function n17() { return pu({ v: "a" satisfies string }); }
+export function n18() { return pu({ v: ["a" as const, "b"] }); }
+declare function id<T>(x: T): T;
+export function n19() { return id(c ? { a: 1 } : { a: 2 }); }
+export function n20() { return id(c ? { a: 2 } : { a: 1 }); }
+export function n21() { return id(c ? { a: 1 } : { a: "s" }); }
+export function n22() { return id(c ? { a: 1 } : { a: 2, b: "x" }); }
+"##;
+
+/// A literal's freshness belongs to its authored occurrence: a fresh
+/// literal read through a `const` binding or `satisfies` still widens, a
+/// conditional of a fresh and an asserted arm widens, an equal asserted
+/// literal at a sibling element does not keep a fresh one, a whole stored
+/// argument keeps its literal, and a `const` type parameter keeps every
+/// nested literal readonly. A conditional's object arms the widening makes
+/// alike are one type in either order, while arms that stay unlike keep
+/// both.
+#[test]
+fn authored_literal_occurrences() {
+    let failures = Matrix::new(AUTHORED_LITERAL_OCCURRENCES).four(&[
+        (
+            Read::Return(r#"n2"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"n4"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"n6"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"n7"#),
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+        ),
+        (
+            Read::Return(r#"n8"#),
+            r#"{ readonly w: "a"; readonly n: readonly [1, 2]; }"#,
+            r#"{ readonly w: "a"; readonly n: readonly [1, 2]; }"#,
+            r#"{ readonly w: "a"; readonly n: readonly [1, 2]; }"#,
+            r#"{ readonly w: "a"; readonly n: readonly [1, 2]; }"#,
+        ),
+        (
+            Read::Return(r#"n9"#),
+            r#"{ readonly v: { readonly w: "a"; }; }"#,
+            r#"{ readonly v: { readonly w: "a"; }; }"#,
+            r#"{ readonly v: { readonly w: "a"; }; }"#,
+            r#"{ readonly v: { readonly w: "a"; }; }"#,
+        ),
+        (
+            Read::Return(r#"n10"#),
+            r#"readonly ["a", { readonly b: 1; }]"#,
+            r#"readonly ["a", { readonly b: 1; }]"#,
+            r#"readonly ["a", { readonly b: 1; }]"#,
+            r#"readonly ["a", { readonly b: 1; }]"#,
+        ),
+        (
+            Read::Return(r#"n11"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"n12"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"n13"#),
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+        ),
+        (
+            Read::Return(r#"n14"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"n15"#),
+            r#"{ v: string; }"#,
+            r#"{ v: string; }"#,
+            r#"{ v: string; }"#,
+            r#"{ v: string; }"#,
+        ),
+        (
+            Read::Return(r#"n16"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"n17"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"n18"#),
+            r#"string[]"#,
+            r#"string[]"#,
+            r#"string[]"#,
+            r#"string[]"#,
+        ),
+        (
+            Read::Return(r#"n19"#),
+            r#"{ a: number; }"#,
+            r#"{ a: number; }"#,
+            r#"{ a: number; }"#,
+            r#"{ a: number; }"#,
+        ),
+        (
+            Read::Return(r#"n20"#),
+            r#"{ a: number; }"#,
+            r#"{ a: number; }"#,
+            r#"{ a: number; }"#,
+            r#"{ a: number; }"#,
+        ),
+        (
+            Read::Return(r#"n21"#),
+            r#"{ a: number; } | { a: string; }"#,
+            r#"{ a: number; } | { a: string; }"#,
+            r#"{ a: number; } | { a: string; }"#,
+            r#"{ a: number; } | { a: string; }"#,
+        ),
+        (
+            Read::Return(r#"n22"#),
+            r#"{ a: number; b?: undefined; } | { a: number; b: string; }"#,
+            r#"{ a: number; b?: undefined; } | { a: number; b: string; }"#,
+            r#"{ a: number; b?: undefined; } | { a: number; b: string; }"#,
+            r#"{ a: number; b?: undefined; } | { a: number; b: string; }"#,
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// An asserted or stored literal nested in an object literal argument is
+/// not fresh: it keeps its literal type where the checker keeps it
+/// (`pu({ v: "a" as "a" })` is `"a"`), and a conditional of a fresh and a
+/// stored arm of one literal keeps it (`c ? "a" : sl` with `sl: "a"`).
+#[test]
+#[ignore = "typed gap in the lane: value lowering keeps no per-occurrence literal freshness, so a nested asserted or stored literal reads as a fresh one"]
+fn nested_regular_literals_keep_their_type() {
+    let failures = Matrix::new(AUTHORED_LITERAL_OCCURRENCES).four(&[
+        (
+            Read::Return(r#"n1"#),
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+        ),
+        (
+            Read::Return(r#"n3"#),
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+        ),
+        (
+            Read::Return(r#"n5"#),
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// A `const` type parameter inferred through a rest parameter keeps the argument tuple's literals.
 #[test]
 #[ignore = "typed gap in the lane: a rest parameter over a const type parameter is an UnrepresentableCallee"]
