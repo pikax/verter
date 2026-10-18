@@ -390,19 +390,34 @@ fn vue_ref_unwrapping_in(settings: &[Setting]) -> Vec<String> {
         ])
 }
 
-/// [`vue_ref_unwrapping_in`] the two settings with `noImplicitAny`; each
-/// project loads the real packages, so the other two are a test of their
-/// own.
+/// [`vue_ref_unwrapping_in`] under `strict`. Each setting's project
+/// discovers `vue`'s whole program — its compiler, runtime and vapor
+/// packages — on its own, so each setting is a test of its own.
 #[test]
 fn vue_ref_unwrapping_decides_through_the_real_re_export_chain() {
-    let failures = vue_ref_unwrapping_in(&ALL[..2]);
+    let failures = vue_ref_unwrapping_in(&ALL[0..1]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// [`vue_ref_unwrapping_in`] the two settings without `noImplicitAny`.
+/// [`vue_ref_unwrapping_in`] with `strictNullChecks` off.
+#[test]
+fn vue_ref_unwrapping_decides_without_strict_null_checks() {
+    let failures = vue_ref_unwrapping_in(&ALL[1..2]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// [`vue_ref_unwrapping_in`] with `noImplicitAny` off.
 #[test]
 fn vue_ref_unwrapping_decides_without_no_implicit_any() {
-    let failures = vue_ref_unwrapping_in(&ALL[2..]);
+    let failures = vue_ref_unwrapping_in(&ALL[2..3]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// [`vue_ref_unwrapping_in`] with both `strictNullChecks` and
+/// `noImplicitAny` off.
+#[test]
+fn vue_ref_unwrapping_decides_with_both_checks_off() {
+    let failures = vue_ref_unwrapping_in(&ALL[3..4]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
