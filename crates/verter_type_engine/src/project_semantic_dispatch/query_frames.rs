@@ -135,19 +135,10 @@ pub(super) enum QueryFrame<'p, 'a, C: crate::resolver_core::ResolverCapabilities
 /// decision, a call's resolution, or a function's flow return.
 pub(super) enum FrameBuild {
     Instantiate(Box<InstantiateBuild>),
-    Typeof(Box<TypeofFrameBuild>),
+    Typeof(Box<TypeofBuild>),
     Conditional(Box<ConditionalBuild>),
     Call(Box<CallBuild>),
     Flow(Box<FlowBuild>),
-}
-
-/// A typeof projection plus the lazy expression returns its signature probes
-/// demand. A new operand discards the tentative projection; answered reads
-/// survive the retry, with the same claims and receipts as a decision frame.
-#[derive(Default)]
-pub(super) struct TypeofFrameBuild {
-    body: Option<Box<TypeofBuild>>,
-    operands: ConditionalBuild,
 }
 
 /// A function's flow return between its steps: the answers to the reads
@@ -872,10 +863,7 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
                 // the site the needing evaluation checks at.
                 if let EvalStep::Need { demand, .. } = &mut step {
                     let mut site = match &frame.build {
-                        Some(FrameBuild::Typeof(build)) => build
-                            .body
-                            .as_ref()
-                            .map_or(TupleSplicePosition::Type, |body| body.checking_site()),
+                        Some(FrameBuild::Typeof(build)) => build.checking_site(),
                         _ if matches!(frame.key, SemanticQueryKey::TypeOf { .. }) => {
                             TupleSplicePosition::Type
                         }
@@ -888,7 +876,6 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
                     // when the runtime starts it.
                     let claim = match frame.build.as_mut() {
                         Some(FrameBuild::Conditional(build)) => build.claim.take(),
-                        Some(FrameBuild::Typeof(build)) => build.operands.claim.take(),
                         Some(FrameBuild::Call(build)) => {
                             let claim = build.claim.take();
                             if let Some(claim) = &claim {
@@ -1424,79 +1411,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         read
     }
 
-    fn drain_typeof_frame(
-        &self,
-        key: &SemanticQueryKey,
-        build: &mut TypeofFrameBuild,
-        mut delivery: Option<QueryDelivery>,
-        depth: u32,
-    ) -> InstantiatePoll {
-        let operands = &mut build.operands;
-        if let Some(answered) = operands.awaiting.take() {
-            let delivered = delivery
-                .take()
-                .expect("a suspended return delivers its answer");
-            operands
-                .answers
-                .insert((answered, delivered.site), delivered);
-        }
-        if let Some((need, claim)) = operands.pending.pop_front() {
-            operands.awaiting = Some(need.clone());
-            operands.claim = Some(claim);
-            return InstantiatePoll::Need(need);
-        }
-        let SemanticQueryKey::TypeOf {
-            value_root,
-            path,
-            context,
-        } = key
-        else {
-            unreachable!("a typeof frame produces typeof")
-        };
-        let installed = self.decision_seam.replace(Some(DecisionSeam {
-            answers: std::mem::take(&mut operands.answers),
-            needs: Vec::new(),
-            depth,
-            nested: 0,
-        }));
-        verter_debug_assert!(installed.is_none(), "one projection runs per step");
-        let run = self.observe_read(|| {
-            if build.body.is_none() {
-                match self.begin_typeof(&value_root.root, path, context.projection_reduction) {
-                    TypeofStart::Done(output) => return InstantiatePoll::Done(output),
-                    TypeofStart::Build(body) => build.body = Some(body),
-                }
-            }
-            self.drain_typeof(
-                build.body.as_mut().expect("the body began"),
-                delivery.map(|delivery| FrameDelivery { delivery, depth }),
-            )
-        });
-        let seam = self
-            .decision_seam
-            .take()
-            .expect("the projection's seam stays installed");
-        operands.answers = seam.answers;
-        let mut needs = seam.needs.into_iter();
-        match needs.next() {
-            Some((need, claim)) => {
-                build.body = None;
-                match run.discard() {
-                    Err(abort) => InstantiatePoll::Done(Box::new(self.aborted_build_output(abort))),
-                    Ok(_) => {
-                        operands.awaiting = Some(need.clone());
-                        operands.claim = Some(claim);
-                        operands.pending = needs.collect();
-                        InstantiatePoll::Need(need)
-                    }
-                }
-            }
-            None => run.adopt(self).unwrap_or_else(|abort| {
-                InstantiatePoll::Done(Box::new(self.aborted_build_output(abort)))
-            }),
-        }
-    }
-
     /// Carry a conditional decision's frame on: record a delivery as the
     /// answer to the read it waited on, then run the decision with every
     /// answer the frame holds. A read none of them answers is the frame's
@@ -1753,7 +1667,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // A typeof build consumes its delivery where its evaluation
             // reads it.
             Some(FrameBuild::Typeof(build)) => self
-                .drain_typeof_frame(&frame.key, build, delivery, frame.depth + 1)
+                .drain_typeof(
+                    build,
+                    delivery.map(|delivery| FrameDelivery {
+                        delivery,
+                        depth: frame.depth + 1,
+                    }),
+                )
                 .into(),
             // A decision keeps its deliveries as answers to its reads.
             Some(FrameBuild::Conditional(build)) => self
@@ -1806,17 +1726,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             }
                         }
                     }
-                    SemanticQueryKey::TypeOf { .. } => {
-                        match self.cold_build_budget_refusal(&frame.key) {
-                            Some(refusal) => InstantiatePoll::Done(Box::new(refusal)).into(),
-                            None => {
+                    SemanticQueryKey::TypeOf {
+                        value_root,
+                        path,
+                        context,
+                    } => {
+                        let begun = match self.cold_build_budget_refusal(&frame.key) {
+                            Some(refusal) => TypeofStart::Done(Box::new(refusal)),
+                            None => self.begin_typeof(
+                                &value_root.root,
+                                path,
+                                context.projection_reduction,
+                            ),
+                        };
+                        match begun {
+                            TypeofStart::Done(output) => InstantiatePoll::Done(output).into(),
+                            TypeofStart::Build(build) => {
                                 let FrameBuild::Typeof(build) =
-                                    frame.build.insert(FrameBuild::Typeof(Box::default()))
+                                    frame.build.insert(FrameBuild::Typeof(build))
                                 else {
                                     unreachable!("the build was just inserted")
                                 };
-                                self.drain_typeof_frame(&frame.key, build, None, frame.depth + 1)
-                                    .into()
+                                self.drain_typeof(build, None).into()
                             }
                         }
                     }

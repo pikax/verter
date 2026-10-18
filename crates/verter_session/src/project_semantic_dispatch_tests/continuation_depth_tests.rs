@@ -716,6 +716,41 @@ fn printing_an_alias_chain_reads_each_alias_a_bounded_number_of_times() {
     );
 }
 
+/// The `typeof` of a call whose declared return is a long alias chain
+/// dispatches a bounded number of instantiation reads per alias: the
+/// call's binder-reach walk reads the chain's links one after another, and
+/// each link's read is one step of the `typeof`'s frame, never a re-run of
+/// its whole projection that reads every earlier link again.
+///
+/// TypeScript 7.0.2, `strict`: `typeof c` is `"ok" | undefined`; the bound
+/// is on Verter's own work.
+#[test]
+fn a_typeof_over_an_alias_chain_reads_each_link_a_bounded_number_of_times() {
+    const LENGTH: usize = 200;
+    let instantiations = on_this_thread(|| {
+        let _trace = super::raise::enable_dispatch_trace_for_test();
+        let host = super::checker_probe_lane_tests::default_probe_host();
+        super::checker_probe_lane_tests::with_probe_outcome_on_host(
+            &host,
+            Default::default(),
+            &alias_chain(LENGTH),
+            "typeof c",
+            |_, _| (),
+        );
+        super::raise::DISPATCH_TRACE.with(|trace| {
+            trace
+                .borrow()
+                .iter()
+                .filter(|kind| **kind == "Instantiate")
+                .count()
+        })
+    });
+    assert!(
+        instantiations <= 4 * LENGTH,
+        "{instantiations} instantiation reads for a chain of {LENGTH} aliases"
+    );
+}
+
 /// In a process of its own — nothing evaluated before it, on any stack —
 /// one small-stack thread evaluates a 200-alias chain, then conditional
 /// arguments nested 97 deep and 500 deep, displays each answer, and drops

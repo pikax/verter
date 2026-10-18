@@ -147,11 +147,11 @@ Anywhere else inside a running drive — a body an inline signature probe
 evaluates beneath a decision, a callee evaluated inline — the check is not
 made and the call keeps its lazy carrier: starting the return's work there
 would nest natively, one level per declared return a chain of calls reaches.
-A typeof frame keeps the operand answers and claims of the reads its
-projection makes (`TypeofFrameBuild`); a new demand discards the tentative
-projection under `observe_read` and retries it after the runtime delivers
-the operand. A pending probe prevents its tentative source shape from
-warming. Only a checker recovery replaces a call's carrier, with its
+A typeof frame installs no decision seam: its projection consumes each
+delivery where its evaluation reads it, so a sequential chain of reads in
+its body (an alias walk, say) costs one step per read rather than a full
+re-run per read. A probe beneath a decision with a pending operand prevents
+its tentative source shape from warming. Only a checker recovery replaces a call's carrier, with its
 expression diagnostic; any other read keeps the named carrier. These reads
 never drive another execution inside a frame step.
 
