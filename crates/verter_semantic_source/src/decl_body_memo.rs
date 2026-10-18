@@ -378,9 +378,11 @@ impl FunctionIndexDemand {
             );
             return WalkedRead::refused(Arc::new(Default::default()));
         };
-        // A missed snapshot, or a walk-stack lease refused the program's
-        // index walks: an uncached empty index, never memoized. The refusal
-        // travels with it to the consumer that marks its result partial.
+        // A walk-stack lease refused the program's index walks, or the
+        // retained snapshot holds a fatal parse: an uncached empty index,
+        // never memoized. A refusal travels with it to the consumer that
+        // marks its result partial; a fatal parse has no functions, so its
+        // empty index is clean. (A lease miss is the broken pin above.)
         let index = match index {
             Some(Ok(index)) => index,
             missed => {
