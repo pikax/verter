@@ -410,9 +410,9 @@ fn execute_returns_typed_type_node_with_clean_provenance() {
     }
 }
 
-/// Wrapper parity: `resolve_decl` (the provenance-stripped convenience
-/// wrapper) returns the same node id that `execute_type_node` carries on
-/// its `Value` arm for the same key.
+/// Wrapper parity: `resolve_decl` (the convenience wrapper) returns the
+/// same node id that `execute_type_node` carries on its `Value` arm for the
+/// same key.
 #[test]
 fn resolve_decl_wrapper_matches_execute_type_node_node() {
     use verter_type_engine::project_semantic_dispatch::{
@@ -430,7 +430,7 @@ fn resolve_decl_wrapper_matches_execute_type_node_node() {
         "C",
     );
     let wrapper = match dispatch.resolve_decl(key.clone()) {
-        QueryResult::Value(node) => node,
+        QueryResult::Value(out) => out.value,
         other => panic!("expected wrapper Value, got {other:?}"),
     };
     let typed = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(key)) {

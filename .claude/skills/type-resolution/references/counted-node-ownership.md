@@ -17,9 +17,9 @@ compile-fail fixture; ordinary-constructor and legacy-sweep negative controls
 are arena unit tests.
 
 `ProjectSemanticDispatch::with_ownership_harness` consumes that same fixture
-and binds its counted graph to a test context; like every dispatcher it opens
-its own construction scope over the graph it is bound to (see "Public carriers
-and capabilities" below). `VerterHost::new_standalone_with_counted_ownership_for_test`
+and binds its counted graph to a test context; like every dispatcher it holds
+the construction lane of the graph it is bound to and opens an owner per
+operation (see "Public carriers and capabilities" below). `VerterHost::new_standalone_with_counted_ownership_for_test`
 composes a whole host over a counted graph (`GraphOwnership::CountedForTests`),
 so a test proves what a host's public delivery keeps alive. Both are restricted
 to `test` or `test-support` builds; `GraphOwnership` has no counted variant in a
@@ -169,16 +169,38 @@ member, entry, index signature, surface, payload or diagnostic, rooting the
 copy's operands in the active scope.
 
 Construction owners are thread-local and addressed by token, never by stack
-position, so scopes and dispatchers close in any order. Every
-`ProjectSemanticDispatch` shares ONE construction owner per graph on its thread
-with every other live dispatcher of that graph (`DispatchConstructionScope`,
-declared last on the dispatcher): an ordinal any of them interns or reads stays
-owned until the graph's last dispatcher on the thread drops, so interleaved
-dispatchers never release one another's operands. A lexical `NodeRootScope`
+position, so scopes and dispatchers close in any order. A dispatcher owns no
+result. Every `ProjectSemanticDispatch` shares ONE construction LANE per graph on
+its thread with every other live dispatcher of that graph
+(`DispatchConstructionLane`, declared last on the dispatcher): the authority to
+read and root that graph's construction ordinals while any of them lives. A
+lane holds nothing — no intern count, root or delivery is captured into it and
+a closing owner never hands its attachments to it. Each dispatcher operation
+owns its own work: every query execution opens a construction scope, and a
+root connected demand (relation, flow, call and evaluation operations) opens
+one when its thread holds no owner of the graph. Nested operations hand their
+deliveries to the enclosing operation, which is the builder owner of the
+values it consumes; the outermost operation releases its intermediates, its
+delivery attachments, the receipts its demand paid and the self-evaluation
+receipts it admitted (each roots the operands it names) when it ends. Results
+the dispatcher keeps for replay are a cache: each entry holds a retention
+charge, and a refused reservation keeps nothing. What survives an operation is what its
+returned carrier owns: a query output (`SemanticQueryOutput`) carries the
+delivery lease that roots its value, a `CacheRead` its lease. A discarded
+result therefore releases its roots while the dispatcher stays alive, and a
+retained result and every clone of it outlive every dispatcher and drain on
+the final holder's drop. Construction labels the dispatcher's other methods
+return (lowered, substituted or united nodes, hot handles, step values) are
+owned by the construction owner the caller holds: an explicit builder scope from
+`enter_construction_scope()` / `grant.enter_scope()`, which outlives the
+dispatcher if the builder keeps it open, or the enclosing operation; with no
+owner open they are released at once and read as stale. A host request that
+composes ordinals across operations before rooting its delivery (the typeinfo
+entry points) holds such a builder for the request. A lexical `NodeRootScope`
 releases its roots when it closes and hands its delivery attachments to the
-nearest remaining owner of its graph. An owner keeps each delivery once: every
-clone of a delivery shares one owner, so repeated reads and clones of a result
-under a dispatcher do not grow it. Records rooted at mint
+nearest remaining owner of its graph — never a lane. An owner keeps each
+delivery once: every clone of a delivery shares one owner, so repeated reads
+and clones of a result inside one operation do not grow it. Records rooted at mint
 (`SignatureSetValue`, `OneLevelSurface`) root in the graph that produced them,
 never in whichever graph's scope is innermost; a runtime-node `SemanticOperand`
 owns its node through the delivery lease of the forced read that produced it.
@@ -200,7 +222,10 @@ labels that authorize no read. `OneLevelSurface` is an owning adapter whose
 `from_view` is crate-private. A
 `SurfaceView` exposes its stream and indexes as borrowed slices, never as shared
 `Arc`s. `CacheRead` fields are crate-private: a consumer borrows `value()` and
-`walker_diagnostics()`; a clone of a read clones its lease. `ShallowDiagnostic`'s
+`walker_diagnostics()`; a clone of a read clones its lease. A
+`SemanticQueryOutput`'s delivery is a private field: only the dispatcher mints
+an output, its `node` capability cannot outlive it, and narrowing (`map`)
+carries the delivery to the narrowed value. `ShallowDiagnostic`'s
 recorded query failure is a `DiagnosticError` that renders but exposes no
 `QueryError` to copy. `SignatureSetValue` owns its candidate nodes: its candidate
 table and their roots share one `Arc`, so every clone owns them. Public results

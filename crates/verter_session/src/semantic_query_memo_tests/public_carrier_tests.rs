@@ -527,37 +527,229 @@ fn a_deferred_substitutions_pending_operands_stay_owned_by_the_delivering_read()
     assert_eq!(harness.live_nodes(), 0, "the final read releases it");
 }
 
-/// Dispatchers over one graph share its construction owner on their
-/// thread: an operand one of them returns stays owned while any of them
-/// lives, whichever is dropped first, and a free construction scope may
-/// close before a dispatcher opened after it.
+/// A dispatcher's construction lane owns no label it hands out: a
+/// construction ordinal minted with no owner open on the thread is released
+/// at once, while one minted inside an explicit builder owner the caller
+/// holds stays owned by that builder through every dispatcher's drop, in
+/// either order, and is released when the builder closes.
 #[test]
-fn dispatchers_drop_in_any_order_and_never_release_a_live_dispatchers_operands() {
+fn construction_labels_are_owned_by_the_callers_builder_never_by_a_dispatcher() {
     let host = counted_host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let first = host.semantic_dispatch();
-    let second = host.semantic_dispatch();
-    let node = first.opaque(QueryError::Other(Arc::from("first's operand")));
-    drop(second);
+    let unowned = first.opaque(QueryError::Other(Arc::from("no owner open")));
     assert!(
-        graph.node_is_live(node),
-        "a dispatcher's operand survives a later dispatcher's drop"
+        !graph.node_is_live(unowned),
+        "the dispatcher's lane keeps nothing a caller does not own"
     );
-    let third = host.semantic_dispatch();
+    let builder = first.enter_construction_scope();
+    let second = host.semantic_dispatch();
+    let owned = second.opaque(QueryError::Other(Arc::from("builder operand")));
     drop(first);
     assert!(
-        graph.node_is_live(node),
-        "a dispatcher still alive keeps the operands of one dropped before it"
+        graph.node_is_live(owned),
+        "a dispatcher's drop leaves it owned"
     );
-    let free = graph.enter_node_root_scope();
-    let fourth = host.semantic_dispatch();
-    drop(free);
-    drop(third);
-    assert!(graph.node_is_live(node));
-    drop(fourth);
+    drop(second);
     assert!(
-        !graph.node_is_live(node),
-        "the last dispatcher's drop releases the shared construction owner"
+        graph.node_is_live(owned),
+        "the builder owns its operand past every dispatcher"
+    );
+    let payload = graph
+        .read_in_scope(owned)
+        .expect("the builder's lane reads it");
+    assert!(
+        matches!(&*payload, SemanticNodeData::Opaque(_)),
+        "{payload:?}"
+    );
+    drop(payload);
+    drop(builder);
+    assert!(
+        !graph.node_is_live(owned),
+        "closing the builder releases what it owned"
+    );
+}
+
+const DELIVERY_FILE: &str = "/public/deliveries.ts";
+
+fn delivery_decl_key(name: &str) -> ResolveDeclKey {
+    ResolveDeclKey {
+        scope: ScopeId {
+            canonical_id: Arc::from(DELIVERY_FILE),
+            owner: TopLevelOwnerId::ordinary_file(),
+            local_scope: None,
+            binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
+                TopLevelOwnerId::ordinary_file(),
+            ),
+        },
+        name: Arc::from(name),
+    }
+}
+
+/// The expanded body of the fixture's declaration `name`.
+fn delivery_body_key<C: verter_type_engine::resolver_core::ResolverCapabilities>(
+    d: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
+    name: &str,
+) -> SemanticQueryKey {
+    let scope: Arc<str> = Arc::from(DELIVERY_FILE);
+    SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+        d.type_slot_for(
+            Arc::clone(&scope),
+            TopLevelOwnerId::ordinary_file(),
+            Arc::from(name),
+        ),
+        Arc::from([]),
+        d.instantiate_context_for(
+            &scope,
+            verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                ProjectionMode::Expanded,
+            ),
+        ),
+    ))
+}
+
+/// What a delivered node reads as through the capability its owner lends:
+/// an object's member names, or the declaration a placeholder names.
+fn delivered_shape(
+    node: verter_type_engine::semantic_query_memo::node_roots::NodeRef<'_>,
+) -> String {
+    let payload = node.read().expect("a retained delivery reads");
+    match &*payload {
+        SemanticNodeData::Object(view) => view
+            .positive_members()
+            .iter()
+            .map(|member| member.string_name().unwrap_or_default().to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+        SemanticNodeData::Opaque(QueryError::DeclPlaceholder { name, .. }) => {
+            format!("declaration {name}")
+        }
+        other => panic!("an object or a declaration placeholder: {other:?}"),
+    }
+}
+
+/// A live dispatcher keeps no result it delivers. With zero retention
+/// headroom every result is returned uncached, so the delivery is the only
+/// owner: a result the caller discards releases its nodes at the end of its
+/// operation while the dispatcher stays alive — and so does everything the
+/// operation kept for replay or paid for, once the graph's own caches let go
+/// of what they hold — while a result the caller keeps, through every public
+/// query delivery, and every clone of it, outlives the dispatcher and drains
+/// when its final holder drops.
+#[test]
+fn a_live_dispatchers_discarded_results_release_while_retained_ones_outlive_it() {
+    use verter_type_engine::semantic_query::{SemanticQueryApi, SemanticQueryValue};
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(DELIVERY_FILE.to_string()),
+        input_id: DELIVERY_FILE.to_string(),
+        source: Arc::from(
+            "type Cond<T> = T extends string ? { derived: T } : { other: T };\n\
+             export type Derived = Cond<\"x\">;\n\
+             export interface First { first: string; }\n\
+             export interface Second { second: number; }\n\
+             export interface Kept { kept: string; }\n\
+             export interface Valued { valued: number; }\n\
+             export interface Declared { declared: string; }\n\
+             export interface Read { read: boolean; }\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(DELIVERY_FILE)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    let harness = CountedOwnershipHarness::with_account(StoreAccount::new(
+        SemanticRetentionAccount::new(RetentionLimits {
+            aggregate_ceiling_bytes: 0,
+            ..RetentionLimits::defaults()
+        }),
+    ));
+    let d = verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::with_ownership_harness(
+        &host, harness,
+    );
+    let graph = Arc::clone(d.graph());
+    let baseline = graph.node_ownership_counts().permanent_nodes;
+    for name in ["First", "Second"] {
+        let QueryResult::Value(discarded) = d.execute_type_node(delivery_body_key(&d, name)) else {
+            panic!("{name} resolves");
+        };
+        assert_eq!(
+            delivered_shape(discarded.node(discarded.value).unwrap()),
+            name.to_lowercase(),
+        );
+        assert!(
+            graph.node_count() > baseline,
+            "{name}: the delivery owns it"
+        );
+        drop(discarded);
+        assert_eq!(
+            graph.node_count(),
+            baseline,
+            "{name}: a discarded result releases its nodes while the dispatcher lives"
+        );
+    }
+    // A conditional's evaluation reads nested request-local completions the
+    // dispatcher keeps for replay and pays receipts that root their
+    // operands; the graph's own hash-cons caches may also keep what it
+    // built. Once those caches let go, nothing the dispatcher held for the
+    // discarded result remains.
+    let QueryResult::Value(discarded) = d.execute_type_node(delivery_body_key(&d, "Derived"))
+    else {
+        panic!("Derived resolves");
+    };
+    assert_eq!(
+        delivered_shape(discarded.node(discarded.value).unwrap()),
+        "derived"
+    );
+    drop(discarded);
+    graph.invalidate_all();
+    assert_eq!(
+        graph.node_count(),
+        baseline,
+        "the live dispatcher keeps nothing for a discarded evaluation"
+    );
+    let QueryResult::Value(kept) = d.execute_type_node(delivery_body_key(&d, "Kept")) else {
+        panic!("Kept resolves");
+    };
+    let clone = kept.clone();
+    let QueryResult::Value(valued) = d.execute(delivery_body_key(&d, "Valued")) else {
+        panic!("Valued resolves");
+    };
+    let SemanticQueryValue::TypeNode(valued_node) = valued.value else {
+        panic!("a declaration resolves to a type node");
+    };
+    let QueryResult::Value(declared) = d.resolve_decl(delivery_decl_key("Declared")) else {
+        panic!("Declared resolves");
+    };
+    let read = d.execute_read(delivery_body_key(&d, "Read"));
+    let QueryResult::Value(read_node) = *read.value() else {
+        panic!("Read resolves: {read:?}");
+    };
+    drop(d);
+    graph.invalidate_all();
+    assert_eq!(delivered_shape(kept.node(kept.value).unwrap()), "kept");
+    drop(kept);
+    assert_eq!(
+        delivered_shape(clone.node(clone.value).unwrap()),
+        "kept",
+        "a clone owns the result after the original and the dispatcher drop"
+    );
+    assert_eq!(delivered_shape(valued.node(valued_node).unwrap()), "valued");
+    assert_eq!(
+        delivered_shape(declared.node(declared.value).unwrap()),
+        "declaration Declared"
+    );
+    assert_eq!(delivered_shape(read.node(read_node).unwrap()), "read");
+    drop((clone, valued, declared));
+    assert!(
+        graph.node_count() > baseline,
+        "the last retained read still owns its result"
+    );
+    drop(read);
+    assert_eq!(
+        graph.node_count(),
+        baseline,
+        "the final holders drain every retained result"
     );
 }
 

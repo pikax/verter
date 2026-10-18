@@ -507,9 +507,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     Arc::clone(&path),
                     context,
                 )) {
-                    QueryResult::Value(SemanticQueryOutput { value, provenance }) => {
-                        (value, provenance.fact_status)
-                    }
+                    QueryResult::Value(SemanticQueryOutput {
+                        value, provenance, ..
+                    }) => (value, provenance.fact_status),
                     _ if !path.is_empty() => {
                         let joined: Arc<str> =
                             Arc::from(format!("{}.{}", value_root.name, path[0]));
@@ -523,9 +523,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             rest,
                             context,
                         )) {
-                            QueryResult::Value(SemanticQueryOutput { value, provenance }) => {
-                                (value, provenance.fact_status)
-                            }
+                            QueryResult::Value(SemanticQueryOutput {
+                                value, provenance, ..
+                            }) => (value, provenance.fact_status),
                             _ => {
                                 return ReferenceProjectionPlan::Ready(
                                     self.opaque(QueryError::Miss),

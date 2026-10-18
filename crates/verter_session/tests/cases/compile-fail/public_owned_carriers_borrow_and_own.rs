@@ -6,7 +6,9 @@
 //! them. Origin reads, display and the canonical union builder keyed by an
 //! ordinal stay callable: they answer only inside a construction lane the
 //! caller holds, and a dispatcher merges a macro spread formula in its own
-//! lane.
+//! lane. A dispatcher's query output borrows nothing from the dispatcher: it
+//! is kept, cloned and read after the dispatcher is gone, and a builder that
+//! composes construction ordinals opens its own explicit owner.
 
 use verter_session_query::flow::policy::NullabilityPolicy;
 use verter_type_engine::project_semantic_dispatch::canonical_algebra;
@@ -16,10 +18,11 @@ use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
 use verter_type_engine::resolver_core::ResolverCapabilities;
 use verter_type_engine::semantic_query::{
     display, CacheRead, DisplayNeeds, ObjectProjectionFormula, QueryError, QueryResult,
-    SemanticNodeData, SemanticNodeId, SemanticQueryValue, SurfaceEntry,
+    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
+    SemanticQueryValue, SurfaceEntry,
 };
 use verter_type_engine::semantic_query_memo::node_data_lease::{NodeDataLease, SurfaceLease};
-use verter_type_engine::semantic_query_memo::node_roots::NodeRoot;
+use verter_type_engine::semantic_query_memo::node_roots::{NodeRoot, NodeRootScope};
 use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 use verter_type_engine::signature_kernel::SignatureSetValue;
 
@@ -118,6 +121,29 @@ fn spread_through_a_dispatcher<C: ResolverCapabilities>(
 
 fn keep_error(error: &QueryError) -> QueryError {
     error.clone()
+}
+
+fn keep_output_past_its_dispatcher<C: ResolverCapabilities>(
+    dispatch: ProjectSemanticDispatch<'_, C>,
+    key: SemanticQueryKey,
+) -> Result<Option<SemanticQueryOutput<SemanticNodeId>>, QueryError> {
+    let QueryResult::Value(output) = dispatch.execute_type_node(key) else {
+        return Ok(None);
+    };
+    drop(dispatch);
+    let kept = output.clone();
+    drop(output);
+    let _ = kept.node(kept.value)?.read()?;
+    Ok(Some(kept))
+}
+
+fn build_under_an_explicit_owner<C: ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
+    error: QueryError,
+) -> Result<(NodeRootScope, NodeRoot), QueryError> {
+    let builder = dispatch.enter_construction_scope();
+    let root = dispatch.graph().root_in_scope(dispatch.opaque(error))?;
+    Ok((builder, root))
 }
 
 fn main() {}

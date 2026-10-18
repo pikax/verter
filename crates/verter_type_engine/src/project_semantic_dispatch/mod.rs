@@ -549,16 +549,7 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// finishing as itself ([`Self::admit_self_evaluation`]): one step under
     /// the evaluation's own identity, a pure function of that identity, so
     /// every admission of it shares one receipt.
-    self_evaluation_receipts: std::cell::RefCell<
-        rustc_hash::FxHashMap<
-            (
-                SemanticNodeId,
-                crate::semantic_query::ProjectionReductionContext,
-                evaluate::DeferredEvaluationDemand,
-            ),
-            Arc<cost_receipt::DemandCostReceipt>,
-        >,
-    >,
+    self_evaluation_receipts: SelfEvaluationReceipts,
     /// The facts the root frame of the running drive traced soundly, left
     /// by its completion for the drive's entry to seal a refusal on.
     driven_root_traced: std::cell::RefCell<Option<TracedFacts>>,
@@ -567,14 +558,68 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// Emptied at each walk's entry, so it never outlives the hold the
     /// walk's caller keeps on the binder.
     substitution_binder: std::cell::RefCell<Option<(SemanticNodeId, substitute::BinderKind)>>,
-    /// The dispatch's share of its graph's construction owner on this
-    /// thread: every ordinal a live dispatcher of the graph interns or reads
-    /// is owned until the last of them drops, so a producer reading a
-    /// construction ordinal after a nested query returns still holds it, and
-    /// dispatchers may be interleaved and dropped in any order. Declared
+    /// How many of this dispatcher's operations are open on its thread
+    /// ([`DispatchOperation`]). When the outermost one ends with no
+    /// construction owner of the graph left open, what the dispatcher held
+    /// for it is released with the rest of the operation's attachments.
+    operation_depth: std::cell::Cell<u32>,
+    /// The dispatch's share of its graph's construction lane on this
+    /// thread: the authority to read and root the graph's construction
+    /// ordinals while a dispatcher of it lives. The lane owns nothing: each
+    /// operation owns its intermediates and releases them when it ends, and
+    /// a result outlives its operation only through the owning carrier it
+    /// is delivered in (or an explicit builder owner the caller holds).
+    /// Dispatchers may be interleaved and dropped in any order. Declared
     /// last so it closes after every other field.
-    _construction: crate::semantic_query_memo::node_roots::DispatchConstructionScope,
+    _construction: crate::semantic_query_memo::node_roots::DispatchConstructionLane,
 }
+
+/// One operation of a dispatcher: a query execution or a root connected
+/// demand. The outermost operation entered with no construction owner of the
+/// graph open on its thread opens its own, which owns everything the
+/// operation constructs and every delivery its nested reads hand up. When
+/// the outermost operation ends with no owner of the graph left open, those
+/// are released together with the receipts its demand paid and the
+/// self-evaluation receipts it admitted, each of which roots the operands it
+/// names, so the dispatcher holds nothing past its operations but the
+/// results it kept for replay, each under a retention charge like any other
+/// cache. What survives is what the returned carrier owns, what an explicit
+/// builder owner the caller holds keeps, or what a charged cache retains.
+pub(crate) struct DispatchOperation<'g> {
+    depth: &'g std::cell::Cell<u32>,
+    self_evaluation_receipts: &'g SelfEvaluationReceipts,
+    demand: &'g connected_demand::ConnectedDemandLedger<'g>,
+    arena: &'g Arc<crate::semantic_query_memo::arena::NodeArenaCore>,
+    owner: Option<crate::semantic_query_memo::node_roots::NodeRootScope>,
+}
+
+impl Drop for DispatchOperation<'_> {
+    fn drop(&mut self) {
+        drop(self.owner.take());
+        let depth = self.depth.get() - 1;
+        self.depth.set(depth);
+        if depth == 0
+            && !crate::semantic_query_memo::node_roots::NodeRootScope::holds_owner(self.arena)
+        {
+            let receipts = std::mem::take(&mut *self.self_evaluation_receipts.borrow_mut());
+            drop(receipts);
+            self.demand.release_paid();
+        }
+    }
+}
+
+/// The receipt of each root evaluation a dispatcher admitted as finishing
+/// as itself ([`ProjectSemanticDispatch::admit_self_evaluation`]).
+type SelfEvaluationReceipts = std::cell::RefCell<
+    rustc_hash::FxHashMap<
+        (
+            SemanticNodeId,
+            crate::semantic_query::ProjectionReductionContext,
+            evaluate::DeferredEvaluationDemand,
+        ),
+        Arc<cost_receipt::DemandCostReceipt>,
+    >,
+>;
 
 /// One result a dispatcher's build published ([`ProjectSemanticDispatch`]'s
 /// `published_results`).
@@ -584,6 +629,8 @@ pub(super) struct PublishedResult {
     carrier: verter_session_query::facts::fact_cache::ReadSetSignature,
     /// The workspace's edit clocks the build computed under.
     published_at: WorkspaceEdit,
+    /// The entry's reservation on the process retention account.
+    _retention: verter_session_query::retention::RetentionCharge,
 }
 
 /// The clocks every workspace edit advances: content, source environment
@@ -877,7 +924,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             binding.graph = graph;
         }
         let binding_graph_scope =
-            crate::semantic_query_memo::node_roots::DispatchConstructionScope::enter(
+            crate::semantic_query_memo::node_roots::DispatchConstructionLane::enter(
                 binding.construction.arena(),
             );
         Self {
@@ -917,7 +964,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self_evaluation_receipts: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             driven_root_traced: std::cell::RefCell::new(None),
             substitution_binder: std::cell::RefCell::new(None),
+            operation_depth: std::cell::Cell::new(0),
             _construction: binding_graph_scope,
+        }
+    }
+
+    /// Enter one operation of this dispatcher ([`DispatchOperation`]),
+    /// opening its construction owner when `own` and none is open on this
+    /// thread.
+    pub(crate) fn enter_operation(&self, own: bool) -> DispatchOperation<'_> {
+        self.operation_depth.set(self.operation_depth.get() + 1);
+        let arena = self.binding.construction.arena();
+        let owner = (own
+            && !crate::semantic_query_memo::node_roots::NodeRootScope::holds_owner(arena))
+        .then(|| self.binding.construction.enter_scope());
+        DispatchOperation {
+            depth: &self.operation_depth,
+            self_evaluation_receipts: &self.self_evaluation_receipts,
+            demand: &self.connected_demand,
+            arena,
+            owner,
         }
     }
 
@@ -947,6 +1013,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self.connected_demand
     }
 
+    /// Enter a connected demand. A root demand is one dispatcher
+    /// operation: entered with no construction owner open on its thread, it
+    /// opens its own, so everything the operation constructs or reads is
+    /// released when it ends — the dispatcher's lane keeps nothing — and
+    /// what outlives it is what its returned carrier owns, or what an
+    /// explicit builder owner the caller holds keeps.
     pub fn enter_connected_demand(
         &self,
         query_boundary: bool,
@@ -954,7 +1026,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         connected_demand::ConnectedDemandGuard<'_>,
         Option<crate::semantic_query::PartialReasonSet>,
     ) {
-        self.connected_demand.enter(query_boundary)
+        let (mut guard, trip) = self.connected_demand.enter(query_boundary);
+        if guard.is_root() {
+            guard.own_operation(self.enter_operation(true));
+        }
+        (guard, trip)
     }
 
     /// Whether the connected-demand ledger has ALREADY tripped on this
@@ -1408,6 +1484,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// landed while it ran (or after, before this call) moved the clocks
     /// past that sample, so the result is never served after it. Only a
     /// priced read is kept: a result is served only with its receipt.
+    ///
+    /// The kept table is a cache the dispatcher owns past its operations,
+    /// so each entry holds a retention charge on the process account like
+    /// every other cache: a refused reservation keeps nothing, and the
+    /// result's delivery stays its only owner.
     pub(super) fn keep_published(
         &self,
         key: &SemanticQueryKey,
@@ -1418,6 +1499,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if read.receipt.priced().is_none() {
             return;
         }
+        let bytes = std::mem::size_of::<SemanticQueryKey>()
+            + std::mem::size_of::<PublishedResult>()
+            + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
+            + read.walker_diagnostics.len()
+                * std::mem::size_of::<crate::project_semantic_dispatch::walk::ShallowDiagnostic>();
+        let verter_session_query::retention::RetentionAdmission::Admitted(retention) =
+            self.graph().retention_account().reserve(
+                verter_session_query::retention::ChargeClass::Retained,
+                bytes,
+            )
+        else {
+            return;
+        };
         let published_at = computed_at;
         self.published_results.borrow_mut().insert(
             key.clone(),
@@ -1425,6 +1519,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 read: read.clone(),
                 carrier,
                 published_at,
+                _retention: retention,
             },
         );
     }
@@ -3826,6 +3921,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // funnel here, so this scope's inclusive time and heap traffic cover
         // every query-time type resolution in the request.
         verter_audit::attribute_scope!(SemanticDispatch);
+        // The execution is one operation of this dispatcher, and its own
+        // construction scope is the operation's owner.
+        let _operation = self.enter_operation(false);
         let _node_scope = self.graph().enter_node_root_scope();
         let _validity = crate::request_context::ExecutionValidityScope::enter();
         #[cfg(feature = "test-support")]
@@ -5112,11 +5210,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> SemanticQueryApi
             #[cfg(any(test, feature = "test-support"))]
             relation::record_redischarge_execute_visit_for_tests();
             let relate = crate::semantic_query::RelateMemoKey::from_query_key(&key);
-            return match self.execute_relate_redischarge_from_api(relate) {
-                QueryResult::Value(value) => QueryResult::Value(SemanticQueryOutput {
+            let _operation = self.enter_operation(true);
+            let result = self.execute_relate_redischarge_from_api(relate);
+            let delivery = self
+                .graph()
+                .lease_delivery(&result, &[])
+                .expect("relation delivery operands are live");
+            return match result {
+                QueryResult::Value(value) => QueryResult::Value(SemanticQueryOutput::delivered(
                     value,
-                    provenance: ResultProvenance::clean(),
-                }),
+                    ResultProvenance::clean(),
+                    delivery,
+                )),
                 QueryResult::Recursive(node) => QueryResult::Recursive(node),
                 QueryResult::Error(error) => QueryResult::Error(error),
             };
@@ -5137,22 +5242,27 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> SemanticQueryApi
         // payloads reach the wrap; its undecided judgements surface
         // `Error(Miss)`. Boundary-local taint is clean; the producer's
         // availability and causes still travel in the wrapper's provenance.
+        //
+        // The output carries the read's delivery: the operation owns nothing
+        // past its end, so the returned value's operands are owned by the
+        // output alone.
         let read = self.execute_via_cold_build_helper(key);
         let fact_status = read.fact_status;
         match read.value {
-            QueryResult::Value(value) => QueryResult::Value(SemanticQueryOutput {
+            QueryResult::Value(value) => QueryResult::Value(SemanticQueryOutput::delivered(
                 value,
-                provenance: ResultProvenance {
+                ResultProvenance {
                     taint: crate::semantic_query::ResultTaint::Clean,
                     fact_status,
                 },
-            }),
+                read.lease,
+            )),
             QueryResult::Recursive(n) => QueryResult::Recursive(n),
             QueryResult::Error(e) => QueryResult::Error(e),
         }
     }
 
-    /// Consumer entry point that returns a bare [`SemanticNodeId`].
+    /// Consumer entry point that returns the type node in its owning output.
     ///
     /// The trait default narrows the value-only `execute`, dropping the
     /// `CacheRead` partiality / non-cacheability metadata of the
@@ -5197,13 +5307,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> SemanticQueryApi
                     actual: SemanticQueryValueTag::OverloadSet,
                 })
             }
-            QueryResult::Value(node) => QueryResult::Value(SemanticQueryOutput {
-                value: node,
-                provenance: ResultProvenance {
+            QueryResult::Value(node) => QueryResult::Value(SemanticQueryOutput::delivered(
+                node,
+                ResultProvenance {
                     taint: crate::semantic_query::ResultTaint::Clean,
                     fact_status: read.fact_status,
                 },
-            }),
+                read.lease,
+            )),
             QueryResult::Recursive(n) => QueryResult::Recursive(n),
             QueryResult::Error(e) => QueryResult::Error(e),
         }
