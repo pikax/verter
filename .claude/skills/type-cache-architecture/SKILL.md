@@ -216,9 +216,13 @@ The cell's `Nested` box and child-registration slice are included in its
 charge. Cache holds additionally charge their backing slice for exactly
 the holds' lifetime (`HeldHandles`, also used by `RetentionCharge::holding`).
 Dropping the cache holds releases that bookkeeping while surviving cells
-return to `Pinned`. An interned dependency rail and its interner entry
-share a `BlockShare`: the cell block stays charged until both strong rail
-owners and the interner's weak entry let go, in either order.
+return to `Pinned`. A weak view (`WeakOwned`) exists only for a cell built
+for one (`Owned::new_with_shared_block`, e.g. an interned dependency rail):
+the cell and every view share a `BlockShare`, so the block stays charged
+until both its strong owners and every view let go, in either order;
+`Owned::downgrade` of any other cell is `None`. Owned strings are named
+without a view by `OwnedStr::identity`, a never-reused stamp that keeps
+nothing allocated (the arena's thread-local scope digest uses it).
 
 **Shared registered allocations** (`verter_retention/src/shared.rs`). An allocation
 cache owners alias without handing it out — a build's fact carrier shared

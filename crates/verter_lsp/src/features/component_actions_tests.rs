@@ -61,10 +61,12 @@ fn make_prop(name: &str) -> TemplatePropUsage {
 /// Macros (with their edit anchors) minted by the REAL analyzer over `source`.
 fn producer_backed_macros(
     source: &str,
-) -> std::sync::Arc<Vec<verter_session_query::analysis::types::AnalyzedMacro>> {
-    crate::features::macro_fixture::analyze_sfc_script(source)
-        .macros
-        .into()
+) -> verter_session_query::analysis::file_analysis::SharedList<
+    verter_session_query::analysis::types::AnalyzedMacro,
+> {
+    verter_session_query::analysis::file_analysis::SharedList::new(
+        crate::features::macro_fixture::analyze_sfc_script(source).macros,
+    )
 }
 
 fn make_child_context(source: &str, analysis: FileAnalysisSnapshot) -> ChildComponentContext {

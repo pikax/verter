@@ -563,6 +563,13 @@ impl<T: HeapSize + Send + Sync + 'static + Default> Default for OwnedValue<T> {
     }
 }
 
+impl<T: HeapSize + Send + Sync + 'static + serde::Serialize> serde::Serialize for OwnedValue<T> {
+    /// Serializes as its value.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        (**self).serialize(serializer)
+    }
+}
+
 impl<T: HeapSize + Send + Sync + 'static> HeapSize for OwnedValue<T> {
     /// Charged by its own cell.
     fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
