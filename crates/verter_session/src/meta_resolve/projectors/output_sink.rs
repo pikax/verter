@@ -755,8 +755,12 @@ pub(crate) fn surface_member_to_expanded_field(
     // object surface — that would re-open the breadth leak.
     let exactness = {
         let dispatch = query_engine.dispatch;
-        let resolved_value =
-            resolve_member_value_for_classification(dispatch, member.value, carrier_mode);
+        let resolved_value = resolve_member_value_for_classification(
+            dispatch,
+            query_engine.builder(),
+            member.value,
+            carrier_mode,
+        );
         classify_node(dispatch, resolved_value)
     };
     // Peek the per-member graph-native materialiser cache BEFORE any
@@ -959,6 +963,7 @@ pub(crate) fn surface_member_to_expanded_field(
 /// revalidation surface as the projector's other dispatches.
 fn resolve_member_value_for_classification(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    builder: &verter_type_engine::semantic_query_memo::node_roots::NodeRootScope,
     value: SemanticNodeId,
     carrier_mode: bool,
 ) -> SemanticNodeId {
@@ -972,12 +977,15 @@ fn resolve_member_value_for_classification(
     // the alias unwrap below then proceeds on the resolved `DeclRef`.
     let value = match dispatch.graph().read_in_scope(value).as_deref() {
         Some(data) if data.bare_ref_head().is_some() || data.import_type_head().is_some() => {
-            dispatch.resolve_carrier_subject_node(
-                value,
-                verter_type_engine::semantic_query::ProjectionReductionContext::published(
-                    ProjectionMode::Navigate,
-                ),
-            )
+            dispatch
+                .owning()
+                .resolve_carrier_subject_node(
+                    value,
+                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                        ProjectionMode::Navigate,
+                    ),
+                )
+                .into_value_in(builder)
         }
         _ => value,
     };
@@ -1239,13 +1247,16 @@ fn materialize_output_source(
                 verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                     ProjectionMode::Navigate,
                 );
-            let hot = dispatch
-                .raise_semantic_type_source_to_hot_strict(
-                    other,
-                    scope_canonical_id,
-                    scope_owner,
-                    transit_ctx,
-                )
+            // The raised carrier owns the node while the cap materialises it.
+            let raised = dispatch.owning().raise_semantic_type_source_to_hot_strict(
+                other,
+                scope_canonical_id,
+                scope_owner,
+                transit_ctx,
+            );
+            let hot = raised
+                .value()
+                .clone()
                 .map_err(|failure| match failure {
                     verter_type_engine::project_semantic_dispatch::semantic_source::StrictSourceRaiseFailure::InteriorMiss(path) => {
                         crate::meta_resolve::ComponentMetaOutputFailure::InteriorSourceMiss { path }

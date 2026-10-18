@@ -466,6 +466,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// A finite source certificate can prove this value independently of the
     /// whole frame's runtime capture contract; inherited read failures and
     /// execution aborts still prevent an exact answer.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn execute_flow_return_value_fact(
         &self,
         key: crate::semantic_query::FlowReturnKey,

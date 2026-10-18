@@ -122,6 +122,7 @@ impl ComponentMetaQueryEngine<'_> {
     ) -> Option<ExpandedObjectShape> {
         let dispatch = self.dispatch;
         let raised = dispatch
+            .owning()
             .raise_semantic_type_source_to_hot(
                 tag_source,
                 SourceRaiseContext {
@@ -133,6 +134,7 @@ impl ComponentMetaQueryEngine<'_> {
                     interior_failures: None,
                 },
             )
+            .into_value_in(self.builder())
             .at_optional_boundary()?;
         let view = dispatch.resolve_typeinfo_surface(
             raised.node(),

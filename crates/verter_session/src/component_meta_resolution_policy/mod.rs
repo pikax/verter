@@ -279,6 +279,7 @@ fn build_policy_macro_role_identities(
     snapshot: &FileAnalysisSnapshot,
     macro_kinds: &[AnalyzedMacroKind],
 ) -> FxHashSet<ResolvedRootIdentity> {
+    let builder = dispatch.enter_construction_scope();
     let mut identities = FxHashSet::default();
     let mut visited_names: FxHashSet<String> = FxHashSet::default();
 
@@ -312,7 +313,7 @@ fn build_policy_macro_role_identities(
         // (no descent into function inner types or IndexedAccess).
         if let Some(locator) = mac.parsed_type_argument.as_ref() {
             let payload = dispatch
-                .raise_semantic_type_source_to_hot(
+                .owning().raise_semantic_type_source_to_hot(
                     &verter_type_expr::facts::SemanticTypeSource::Authored(
                         verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(
                             locator.clone(),
@@ -324,7 +325,7 @@ fn build_policy_macro_role_identities(
                         context: transit_ctx,
                         interior_failures: None,
                     },
-                )
+                ).into_value_in(&builder)
                 .at_optional_boundary();
             if let Some(hot) = payload {
                 harvest_role_bearing_refs_node(dispatch, hot.node(), |name| {
@@ -345,7 +346,7 @@ fn build_policy_macro_role_identities(
                 &mut visited_names,
             );
             let shape_hot = dispatch
-                .raise_semantic_type_source_to_hot(
+                .owning().raise_semantic_type_source_to_hot(
                     &verter_type_expr::facts::SemanticTypeSource::Synthesized(
                         resolved_local.shape.clone(),
                     ),
@@ -355,7 +356,7 @@ fn build_policy_macro_role_identities(
                         context: transit_ctx,
                         interior_failures: None,
                     },
-                )
+                ).into_value_in(&builder)
                 .at_optional_boundary();
             if let Some(hot) = shape_hot {
                 harvest_role_bearing_refs_node(dispatch, hot.node(), |name| {
@@ -397,7 +398,7 @@ fn build_policy_macro_role_identities(
             ),
         );
         let Some(hot) = dispatch
-            .raise_semantic_type_source_to_hot(
+            .owning().raise_semantic_type_source_to_hot(
                 &body_source,
                 verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                     scope_canonical_id: owner_canonical,
@@ -405,7 +406,7 @@ fn build_policy_macro_role_identities(
                     context: transit_ctx,
                     interior_failures: None,
                 },
-            )
+            ).into_value_in(&builder)
             .at_optional_boundary()
         else {
             continue;

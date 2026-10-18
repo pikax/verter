@@ -1024,11 +1024,18 @@ when the lease names no arena): a closing owner hands its deliveries to
 another open owner of the arena, so a delivery lives until no owner of its
 arena is open on the thread whichever owner holds it, and holding it at the
 oldest spares the hand-on at every nested scope's close. A closing owner that
-does hold deliveries merges the smaller holding into the larger.
+does hold deliveries merges the smaller holding into the larger. A
+dispatcher's construction lane is never an owner: interns, roots and
+deliveries skip it, so the outermost operation's owner releases them when the
+operation ends and a result outlives it only through the carrier it is
+delivered in (`SemanticQueryOutput`, `CacheRead`) or an explicit builder owner.
 
 Kept results: a dispatcher keeps the results its builds published
 (`keep_published`: admitted results, and request-local completions) under the
-workspace edit clocks they were computed at. A later read first performs the
+workspace edit clocks they were computed at. The kept table is a cache the
+dispatcher owns past its operations, so every entry holds a `Retained` charge
+on the process retention account: a refused reservation keeps nothing, and
+the result's delivery stays its only owner. A later read first performs the
 family memo's validated lookup. After a miss, `own_published_read` can answer
 from a kept result before a producer claim is installed, provided its edit
 clocks are current and its nodes and kernel epochs remain live. The read

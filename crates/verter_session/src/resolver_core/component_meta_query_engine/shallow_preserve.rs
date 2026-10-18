@@ -109,12 +109,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .collect();
         let dispatch = self.dispatch;
         let Some(member_node) = dispatch
-            .raise_authored_locator_to_hot(
+            .owning().raise_authored_locator_to_hot(
                 &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(member.ty.clone()),
                 verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                     verter_type_engine::semantic_query::ProjectionMode::Navigate,
                 ),
-            )
+            ).into_value_in(self.builder())
             .at_optional_boundary()
         else {
             return true;
@@ -254,14 +254,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         .collect();
                     let dispatch = self.dispatch;
                     let member_node = dispatch
-                        .raise_authored_locator_to_hot(
+                        .owning().raise_authored_locator_to_hot(
                             &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
                                 member.ty.clone(),
                             ),
                             verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                                 verter_type_engine::semantic_query::ProjectionMode::Navigate,
                             ),
-                        )
+                        ).into_value_in(self.builder())
                         .at_optional_boundary()?;
                     if node_references_type_param_names(
                         self.dispatch,
@@ -313,14 +313,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             if prepared.type_parameters.is_empty() {
                                 let body_slot = prepared.body_facts.body_slot.clone();
                                 let dispatch = self.dispatch;
-                                if let Some(body_node) = dispatch.raise_authored_locator_to_hot(
+                                if let Some(body_node) = dispatch.owning().raise_authored_locator_to_hot(
                                     &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
                                         body_slot.clone(),
                                     ),
                                     verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                                         verter_type_engine::semantic_query::ProjectionMode::Navigate,
                                     ),
-                                ).at_optional_boundary() {
+                                ).into_value_in(self.builder()).at_optional_boundary() {
                                     let exactness =
                                         match crate::meta_resolve::exactness::classify_node(
                                             dispatch,
@@ -418,12 +418,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let member = prepared.member_index.get(&field_key)?;
         let dispatch = self.dispatch;
         dispatch
-            .raise_authored_locator_to_hot(
+            .owning().raise_authored_locator_to_hot(
                 &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(member.ty.clone()),
                 verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                     verter_type_engine::semantic_query::ProjectionMode::Navigate,
                 ),
-            )
+            ).into_value_in(self.builder())
             .at_optional_boundary()
     }
 
@@ -618,14 +618,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             .and_then(|body_slot| {
                                 let dispatch =
                                     self.dispatch;
-                                dispatch.raise_authored_locator_to_hot(
+                                dispatch.owning().raise_authored_locator_to_hot(
                                     &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
                                         body_slot,
                                     ),
                                     verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                                         verter_type_engine::semantic_query::ProjectionMode::Navigate,
                                     ),
-                                ).at_optional_boundary()
+                                ).into_value_in(self.builder()).at_optional_boundary()
                             });
                         let Some(body) = body else {
                             return Reach::Parts(Vec::new());

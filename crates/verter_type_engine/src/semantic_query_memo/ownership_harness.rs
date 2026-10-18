@@ -230,15 +230,18 @@ mod tests {
     #[test]
     fn counted_identity_records_root_in_their_issuing_graph_not_the_newest_dispatcher() {
         use crate::semantic_query::{ContextualTypingKey, FlowNarrowingKey, InferableParamSetId};
-        use crate::semantic_query_memo::node_roots::DispatchConstructionScope;
+        use crate::semantic_query_memo::node_roots::DispatchConstructionLane;
         use std::sync::Arc;
 
         let issuing = CountedOwnershipHarness::new();
         let newest = CountedOwnershipHarness::new();
-        let issuing_dispatcher = DispatchConstructionScope::enter(&issuing.graph.arena.core);
-        // A second graph's dispatcher opened later is the thread's newest
-        // owner, and allocates the same ordinal the issuing graph does.
-        let newest_dispatcher = DispatchConstructionScope::enter(&newest.graph.arena.core);
+        let issuing_dispatcher = DispatchConstructionLane::enter(&issuing.graph.arena.core);
+        let issuing_operation = issuing.graph.enter_node_root_scope();
+        // A second graph's dispatcher and operation opened later are the
+        // thread's newest owner, and allocate the same ordinal the issuing
+        // graph does.
+        let newest_dispatcher = DispatchConstructionLane::enter(&newest.graph.arena.core);
+        let newest_operation = newest.graph.enter_node_root_scope();
         let node = issuing
             .graph
             .intern_node(SemanticNodeData::Literal(LiteralValue::String(
@@ -257,8 +260,8 @@ mod tests {
         let contextual = ContextualTypingKey::new(graph, set());
         let params = InferableParamSetId::new(graph, set());
         let recipe = IntersectionInputRef::from_operands(graph, &[node, node, node]);
-        drop(newest_dispatcher);
-        drop(issuing_dispatcher);
+        drop((newest_operation, newest_dispatcher));
+        drop((issuing_operation, issuing_dispatcher));
         assert_eq!(
             newest.live_nodes(),
             0,
@@ -276,36 +279,58 @@ mod tests {
     }
 
     #[test]
-    fn a_dispatcher_owner_keeps_each_delivery_once_however_often_it_is_read() {
+    fn a_dispatcher_lane_keeps_no_delivery_and_its_operation_keeps_each_once() {
         use crate::semantic_query::{QueryResult, SemanticQueryValue};
-        use crate::semantic_query_memo::node_roots::{DispatchConstructionScope, NodeRootScope};
+        use crate::semantic_query_memo::node_roots::{DispatchConstructionLane, NodeRootScope};
 
         let harness = CountedOwnershipHarness::new();
-        let dispatcher = DispatchConstructionScope::enter(&harness.graph.arena.core);
-        let node = harness
-            .graph
-            .intern_node(SemanticNodeData::Literal(LiteralValue::String(
-                "delivered".into(),
-            )));
-        let read = QueryResult::Value(SemanticQueryValue::TypeNode(node));
-        let lease = harness.graph.lease_delivery(&read, &[]).unwrap();
-        for _ in 0..64 {
-            drop(lease.clone());
-        }
-        {
-            let _build = harness.graph.enter_node_root_scope();
-            drop(lease.clone());
-        }
+        let dispatcher = DispatchConstructionLane::enter(&harness.graph.arena.core);
+        let lease = {
+            let _operation = harness.graph.enter_node_root_scope();
+            let node = harness
+                .graph
+                .intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                    "delivered".into(),
+                )));
+            let read = QueryResult::Value(SemanticQueryValue::TypeNode(node));
+            let lease = harness.graph.lease_delivery(&read, &[]).unwrap();
+            for _ in 0..64 {
+                drop(lease.clone());
+            }
+            {
+                let _build = harness.graph.enter_node_root_scope();
+                drop(lease.clone());
+            }
+            assert_eq!(
+                NodeRootScope::retained_deliveries_for_tests(),
+                1,
+                "repeated reads of one delivery are kept once, not once per read"
+            );
+            lease
+        };
         assert_eq!(
             NodeRootScope::retained_deliveries_for_tests(),
+            0,
+            "the dispatcher's lane keeps nothing once its operation ends"
+        );
+        assert_eq!(
+            harness.live_nodes(),
             1,
-            "repeated reads of one delivery are kept once, not once per read"
+            "the delivered lease owns its value"
+        );
+        drop(lease.clone());
+        assert_eq!(
+            NodeRootScope::retained_deliveries_for_tests(),
+            0,
+            "a clone outside any operation is not captured by the lane"
         );
         drop(lease);
-        assert_eq!(harness.live_nodes(), 1, "the dispatcher still owns it");
+        assert_eq!(
+            harness.live_nodes(),
+            0,
+            "the final holder releases it while the dispatcher is still alive"
+        );
         drop(dispatcher);
-        assert_eq!(NodeRootScope::retained_deliveries_for_tests(), 0);
-        assert_eq!(harness.live_nodes(), 0);
     }
 
     #[test]

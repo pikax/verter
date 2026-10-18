@@ -182,42 +182,44 @@ struct PropertySpreadChain {
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
-    pub fn project_object_spread_for_consumer(
-        &self,
-        program: SemanticNodeId,
-        selector: ObjectProjectionSelector,
-        projection_reduction: crate::semantic_query::ProjectionReductionContext,
-    ) -> QueryResult<ObjectProjectionFormula> {
-        let canonical = self
-            .graph()
-            .node_scope(program)
-            .and_then(|scope| scope.canonical_file())
-            .unwrap_or_else(|| Arc::from(""));
-        let policy = if self.relation_strict_config().exact_optional_property_types {
-            ExactOptionalPropertyPolicy::Enabled
-        } else {
-            ExactOptionalPropertyPolicy::Disabled
-        };
-        let context = self.object_spread_projection_context_for(
-            &canonical,
-            projection_reduction,
-            crate::semantic_query::SubstitutionCanonicalHash::empty(),
-            policy,
-        );
-        match self
-            .execute_via_cold_build_helper(SemanticQueryKey::ProjectObjectSpread {
-                program,
-                selector,
-                context,
-            })
-            .value
-        {
-            QueryResult::Value(SemanticQueryValue::ObjectProjection(formula)) => {
-                QueryResult::Value(formula)
+    construction_ordinal_seam! {
+        fn project_object_spread_for_consumer(
+            &self,
+            program: SemanticNodeId,
+            selector: ObjectProjectionSelector,
+            projection_reduction: crate::semantic_query::ProjectionReductionContext,
+        ) -> QueryResult<ObjectProjectionFormula> {
+            let canonical = self
+                .graph()
+                .node_scope(program)
+                .and_then(|scope| scope.canonical_file())
+                .unwrap_or_else(|| Arc::from(""));
+            let policy = if self.relation_strict_config().exact_optional_property_types {
+                ExactOptionalPropertyPolicy::Enabled
+            } else {
+                ExactOptionalPropertyPolicy::Disabled
+            };
+            let context = self.object_spread_projection_context_for(
+                &canonical,
+                projection_reduction,
+                crate::semantic_query::SubstitutionCanonicalHash::empty(),
+                policy,
+            );
+            match self
+                .execute_via_cold_build_helper(SemanticQueryKey::ProjectObjectSpread {
+                    program,
+                    selector,
+                    context,
+                })
+                .value
+            {
+                QueryResult::Value(SemanticQueryValue::ObjectProjection(formula)) => {
+                    QueryResult::Value(formula)
+                }
+                QueryResult::Value(_) => QueryResult::Error(QueryError::Miss),
+                QueryResult::Error(error) => QueryResult::Error(error),
+                QueryResult::Recursive(node) => QueryResult::Recursive(node),
             }
-            QueryResult::Value(_) => QueryResult::Error(QueryError::Miss),
-            QueryResult::Error(error) => QueryResult::Error(error),
-            QueryResult::Recursive(node) => QueryResult::Recursive(node),
         }
     }
 

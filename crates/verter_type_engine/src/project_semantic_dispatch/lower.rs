@@ -248,80 +248,84 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .cloned()
     }
 
-    /// The WIDENED structural inhabitant of a nominal (`unique symbol`)
-    /// carrier — the bare `symbol` primitive — or `None` when `node` carries
-    /// no nominal identity.
-    ///
-    /// A nominal carrier is TERMINAL under carrier resolution: it
-    /// self-resolves, because resolving its head would project the
-    /// annotation down to the shared `symbol` primitive and erase the
-    /// declaring identity that IS the type. Every consumer that asks a
-    /// NOMINAL question (which declaration, which relation) reads the
-    /// carrier directly and must never widen.
-    ///
-    /// A consumer that asks a STRUCTURAL question — which runtime
-    /// constructor a prop emits, which callable role a member plays, which
-    /// member surface a path hop reads — has no nominal question to ask, and
-    /// its `resolved == node` rail means "this reference did not resolve".
-    /// Reading a terminal carrier through that rail turns a program that
-    /// resolves fine into a missing dependency: a `unique symbol`-typed prop
-    /// would lose its `Symbol` runtime constructor and a `unique
-    /// symbol`-typed member would publish as an unresolved role. Those
-    /// consumers widen through THIS one helper instead, so the structural
-    /// answer stays the one the widened primitive always gave.
-    pub fn widened_nominal_typeof(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
-        self.graph()
-            .node_data(node)?
-            .typeof_nominal_identity()
-            .is_some()
-            .then(|| {
-                self.graph().intern_node(SemanticNodeData::Primitive(
-                    crate::semantic_query::PrimitiveKind::Symbol,
-                ))
-            })
+    construction_ordinal_seam! {
+        /// The WIDENED structural inhabitant of a nominal (`unique symbol`)
+        /// carrier — the bare `symbol` primitive — or `None` when `node` carries
+        /// no nominal identity.
+        ///
+        /// A nominal carrier is TERMINAL under carrier resolution: it
+        /// self-resolves, because resolving its head would project the
+        /// annotation down to the shared `symbol` primitive and erase the
+        /// declaring identity that IS the type. Every consumer that asks a
+        /// NOMINAL question (which declaration, which relation) reads the
+        /// carrier directly and must never widen.
+        ///
+        /// A consumer that asks a STRUCTURAL question — which runtime
+        /// constructor a prop emits, which callable role a member plays, which
+        /// member surface a path hop reads — has no nominal question to ask, and
+        /// its `resolved == node` rail means "this reference did not resolve".
+        /// Reading a terminal carrier through that rail turns a program that
+        /// resolves fine into a missing dependency: a `unique symbol`-typed prop
+        /// would lose its `Symbol` runtime constructor and a `unique
+        /// symbol`-typed member would publish as an unresolved role. Those
+        /// consumers widen through THIS one helper instead, so the structural
+        /// answer stays the one the widened primitive always gave.
+        fn widened_nominal_typeof(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+            self.graph()
+                .node_data(node)?
+                .typeof_nominal_identity()
+                .is_some()
+                .then(|| {
+                    self.graph().intern_node(SemanticNodeData::Primitive(
+                        crate::semantic_query::PrimitiveKind::Symbol,
+                    ))
+                })
+        }
     }
 
-    /// The same widen applied at EVERY position of `node`'s subtree whose
-    /// nominal carrier is declared in `canonical` — the render-boundary
-    /// fail-close for a generated declaration surface that cannot name the
-    /// owner's own script-setup bindings.
-    ///
-    /// A nominal carrier renders its authored head (`typeof K`), and a
-    /// setup binding is not importable, so a surface that splices that text
-    /// would name an identifier it never declares. The ROOT position is not
-    /// the only one that can hold such a carrier: `{ inner: typeof K }`, a
-    /// union arm, and a signature return all reach the same render. Every
-    /// one of them widens to the `symbol` primitive — the honest structural
-    /// inhabitant, with no phantom reference and no fresh nominal identity —
-    /// through the one substitution route, so a carrier declared in ANOTHER
-    /// module keeps its precise spelling wherever it sits.
-    ///
-    /// The carriers come from the SAME walk that decides which reference
-    /// names a rendered surface must have in scope, so a carrier this misses
-    /// is one that walk cannot name either.
-    pub fn widen_owner_local_nominal_typeofs(
-        &self,
-        node: SemanticNodeId,
-        canonical: &str,
-    ) -> SemanticNodeId {
-        let mut carriers: Vec<SemanticNodeId> = Vec::new();
-        super::reference_carriers::collect_owner_local_nominal_carriers(
-            self,
-            node,
-            canonical,
-            &mut carriers,
-        );
-        if carriers.is_empty() {
-            return node;
+    construction_ordinal_seam! {
+        /// The same widen applied at EVERY position of `node`'s subtree whose
+        /// nominal carrier is declared in `canonical` — the render-boundary
+        /// fail-close for a generated declaration surface that cannot name the
+        /// owner's own script-setup bindings.
+        ///
+        /// A nominal carrier renders its authored head (`typeof K`), and a
+        /// setup binding is not importable, so a surface that splices that text
+        /// would name an identifier it never declares. The ROOT position is not
+        /// the only one that can hold such a carrier: `{ inner: typeof K }`, a
+        /// union arm, and a signature return all reach the same render. Every
+        /// one of them widens to the `symbol` primitive — the honest structural
+        /// inhabitant, with no phantom reference and no fresh nominal identity —
+        /// through the one substitution route, so a carrier declared in ANOTHER
+        /// module keeps its precise spelling wherever it sits.
+        ///
+        /// The carriers come from the SAME walk that decides which reference
+        /// names a rendered surface must have in scope, so a carrier this misses
+        /// is one that walk cannot name either.
+        fn widen_owner_local_nominal_typeofs(
+            &self,
+            node: SemanticNodeId,
+            canonical: &str,
+        ) -> SemanticNodeId {
+            let mut carriers: Vec<SemanticNodeId> = Vec::new();
+            super::reference_carriers::collect_owner_local_nominal_carriers(
+                self,
+                node,
+                canonical,
+                &mut carriers,
+            );
+            if carriers.is_empty() {
+                return node;
+            }
+            let widened = self.graph().intern_node(SemanticNodeData::Primitive(
+                crate::semantic_query::PrimitiveKind::Symbol,
+            ));
+            let mut result = node;
+            for carrier in carriers {
+                result = self.substitute_semantic_type_param(result, carrier, widened);
+            }
+            result
         }
-        let widened = self.graph().intern_node(SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::Symbol,
-        ));
-        let mut result = node;
-        for carrier in carriers {
-            result = self.substitute_semantic_type_param(result, carrier, widened);
-        }
-        result
     }
 
     /// Intern the terminal nominal `typeof` carrier for one declaration.
@@ -1022,34 +1026,36 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         )
     }
 
-    /// Locator-anchored eager lowering for an authored payload that has
-    /// already been re-borrowed and validated by its producer.
-    #[allow(clippy::too_many_arguments)]
-    pub fn shallow_lower_type_expr_with_context_at_locator(
-        &self,
-        expr: &TypeExpr,
-        locator: &verter_type_expr::locators::AuthoredBodyLocator,
-        env: &FxHashMap<String, SemanticNodeId>,
-        scope: &NodeScopeId,
-        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
-        scope_payload: Option<&DeclarationScopePayload>,
-        shadowing: &ScopeShadowing,
-        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
-        reduction_context: ProjectionReductionContext,
-    ) -> SemanticNodeId {
-        let infer_binders =
-            crate::semantic_query::InferBinderFactory::for_authored_locator(scope, expr, locator);
-        self.lower_type_expr_with_infer_factory(
-            &infer_binders,
-            expr,
-            env,
-            scope,
-            name_resolution,
-            scope_payload,
-            shadowing,
-            substitutions,
-            reduction_context,
-        )
+    construction_ordinal_seam! {
+        /// Locator-anchored eager lowering for an authored payload that has
+        /// already been re-borrowed and validated by its producer.
+        #[allow(clippy::too_many_arguments)]
+        fn shallow_lower_type_expr_with_context_at_locator(
+            &self,
+            expr: &TypeExpr,
+            locator: &verter_type_expr::locators::AuthoredBodyLocator,
+            env: &FxHashMap<String, SemanticNodeId>,
+            scope: &NodeScopeId,
+            name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+            scope_payload: Option<&DeclarationScopePayload>,
+            shadowing: &ScopeShadowing,
+            substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+            reduction_context: ProjectionReductionContext,
+        ) -> SemanticNodeId {
+            let infer_binders =
+                crate::semantic_query::InferBinderFactory::for_authored_locator(scope, expr, locator);
+            self.lower_type_expr_with_infer_factory(
+                &infer_binders,
+                expr,
+                env,
+                scope,
+                name_resolution,
+                scope_payload,
+                shadowing,
+                substitutions,
+                reduction_context,
+            )
+        }
     }
 
     /// Lower `expr` — the ONE eager lowering entry every arm recurses

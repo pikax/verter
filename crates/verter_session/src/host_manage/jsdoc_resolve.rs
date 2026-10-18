@@ -237,12 +237,14 @@ impl HostComponentMetaResolver<'_, ComponentMetaSemanticServices<'_, '_>> {
             type_arguments: std::sync::Arc::from(Vec::<verter_type_expr::TypeExpr>::new()),
         };
         let dispatch = self.engine.dispatch;
-        let Some(base) = dispatch.lower_type_expr_in_owner_scope_with_mode(
+        // The lowered carrier owns the base while its surface is read.
+        let lowered = dispatch.owning().lower_type_expr_in_owner_scope_with_mode(
             owner_canonical,
             owner,
             &root_ref,
             verter_type_engine::semantic_query::ProjectionMode::Navigate,
-        ) else {
+        );
+        let Some(base) = *lowered.value() else {
             return false;
         };
         let Some(view) = dispatch.resolve_typeinfo_surface(
@@ -409,16 +411,16 @@ impl crate::resolver_core::ComponentMetaResolverHost
     ) -> Option<bool> {
         let locator = mac.parsed_type_argument.as_ref()?;
         let dispatch = self.engine.dispatch;
-        let payload = dispatch
-            .raise_authored_locator_to_hot(
+        let raised = dispatch
+            .owning().raise_authored_locator_to_hot(
                 &verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(
                     absolutize_macro_payload_locator(locator, owner_canonical),
                 ),
                 verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                     verter_type_engine::semantic_query::ProjectionMode::Navigate,
                 ),
-            )
-            .at_optional_boundary()?;
+            );
+        let payload = raised.value().clone().at_optional_boundary()?;
         Some(node_has_direct_macro_reference(
             self.engine.dispatch,
             dispatch.graph(),

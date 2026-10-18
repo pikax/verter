@@ -126,18 +126,21 @@ pub(crate) fn slot_binding_targets_define_props_root(
         verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
             verter_type_engine::semantic_query::ProjectionMode::Navigate,
         );
-    let raised = field
-        .authored_evidence
+    // The raised carriers own their nodes for the whole walk below.
+    let authored_raised = field.authored_evidence.as_ref().map(|evidence| {
+        dispatch
+            .owning()
+            .raise_authored_locator_to_hot(evidence.source().locator(), transit_ctx)
+    });
+    let authored = authored_raised
         .as_ref()
-        .and_then(|evidence| {
-            dispatch
-                .raise_authored_locator_to_hot(evidence.source().locator(), transit_ctx)
-                .at_optional_boundary()
-        })
-        .or_else(|| {
-            dispatch
-                .raise_semantic_type_source_to_hot(
-                    field.authority.source()?,
+        .and_then(|raised| raised.value().clone().at_optional_boundary());
+    let resolved_raised = authored
+        .is_none()
+        .then(|| {
+            field.authority.source().map(|source| {
+                dispatch.owning().raise_semantic_type_source_to_hot(
+                    source,
                     verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                         scope_canonical_id: owner_canonical,
                         scope_owner: owner,
@@ -145,8 +148,14 @@ pub(crate) fn slot_binding_targets_define_props_root(
                         interior_failures: None,
                     },
                 )
-                .at_optional_boundary()
-        });
+            })
+        })
+        .flatten();
+    let raised = authored.or_else(|| {
+        resolved_raised
+            .as_ref()
+            .and_then(|raised| raised.value().clone().at_optional_boundary())
+    });
     let Some(raised) = raised else {
         return false;
     };

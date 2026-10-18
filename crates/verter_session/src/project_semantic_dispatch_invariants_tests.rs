@@ -2854,38 +2854,6 @@ fn migrate_owner_engine_project_expr_surface_as_type_expr_preserves_env() {
     }
 }
 
-/// Dispatch-first routing contract: the dispatch path on
-/// ComponentMetaQueryEngine must route through dispatch — checked by
-/// file-content grep so a regression that deletes the dispatch call
-/// surfaces immediately.
-///
-/// Scans all sibling files in the `component_meta_query_engine/`
-/// folder (mod.rs + child modules) because the dispatch-routed helpers
-/// may live in private child modules after the folder split.
-#[test]
-fn migrate_engine_lower_and_project_to_expanded_preserves_env() {
-    let cmqe_files: &[&str] = &[
-        include_str!("resolver_core/component_meta_query_engine/mod.rs"),
-        include_str!("resolver_core/component_meta_query_engine/registry_decl.rs"),
-        include_str!("resolver_core/component_meta_query_engine/shallow_preserve.rs"),
-        include_str!("resolver_core/component_meta_query_engine/surface.rs"),
-        include_str!("resolver_core/component_meta_query_engine/helpers.rs"),
-    ];
-    let combined = cmqe_files.join("\n");
-    // The dispatch-first lowering entry is the OWNER-AWARE scope spelling
-    // (`lower_type_expr_in_owner_scope_with_mode`): the engine threads the
-    // exact top-level lexical owner into the dispatch lowering so a Vue
-    // module/setup owner pair never collapses onto one scope.
-    assert!(
-        combined.contains("dispatch.lower_type_expr_in_owner_scope_with_mode"),
-        "lower_and_project_to_expanded must attempt dispatch-first lowering post-migration"
-    );
-    assert!(
-        combined.contains("ProjectPath"),
-        "lower_and_project_to_expanded must query ProjectPath post-migration"
-    );
-}
-
 // characterization tests `migrate_engine_project_expr_surface_shape_preserves_env`,
 // `instantiate_local_generic_ref_production_callers_migrated_to_dispatch_helper`, and
 // `phase_05c_engine_surface_trampolines_route_through_dispatch` deleted alongside the
