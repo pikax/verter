@@ -2426,7 +2426,8 @@ struct CallArgumentLiteralPolicy {
 /// parameter the position's contextual type names — the only parameter
 /// whose deposits from that position keep it. A position holding an
 /// equal literal under a contextual type that is no literal context for
-/// it contributes nothing, so its deposits widen.
+/// it relates with that literal already widened, so its deposits never
+/// read this record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ContextKeptLiteral {
     pub(crate) literal: SemanticNodeId,

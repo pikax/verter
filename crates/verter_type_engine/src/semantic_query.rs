@@ -2100,9 +2100,13 @@ pub enum CallKind {
 /// subject to the inferring parameter's widening rule) or in a form that
 /// already pins its own type.
 ///
-/// It governs the inference DEPOSIT only. Applicability always relates the
-/// argument's actual type — TypeScript widens inference results, never the
-/// assignability check.
+/// It governs the inference DEPOSIT, and the per-position contextual
+/// widening of a bare literal's nested literals: applicability relates the
+/// argument's checked type — a nested authored literal whose contextual
+/// type is known to be no literal context for it is its widened primitive
+/// (`checkExpressionForMutableLocation`), every other literal as
+/// authored. TypeScript widens a naked inference result, never the
+/// argument's own top-level literal in the assignability check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ArgumentLiteralMode {
     /// A bare literal argument expression: the inference candidate widens

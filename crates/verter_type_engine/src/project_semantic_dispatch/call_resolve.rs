@@ -3733,9 +3733,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// Relate one call argument to its parameter type `target` under the
     /// candidate whose type parameters are `declared`. A bare literal
     /// argument's nested literals are first read against their contextual
-    /// types in `target`, one authored expression at a time
-    /// ([`Self::nested_literal_context_keeps`]), before its deposits
-    /// compose them.
+    /// types in `target`, one authored expression at a time, and the
+    /// argument relates as the type that reading gives it
+    /// ([`Self::checked_literal_argument`]), so its deposits compose
+    /// each position's decision.
     pub(super) fn call_argument_relation(
         &self,
         source: SemanticNodeId,
@@ -3746,10 +3747,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         declared: &[crate::semantic_query::TypeParamDecl],
     ) -> RelationStep {
         let top_level = self.top_level_type_param_targets(target);
-        let context_keeps = if literal_mode == ArgumentLiteralMode::Widened {
-            self.nested_literal_context_keeps(source, target, declared)
+        let (source, context_keeps) = if literal_mode == ArgumentLiteralMode::Widened {
+            self.checked_literal_argument(source, target, declared)
         } else {
-            Vec::new()
+            (source, Vec::new())
         };
         self.dispatch_txn.borrow_mut().begin_call_argument(
             Some(literal_mode),

@@ -1577,6 +1577,29 @@ export function l30() { return ix({ a: "x" }); }
 export function l31() { return ixn({ 1: "x" }); }
 export function l32() { return um({ v: "AB" }); }
 export function l33() { return lc({ v: "a" }); }
+declare function sv<T>(x: { a: T | "a"; b: T }): T;
+declare function sp<T>(x: { a: T; b: T | "y" }): T;
+declare function sp2<T, U extends string>(x: { a: T; b: U | T[] }): T;
+declare function sp4<T>(x: [T, T | "y"]): T;
+declare function hu<T>(x: { v: T } | { v: "a" }): T;
+declare function hm<T>(x: { v: T | "a" }): T;
+declare function gb<T extends string>(x: { box: { v: T } }): T;
+export function l34() { return sv({ a: "x", b: "x" }); }
+export function l35() { return sv({ a: "x", b: "y" }); }
+export function l36() { return sp({ a: "x", b: "x" }); }
+export function l37() { return sp({ a: "x", b: "z" }); }
+export function l38() { return sp2({ a: "x", b: "x" }); }
+export function l39() { return sp4(["x", "x"]); }
+export function l40() { return hu({ v: "x" }); }
+export function l41() { return hm({ v: "x" }); }
+export function l42() { return pw(c ? { v: "a" } : { v: "b" }); }
+export function l43() { return gb({ box: c ? { v: "a" } : { v: "b" } }); }
+declare function pu<T>(x: { v: T }): T;
+declare function fa<T>(x: T): T[];
+declare function ng(x: { v: "a" | "b" }): 1;
+export function l44() { return pu(c ? { v: "a" } : { v: "b" }); }
+export function l45() { return fa(c ? "a" : "b"); }
+export function l46() { return ng(c ? { v: "a" } : { v: "b" }); }
 "##;
 
 /// Each candidate evaluates a nested argument literal under its own type
@@ -1592,7 +1615,11 @@ export function l33() { return lc({ v: "a" }); }
 /// elements widen apart; a constraint is read through its named aliases.
 /// A literal kept at one position stays its own: an equal literal at a
 /// sibling member, tuple element or nested member whose contextual type
-/// is no literal context still widens. A member's contextual type falls
+/// is no literal context still widens, even where both reach the same
+/// type parameter. A member's contextual type combines every constituent
+/// of a union parameter type, and a conditional's object arms are each
+/// read against the same contextual type, at the argument's root or
+/// nested. A member's contextual type falls
 /// back to an applicable index signature; a string mapping is a string
 /// literal context; and an acyclic constraint chain is read to its end,
 /// however long.
@@ -1830,6 +1857,91 @@ fn candidate_literal_contexts() {
             r#""a""#,
             r#""a""#,
         ),
+        (
+            Read::Return(r#"l34"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"l35"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"l36"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"l37"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"l38"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"l39"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"l40"#),
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+        ),
+        (
+            Read::Return(r#"l41"#),
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+        ),
+        (
+            Read::Return(r#"l42"#),
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+        ),
+        (
+            Read::Return(r#"l43"#),
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+        ),
+        (
+            Read::Return(r#"l44"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"l45"#),
+            r#"string[]"#,
+            r#"string[]"#,
+            r#"string[]"#,
+            r#"string[]"#,
+        ),
+        (Read::Return(r#"l46"#), r#"1"#, r#"1"#, r#"1"#, r#"1"#),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

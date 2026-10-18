@@ -748,12 +748,21 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                         FlowIndexedArgumentBinding::NonBindingExpression,
                                         Some(frame_arguments),
                                     ) => frame_arguments.get(ordinal).and_then(|frame_argument| {
-                                        let value =
-                                            self.eval_frame_call_argument(&frame_argument.value)?;
+                                        let authored_literal = argument.literal_mode
+                                            == verter_type_expr::IndexedValueLiteralMode::Widened;
+                                        let value = self.eval_frame_call_argument(
+                                            &frame_argument.value,
+                                            authored_literal,
+                                        )?;
                                         const_view = frame_argument
                                             .const_context
                                             .as_ref()
-                                            .and_then(|expr| self.eval_frame_call_argument(expr));
+                                            .and_then(|expr| {
+                                                self.eval_frame_call_argument(
+                                                    expr,
+                                                    authored_literal,
+                                                )
+                                            });
                                         Some(value)
                                     }),
                                     _ => None,

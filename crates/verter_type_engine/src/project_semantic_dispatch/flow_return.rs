@@ -28058,6 +28058,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn eval_frame_call_argument(
         &mut self,
         expr: &verter_session_query::flow::slice::SliceExpr,
+        authored_literal: bool,
     ) -> Option<SemanticNodeId> {
         // An argument that reads nothing of this frame is the indexed
         // program's own value, typed where the parameter's context (a
@@ -28065,10 +28066,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // except a branch join, whose arms the checker types each as its
         // own fresh literal (`c ? { a: 1 } : { a: 2 }` passes `{ a: number
         // }`), where the indexed program keeps the arms' member literals.
-        let branch_join = matches!(
-            expr,
-            verter_session_query::flow::slice::SliceExpr::Union { .. }
-        );
+        // A join of bare literal arms (`authored_literal`) stays the indexed
+        // program's: each call candidate widens its literals itself, keeping
+        // those its parameter's contextual type is a literal context for.
+        let branch_join = !authored_literal
+            && matches!(
+                expr,
+                verter_session_query::flow::slice::SliceExpr::Union { .. }
+            );
         if !expression_write_tree(expr).is_empty() || !(branch_join || slice_expr_reads_frame(expr))
         {
             return None;
