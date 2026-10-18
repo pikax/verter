@@ -577,6 +577,15 @@ impl<T: HeapSize + Send + Sync + 'static + serde::Serialize> serde::Serialize fo
     }
 }
 
+impl<'de, T: HeapSize + Send + Sync + 'static + serde::Deserialize<'de>> serde::Deserialize<'de>
+    for OwnedValue<T>
+{
+    /// A new allocation of the decoded value, charged by its first owner.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        T::deserialize(deserializer).map(Self::new)
+    }
+}
+
 impl<T: HeapSize + Send + Sync + 'static> HeapSize for OwnedValue<T> {
     /// Charged by its own cell.
     fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
@@ -601,6 +610,26 @@ impl<T: HeapSize + Send + Sync + 'static> Measured for OwnedValue<T> {
     fn heap_bytes(&self, aliases: &mut AliasSet) -> usize {
         self.offer(aliases)
     }
+}
+
+/// The heap `value` keeps reachable, measured by its [`HeapSize`] with
+/// nested owned handles offered to `aliases`: the [`Measured`] figure of a
+/// data tree an owned list keeps as its items ([`measured_by_heap_size`]).
+pub fn measured_heap_bytes<T: HeapSize>(value: &T, aliases: &mut AliasSet) -> usize {
+    value.heap_size(&mut HeapMeter::new(aliases))
+}
+
+/// Implement [`Measured`] for data trees through their [`HeapSize`], so an
+/// [`super::owned::OwnedSlice`] can keep them as items.
+#[macro_export]
+macro_rules! measured_by_heap_size {
+    ($($t:ty),* $(,)?) => {
+        $(impl $crate::owned::Measured for $t {
+            fn heap_bytes(&self, aliases: &mut $crate::allocation::AliasSet) -> usize {
+                $crate::heap_size::measured_heap_bytes(self, aliases)
+            }
+        })*
+    };
 }
 
 #[cfg(test)]

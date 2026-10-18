@@ -103,9 +103,9 @@ pub use publication::{
     select_type_publication, AuthoredProvenance, AuthoredSourceMint, AuthoredTypeEvidence,
     AuthoredTypeSource, PublicationPolicy, PublicationPolicyReason, PublicationProvenance,
     PublicationReason, PublicationResult, ResolutionDiagnostic, ResolutionDiagnosticKind,
-    ResolutionExactness, ResolutionProvenance, ResolvedTypeAuthority, ResolvedTypeOutcome,
-    SemanticAuthority, SymbolicEquivalenceKind, SymbolicEquivalenceMint, SymbolicEquivalenceProof,
-    TypePublication, TypedResolutionFailure,
+    ResolutionDiagnostics, ResolutionExactness, ResolutionProvenance, ResolvedTypeAuthority,
+    ResolvedTypeOutcome, SemanticAuthority, SharedTypeSource, SymbolicEquivalenceKind,
+    SymbolicEquivalenceMint, SymbolicEquivalenceProof, TypePublication, TypedResolutionFailure,
 };
 
 pub mod intrinsics;
