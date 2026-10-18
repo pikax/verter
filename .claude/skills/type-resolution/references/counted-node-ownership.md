@@ -123,7 +123,13 @@ DAGs they retain) outlive its own cache and caller owners. The bound is the
 stranded-majority epoch replacement (`replace_epoch_if_mostly_stranded`) or
 the eviction of the last holder, and never exceeds one deferred root per
 stranded token, since a re-interned token reclaims its deferred root
-(`repeated_close_and_re_intern_under_a_held_epoch_keeps_one_root_per_token`); `SemanticCloseReport::signature_tokens_released`
+(`repeated_close_and_re_intern_under_a_held_epoch_keeps_one_root_per_token`).
+The deferred table charges the epoch's storage for the bucket backing it holds,
+not the capacity `HashMap` reports — a tombstoning removal lowers that without
+freeing anything — and frees empty or rebuilds sparse backing geometrically, so
+repeated close/re-intern accounts no new bytes and the final holder's drop
+returns them all
+(`repeated_close_and_re_intern_under_a_held_epoch_keeps_epoch_storage_flat`); `SemanticCloseReport::signature_tokens_released`
 counts roots taken from the store, not nodes freed. This is an accepted
 ownership bound: after the epoch's cache and caller holders drain, its deferred
 roots and their backing drain too. Epoch table storage stays charged until
