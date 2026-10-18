@@ -47,7 +47,7 @@ fn a_same_key_subscriber_of_another_flight_never_satisfies_readiness() {
     std::thread::scope(|threads| {
         let rendezvous = store.arm_flight_rendezvous(key.clone());
         let shared = store
-            .armed_flight_rendezvous()
+            .armed_flight_rendezvous(&key)
             .expect("the rendezvous is armed");
         let producer = {
             let shared = Arc::clone(&shared);
@@ -59,7 +59,7 @@ fn a_same_key_subscriber_of_another_flight_never_satisfies_readiness() {
             .wait_producer_parked(HANG_BOUND)
             .expect("the first producer parks at its cold-build boundary");
         // The same key on a different FlightCell: the wrong flight.
-        shared.note_subscriber(&key, &other);
+        let _ = shared.note_subscriber(&key, &other);
         assert_eq!(
             rendezvous.observe().subscribers,
             0,
@@ -70,11 +70,23 @@ fn a_same_key_subscriber_of_another_flight_never_satisfies_readiness() {
             Err(FlightRendezvousMiss::HangBound),
             "the wrong-flight event leaves readiness unsatisfied"
         );
-        // The held producer's exact flight satisfies it.
-        shared.note_subscriber(&key, &held);
+        // The held producer's exact flight satisfies it, and the
+        // registration retires with the subscriber's wait.
+        let mut registration = shared.note_subscriber(&key, &held);
         rendezvous
             .wait_subscriber_registered(HANG_BOUND)
             .expect("the held flight's subscriber registers");
+        registration.retire();
+        assert_eq!(
+            rendezvous.observe().subscribers,
+            1,
+            "the registration stays recorded as the event"
+        );
+        assert_eq!(
+            rendezvous.cancel_participants(),
+            0,
+            "a retired subscriber is no longer a cancellable participant"
+        );
         rendezvous.release();
         producer.join().expect("the held producer returns");
     });
@@ -100,6 +112,42 @@ fn overlapping_guards_drop_out_of_order_stay_scoped() {
         store.flight_rendezvous_is_disarmed(),
         "the store disarms once every guard has ended"
     );
+}
+
+/// A rendezvous armed later for another key never shadows an older live
+/// one: each key's cold build reports to the first rendezvous armed for
+/// that key, so both stay observable while both are live.
+#[test]
+fn a_newer_rendezvous_for_another_key_never_shadows_the_older_live_one() {
+    let store = SemanticGraphStore::new();
+    let icon_box = decl_key("/src/types/icon.ts", "IconBox");
+    let icon_props = decl_key("/src/types/icon.ts", "IconProps");
+    let flags = crate::resolver_core::resolver_context::RequestFlags::new(
+        crate::resolver_core::resolver_context::ProjectGenerationClock::new(Arc::new(
+            std::sync::atomic::AtomicU64::new(0),
+        )),
+    );
+    let held = Arc::new(FlightCell::new());
+    // The rendezvous lives inside the scope: a failed assertion unwinds
+    // through its drop, which releases the parked producer before the
+    // scope joins it.
+    std::thread::scope(|threads| {
+        let older = store.arm_flight_rendezvous(icon_box.clone());
+        let _newer = store.arm_flight_rendezvous(icon_props);
+        let producer = {
+            let shared = store
+                .armed_flight_rendezvous(&icon_box)
+                .expect("the older rendezvous is armed for its key");
+            threads.spawn(move || shared.hold_producer(&icon_box, &held, &flags))
+        };
+        assert!(
+            older.wait_producer_parked(HANG_BOUND).is_ok(),
+            "the older live rendezvous still parks its key's producer"
+        );
+        older.release();
+        producer.join().expect("the older one's producer returns");
+    });
+    assert!(store.flight_rendezvous_is_disarmed());
 }
 
 /// Arming is for keys the dispatcher's synchronous path produces: an

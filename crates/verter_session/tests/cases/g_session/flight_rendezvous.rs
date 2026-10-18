@@ -113,6 +113,15 @@ fn a_held_cold_producer_is_joined_by_a_real_subscriber() {
             producer.join().expect("the producer answers"),
             subscriber.join().expect("the subscriber answers"),
         ];
+        // Both requests have returned, so no participant is live anymore:
+        // the retired subscriber and the unparked producer leave nothing
+        // for the cancellation oracle to name, while the guard is still
+        // armed.
+        assert_eq!(
+            rendezvous.cancel_participants(),
+            0,
+            "no completed participant stays a live cancellation"
+        );
         let held_flight = rendezvous
             .held_flight_weak()
             .expect("the rendezvous names the held flight");
@@ -265,6 +274,48 @@ fn a_nested_rendezvous_restores_the_one_it_replaced() {
     assert!(graph.flight_rendezvous_is_disarmed());
 }
 
+/// A rendezvous armed later for another key never shadows an older live
+/// one: while both guards are live, the older key's request still parks at
+/// the older rendezvous, exactly as the arm and drop docs promise. The
+/// older guard takes `IconProps` because that interface's build demands no
+/// other key cold, so its producer cannot nest inside the newer guard's
+/// key while only the older one is released.
+#[test]
+fn a_newer_rendezvous_for_another_key_never_shadows_the_older_live_one() {
+    let host = host();
+    let graph = host.project_type_store().semantic_graph();
+    let older = graph.arm_flight_rendezvous(resolve_decl("IconProps"));
+    let newer = graph.arm_flight_rendezvous(resolve_decl("IconBox"));
+    std::thread::scope(|threads| {
+        let _release_on_unwind = ReleaseOnUnwind(|| older.release());
+        let producer = threads.spawn(|| {
+            host.resolve_named_symbol(ICON, "IconProps", None)
+                .expect("IconProps resolves");
+        });
+        assert!(
+            older.wait_producer_parked(HANG_BOUND).is_ok(),
+            "the older live rendezvous still parks its key's producer"
+        );
+        older.release();
+        producer.join().expect("the older one's producer answers");
+    });
+    // The newer rendezvous for its own key still works after the older one
+    // served its key: `IconProps` is warm now, so the `IconBox` build parks
+    // only at its own guard.
+    std::thread::scope(|threads| {
+        let _release_on_unwind = ReleaseOnUnwind(|| newer.release());
+        let producer = threads.spawn(|| request_icon_box(&host));
+        newer
+            .wait_producer_parked(HANG_BOUND)
+            .expect("the newer rendezvous parks its own key's producer");
+        newer.release();
+        producer.join().expect("the newer one's producer answers");
+    });
+    drop(older);
+    drop(newer);
+    assert!(graph.flight_rendezvous_is_disarmed());
+}
+
 #[test]
 fn out_of_order_guard_drops_keep_the_live_rendezvous_armed() {
     let host = host();
@@ -277,6 +328,11 @@ fn out_of_order_guard_drops_keep_the_live_rendezvous_armed() {
     drop(older);
     assert!(!graph.flight_rendezvous_is_disarmed());
     std::thread::scope(|threads| {
+        // The live rendezvous is owned outside this scope, so a failed
+        // readiness assertion unwinds into the scope's implicit join with
+        // the producer still parked: release on this scope's unwind path
+        // first, exactly as a guard created inside the scope would.
+        let _release_on_unwind = ReleaseOnUnwind(|| newer.release());
         let producer = threads.spawn(|| {
             host.resolve_named_symbol(ICON, "IconProps", None)
                 .expect("IconProps resolves");
@@ -293,6 +349,17 @@ fn out_of_order_guard_drops_keep_the_live_rendezvous_armed() {
     // runs free and the store stays disarmed.
     request_icon_box(&host);
     assert!(graph.flight_rendezvous_is_disarmed());
+}
+
+/// Runs `release` when dropped, so a parked schedule's guard-timed cleanup
+/// also runs on a failed assertion's unwind, before the owning scope joins
+/// the parked producer.
+struct ReleaseOnUnwind<F: Fn()>(F);
+
+impl<F: Fn()> Drop for ReleaseOnUnwind<F> {
+    fn drop(&mut self) {
+        (self.0)();
+    }
 }
 
 #[test]

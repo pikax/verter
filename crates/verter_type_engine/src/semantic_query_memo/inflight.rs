@@ -547,26 +547,55 @@ impl FlightRendezvousShared {
     }
 
     /// A subscriber of `key` registered its wait on `flight`. Counted only
-    /// when `flight` is the held producer's flight.
+    /// when `flight` is the held producer's flight; the returned
+    /// registration retires the cancellation token when the subscriber's
+    /// wait returns, so a completed subscriber is never a cancellable
+    /// participant again. The registration itself stays recorded: the
+    /// subscriber count is the event record, not a liveness probe.
     pub(super) fn note_subscriber(
-        &self,
+        self: &Arc<Self>,
         key: &crate::semantic_query::SemanticQueryKey,
         flight: &Arc<FlightCell>,
-    ) {
+    ) -> SubscriberRegistration {
         if key != &self.key {
-            return;
+            return SubscriberRegistration::inactive();
         }
         let mut state = self.state.lock();
         let held = state
             .flight
             .as_ref()
             .is_some_and(|held| std::ptr::eq(held.as_ptr(), Arc::as_ptr(flight)));
-        if held {
-            state.subscribers += 1;
-            if let Some(token) = crate::request_context::current_request_cancellation_token() {
-                state.subscriber_cancellations.push(token);
-            }
-            self.changed.notify_all();
+        if !held {
+            return SubscriberRegistration::inactive();
+        }
+        state.subscribers += 1;
+        let token = crate::request_context::current_request_cancellation_token();
+        if let Some(token) = &token {
+            state.subscriber_cancellations.push(token.clone());
+        }
+        self.changed.notify_all();
+        SubscriberRegistration {
+            registration: Some(ActiveSubscriberRegistration {
+                shared: Arc::clone(self),
+                token,
+            }),
+        }
+    }
+
+    /// Retire one counted subscriber's cancellation registration: its wait
+    /// returned, so its token no longer names a live participant. The
+    /// registration count stays: it is the event record the driver's
+    /// readiness oracle reads. No wait condition reads the token list, so
+    /// this changes nothing a driver waits on.
+    fn retire_subscriber(&self, token: Option<&verter_execution::cancellation::CancellationToken>) {
+        let mut state = self.state.lock();
+        if let Some(position) = token.and_then(|token| {
+            state
+                .subscriber_cancellations
+                .iter()
+                .position(|saved| saved.same_source(token))
+        }) {
+            state.subscriber_cancellations.swap_remove(position);
         }
     }
 
@@ -588,6 +617,55 @@ impl FlightRendezvousShared {
             }
         }
         Ok(state.observation())
+    }
+}
+
+/// A counted subscriber's registration with an armed rendezvous. Dropping
+/// it — the subscriber's wait returned, was cancelled or unwound — retires
+/// its cancellation token, so
+/// [`FlightRendezvous::cancel_participants`] only ever names participants
+/// whose wait is still live. The registration count itself stays recorded.
+/// A note that matched no held flight carries no registration and drops as
+/// a no-op.
+#[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+#[must_use = "the registration retires the subscriber when it returns; hold it until the wait ends"]
+pub(super) struct SubscriberRegistration {
+    registration: Option<ActiveSubscriberRegistration>,
+}
+
+/// The counted half of a [`SubscriberRegistration`]: which rendezvous
+/// counts it, and its cancellation token when the subscribing request
+/// carries one.
+#[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+struct ActiveSubscriberRegistration {
+    shared: Arc<FlightRendezvousShared>,
+    token: Option<verter_execution::cancellation::CancellationToken>,
+}
+
+#[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+impl SubscriberRegistration {
+    fn new(registration: Option<ActiveSubscriberRegistration>) -> Self {
+        Self { registration }
+    }
+
+    /// A registration that matched no held flight: dropping it retires
+    /// nothing.
+    pub(super) fn inactive() -> Self {
+        Self::new(None)
+    }
+
+    /// Retire this registration now. Idempotent; the drop path calls it too.
+    pub(super) fn retire(&mut self) {
+        if let Some(ActiveSubscriberRegistration { shared, token }) = self.registration.take() {
+            shared.retire_subscriber(token.as_ref());
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+impl Drop for SubscriberRegistration {
+    fn drop(&mut self) {
+        self.retire();
     }
 }
 
@@ -741,9 +819,18 @@ impl super::SemanticGraphStore {
         self.flight_rendezvous.lock().is_empty()
     }
 
-    /// The innermost armed rendezvous, cloned out so no store lock is held
+    /// The armed rendezvous a cold build of `key` reports to: the first
+    /// one armed for that key, so a rendezvous armed later for another key
+    /// never shadows an older live one. Cloned out so no store lock is held
     /// while a hook point signals or parks.
-    pub(super) fn armed_flight_rendezvous(&self) -> Option<Arc<FlightRendezvousShared>> {
-        self.flight_rendezvous.lock().last().cloned()
+    pub(super) fn armed_flight_rendezvous(
+        &self,
+        key: &crate::semantic_query::SemanticQueryKey,
+    ) -> Option<Arc<FlightRendezvousShared>> {
+        self.flight_rendezvous
+            .lock()
+            .iter()
+            .find(|armed| &armed.key == key)
+            .cloned()
     }
 }

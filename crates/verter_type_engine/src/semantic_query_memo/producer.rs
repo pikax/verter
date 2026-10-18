@@ -640,15 +640,20 @@ impl Subscription<'_> {
             None
         };
         // A rendezvous learns of this registered subscriber with the flight
-        // unlocked: the wait below re-checks the flight before parking.
+        // unlocked: the wait below re-checks the flight before parking. The
+        // registration is held until the wait returns, so the rendezvous's
+        // live-participant oracle never counts a completed subscriber.
         #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
-        if wait_edge.is_some() {
-            if let Some(rendezvous) = store.armed_flight_rendezvous() {
-                parking_lot::MutexGuard::unlocked(&mut state, || {
-                    rendezvous.note_subscriber(prepared.key(), &inflight);
-                });
+        let mut subscriber_registration = if wait_edge.is_some() {
+            match store.armed_flight_rendezvous(prepared.key()) {
+                Some(rendezvous) => parking_lot::MutexGuard::unlocked(&mut state, || {
+                    rendezvous.note_subscriber(prepared.key(), &inflight)
+                }),
+                None => super::inflight::SubscriberRegistration::inactive(),
             }
-        }
+        } else {
+            super::inflight::SubscriberRegistration::inactive()
+        };
         // Cooperative wait on the flight's condvar until it completes, is
         // aborted by a canonical-invalidation sweep, or this request is
         // cancelled. Subscribers never busy-spin.
@@ -668,6 +673,11 @@ impl Subscription<'_> {
                 .wait_for(&mut state, std::time::Duration::from_millis(2));
         }
         drop(wait_edge);
+        // The wait returned: retire the subscriber's registration before any
+        // further engine work on this request, with the flight unlocked
+        // exactly as the registration took it.
+        #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+        parking_lot::MutexGuard::unlocked(&mut state, || subscriber_registration.retire());
         store
             .stats
             .waits_ms
@@ -1062,7 +1072,7 @@ impl<'s> ProducerLease<'s> {
         if self.independent {
             return;
         }
-        if let Some(rendezvous) = self.store.armed_flight_rendezvous() {
+        if let Some(rendezvous) = self.store.armed_flight_rendezvous(self.prepared.key()) {
             rendezvous.hold_producer(self.prepared.key(), &self.inflight, flags);
         }
     }

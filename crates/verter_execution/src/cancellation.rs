@@ -194,6 +194,14 @@ impl CancellationToken {
         self.state.cancelled.store(true, Ordering::Release);
     }
 
+    /// Whether two handles name the same cancellation source: clones of one
+    /// token agree, independent tokens never do. Identity is content-free —
+    /// it never observes the cancelled flag.
+    #[must_use]
+    pub fn same_source(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+    }
+
     /// Returns whether the token has been cancelled.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
