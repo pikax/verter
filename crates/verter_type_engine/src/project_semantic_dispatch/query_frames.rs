@@ -371,7 +371,7 @@ pub struct SemanticTask<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilitie
     /// [`ProjectSemanticDispatch::return_semantic_task`], or by its drop
     /// through `home`.
     program: Option<QueryProgram<'p, 'a, C>>,
-    construction: crate::semantic_query_memo::node_roots::TaskConstructionOwner,
+    construction: Option<crate::semantic_query_memo::node_roots::TaskConstructionOwner>,
     validity: crate::request_context::TaskExecutionValidity,
     /// The scheduler job the task was lent under: its aggregate token
     /// decides cancellation on every thread the task is polled on.
@@ -410,12 +410,13 @@ impl TaskAccounting {
 }
 
 /// What a task dropped without being returned leaves for its lender: the
-/// request state its dispatcher borrowed, the abort its polls observed and
-/// the accounting it recorded.
+/// request state its dispatcher borrowed, its construction ownership, the
+/// abort its polls observed and the accounting it recorded.
 struct UnreturnedTask<'a, C: crate::resolver_core::ResolverCapabilities> {
     dispatch: ProjectSemanticDispatch<'a, C>,
     validity: crate::request_context::TaskExecutionValidity,
     accounting: TaskAccounting,
+    construction: crate::semantic_query_memo::node_roots::TaskConstructionOwner,
 }
 
 impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> SemanticTask<'p, 'a, C> {
@@ -430,7 +431,11 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> SemanticTask<'p,
             .program
             .as_mut()
             .expect("a task holds its program until it gives its state back");
-        let _construction = self.construction.install();
+        let _construction = self
+            .construction
+            .as_mut()
+            .expect("a task holds its construction owner until it gives its state back")
+            .install();
         let _task = program.graph.install_execution(&program.task);
         let _validity = self.validity.install();
         let _job = verter_execution::cancellation::JobCancellationGuard::replace(
@@ -554,6 +559,10 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Drop for Semanti
             dispatch,
             validity: std::mem::take(&mut self.validity),
             accounting: std::mem::take(&mut self.accounting),
+            construction: self
+                .construction
+                .take()
+                .expect("an unreturned task retains its construction owner"),
         });
     }
 }
@@ -590,8 +599,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         SemanticTask {
             execution,
             program: Some(program),
-            construction: crate::semantic_query_memo::node_roots::TaskConstructionOwner::new(
-                self.binding.construction.arena(),
+            construction: Some(
+                crate::semantic_query_memo::node_roots::TaskConstructionOwner::new(
+                    self.binding.construction.arena(),
+                ),
             ),
             validity: crate::request_context::TaskExecutionValidity::inherit(),
             job_cancellation: verter_execution::cancellation::current_job_cancellation_token(),
@@ -614,6 +625,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.exchange_request_state(&program.dispatch);
         std::mem::take(&mut task.accounting).return_to_lender();
         task.validity.bubble();
+        drop(task.construction.take());
     }
 
     /// Take back the request state a task this dispatcher lent left in
@@ -623,6 +635,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.exchange_request_state(&unreturned.dispatch);
             unreturned.accounting.return_to_lender();
             unreturned.validity.bubble();
+            // Only the lender's thread may absorb these roots. Keep them
+            // until its request state has been restored, just as on return.
+            drop(unreturned.construction);
         }
     }
 }
