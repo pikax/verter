@@ -2213,7 +2213,7 @@ fn b4_svelte_analysis(source: &str, token_name: &str) -> FileAnalysisSnapshot {
     let token_start = source.find(&needle).unwrap() + 7;
     FileAnalysisSnapshot {
         template: None,
-        markup_class_tokens: std::sync::Arc::new(vec![
+        markup_class_tokens: verter_session_query::analysis::file_analysis::SharedList::new(vec![
             verter_session_query::analysis::template::MarkupClassToken {
                 name: token_name.to_string(),
                 span: verter_span::Span::new(

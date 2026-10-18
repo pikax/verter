@@ -744,14 +744,14 @@ fn raw_template_slot_claims_wide_signature_pages() {
             );
         }
         let mut state = DerivedRawState::default();
-        let template = Arc::new(
+        let template = verter_session_query::retention::heap_size::OwnedValue::new(
             verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                 css_var_names: vec!["color".into()],
                 ..Default::default()
             },
         );
         state.install_raw_template_analysis(
-            Arc::clone(&template),
+            template.clone(),
             RawTemplateSlotAdmission {
                 store_published: true,
                 source_version: Some(verter_scheduler::node::SourceVersion {
@@ -775,14 +775,37 @@ fn raw_template_slot_claims_wide_signature_pages() {
         assert!(pages
             .iter()
             .all(|page| page.retained_charge_class() == Some(expected)));
+        // The slot retains the template it serves as well as its evidence;
+        // a refused slot leaves the template its caller's, uncharged by it.
+        let template_charge = template.charge_bytes().unwrap_or(0);
+        if admitted {
+            assert!(
+                template_charge >= std::mem::size_of_val(&*template),
+                "the retained template is charged its whole cell"
+            );
+            assert_eq!(template.charge_class(), Some(ChargeClass::Retained));
+        } else {
+            assert_eq!(template.charge_bytes(), None);
+        }
         assert_eq!(
             account.snapshot().retained_bytes,
-            if admitted { page_bytes } else { 0 }
+            if admitted {
+                page_bytes + template_charge
+            } else {
+                0
+            }
         );
         state.clear_raw_template_analysis();
         assert!(state.raw_template_analysis().is_none());
         drop((state, pages));
         assert_eq!(account.snapshot().retained_bytes, 0);
+        assert_eq!(
+            account.snapshot().pinned_bytes,
+            template_charge,
+            "a template kept past its slot stays charged until its own drop"
+        );
+        drop(template);
+        assert_eq!(account.snapshot().total_bytes(), 0);
     }
 }
 

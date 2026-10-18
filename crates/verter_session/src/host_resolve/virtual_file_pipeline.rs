@@ -2316,7 +2316,9 @@ impl VerterHost {
                         if let Some(template_analysis) = compiled_products.template_analysis() {
                             self.persist_raw_template_analysis(
                                 &canonical_id,
-                                Arc::new(template_analysis),
+                                verter_session_query::retention::heap_size::OwnedValue::new(
+                                    template_analysis,
+                                ),
                                 crate::types::RawTemplateSlotAdmission {
                                     store_published: true,
                                     source_version: Some(source_snap.version()),

@@ -982,7 +982,7 @@ impl VerterHost {
                 ..Default::default()
             },
         ));
-        let export_signatures = Some(Arc::clone(&snapshot.export_signatures));
+        let export_signatures = Some(snapshot.export_signatures.clone());
 
         let indexed = Arc::new(crate::project_type_store::IndexedReady {
             whole_hash,

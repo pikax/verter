@@ -4141,7 +4141,7 @@ fn svelte_css_analysis(source: &str) -> FileAnalysisSnapshot {
 
     FileAnalysisSnapshot {
         template: None,
-        markup_class_tokens: std::sync::Arc::new(tokens),
+        markup_class_tokens: verter_session_query::analysis::file_analysis::SharedList::new(tokens),
         styles: (vec![verter_semantic::analysis::build_scanned_style_analysis(
             verter_session_query::analysis::style::StyleAnalysisLang::Css,
             style_css,

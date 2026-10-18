@@ -725,13 +725,15 @@ fn persisted_raw_template(
     host: &VerterHost,
     canonical: &str,
 ) -> Option<(
-    Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
+    verter_session_query::retention::heap_size::OwnedValue<
+        verter_session_query::analysis::template::TemplateAnalysisSnapshot,
+    >,
     verter_session_query::facts::fact_cache::ReadSetSignature,
 )> {
     host.derived_raw_cache().get(canonical).and_then(|derived| {
         derived.raw_template_analysis().map(|entry| {
             (
-                Arc::clone(&entry.template),
+                entry.template.clone(),
                 entry.template_class_signature.clone(),
             )
         })

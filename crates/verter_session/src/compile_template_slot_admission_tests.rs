@@ -92,10 +92,14 @@ fn session_slot_present(host: &VerterHost, profile: &CompileProfile) -> bool {
 
 fn template_slot(
     host: &VerterHost,
-) -> Option<Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>> {
+) -> Option<
+    verter_session_query::retention::heap_size::OwnedValue<
+        verter_session_query::analysis::template::TemplateAnalysisSnapshot,
+    >,
+> {
     host.derived_raw_cache().get(OWNER).and_then(|cc| {
         cc.raw_template_analysis()
-            .map(|entry| Arc::clone(&entry.template))
+            .map(|entry| entry.template.clone())
     })
 }
 
@@ -172,7 +176,7 @@ fn default_profile_inline_compile_still_persists_and_warm_serves() {
         .as_ref()
         .expect("the warm read carries a template");
     assert!(
-        Arc::ptr_eq(served, &persisted),
+        verter_session_query::retention::heap_size::OwnedValue::ptr_eq(served, &persisted),
         "the default lane warm-serves the compile-persisted value — the \
          admission must not decline the coherent default-extraction persist",
     );
