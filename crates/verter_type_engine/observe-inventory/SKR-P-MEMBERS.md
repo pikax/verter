@@ -18,4 +18,3 @@ Classification follows [the observation policy](../../../docs/arch/semantic-obse
 | --- | --- | --- | --- | --- | --- |
 | `SelectedValueSignature` (one overload-group member re-borrowed from the statement declaring it) | The locator deref of a `ValueSignature` position lowers one statement instead of the whole overload group | REQUIRED | One locator deref | `src/decl_body_memo.rs` | always |
 | `DeclLoweringCounters::decl_statements_lowered`, now also bumped by the transient value re-borrow and the overload-member selection | The overload-group lowering growth test; the provenance snapshot | OPTIONAL (visit history; field and other legacy hooks pre-existing) | Per host; reset only by the provenance facade | `src/decl_lowering.rs` | New transient hooks: `cfg(any(test, feature = "test-support", feature = "semantic-observe"))`; legacy hooks unchanged |
-
