@@ -11,13 +11,15 @@
 
 use crate::facts::*;
 use crate::locators::*;
+use crate::OwnedSlice;
+use crate::OwnedStr;
 use crate::PrimitiveName;
 
 fn anchor() -> AuthoredAnchor {
     AuthoredAnchor {
-        canonical_id: std::sync::Arc::from("/ws/a.ts"),
+        canonical_id: OwnedStr::from(std::sync::Arc::from("/ws/a.ts")),
         owner: crate::TopLevelOwnerId::ordinary_file(),
-        symbol: std::sync::Arc::from("A"),
+        symbol: OwnedStr::from(std::sync::Arc::from("A")),
         space: LocatorSymbolSpace::Type,
     }
 }
@@ -25,7 +27,7 @@ fn anchor() -> AuthoredAnchor {
 fn slot() -> TypeBodySlot {
     TypeBodySlot {
         anchor: anchor(),
-        path: std::sync::Arc::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+        path: OwnedSlice::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
     }
 }
 

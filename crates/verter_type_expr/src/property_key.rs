@@ -3,6 +3,8 @@
 use std::fmt;
 use std::sync::Arc;
 
+use verter_retention::owned::OwnedStr;
+
 /// An integer whose decimal digits are its canonical ECMAScript number
 /// spelling.
 #[derive(
@@ -17,6 +19,7 @@ use std::sync::Arc;
     serde::Serialize,
     verter_no_typeexpr::NoTypeExpr,
     verter_no_storedspan::NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct CanonicalIndexInt(i64);
 
@@ -81,9 +84,13 @@ impl fmt::Display for CanonicalIndexInt {
     serde::Deserialize,
     verter_no_typeexpr::NoTypeExpr,
     verter_no_storedspan::NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum PropertyKey<I> {
-    String(Arc<str>),
+    /// An ordinary string key. Its text is an owned, self-charged
+    /// allocation: a holder that clones it out of a delivered value keeps
+    /// it charged until its own last handle drops.
+    String(OwnedStr),
     Number(CanonicalIndexInt),
     UniqueSymbol(I),
 }
@@ -91,13 +98,13 @@ pub enum PropertyKey<I> {
 impl<I> PropertyKey<I> {
     /// Normalize an identifier spelling into the shared string-key variant.
     #[must_use]
-    pub fn identifier(name: impl Into<Arc<str>>) -> Self {
+    pub fn identifier(name: impl Into<OwnedStr>) -> Self {
         Self::String(name.into())
     }
 
     /// Normalize a string-literal spelling into the shared string-key variant.
     #[must_use]
-    pub fn string_literal(value: impl Into<Arc<str>>) -> Self {
+    pub fn string_literal(value: impl Into<OwnedStr>) -> Self {
         Self::String(value.into())
     }
 
@@ -108,7 +115,9 @@ impl<I> PropertyKey<I> {
     pub fn from_js_number(value: f64) -> Self {
         CanonicalIndexInt::from_js_number(value)
             .map(Self::Number)
-            .unwrap_or_else(|| Self::String(Arc::from(verter_ecma::js_number_to_string(value))))
+            .unwrap_or_else(|| {
+                Self::String(OwnedStr::from(verter_ecma::js_number_to_string(value)))
+            })
     }
 
     /// Borrow the ordinary string spelling when this is a string key.
@@ -124,7 +133,7 @@ impl<I> PropertyKey<I> {
     #[must_use]
     pub fn as_ref(&self) -> PropertyKey<&I> {
         match self {
-            Self::String(value) => PropertyKey::String(Arc::clone(value)),
+            Self::String(value) => PropertyKey::String(value.clone()),
             Self::Number(value) => PropertyKey::Number(*value),
             Self::UniqueSymbol(identity) => PropertyKey::UniqueSymbol(identity),
         }
@@ -147,7 +156,7 @@ impl<I> PropertyKey<I> {
     #[must_use]
     pub fn element_access_equivalent(&self) -> Option<Self> {
         match self {
-            Self::Number(value) => Some(Self::String(Arc::from(value.get().to_string()))),
+            Self::Number(value) => Some(Self::String(OwnedStr::from(value.get().to_string()))),
             Self::String(value) => {
                 let parsed: i64 = value.parse().ok()?;
                 if parsed.to_string() != value.as_ref() {
@@ -170,18 +179,24 @@ impl<I: PartialEq> PropertyKey<I> {
 
 impl<I> From<&str> for PropertyKey<I> {
     fn from(value: &str) -> Self {
-        Self::String(Arc::from(value))
+        Self::String(OwnedStr::from(value))
     }
 }
 
 impl<I> From<String> for PropertyKey<I> {
     fn from(value: String) -> Self {
-        Self::String(Arc::from(value))
+        Self::String(OwnedStr::from(value))
     }
 }
 
 impl<I> From<Arc<str>> for PropertyKey<I> {
     fn from(value: Arc<str>) -> Self {
+        Self::String(OwnedStr::from(value))
+    }
+}
+
+impl<I> From<OwnedStr> for PropertyKey<I> {
+    fn from(value: OwnedStr) -> Self {
         Self::String(value)
     }
 }
@@ -198,9 +213,10 @@ impl<I> From<Arc<str>> for PropertyKey<I> {
     serde::Deserialize,
     verter_no_typeexpr::NoTypeExpr,
     verter_no_storedspan::NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum AuthoredPropertyKey<C, I> {
-    String(Arc<str>),
+    String(OwnedStr),
     Number(CanonicalIndexInt),
     UniqueSymbol(I),
     Computed(C),
@@ -208,18 +224,24 @@ pub enum AuthoredPropertyKey<C, I> {
 
 impl<C, I> From<&str> for AuthoredPropertyKey<C, I> {
     fn from(value: &str) -> Self {
-        Self::String(Arc::from(value))
+        Self::String(OwnedStr::from(value))
     }
 }
 
 impl<C, I> From<String> for AuthoredPropertyKey<C, I> {
     fn from(value: String) -> Self {
-        Self::String(Arc::from(value))
+        Self::String(OwnedStr::from(value))
     }
 }
 
 impl<C, I> From<Arc<str>> for AuthoredPropertyKey<C, I> {
     fn from(value: Arc<str>) -> Self {
+        Self::String(OwnedStr::from(value))
+    }
+}
+
+impl<C, I> From<OwnedStr> for AuthoredPropertyKey<C, I> {
+    fn from(value: OwnedStr) -> Self {
         Self::String(value)
     }
 }
@@ -227,7 +249,7 @@ impl<C, I> From<Arc<str>> for AuthoredPropertyKey<C, I> {
 impl<C, I> AuthoredPropertyKey<C, I> {
     /// Construct the normalized ordinary string-key form.
     #[must_use]
-    pub fn string(name: impl Into<Arc<str>>) -> Self {
+    pub fn string(name: impl Into<OwnedStr>) -> Self {
         Self::String(name.into())
     }
 
@@ -245,7 +267,7 @@ impl<C, I> AuthoredPropertyKey<C, I> {
     #[must_use]
     pub fn as_known(&self) -> Option<PropertyKey<&I>> {
         match self {
-            Self::String(value) => Some(PropertyKey::String(Arc::clone(value))),
+            Self::String(value) => Some(PropertyKey::String(value.clone())),
             Self::Number(value) => Some(PropertyKey::Number(*value)),
             Self::UniqueSymbol(identity) => Some(PropertyKey::UniqueSymbol(identity)),
             Self::Computed(_) => None,
@@ -259,7 +281,7 @@ impl<C, I> AuthoredPropertyKey<C, I> {
         I: Clone,
     {
         match self {
-            Self::String(value) => Some(PropertyKey::String(Arc::clone(value))),
+            Self::String(value) => Some(PropertyKey::String(value.clone())),
             Self::Number(value) => Some(PropertyKey::Number(*value)),
             Self::UniqueSymbol(identity) => Some(PropertyKey::UniqueSymbol(identity.clone())),
             Self::Computed(_) => None,
@@ -296,10 +318,10 @@ impl<C, I> AuthoredPropertyKey<C, I> {
     /// site that re-derives a published name on its own can disagree with
     /// the rest of the boundary about which members the surface declares.
     #[must_use]
-    pub fn published_name(&self) -> Option<Arc<str>> {
+    pub fn published_name(&self) -> Option<OwnedStr> {
         match self {
-            Self::String(value) => Some(Arc::clone(value)),
-            Self::Number(value) => Some(Arc::from(value.get().to_string())),
+            Self::String(value) => Some(value.clone()),
+            Self::Number(value) => Some(OwnedStr::from(value.get().to_string())),
             Self::UniqueSymbol(_) | Self::Computed(_) => None,
         }
     }
@@ -340,14 +362,13 @@ mod tests {
 mod authored_property_key_contract_tests {
     use super::{AuthoredPropertyKey, CanonicalIndexInt, PropertyKey};
     use crate::{FunctionExpr, MethodSignature, ObjectProperty, TypeExpr, ValueDeclIdentityPart};
-    use std::sync::Arc;
 
     fn symbol(canonical_id: &str) -> ValueDeclIdentityPart {
         ValueDeclIdentityPart {
-            canonical_id: Arc::from(canonical_id),
+            canonical_id: crate::OwnedStr::from(canonical_id),
             owner: crate::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("token"),
-            member_path: Arc::from([]),
+            symbol: crate::OwnedStr::from("token"),
+            member_path: crate::OwnedSlice::from([]),
         }
     }
 
@@ -400,5 +421,30 @@ mod authored_property_key_contract_tests {
             false,
         );
         assert_eq!(method.key, computed);
+    }
+}
+
+impl<I: verter_retention::owned::Measured> verter_retention::owned::Measured for PropertyKey<I> {
+    /// A string key's text is an owned allocation, charged by its own cell.
+    fn heap_bytes(&self, aliases: &mut verter_retention::allocation::AliasSet) -> usize {
+        match self {
+            Self::String(text) => text.offer(aliases),
+            Self::Number(_) => 0,
+            Self::UniqueSymbol(identity) => identity.heap_bytes(aliases),
+        }
+    }
+}
+
+impl<C: verter_retention::owned::Measured, I: verter_retention::owned::Measured>
+    verter_retention::owned::Measured for AuthoredPropertyKey<C, I>
+{
+    /// A string key's text is an owned allocation, charged by its own cell.
+    fn heap_bytes(&self, aliases: &mut verter_retention::allocation::AliasSet) -> usize {
+        match self {
+            Self::String(text) => text.offer(aliases),
+            Self::Number(_) => 0,
+            Self::UniqueSymbol(identity) => identity.heap_bytes(aliases),
+            Self::Computed(child) => child.heap_bytes(aliases),
+        }
     }
 }

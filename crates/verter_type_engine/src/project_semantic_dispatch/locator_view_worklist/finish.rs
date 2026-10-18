@@ -9,7 +9,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
     ) -> ReferenceProjectionPlan {
         let (name, _bare_scope) = data.bare_ref_head().expect("BareRef head");
-        let name = Arc::clone(name);
+        let name = Arc::<str>::from(name);
         let type_args: Arc<[SemanticNodeId]> =
             Arc::from(data.carrier_type_args().to_vec().into_boxed_slice());
         if type_args.is_empty() {
@@ -66,7 +66,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> ReferenceProjectionPlan {
         let (specifier, qualifier, typeof_query) =
             data.import_type_head().expect("ImportType head");
-        let qualifier: Vec<Arc<str>> = qualifier.iter().map(Arc::clone).collect();
+        let qualifier: Vec<verter_type_expr::OwnedStr> = qualifier.to_vec();
         let type_args: Arc<[SemanticNodeId]> =
             Arc::from(data.carrier_type_args().to_vec().into_boxed_slice());
         let NodeScopeId::File {
@@ -226,9 +226,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return ProjectionFinish::Instantiate(SemanticQueryKey::Instantiate(
                 crate::semantic_query::InstantiateKey::new(
                     self.type_slot_for(
-                        Arc::clone(&base.canonical_id),
+                        base.canonical_id.clone(),
                         base.owner,
-                        Arc::clone(&base.decl_name),
+                        base.decl_name.clone(),
                     ),
                     projected_args,
                     self.instantiate_context_for(&base.canonical_id, context),
@@ -257,9 +257,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ProjectionFinish::Instantiate(SemanticQueryKey::Instantiate(
                 crate::semantic_query::InstantiateKey::new(
                     self.type_slot_for(
-                        Arc::clone(&base.canonical_id),
+                        base.canonical_id.clone(),
                         base.owner,
-                        Arc::clone(&base.decl_name),
+                        base.decl_name.clone(),
                     ),
                     projected_args,
                     self.instantiate_context_for(&base.canonical_id, context),
@@ -341,7 +341,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             param_index: *param_index,
                             constraint: new_constraint,
                             default: new_default,
-                            display_name: Arc::clone(display_name),
+                            display_name: (*display_name).clone(),
                         },
                     )
                 }
@@ -475,7 +475,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 graph.intern_preserving_scope(
                     node,
                     SemanticNodeData::TemplateLiteral {
-                        quasis: Arc::clone(quasis),
+                        quasis: (*quasis).clone(),
                         expressions: crate::semantic_query::PayloadArray::from(expressions.into_boxed_slice()),
                     },
                 )
@@ -503,7 +503,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                         ))
                                 }),
                             verter_type_expr::AuthoredPropertyKey::String(value) => {
-                                verter_type_expr::AuthoredPropertyKey::String(Arc::clone(value))
+                                verter_type_expr::AuthoredPropertyKey::String(value.clone())
                             }
                             verter_type_expr::AuthoredPropertyKey::Number(value) => {
                                 verter_type_expr::AuthoredPropertyKey::Number(*value)
@@ -629,7 +629,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let type_parameters: Vec<_> = type_parameters
                     .iter()
                     .map(|parameter| TypeParamDecl {
-                        name: Arc::clone(&parameter.name),
+                        name: parameter.name.clone(),
                         param: projected(memo, parameter.param, context),
                         constraint: parameter
                             .constraint
@@ -709,7 +709,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let object_context = self.indexed_access_operand_context(*object, context);
                 let object_id = projected(memo, *object, object_context);
                 let index = match index {
-                    IndexKey::String(value) => IndexKey::String(Arc::clone(value)),
+                    IndexKey::String(value) => IndexKey::String(value.clone()),
                     IndexKey::Number(value) => IndexKey::Number(*value),
                     IndexKey::UniqueSymbol(identity) => IndexKey::UniqueSymbol(identity.clone()),
                     // A key that already names a nominal identity is

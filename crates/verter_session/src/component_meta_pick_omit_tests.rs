@@ -1627,7 +1627,7 @@ fn budget_exceeded_typed_channel_vs_inert_identical_spelling() {
             domain: BudgetDomain::ProjectionOperation,
             limit: 1,
             actual: 2,
-            context: "typed-channel-fixture".to_string(),
+            context: "typed-channel-fixture".into(),
         }),
     );
     let tree = typed_sealed.into_type_expr(cap.authority());
@@ -1645,7 +1645,7 @@ fn budget_exceeded_typed_channel_vs_inert_identical_spelling() {
             domain: BudgetDomain::ProjectionOperation,
             limit: 1,
             actual: 2,
-            context: "typed-channel-fixture".to_string(),
+            context: "typed-channel-fixture".into(),
         }),
     );
     let carrier =

@@ -535,7 +535,7 @@ impl verter_type_engine::resolver_core::request_ports::HostAttachmentPort for cr
 /// Hooks that must re-enter the resolver tier receive the enclosing
 /// adapter as `ctx: &dyn ResolverContext` so the re-entry binds to the
 /// same request-bound context.
-pub(crate) trait RequestBoundLifecycle {
+pub(crate) trait RequestBoundLifecycle: Sync {
     /// The host this request runs against.
     fn host(&self) -> &crate::VerterHost;
 
@@ -1381,7 +1381,7 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
     fn complete_graph_signature(
         &self,
         roots: &[(
-            std::sync::Arc<str>,
+            verter_type_expr::OwnedStr,
             verter_session_query::analysis::types::Hash16,
         )],
         facts: Vec<FactVersionRef>,

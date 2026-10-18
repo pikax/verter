@@ -692,10 +692,12 @@ mod tests {
                 is_unique_symbol: false,
                 unique_symbol_members: Arc::from([]),
                 typeof_alias_target: Some(verter_type_expr::facts::ValueDeclIdentityPart {
-                    canonical_id: Arc::from("/src/theme.ts"),
+                    canonical_id: verter_type_expr::OwnedStr::from("/src/theme.ts"),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    symbol: Arc::from("theme"),
-                    member_path: Arc::from(Vec::<String>::new().into_boxed_slice()),
+                    symbol: verter_type_expr::OwnedStr::from("theme"),
+                    member_path: verter_type_expr::OwnedSlice::from(
+                        Vec::<String>::new().into_boxed_slice(),
+                    ),
                 }),
                 classification: ValueAnnotationClass::TypeOfAlias,
                 annotation: None,

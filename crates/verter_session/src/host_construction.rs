@@ -945,7 +945,7 @@ impl VerterHost {
     #[must_use]
     pub fn semantic_dispatch(
         &self,
-    ) -> verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+    ) -> verter_type_engine::project_semantic_dispatch::ThreadDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     > {
@@ -1866,7 +1866,7 @@ mod fact_validation_authority {
         fn complete_graph_signature(
             &self,
             roots: &[(
-                std::sync::Arc<str>,
+                verter_type_expr::OwnedStr,
                 verter_session_query::analysis::types::Hash16,
             )],
             facts: Vec<FactVersionRef>,

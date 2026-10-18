@@ -466,6 +466,24 @@ impl ExecutionScope {
         }
     }
 
+    /// Install `task` — a task that may run on any thread — as the one
+    /// `registry`'s entries on this thread join, for the extent of the
+    /// returned scope: the scope a suspendable execution opens around each
+    /// of its polls, on whichever thread runs it.
+    pub fn install(registry: &TaskRegistry, task: &ExecutionTask) -> Self {
+        let registry_identity = registry.identity();
+        INSTALLED_TASKS.with(|installed| {
+            installed
+                .borrow_mut()
+                .push((registry_identity, task.clone()));
+        });
+        Self {
+            registry_identity,
+            task: task.clone(),
+            installed: true,
+        }
+    }
+
     /// The task this scope runs as.
     pub fn task(&self) -> &ExecutionTask {
         &self.task

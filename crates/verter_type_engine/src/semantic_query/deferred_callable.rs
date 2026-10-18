@@ -275,7 +275,7 @@ impl DeferredCallable {
     /// neither — [`SemanticNodeData::Signature`] exposes the same
     /// content-free anchor through its public `occurrence` field.
     #[must_use]
-    pub(crate) fn declaring_canonical(&self) -> &Arc<str> {
+    pub(crate) fn declaring_canonical(&self) -> &verter_type_expr::OwnedStr {
         self.return_carrier
             .flow_identity()
             .map(|identity| &identity.anchor.canonical_id)

@@ -281,7 +281,16 @@ impl JobCancellationGuard {
     /// Install `token` for the current job and restore the prior token on drop.
     #[must_use]
     pub fn install(token: CancellationToken) -> Self {
-        let previous = CURRENT_JOB_CANCELLATION.with(|slot| slot.replace(Some(token)));
+        Self::replace(Some(token))
+    }
+
+    /// Install `token` — or no job token at all — for work this thread runs
+    /// on behalf of a job that began elsewhere, and restore the prior token
+    /// on drop. Work suspended under one job and resumed on another thread
+    /// observes its own job's cancellation, never the thread's.
+    #[must_use]
+    pub fn replace(token: Option<CancellationToken>) -> Self {
+        let previous = CURRENT_JOB_CANCELLATION.with(|slot| slot.replace(token));
         Self { previous }
     }
 }

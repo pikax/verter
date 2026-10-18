@@ -12,25 +12,40 @@
 //!
 //! **Storage charge.** A `Weak` keeps its rail's cell block allocated
 //! after the last handle drops (the entries and their charge go with the
-//! handle), so an interned rail's block lives exactly as long as its entry
-//! here, never shorter. The interner therefore charges, pinned against its
-//! store's account, every entry's block, every bucket's backing and its
-//! tables' buckets, settled as entries are added and pruned; an interned
-//! rail's own charge covers its entries only
-//! ([`DepSignature::interned_rail`]).
+//! handle), and a rail keeps its block allocated after the interner lets
+//! go. The block is therefore charged by a [`BlockShare`] the rail and its
+//! entry here each keep a clone of: it stays charged until both have let
+//! go, in either order ([`DepSignature::interned_rail`]). The interner
+//! charges, pinned against its store's account, its own storage — every
+//! bucket's backing and its tables' buckets — settled as entries are added
+//! and pruned; an interned rail's own charge covers its entries.
 
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 
-use verter_session_query::retention::owned::{Owned, WeakOwned};
+use verter_session_query::retention::owned::{BlockShare, ChargeCtx, Owned, WeakOwned};
 
 use crate::semantic_query::{DepEntry, DepRail, DepSignature, DepVersion};
 
-/// `Weak` view of an interned `DepSignature` payload — see
+/// `Weak` view of an interned `DepSignature` payload, with its share of the
+/// charge on the block the view keeps allocated — see
 /// [`DepSignatureInterner`].
-type DepSignatureWeak = WeakOwned<DepRail>;
+struct DepSignatureWeak {
+    rail: WeakOwned<DepRail>,
+    block: BlockShare,
+}
+
+impl DepSignatureWeak {
+    fn strong_count(&self) -> usize {
+        self.rail.strong_count()
+    }
+
+    fn upgrade(&self) -> Option<Owned<DepRail>> {
+        self.rail.upgrade()
+    }
+}
 
 /// Shards the interner's buckets are spread over.
 const SHARDS: usize = 16;
@@ -94,26 +109,15 @@ impl Storage {
     }
 }
 
-/// The block an entry's allocation holds — alive or not.
-fn entry_block_bytes(_entry: &DepSignatureWeak) -> usize {
-    Owned::<DepRail>::cell_block_bytes()
-}
-
 /// The backing one bucket's entry list holds.
 fn bucket_list_bytes(bucket: &Vec<DepSignatureWeak>) -> usize {
     verter_session_query::retention::allocation::vec_bytes(bucket)
 }
 
-/// Bytes one shard's storage holds: its table buckets, every bucket's
-/// entry list and every entry's block.
+/// Bytes one shard's storage holds: its table buckets and every bucket's
+/// entry list. Each entry's rail block is charged by its share.
 fn shard_bytes(shard: &FxHashMap<u64, Vec<DepSignatureWeak>>) -> usize {
-    shard.capacity() * TABLE_BUCKET_BYTES
-        + shard
-            .values()
-            .map(|bucket| {
-                bucket_list_bytes(bucket) + bucket.iter().map(entry_block_bytes).sum::<usize>()
-            })
-            .sum::<usize>()
+    shard.capacity() * TABLE_BUCKET_BYTES + shard.values().map(bucket_list_bytes).sum::<usize>()
 }
 
 impl Default for DepSignatureInterner {
@@ -186,41 +190,35 @@ impl DepSignatureInterner {
         let table_before = shard.capacity() * TABLE_BUCKET_BYTES;
         let bucket = shard.entry(hash).or_default();
         let list_before = bucket_list_bytes(bucket);
-        // Prune dead Weaks while scanning: their blocks are freed with them.
-        let mut freed = 0;
-        bucket.retain(|w| {
-            let live = w.strong_count() > 0;
-            if !live {
-                freed += entry_block_bytes(w);
-            }
-            live
-        });
+        // Prune dead Weaks while scanning: their blocks are freed with
+        // them, and so are the blocks' charges.
+        bucket.retain(|w| w.strong_count() > 0);
         let hit = bucket.iter().find_map(|w| {
             w.upgrade()
                 .map(DepSignature::from_owned)
                 .filter(|rail| rail.iter().eq(normalised.iter()))
         });
-        let (rail, added_block) = match hit {
+        let rail = match hit {
             Some(rail) => {
                 crate::request_observers::record_dep_signature_intern_hit();
-                (rail, 0)
+                rail
             }
             None => {
-                // Miss: insert a fresh rail and downgrade for the bucket.
-                let fresh = DepSignature::interned_rail(normalised);
-                let entry = Owned::downgrade(&fresh);
-                let block = entry_block_bytes(&entry);
-                bucket.push(entry);
-                (DepSignature::from_owned(fresh), block)
+                // Miss: insert a fresh rail and downgrade for the bucket,
+                // the entry sharing the charge on the block it keeps.
+                let (fresh, block) =
+                    DepSignature::interned_rail(normalised, ChargeCtx::new(&storage.account));
+                bucket.push(DepSignatureWeak {
+                    rail: Owned::downgrade(&fresh),
+                    block,
+                });
+                DepSignature::from_owned(fresh)
             }
         };
         let list_after = bucket_list_bytes(bucket);
         let table_after = shard.capacity() * TABLE_BUCKET_BYTES;
         drop(shard);
-        storage.settle(
-            added_block + list_after + table_after,
-            freed + list_before + table_before,
-        );
+        storage.settle(list_after + table_after, list_before + table_before);
         drop(storage);
 
         // Auto-sweep trigger. cheap O(buckets) walk every
@@ -293,6 +291,23 @@ impl DepSignatureInterner {
                     .lock()
                     .values()
                     .map(|bucket| bucket.iter().filter(|w| w.strong_count() > 0).count())
+                    .sum::<usize>()
+            })
+            .sum()
+    }
+
+    /// Bytes the block shares its entries keep are charged: every interned
+    /// rail block an entry still keeps allocated, alive or not.
+    #[must_use]
+    pub fn entry_block_charge_bytes(&self) -> usize {
+        self.shards
+            .iter()
+            .map(|shard| {
+                shard
+                    .lock()
+                    .values()
+                    .flatten()
+                    .map(|entry| entry.block.bytes())
                     .sum::<usize>()
             })
             .sum()

@@ -53,14 +53,14 @@ fn type_resolution_audit_long_chain_terminates_without_stack_overflow() {
     // `depth_high_water` at WALKER_DEPTH_CAP.
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::from("/chain.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/chain.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
-        name: Arc::from("T0"),
+        name: verter_type_expr::OwnedStr::from("T0"),
     });
 
     let (resolved, record) = host.resolve_type_with_audit(key, "/chain.ts").into_parts();

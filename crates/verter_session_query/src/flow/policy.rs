@@ -1,7 +1,5 @@
 //! Flow lowering policy and the gap vocabulary a lowering records where it stops modelling.
 
-use std::sync::Arc;
-
 /// One type-parameter clause enclosing a class expression.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ClassExpressionClause {
@@ -10,9 +8,20 @@ pub struct ClassExpressionClause {
     /// class method, `o.m` for a method of an object literal a variable
     /// holds, `arrow` for the arrow a variable holds, `GHolder` for a
     /// class.
-    pub container: Arc<str>,
+    pub container: verter_type_expr::OwnedStr,
     /// The clause's type parameters, in declaration order.
-    pub parameters: Arc<[Arc<str>]>,
+    pub parameters: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
+}
+
+impl crate::retention::owned::Measured for ClassExpressionClause {
+    /// Both names are owned allocations, each charged by its own cell.
+    fn heap_bytes(&self, aliases: &mut crate::retention::allocation::AliasSet) -> usize {
+        let Self {
+            container,
+            parameters,
+        } = self;
+        container.offer(aliases) + parameters.offer(aliases)
+    }
 }
 
 /// The `null` / `undefined` algebra one union is constructed under —

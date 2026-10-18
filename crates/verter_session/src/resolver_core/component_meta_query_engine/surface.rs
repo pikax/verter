@@ -118,7 +118,7 @@ pub(crate) fn lower_and_project_to_expanded_node(
     )?;
     let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base,
-        path: std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
         context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
@@ -169,10 +169,7 @@ pub(crate) fn project_class_a_terminal_node(
             expr,
             ProjectionMode::Expanded,
         )?;
-        (
-            base,
-            std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-        )
+        (base, verter_type_expr::OwnedSlice::<PathSegment>::default())
     } else {
         let base = dispatch.lower_type_expr_in_owner_scope_with_mode(
             scope_canonical_id,

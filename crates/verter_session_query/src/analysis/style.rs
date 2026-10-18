@@ -4,7 +4,16 @@
 use verter_span::Span;
 
 /// Discriminant for Vue special pseudo-classes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum SpecialPseudoKind {
     Deep,
     Global,
@@ -20,7 +29,17 @@ pub enum SpecialPseudoKind {
 /// processed language. Until that selection is available, consumers fail open
 /// for binding liveness (see
 /// [`super::types::ScriptAnalysisSnapshot::mark_bindings_used_in_style`]).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum BlockContentAvailability {
     /// Inline `<style>` content — analyzed in place.
@@ -42,7 +61,14 @@ impl BlockContentAvailability {
 }
 
 /// Complete analysis of a single `<style>` block.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct StyleBlockAnalysis {
     pub lang: StyleAnalysisLang,
@@ -55,6 +81,7 @@ pub struct StyleBlockAnalysis {
     /// analysis and a structure block: consumers full-identity-join
     /// (artifact identity + block id) and fail closed on missing/mismatch.
     #[serde(skip)]
+    #[heap_size(with = "crate::retention::heap_size_foreign::artifact_block_ref")]
     pub block_ref: Option<verter_language::parse_artifact::carrier_inventory::ArtifactBlockRef>,
 
     /// Opaque public block token for wire consumers (playground/FFI),
@@ -127,7 +154,9 @@ impl StyleBlockAnalysis {
 }
 
 /// Analyzed `v-bind()` expression from a style block.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, serde::Serialize, serde::Deserialize, verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyzedVBind {
     pub expression: String,
@@ -149,7 +178,9 @@ pub struct AnalyzedVBind {
 }
 
 /// Analyzed Vue special pseudo-class.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, serde::Serialize, serde::Deserialize, verter_retention::heap_size::HeapSize,
+)]
 pub struct AnalyzedSpecialPseudo {
     pub kind: SpecialPseudoKind,
     pub start: u32,
@@ -158,7 +189,14 @@ pub struct AnalyzedSpecialPseudo {
 }
 
 /// Trusted style analysis projected from the shared syntax authority.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct CssAnalysis {
     pub selectors: Vec<AnalyzedSelector>,
@@ -228,7 +266,7 @@ impl CssAnalysis {
 }
 
 /// A CSS selector with its computed specificity and optional parsed structure.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub struct AnalyzedSelector {
     pub text: String,
     /// Specificity tuple: (id, class, type).
@@ -303,7 +341,15 @@ impl<'de> serde::Deserialize<'de> for AnalyzedSelector {
 /// - `combinators`: `[Child]`
 ///
 /// The compounds and combinators alternate: `compounds[0] combinator[0] compounds[1] combinator[1] ...`
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct StructuredSelector {
     pub compounds: Vec<CompoundSelector>,
@@ -313,7 +359,16 @@ pub struct StructuredSelector {
 /// A compound selector: a sequence of simple selectors applied to the same element.
 ///
 /// For `"div.active#main"`: element=Some("div"), classes=["active"], id=Some("main")
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct CompoundSelector {
     /// Element type selector (e.g., `"div"`, `"p"`). `None` if omitted (class/id-only).
@@ -337,7 +392,16 @@ pub struct CompoundSelector {
 }
 
 /// CSS selector combinator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum SelectorCombinator {
     /// ` ` (space) — descendant
@@ -351,7 +415,15 @@ pub enum SelectorCombinator {
 }
 
 /// CSS pseudo-class classification.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum SelectorPseudoClass {
     /// `:not(...)` — negation with inner selectors
@@ -365,7 +437,15 @@ pub enum SelectorPseudoClass {
 }
 
 /// CSS attribute selector.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct AttributeSelector {
     pub name: String,
@@ -376,7 +456,16 @@ pub struct AttributeSelector {
 }
 
 /// CSS attribute selector operator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum AttributeOperator {
     /// `=` exact match
@@ -394,7 +483,7 @@ pub enum AttributeOperator {
 }
 
 /// A CSS class selector occurrence.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub struct AnalyzedCssClass {
     pub name: String,
     /// SFC-absolute byte span of the class name (after `.`).
@@ -443,7 +532,7 @@ impl<'de> serde::Deserialize<'de> for AnalyzedCssClass {
 }
 
 /// A CSS ID selector occurrence.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub struct AnalyzedCssId {
     pub name: String,
     /// SFC-absolute byte span of the ID name (after `#`).
@@ -481,7 +570,9 @@ impl<'de> serde::Deserialize<'de> for AnalyzedCssId {
 }
 
 /// A CSS custom property (variable) declaration.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, serde::Serialize, serde::Deserialize, verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyzedCustomProperty {
     /// Includes the `--` prefix.
@@ -501,7 +592,9 @@ pub struct AnalyzedCustomProperty {
 }
 
 /// A `var(--name)` or `var(--name, fallback)` reference in a CSS value.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, serde::Serialize, serde::Deserialize, verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct CssVarReference {
     /// Variable name including `--` prefix.
@@ -516,7 +609,9 @@ pub struct CssVarReference {
 }
 
 /// The fallback portion of a `var(--name, fallback)` expression.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, serde::Serialize, serde::Deserialize, verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct CssVarFallback {
     /// Raw text of the fallback value.
@@ -529,7 +624,9 @@ pub struct CssVarFallback {
 }
 
 /// A `var()` usage in a non-custom-property CSS declaration.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, serde::Serialize, serde::Deserialize, verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyzedVarUsage {
     /// The CSS property name (e.g. `"color"`, `"background"`).
@@ -545,7 +642,9 @@ pub struct AnalyzedVarUsage {
 /// per-declaration counterpart `CssAnalysis.declarations` records for every
 /// `StyleCompleteness::Complete` declaration — unlike `custom_properties`,
 /// which only projects the `--`-prefixed subset.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, serde::Serialize, serde::Deserialize, verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyzedDeclaration {
     /// SFC-absolute span of the property/custom-property name.
@@ -563,7 +662,16 @@ pub struct AnalyzedDeclaration {
 }
 
 /// The syntactic shape of a color-literal candidate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum ColorCandidateKind {
     /// A `#`-prefixed hex color token (e.g. `#fff`, `#ff0000`).
     Hex,
@@ -574,7 +682,9 @@ pub enum ColorCandidateKind {
 /// A color-literal candidate span found while walking a declaration's value.
 /// Comment and string content structurally never produce a candidate — the
 /// walk simply does not visit `ComponentValue::Comment`/`ComponentValue::String`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, serde::Serialize, serde::Deserialize, verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyzedColorCandidate {
     /// SFC-absolute span of the candidate (the hash token, or the whole
@@ -606,7 +716,15 @@ pub struct AnalyzedColorCandidate {
 /// `rgb()`/`hsl()` channels must apply its OWN percentage rule (always
 /// `/100`) rather than folding a percentage into the same 0-255-vs-0-1
 /// magnitude heuristic it uses for a bare `Number`.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(tag = "kind", content = "value", rename_all = "camelCase")]
 pub enum NumericArg {
     Number(f64),
@@ -614,14 +732,25 @@ pub enum NumericArg {
 }
 
 /// A CSS at-rule occurrence.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, serde::Serialize, serde::Deserialize, verter_retention::heap_size::HeapSize,
+)]
 pub struct AnalyzedAtRule {
     pub kind: AtRuleKind,
     pub name: String,
 }
 
 /// Discriminant for CSS at-rule types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum AtRuleKind {
     Media,
     Keyframes,
@@ -661,7 +790,17 @@ bitflags::bitflags! {
 }
 
 /// Style preprocessor language.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum StyleAnalysisLang {
     #[default]
     Css,

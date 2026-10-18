@@ -26,7 +26,7 @@ use std::sync::Arc;
 use verter_no_typeexpr::NoTypeExpr;
 
 /// One read of one runtime variable, keyed for "is it read after this span".
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct IndexedRead {
     /// The span of the site the read is attributed to.
     pub site_span: FrameSpan,
@@ -44,7 +44,9 @@ pub struct IndexedRead {
 /// An unprepared skeleton carries the empty index; only
 /// [`prepare_function_body_skeleton`](super::skeleton::prepare_function_body_skeleton)
 /// fills it.
-#[derive(Debug, Clone, Default, PartialEq, Eq, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub struct SkeletonSpanIndex {
     sites: Arc<[(FrameSpan, SkeletonExprSiteId)]>,
     writes: Arc<[(FrameSpan, u32)]>,

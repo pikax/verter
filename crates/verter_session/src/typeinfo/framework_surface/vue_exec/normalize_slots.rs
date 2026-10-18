@@ -373,7 +373,7 @@ fn binding_fields_from_param_node<C: crate::session_attachment::SessionCapabilit
         ctx,
         dispatch,
         first_param,
-        Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
         ProjectionReductionContext::published(ProjectionMode::Shallow),
         None,
     ) {
@@ -697,7 +697,7 @@ mod raise_miss_normalization_tests {
             .shallow_file_state("/dep.ts")
             .expect("/dep.ts must index");
         let scope = NodeScopeId::File {
-            canonical_id: Arc::from("/dep.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/dep.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: shallow.whole_hash,
             local_scope: None,

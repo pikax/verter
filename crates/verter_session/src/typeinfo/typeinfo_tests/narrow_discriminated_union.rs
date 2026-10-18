@@ -50,9 +50,9 @@ fn resolve_switch(source: &str) -> TypeExpr {
     upsert_ts(&host, path, source);
     let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: Arc::from(path),
+            canonical_id: verter_type_expr::OwnedStr::from(path),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("f"),
+            symbol: verter_type_expr::OwnedStr::from("f"),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
         function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,

@@ -274,9 +274,9 @@ defineEmits<{ save: [id: number] }>()
     let source = SemanticTypeSource::Projected(ProjectedTypeFact::MemberPath {
         base: AuthoredBodyLocator::MacroPayload(verter_type_expr::locators::MacroPayloadLocator {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: std::sync::Arc::from("/App.vue"),
+                canonical_id: verter_type_expr::OwnedStr::from("/App.vue"),
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
-                symbol: std::sync::Arc::from("default"),
+                symbol: verter_type_expr::OwnedStr::from("default"),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
             },
             // Out of range: no such macro exists, so the base has no live
@@ -349,9 +349,9 @@ defineEmits<{ save: [id: number] }>()
     let miss_projection_source = SemanticTypeSource::Projected(ProjectedTypeFact::MemberPath {
         base: AuthoredBodyLocator::MacroPayload(verter_type_expr::locators::MacroPayloadLocator {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: std::sync::Arc::from("/App.vue"),
+                canonical_id: verter_type_expr::OwnedStr::from("/App.vue"),
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
-                symbol: std::sync::Arc::from("default"),
+                symbol: verter_type_expr::OwnedStr::from("default"),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
             },
             macro_index: 0,

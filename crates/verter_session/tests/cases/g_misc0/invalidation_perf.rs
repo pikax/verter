@@ -41,9 +41,9 @@ fn invalidate_canonical_touches_only_indexed_entries() {
     let mut inserted = 0usize;
     for i in 0..K {
         let key: ImportedRegistryKey = (
-            Arc::clone(&target_arc),
+            verter_type_expr::OwnedStr::from(target_arc.clone()),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(format!("name-{i}").as_str()),
+            verter_type_expr::OwnedStr::from(format!("name-{i}").as_str()),
         );
         let entry = Arc::new(ImportedRegistryEntry {
             value: None,
@@ -58,9 +58,9 @@ fn invalidate_canonical_touches_only_indexed_entries() {
         let canonical_arc: Arc<str> = Arc::from(canonical.as_str());
         for slot in 0..10u64 {
             let key: ImportedRegistryKey = (
-                Arc::clone(&canonical_arc),
+                verter_type_expr::OwnedStr::from(canonical_arc.clone()),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from(format!("name-{shard}-{slot}").as_str()),
+                verter_type_expr::OwnedStr::from(format!("name-{shard}-{slot}").as_str()),
             );
             let entry = Arc::new(ImportedRegistryEntry {
                 value: None,

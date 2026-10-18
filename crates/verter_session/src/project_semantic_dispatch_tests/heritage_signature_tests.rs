@@ -224,7 +224,7 @@ fn a_substituted_heritage_body_stays_a_declaration() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: std::sync::Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let returning = |return_type| {
         graph.intern_node(SemanticNodeData::Signature {

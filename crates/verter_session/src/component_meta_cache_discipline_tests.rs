@@ -154,9 +154,9 @@ fn cache_discipline_resolve_macro_payload_repeated_keys_warm() {
             ));
     let unrelated_key = SemanticQueryKey::ResolveMacroPayload {
         owner: verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
-            Arc::from("<synthetic>"),
+            verter_type_expr::OwnedStr::from("<synthetic>"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from("OtherOwner"),
+            verter_type_expr::OwnedStr::from("OtherOwner"),
         ),
         macro_index: 1,
         macro_kind: AnalyzedMacroKind::DefineProps,
@@ -333,7 +333,7 @@ fn cache_discipline_execute_read_repeated_keys_warm() {
     // key form sees the same digest as the warm cache.
     let key = SemanticQueryKey::ProjectMember {
         base,
-        member: Arc::from("a"),
+        member: verter_type_expr::OwnedStr::from("a"),
         mode: ProjectionMode::Expanded,
     };
 
@@ -363,7 +363,7 @@ fn cache_discipline_execute_read_repeated_keys_warm() {
     // distinct key that cold-fires once.
     let unrelated_key = SemanticQueryKey::ProjectMember {
         base,
-        member: Arc::from("z"),
+        member: verter_type_expr::OwnedStr::from("z"),
         mode: ProjectionMode::Expanded,
     };
     let unrelated_baseline_cold = counter.family_cold(&unrelated_key);
@@ -446,13 +446,13 @@ fn cross_owner_shared_declaration_resolves_once_across_owners() {
     // cycle-gate classification of `Shared` and its Skeleton-transit
     // instantiation (the gate's own body demand).
     let gate_key = dispatch.materialization_cycle_gate_key_for(&DeclIdentity {
-        canonical_id: Arc::from(shared),
+        canonical_id: verter_type_expr::OwnedStr::from(shared),
         owner: owner_id,
         whole_hash: host
             .shallow_file_state(shared)
             .map(|state| state.whole_hash)
             .expect("the shared declaration file is tracked"),
-        decl_name: Arc::from("Shared"),
+        decl_name: verter_type_expr::OwnedStr::from("Shared"),
     });
     let skeleton_key = SemanticQueryKey::Instantiate(InstantiateKey::new(
         shared_slot(),

@@ -35,6 +35,7 @@ use verter_no_typeexpr::NoTypeExpr;
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum IntrinsicMemberKind {
     /// An HTML attribute (e.g. `id`, `disabled`, `placeholder`).
@@ -62,6 +63,7 @@ pub enum IntrinsicMemberKind {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct StaticIntrinsicTypeId(u32);
 

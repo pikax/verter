@@ -193,7 +193,15 @@ pub enum CacheAdmission<V> {
 /// carrying the value plus the validity rails a warm hit checks. Refer
 /// to it by its qualified `cache_runtime` path to avoid the name
 /// collision.
-#[derive(Clone)]
+///
+/// An entry exists only charged ([`Self::admit`]). Its own allocations —
+/// its map slot and key, its block, its fact slice, its self-root list,
+/// whatever heap its value keeps outside owned cells, and the evidence
+/// pages its signature reaches — are one refusable `Retained` reservation
+/// released with the entry. The value's owned cells (the allocations a warm
+/// hit hands out) carry their own charges, which the reservation holds:
+/// when the entry goes, each passes to the handles callers still keep and
+/// is released by the last of them.
 pub struct CacheEntry<V> {
     /// The cached value.
     pub value: V,
@@ -204,6 +212,92 @@ pub struct CacheEntry<V> {
     pub self_root_canonicals: Arc<[Arc<str>]>,
     /// World generation the entry was computed under.
     pub validated_at_generation: u64,
+    _retention: verter_session_query::retention::RetentionCharge,
+}
+
+/// An entry the account refused to retain: its complete value, uncached,
+/// with every owned cell it reaches charged to the callers that keep it.
+pub struct RefusedEntry<V> {
+    /// The complete value.
+    pub value: V,
+    /// Its signature.
+    pub signature: ReadSetSignature,
+    /// Its self-roots.
+    pub self_root_canonicals: Arc<[Arc<str>]>,
+    /// Its generation stamp.
+    pub validated_at_generation: u64,
+}
+
+impl<V> CacheEntry<V> {
+    /// Charge an entry for keeping `value` in a map slot keyed by `K`.
+    /// `footprint` is what the key and the value keep beyond their inline
+    /// bytes: the heap the entry owns alone, and the value's owned cells.
+    ///
+    /// # Errors
+    ///
+    /// The account's refusal: nothing is retained, the complete value comes
+    /// back, and its owned cells are charged to its callers.
+    pub fn admit<K>(
+        value: V,
+        signature: ReadSetSignature,
+        self_root_canonicals: Arc<[Arc<str>]>,
+        validated_at_generation: u64,
+        footprint: verter_session_query::retention::Footprint,
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) -> Result<Self, RefusedEntry<V>> {
+        use verter_session_query::retention::allocation::{
+            arc_block_bytes, arc_str_list_bytes, fact_slice_bytes, AliasSet,
+        };
+        use verter_session_query::retention::RetentionAdmission;
+        let ctx = verter_session_query::retention::owned::ChargeCtx::new(account);
+        let mut aliases = AliasSet::new();
+        let own = verter_session_query::retention::ENTRY_OVERHEAD_BYTES
+            + std::mem::size_of::<(K, Arc<Self>)>()
+            + arc_block_bytes(std::mem::size_of::<Self>())
+            + fact_slice_bytes(&signature.facts, &mut aliases)
+            + arc_str_list_bytes(&self_root_canonicals, &mut aliases)
+            + footprint.bytes;
+        let handles = aliases.take_handles().merge(footprint.handles);
+        let Ok(holds) = handles.hold_or_pin(ctx) else {
+            return Err(RefusedEntry {
+                value,
+                signature,
+                self_root_canonicals,
+                validated_at_generation,
+            });
+        };
+        match verter_session_query::facts::receipt::reserve_retained_with_evidence(
+            account,
+            own,
+            &[&signature.facts],
+        ) {
+            RetentionAdmission::Admitted(charge) => Ok(Self {
+                value,
+                signature,
+                self_root_canonicals,
+                validated_at_generation,
+                _retention: charge.holding(holds),
+            }),
+            // Dropping the holds hands each cell back to its callers.
+            RetentionAdmission::Refused(_) => {
+                drop(holds);
+                Err(RefusedEntry {
+                    value,
+                    signature,
+                    self_root_canonicals,
+                    validated_at_generation,
+                })
+            }
+        }
+    }
+
+    /// Bytes the entry's own reservation holds, its owned cells' charges
+    /// aside.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn charge_bytes_for_tests(&self) -> usize {
+        self._retention.bytes()
+    }
 }
 
 /// One candidate inside a query-identity multi-candidate slot.

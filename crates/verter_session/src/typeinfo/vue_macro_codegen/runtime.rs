@@ -43,8 +43,7 @@ pub(super) fn direct_member_dependency_is_missing(
             }
             SemanticNodeData::BareRef(_) => {
                 let (name, _) = data.bare_ref_head().expect("BareRef carrier head");
-                let tracked_dependency =
-                    tracked_dependency || dependency_names.contains(name.as_ref());
+                let tracked_dependency = tracked_dependency || dependency_names.contains(name);
                 drop(data);
                 let Some(resolved) = resolve_member_carrier(
                     dispatch,
@@ -100,7 +99,7 @@ pub(super) fn direct_member_dependency_is_missing(
                 let (resolved, local) = observe_local(|| {
                     dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                         scope: ScopeId {
-                            canonical_id: Arc::clone(&identity.canonical_id),
+                            canonical_id: identity.canonical_id.clone(),
                             owner: identity.owner,
                             local_scope: None,
                             binder_scope_id:
@@ -108,7 +107,7 @@ pub(super) fn direct_member_dependency_is_missing(
                                     identity.owner,
                                 ),
                         },
-                        name: Arc::clone(&identity.decl_name),
+                        name: identity.decl_name.clone(),
                     }))
                 });
                 match resolved {
@@ -133,9 +132,9 @@ pub(super) fn direct_member_dependency_is_missing(
                     dispatch.execute_type_node(SemanticQueryKey::Instantiate(
                         verter_type_engine::semantic_query::InstantiateKey::new(
                             dispatch.type_slot_for(
-                                Arc::clone(&base.canonical_id),
+                                base.canonical_id.clone(),
                                 base.owner,
-                                Arc::clone(&base.decl_name),
+                                base.decl_name.clone(),
                             ),
                             args,
                             dispatch.instantiate_context_for(
@@ -171,14 +170,14 @@ pub(super) fn direct_member_dependency_is_missing(
             ) => {
                 let tracked_dependency =
                     tracked_dependency || dependency_names.contains(name.as_ref());
-                let canonical_id = Arc::clone(canonical_id);
+                let canonical_id = canonical_id.clone();
                 let owner = *owner;
-                let name = Arc::clone(name);
+                let name = name.clone();
                 drop(data);
                 let (resolved, local) = observe_local(|| {
                     dispatch.execute_type_node(SemanticQueryKey::Instantiate(
                         verter_type_engine::semantic_query::InstantiateKey::new(
-                            dispatch.type_slot_for(Arc::clone(&canonical_id), owner, name),
+                            dispatch.type_slot_for(canonical_id.clone(), owner, name),
                             Arc::from([]),
                             dispatch.instantiate_context_for(
                                 &canonical_id,
@@ -265,7 +264,7 @@ fn is_definitely_non_object_root(
                 let resolved =
                     dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                         scope: ScopeId {
-                            canonical_id: Arc::clone(&identity.canonical_id),
+                            canonical_id: identity.canonical_id.clone(),
                             owner: identity.owner,
                             local_scope: None,
                             binder_scope_id:
@@ -273,7 +272,7 @@ fn is_definitely_non_object_root(
                                     identity.owner,
                                 ),
                         },
-                        name: Arc::clone(&identity.decl_name),
+                        name: identity.decl_name.clone(),
                     }));
                 let QueryResult::Value(resolved) = resolved else {
                     return false;
@@ -290,9 +289,9 @@ fn is_definitely_non_object_root(
                 let resolved = dispatch.execute_type_node(SemanticQueryKey::Instantiate(
                     verter_type_engine::semantic_query::InstantiateKey::new(
                         dispatch.type_slot_for(
-                            Arc::clone(&base.canonical_id),
+                            base.canonical_id.clone(),
                             base.owner,
-                            Arc::clone(&base.decl_name),
+                            base.decl_name.clone(),
                         ),
                         args,
                         dispatch.instantiate_context_for(&base.canonical_id, resolution_context),
@@ -314,13 +313,13 @@ fn is_definitely_non_object_root(
                     ..
                 },
             ) => {
-                let canonical_id = Arc::clone(canonical_id);
+                let canonical_id = canonical_id.clone();
                 let owner = *owner;
-                let name = Arc::clone(name);
+                let name = name.clone();
                 drop(data);
                 let resolved = dispatch.execute_type_node(SemanticQueryKey::Instantiate(
                     verter_type_engine::semantic_query::InstantiateKey::new(
-                        dispatch.type_slot_for(Arc::clone(&canonical_id), owner, name),
+                        dispatch.type_slot_for(canonical_id.clone(), owner, name),
                         Arc::from([]),
                         dispatch.instantiate_context_for(&canonical_id, resolution_context),
                     ),

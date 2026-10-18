@@ -52,9 +52,9 @@ fn with_probe<R>(
     );
     let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: Arc::from(PROBE_FILE),
+            canonical_id: verter_type_expr::OwnedStr::from(PROBE_FILE),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("__predicate_probe"),
+            symbol: verter_type_expr::OwnedStr::from("__predicate_probe"),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
         function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
@@ -288,7 +288,7 @@ fn kernel_effects_read_the_declared_predicate_under_the_call_map() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let signature = |name: &str, type_parameters: Vec<TypeParamDecl>, ret, predicate| {
         graph.intern_node(SemanticNodeData::Signature {
@@ -328,7 +328,7 @@ fn kernel_effects_read_the_declared_predicate_under_the_call_map() {
     let generic = signature(
         "isT",
         vec![TypeParamDecl {
-            name: Arc::from("T"),
+            name: verter_type_expr::OwnedStr::from("T"),
             param: t,
             constraint: None,
             default: None,

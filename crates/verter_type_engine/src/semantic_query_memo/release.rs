@@ -39,15 +39,235 @@
 //! edges, stable-key classes) own nothing. Each marks the slot it describes,
 //! and a marked slot's destruction is logged for cleanup, so the pending log
 //! never outgrows the stale entries it removes. The log is drained by every
-//! close and by any sidecar write that finds it past
-//! [`DESTROYED_DRAIN_THRESHOLD`].
+//! close, by any sidecar write that finds it past
+//! [`DESTROYED_DRAIN_THRESHOLD`], and by the release that grows it past that
+//! threshold ([`SidecarSink`]). A release that finds a sidecar lock held
+//! leaves the drain to that lock's holder, which runs it as it unlocks
+//! ([`SidecarMutex`]), so the pending log and the stale sidecar entries it
+//! describes stay bounded at rest even when a holder's final drop comes
+//! after the last close, under contention, and no later work runs.
 
 use rustc_hash::FxHashMap;
 
 use super::*;
 
-/// Destroyed ids the pending log may hold before a sidecar write drains it.
+/// Destroyed ids the pending log may hold before a sidecar write or a
+/// release drains it.
 pub(super) const DESTROYED_DRAIN_THRESHOLD: usize = 1024;
+
+/// A per-node sidecar's lock. Its guard settles any cleanup a release
+/// could not run because a sidecar lock was held: the release records the
+/// obligation ([`SidecarSink::settle`]) and the holder that blocked it
+/// drains the log as it unlocks, so the pending log never waits on later,
+/// unrelated work.
+pub(crate) struct SidecarMutex<T> {
+    lock: Mutex<T>,
+    binding: std::sync::OnceLock<SidecarBinding>,
+}
+
+/// What a sidecar guard settles on unlock: the owning arena's cleanup
+/// obligation.
+struct SidecarBinding {
+    owed: Arc<std::sync::atomic::AtomicBool>,
+    arena: std::sync::Weak<super::arena::NodeArenaCore>,
+}
+
+impl<T: Default> Default for SidecarMutex<T> {
+    fn default() -> Self {
+        Self::new(T::default())
+    }
+}
+
+impl<T> SidecarMutex<T> {
+    pub(super) fn new(value: T) -> Self {
+        Self {
+            lock: Mutex::new(value),
+            binding: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Lock the sidecar; the guard settles a cleanup obligation recorded
+    /// while it was held.
+    pub(super) fn lock(&self) -> SidecarGuard<'_, T> {
+        SidecarGuard {
+            guard: Some(self.lock.lock()),
+            binding: self.binding.get(),
+        }
+    }
+
+    /// The raw lock, for the drain itself: it settles nothing on unlock.
+    fn try_lock_raw(&self) -> Option<parking_lot::MutexGuard<'_, T>> {
+        self.lock.try_lock()
+    }
+
+    fn bind(
+        &self,
+        owed: &Arc<std::sync::atomic::AtomicBool>,
+        arena: &Arc<super::arena::NodeArenaCore>,
+    ) {
+        let _ = self.binding.set(SidecarBinding {
+            owed: Arc::clone(owed),
+            arena: Arc::downgrade(arena),
+        });
+    }
+}
+
+/// A held sidecar lock (see [`SidecarMutex`]).
+pub(crate) struct SidecarGuard<'a, T> {
+    guard: Option<parking_lot::MutexGuard<'a, T>>,
+    binding: Option<&'a SidecarBinding>,
+}
+
+impl<T> std::ops::Deref for SidecarGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        self.guard.as_ref().expect("a held sidecar guard")
+    }
+}
+
+impl<T> std::ops::DerefMut for SidecarGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.guard.as_mut().expect("a held sidecar guard")
+    }
+}
+
+impl<T> Drop for SidecarGuard<'_, T> {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        let Some(binding) = self.binding else {
+            return;
+        };
+        // Pairs with the fence in `SidecarSink::settle_owed`: a release that
+        // found this lock held recorded its obligation before trying it, so
+        // either it drained after this unlock or this load sees the
+        // obligation.
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+        if binding.owed.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Some(arena) = binding.arena.upgrade() {
+                arena.settle_destroyed_log();
+            }
+        }
+    }
+}
+
+/// Weak handles on a store's per-node sidecars, bound into the store's arena
+/// so the release that grows the destroyed log past
+/// [`DESTROYED_DRAIN_THRESHOLD`] drains it itself, and the cleanup
+/// obligation a held sidecar lock leaves to its holder.
+pub(super) struct SidecarSink {
+    unresolved_reach: std::sync::Weak<
+        SidecarMutex<FxHashMap<SemanticNodeId, super::unresolved_reach::NodeStructureBits>>,
+    >,
+    member_ordinal_index_memo:
+        std::sync::Weak<DashMap<SemanticNodeId, Arc<super::member_index::MemberOrdinalIndex>>>,
+    member_ordinal_index_fifo:
+        std::sync::Weak<SidecarMutex<std::collections::VecDeque<SemanticNodeId>>>,
+    derivation: std::sync::Weak<SidecarMutex<DerivationStore>>,
+    key_classes: std::sync::Weak<SidecarMutex<crate::semantic_query::stable_key::KeyClasses>>,
+    /// Set from the release that leaves the destroyed log past its threshold
+    /// until a drain empties it.
+    owed: Arc<std::sync::atomic::AtomicBool>,
+    /// Held by the one drain attempt in progress. Drain attempts never
+    /// overlap, so a sidecar lock a drain finds held is held by an ordinary
+    /// guard, whose unlock settles the obligation.
+    draining: std::sync::atomic::AtomicBool,
+    /// Set by a settle that found a drain in progress: that drain may hold
+    /// the lock whose unlock asked for the settle, so it retries once it has
+    /// released its partial locks rather than leave the obligation stranded.
+    rerun: std::sync::atomic::AtomicBool,
+}
+
+impl SidecarSink {
+    /// Drain the destroyed log, now or through the holder of a sidecar lock
+    /// that blocks it. Never waits for a sidecar lock: one held elsewhere —
+    /// on this thread too, when the release runs inside a sidecar write —
+    /// leaves the obligation recorded, and that holder's unlock settles it.
+    pub(super) fn settle(&self, arena: &super::arena::NodeArenaCore) {
+        self.owed.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.settle_owed(arena);
+    }
+
+    /// Settle a recorded obligation, if any.
+    ///
+    /// One drain attempt runs at a time. A settle arriving while one is in
+    /// progress asks it to run again and returns: the attempt in progress
+    /// may hold the very lock whose unlock asked for this settle, so had it
+    /// tried itself it would have failed on that partial lock, and the
+    /// attempt in progress could then fail and return too, leaving the
+    /// obligation with no holder to settle it.
+    pub(super) fn settle_owed(&self, arena: &super::arena::NodeArenaCore) {
+        use std::sync::atomic::Ordering::{Relaxed, SeqCst};
+        loop {
+            // Pairs with the fence in a sidecar guard's unlock: an
+            // obligation recorded while this drain held the locks is seen
+            // here, and one recorded before a holder unlocked is seen there.
+            std::sync::atomic::fence(SeqCst);
+            if !self.owed.load(Relaxed) {
+                return;
+            }
+            // Set before trying to take the drain: if the attempt in
+            // progress releases it after this settle saw it held, that
+            // attempt then reads this request.
+            self.rerun.store(true, SeqCst);
+            if self.draining.swap(true, SeqCst) {
+                return;
+            }
+            self.rerun.store(false, SeqCst);
+            let drained = self.try_drain(arena);
+            self.draining.store(false, SeqCst);
+            // A blocked attempt retries only for a settle it turned away;
+            // otherwise the guard that blocked it settles as it unlocks.
+            if !drained && !self.rerun.swap(false, SeqCst) {
+                return;
+            }
+        }
+    }
+
+    /// Drop the sidecar entries of every logged destroyed id, clearing the
+    /// obligation under the sidecar locks. `false` when a sidecar lock is
+    /// held elsewhere. A store already gone has no entries left to drop: its
+    /// log is emptied.
+    fn try_drain(&self, arena: &super::arena::NodeArenaCore) -> bool {
+        let (Some(reach), Some(memo), Some(fifo), Some(derivation), Some(classes)) = (
+            self.unresolved_reach.upgrade(),
+            self.member_ordinal_index_memo.upgrade(),
+            self.member_ordinal_index_fifo.upgrade(),
+            self.derivation.upgrade(),
+            self.key_classes.upgrade(),
+        ) else {
+            self.owed.store(false, std::sync::atomic::Ordering::SeqCst);
+            drop(arena.drain_destroyed());
+            return true;
+        };
+        let guards = (
+            reach.try_lock_raw(),
+            fifo.try_lock_raw(),
+            derivation.try_lock_raw(),
+            classes.try_lock_raw(),
+        );
+        let (Some(mut reach), Some(mut fifo), Some(mut derivation), Some(mut classes)) = guards
+        else {
+            // The partial locks are still held here.
+            #[cfg(test)]
+            arena.race_event(super::arena::ArenaRaceEvent::SidecarDrainBlocked);
+            return false;
+        };
+        self.owed.store(false, std::sync::atomic::Ordering::SeqCst);
+        let destroyed = arena.drain_destroyed();
+        for id in &destroyed {
+            reach.remove(id);
+            // A member-index shard is held only to read or write one entry,
+            // never across a release, so waiting for it cannot deadlock.
+            memo.remove(id);
+        }
+        let dead: rustc_hash::FxHashSet<SemanticNodeId> = destroyed.into_iter().collect();
+        fifo.retain(|id| !dead.contains(id));
+        derivation.release_nodes(&|id| dead.contains(&id));
+        classes.release_nodes(|id| dead.contains(&id));
+        true
+    }
+}
 
 /// What one [`SemanticGraphStore::close_canonical`] evicted. Counts are per
 /// call; `shape_entries_released` is filled by the owning
@@ -60,7 +280,10 @@ pub struct SemanticCloseReport {
     pub memo_entries_evicted: usize,
     /// Union member views over closed content evicted.
     pub union_views_released: usize,
-    /// Signature-kernel type-token roots released for closed content.
+    /// Signature-kernel type-token roots the store released for closed
+    /// content. A root a live reader or lease of the epoch may still read
+    /// back is dropped when the epoch's last holder drops, so this counts
+    /// roots taken from the store, not nodes freed by this close.
     pub signature_tokens_released: usize,
     /// Whether this close replaced the signature kernel's epoch.
     pub signature_epoch_replaced: bool,
@@ -197,6 +420,26 @@ impl SemanticGraphStore {
         report.sidecar_entries_dropped = self.reclaim_destroyed_sidecars();
         report.elapsed_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
         report
+    }
+
+    /// Bind this store's sidecars into its arena, so a release that grows
+    /// the destroyed log past [`DESTROYED_DRAIN_THRESHOLD`] drains it.
+    pub(super) fn bind_destroyed_sidecar_sink(&self) {
+        let owed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.unresolved_reach.bind(&owed, &self.arena.core);
+        self.member_ordinal_index_fifo.bind(&owed, &self.arena.core);
+        self.derivation.bind(&owed, &self.arena.core);
+        self.key_classes.bind(&owed, &self.arena.core);
+        self.arena.core.bind_destroyed_sink(SidecarSink {
+            unresolved_reach: Arc::downgrade(&self.unresolved_reach),
+            member_ordinal_index_memo: Arc::downgrade(&self.member_ordinal_index_memo),
+            member_ordinal_index_fifo: Arc::downgrade(&self.member_ordinal_index_fifo),
+            derivation: Arc::downgrade(&self.derivation),
+            key_classes: Arc::downgrade(&self.key_classes),
+            owed,
+            draining: std::sync::atomic::AtomicBool::new(false),
+            rerun: std::sync::atomic::AtomicBool::new(false),
+        });
     }
 
     /// Drop the per-node sidecar entries of every destroyed node the arena

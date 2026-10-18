@@ -691,7 +691,7 @@ fn inferable_param_set_id_is_order_insensitive_set() {
 #[test]
 pub(crate) fn relate_query_value_carries_relation_proof_and_budget_state() {
     let binding = verter_type_engine::semantic_query::InferBinding {
-        name: Arc::from("T"),
+        name: verter_type_expr::OwnedStr::from("T"),
         param: SemanticNodeId(2),
         bound: SemanticNodeId(3),
     };
@@ -699,9 +699,7 @@ pub(crate) fn relate_query_value_carries_relation_proof_and_budget_state() {
         // Budget state is FOLDED into the outcome — there is no separate
         // `budget_state` field (the old field would fail to compile here).
         outcome: RelationOutcome::BudgetExceeded(BudgetExceededKind::RelationBudget),
-        bindings: verter_session_query::retention::owned::Owned::from(
-            vec![binding].into_boxed_slice(),
-        ),
+        bindings: verter_session_query::retention::owned::OwnedSlice::from(vec![binding]),
         recursion: Default::default(),
     };
 
