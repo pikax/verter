@@ -447,6 +447,20 @@ impl VerterHost {
                     })
                 }
             };
+            let ctx = verter_session_query::retention::owned::ChargeCtx::new(
+                self.project_type_store.retention_account(),
+            );
+            match &row {
+                CompiledProduct::Runtime { nodes, .. } => {
+                    for node in nodes {
+                        pin_generated_texts(&node.code, node.source_map.as_ref(), ctx);
+                    }
+                }
+                CompiledProduct::Ide(ide) => {
+                    pin_generated_texts(&ide.code, ide.source_map.as_ref(), ctx);
+                }
+                CompiledProduct::Analysis(_) => {}
+            }
             rows.push(row);
         }
 

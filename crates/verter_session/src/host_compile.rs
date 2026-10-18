@@ -976,24 +976,35 @@ impl VerterHost {
     ) -> CompileBatchEntry {
         let id_prefix = format!("[{}] ", input.canonical_id);
         match self.render_only_main(&input.canonical_id, per_input_profile, style_processing) {
-            Ok(render) => CompileBatchEntry {
-                canonical_id: input.canonical_id.clone(),
-                outcome: CompileBatchOutcome::Produced {
-                    code: verter_type_expr::OwnedStr::from(render.code),
-                    lang: render.lang,
-                    source_map: render.source_map.map(verter_type_expr::OwnedStr::from),
-                    diagnostics: render.diagnostics,
-                },
-                duration_ms: start.elapsed().as_secs_f64() * 1000.0,
-                // The render lane consults no host cache node, so a render
-                // is never a "warm hit" and always reports `false`. The
-                // mode axis is carried for wire-shape parity with the
-                // HostBacked entry; the render lane runs under no cache mode.
-                cache_hit: false,
-                requested_mode,
-                actual_mode: requested_mode,
-                downgrade_reason: None,
-            },
+            Ok(render) => {
+                let code = verter_type_expr::OwnedStr::from(render.code);
+                let source_map = render.source_map.map(verter_type_expr::OwnedStr::from);
+                crate::types::pin_generated_texts(
+                    &code,
+                    source_map.as_ref(),
+                    verter_session_query::retention::owned::ChargeCtx::new(
+                        self.project_type_store.retention_account(),
+                    ),
+                );
+                CompileBatchEntry {
+                    canonical_id: input.canonical_id.clone(),
+                    outcome: CompileBatchOutcome::Produced {
+                        code,
+                        lang: render.lang,
+                        source_map,
+                        diagnostics: render.diagnostics,
+                    },
+                    duration_ms: start.elapsed().as_secs_f64() * 1000.0,
+                    // The render lane consults no host cache node, so a render
+                    // is never a "warm hit" and always reports `false`. The
+                    // mode axis is carried for wire-shape parity with the
+                    // HostBacked entry; the render lane runs under no cache mode.
+                    cache_hit: false,
+                    requested_mode,
+                    actual_mode: requested_mode,
+                    downgrade_reason: None,
+                }
+            }
             Err(HostError::CompileError(failure)) => {
                 let errors: Vec<String> = failure
                     .diagnostics

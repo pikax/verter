@@ -315,6 +315,19 @@ pub(crate) enum ServedProducts {
 }
 
 impl ServedProducts {
+    /// The first delivery owns its texts even if admission was refused,
+    /// bypassed or lost its publication fence.
+    fn pin_texts(&self, ctx: verter_session_query::retention::owned::ChargeCtx<'_>) {
+        if let Self::Produced { outputs, tsx } = self {
+            for output in outputs.values() {
+                pin_generated_texts(&output.code, output.source_map.as_ref(), ctx);
+            }
+            if let Some(tsx) = tsx {
+                pin_generated_texts(&tsx.code, tsx.source_map.as_ref(), ctx);
+            }
+        }
+    }
+
     /// The served virtual-node outputs; `None` on a refusal (which has none).
     pub(crate) fn outputs(&self) -> Option<&FxHashMap<VirtualNodeKind, CachedVirtualFile>> {
         match self {
@@ -2385,8 +2398,12 @@ impl VerterHost {
         // exception — it carries the previous compile's virtual nodes and no
         // `tsx`, so an IDE demand against it is unsatisfied and recomputes on
         // the next request (see `compile_serve_satisfies_demand`).
+        let products = compiled_products.into_served();
+        products.pin_texts(verter_session_query::retention::owned::ChargeCtx::new(
+            self.project_type_store.retention_account(),
+        ));
         Ok(CompileServe {
-            products: compiled_products.into_served(),
+            products,
             meta,
             diagnostics,
             stale,

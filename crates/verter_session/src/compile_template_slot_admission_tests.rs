@@ -397,3 +397,39 @@ fn a_refused_ide_output_is_still_delivered_complete_to_the_reader() {
 fn ide_profile(profile: &CompileProfile) -> CompileProfile {
     VerterHost::ide_normalized_profile(profile)
 }
+
+#[test]
+fn stateless_generated_text_is_pinned_through_its_final_leaf() {
+    use verter_session_query::retention::{ChargeClass, SemanticRetentionAccount};
+    let host = make_host();
+    upsert(&host, INLINE_SOURCE);
+    let response = compile_with(
+        &host,
+        CompileProfile {
+            requested_mode: CompileCacheMode::Stateless,
+            source_map: true,
+            ..CompileProfile::default()
+        },
+    )
+    .expect("stateless compile produces complete output");
+    assert_eq!(response.actual_mode, CompileCacheMode::Stateless);
+    assert_eq!(response.code.charge_class(), Some(ChargeClass::Pinned));
+    let map = response
+        .source_map
+        .clone()
+        .expect("source maps were requested");
+    assert_eq!(map.charge_class(), Some(ChargeClass::Pinned));
+    let code = response.code.clone();
+    let bytes = verter_type_expr::OwnedStr::charge_for_len(code.len());
+    assert_eq!(code.charge_bytes(), Some(bytes));
+    drop((response, host, map));
+    assert_eq!(
+        code.charge_bytes(),
+        Some(bytes),
+        "leaf outlives host and response"
+    );
+    let account = SemanticRetentionAccount::process_local();
+    let before = account.snapshot().pinned_bytes;
+    drop(code);
+    assert_eq!(account.snapshot().pinned_bytes, before - bytes);
+}

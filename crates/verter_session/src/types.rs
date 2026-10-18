@@ -2861,6 +2861,19 @@ pub(crate) struct CachedTsx {
     pub(crate) destructured_block: Option<verter_compiler::compile::types::DestructuredBlockMeta>,
 }
 
+/// A delivered text allocation is charged even when no cache accepted it.
+/// Already retained cells keep their existing shared charge.
+pub(crate) fn pin_generated_texts(
+    code: &verter_type_expr::OwnedStr,
+    source_map: Option<&verter_type_expr::OwnedStr>,
+    ctx: verter_session_query::retention::owned::ChargeCtx<'_>,
+) {
+    code.pin(ctx);
+    if let Some(map) = source_map {
+        map.pin(ctx);
+    }
+}
+
 /// Response from [`VerterHost::get_ide`].
 #[derive(Debug, Clone)]
 pub struct IdeResponse {

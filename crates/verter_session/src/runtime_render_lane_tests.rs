@@ -49,6 +49,37 @@ fn new_host() -> VerterHost {
     VerterHost::new_standalone(HostConfig::default())
 }
 
+#[test]
+fn runtime_render_generated_text_is_pinned_for_its_reader() {
+    use verter_session_query::retention::{ChargeClass, SemanticRetentionAccount};
+    let host = new_host();
+    let mut profile = simple_render_profile();
+    profile.source_map = true;
+    let rendered = render_with_profile(
+        &host,
+        "/owned.vue",
+        "<script setup>const text = 'owned'</script><template><div>{{ text }}</div></template>",
+        profile,
+        None,
+    );
+    let crate::host_compile::CompileBatchOutcome::Produced {
+        code, source_map, ..
+    } = rendered.outcome
+    else {
+        panic!("render must produce a complete product");
+    };
+    assert_eq!(code.charge_class(), Some(ChargeClass::Pinned));
+    let source_map = source_map.expect("source maps were requested");
+    assert_eq!(source_map.charge_class(), Some(ChargeClass::Pinned));
+    let bytes = verter_type_expr::OwnedStr::charge_for_len(code.len());
+    assert_eq!(code.charge_bytes(), Some(bytes));
+    drop((host, source_map));
+    let account = SemanticRetentionAccount::process_local();
+    let before = account.snapshot().pinned_bytes;
+    drop(code);
+    assert_eq!(account.snapshot().pinned_bytes, before - bytes);
+}
+
 fn input(canonical_id: &str, source: &str) -> CompileBatchInput {
     CompileBatchInput {
         canonical_id: canonical_id.to_string(),
