@@ -391,6 +391,7 @@ struct TaskAccounting {
     spans: super::connected_demand::TaskSpanCarry,
     spend: crate::request_budget::TaskSpendCarry,
     refusals: crate::fact_tracing::refusal_scope::TaskRefusalCarry,
+    completeness: crate::request_context::TaskCompletenessCarry,
 }
 
 impl TaskAccounting {
@@ -399,6 +400,7 @@ impl TaskAccounting {
             spans: super::connected_demand::TaskSpanCarry::lend(),
             spend: crate::request_budget::TaskSpendCarry::lend(),
             refusals: crate::fact_tracing::refusal_scope::TaskRefusalCarry::lend(),
+            completeness: crate::request_context::TaskCompletenessCarry::lend(),
         }
     }
 
@@ -406,6 +408,7 @@ impl TaskAccounting {
         self.spans.return_to_lender();
         self.spend.return_to_lender();
         self.refusals.return_to_lender();
+        self.completeness.return_to_lender();
     }
 }
 
@@ -444,6 +447,7 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> SemanticTask<'p,
         let _spans = self.accounting.spans.install();
         let _spend = self.accounting.spend.install();
         let _refusals = self.accounting.refusals.install();
+        let _completeness = self.accounting.completeness.install();
         self.execution.poll(program, self.root.take(), waker)
     }
 
