@@ -306,7 +306,13 @@ account), `/component-meta` (publication surface), `/audit-infrastructure`
 epoch replacement. Signature set/result values carry `SignatureVersion`; their
 internal delivery envelope retains that attachment rather than reacquiring the
 current epoch. Each epoch retains the graph nodes its type tokens name through
-root sets; the store's graph attachment is weak. Legacy canonical node release
-retires corresponding dormant token roots. This does not activate counted graph
-node destruction in production or change substitution/inference semantics.
+counted root sets, one per token; the store's graph attachment is weak, and a
+graph node is destroyed when its last owner releases it. A document close
+(`SemanticGraphStore::close_canonical`) releases the current epoch's roots on
+tokens naming the closed content and marks them stranded; while a read view or
+`SignatureEpochLease` of the epoch is alive those roots are deferred, keyed by
+token, until the last holder drops, and an intern of a stranded token takes its
+deferred root back. The epoch is replaced once stranded tokens outnumber live
+ones (`replace_epoch_if_mostly_stranded`) or its records pass
+`EPOCH_RECORD_CAP`. Substitution and inference semantics are unaffected.
 See the [ownership reference](../type-resolution/references/counted-node-ownership.md).

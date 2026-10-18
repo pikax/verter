@@ -686,6 +686,49 @@ impl FactReadSet {
         self.observations.is_empty() && self.canonical_runs.is_empty()
     }
 
+    /// The absorbed run that holds every fact this scope observed, when its
+    /// own seal reproduces it ([`seals_unchanged`]): the widest run, every
+    /// other run a subset of it and every local observation in it.
+    fn covering_run(&self) -> Option<usize> {
+        let mut widest = 0;
+        let mut index = 1;
+        while index < self.canonical_runs.len() {
+            if self.canonical_runs[index].len() > self.canonical_runs[widest].len() {
+                widest = index;
+            }
+            index += 1;
+        }
+        let run = self.canonical_runs.get(widest)?;
+        if !seals_unchanged(run) {
+            return None;
+        }
+        let mut compared = 0;
+        let mut covered = true;
+        for observed in &self.observations {
+            match run.binary_search_by(|held| {
+                compared += 1;
+                held.cmp(observed)
+            }) {
+                Ok(_) => {}
+                Err(_) => {
+                    covered = false;
+                    break;
+                }
+            }
+        }
+        let mut other = 0;
+        while covered && other < self.canonical_runs.len() {
+            if other != widest {
+                let (contained, work) = run_contains(run, &self.canonical_runs[other]);
+                compared += work;
+                covered = contained;
+            }
+            other += 1;
+        }
+        record_signature_work(compared);
+        covered.then_some(widest)
+    }
+
     /// Collapse the tracer into ONE strictly-increasing observation vector:
     /// sort + dedup the local observations, then merge every absorbed
     /// canonical run into them.
@@ -729,13 +772,11 @@ impl FactReadSet {
         if self.mutation_unstable {
             return FactReadSetFinalise::MutationUnstable;
         }
-        // A scope that only replayed one completed witness seals as that
-        // witness: canonicalising it again would rebuild the same facts.
-        if self.observations.is_empty()
-            && self.canonical_runs.len() == 1
-            && seals_unchanged(&self.canonical_runs[0])
-        {
-            let arc = self.canonical_runs.pop().expect("exactly one absorbed run");
+        // A scope whose every observation lies in one completed witness it
+        // replayed seals as that witness: the union is the witness, and
+        // canonicalising it again would rebuild the same facts.
+        if let Some(widest) = self.covering_run() {
+            let arc = self.canonical_runs.swap_remove(widest);
             return if self.non_cacheable_propagation.is_some() {
                 FactReadSetFinalise::NonCacheable(arc)
             } else {
@@ -982,6 +1023,34 @@ fn seals_unchanged(run: &[FactVersionRef]) -> bool {
             .any(|fact| matches!(fact, FactVersionRef::DomainGeneration(_)))
 }
 
+/// Whether every fact of the canonical `part` is in the canonical `whole`,
+/// with the comparisons the walk made. Both are strictly increasing, so one
+/// forward walk over each decides it.
+fn run_contains(whole: &[FactVersionRef], part: &[FactVersionRef]) -> (bool, usize) {
+    if part.len() > whole.len() {
+        return (false, 0);
+    }
+    let mut compared = 0;
+    let mut at = 0;
+    for fact in part {
+        loop {
+            let Some(held) = whole.get(at) else {
+                return (false, compared);
+            };
+            compared += 1;
+            match held.cmp(fact) {
+                std::cmp::Ordering::Less => at += 1,
+                std::cmp::Ordering::Equal => {
+                    at += 1;
+                    break;
+                }
+                std::cmp::Ordering::Greater => return (false, compared),
+            }
+        }
+    }
+    (true, compared)
+}
+
 fn page_canonical(entries: Vec<FactVersionRef>) -> Vec<FactVersionRef> {
     page_canonical_at_width(entries, FACT_PAGE_WIDTH)
 }
@@ -1111,8 +1180,14 @@ pub fn signature_work_for_tests() -> usize {
 /// lane verifies the precondition it depends on and a non-canonical input
 /// falls back to the ordinary observation path, which sorts it.
 fn is_canonical_run(run: &[FactVersionRef]) -> bool {
-    run.windows(2)
-        .all(|pair| compare_fact_refs(&pair[0], &pair[1]) == std::cmp::Ordering::Less)
+    let mut index = 1;
+    while index < run.len() {
+        if compare_fact_refs(&run[index - 1], &run[index]) != std::cmp::Ordering::Less {
+            return false;
+        }
+        index += 1;
+    }
+    true
 }
 
 /// A signature verified to be a canonical run — strictly increasing under

@@ -15,7 +15,7 @@ use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_session_query::facts::store_view::StoreView;
 
 /// Result of resolving an imported type root.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub enum ImportedRootResult {
     /// Root resolved: the type's canonical source and resolved symbol name.
     Resolved {

@@ -79,7 +79,7 @@ use rustc_hash::FxHashMap;
 
 use super::allocation::{arc_block_bytes, heap_block_bytes, AliasSet};
 use super::granular::GranularPin;
-use super::owned::{hold_nodes, pin_node, ChargeCtx, Node, OwnedHold};
+use super::owned::{hold_nodes, pin_node, ChargeCtx, HeldHandles, Node};
 use super::{
     ChargeClass, RetentionAdmission, RetentionCharge, RetentionRefusal, SemanticRetentionAccount,
 };
@@ -114,7 +114,7 @@ enum LeafHolds {
     Cache {
         leaves: Box<[CacheHold]>,
         /// Held for their release on drop.
-        _children: Box<[OwnedHold]>,
+        _children: HeldHandles,
     },
     Caller(Box<[CallerHold]>),
 }
@@ -123,7 +123,7 @@ impl LeafHolds {
     fn none() -> Self {
         Self::Cache {
             leaves: Box::new([]),
-            _children: Box::new([]),
+            _children: HeldHandles::default(),
         }
     }
 }
@@ -520,6 +520,16 @@ pub fn registration_bytes() -> usize {
         + heap_block_bytes(std::mem::size_of::<usize>())
 }
 
+/// Bytes a registered carrier's own bookkeeping keeps for as long as it is
+/// registered: the slice of holds on its `leaves` leaf names (cache or
+/// caller holds, one pointer each) and the slice recording its `children`
+/// owned allocations. Neither allocates when empty.
+fn bookkeeping_bytes(leaves: usize, children: usize) -> usize {
+    const _: () = assert!(std::mem::size_of::<CacheHold>() == std::mem::size_of::<CallerHold>());
+    heap_block_bytes(leaves * std::mem::size_of::<CacheHold>())
+        + heap_block_bytes(children * std::mem::size_of::<Arc<dyn Node>>())
+}
+
 /// Charges keyed by allocation, so independently charged owners of one
 /// allocation share one charge. See the module docs.
 #[derive(Clone, Default)]
@@ -591,7 +601,10 @@ impl AliasCharges {
         let children = aliases.take_handles().into_children();
         // Reserved under the registry lock, so two first holders of one
         // allocation cannot both reserve it.
-        let charge = match account.reserve(ChargeClass::Retained, bytes + registration_bytes()) {
+        let charge = match account.reserve(
+            ChargeClass::Retained,
+            bytes + registration_bytes() + bookkeeping_bytes(leaves.len(), children.len()),
+        ) {
             RetentionAdmission::Admitted(charge) => charge,
             RetentionAdmission::Refused(refusal) => return Err(refusal),
         };
@@ -664,7 +677,8 @@ impl AliasCharges {
         for child in children.iter() {
             pin_node(&**child, ChargeCtx::new(account));
         }
-        let charge = account.pin(bytes + registration_bytes());
+        let charge = account
+            .pin(bytes + registration_bytes() + bookkeeping_bytes(leaves.len(), children.len()));
         let leaf_holds: Box<[CallerHold]> = leaves
             .iter()
             .map(|leaf| self.pin_leaf_in(table, account, leaf))

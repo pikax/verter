@@ -663,6 +663,7 @@
           "crates/verter_session/src/resolver_core_tests/bare_name_resolve_namespace_tests.rs",
           "crates/verter_session/src/semantic_graph_self_root_tests.rs",
           "crates/verter_session/src/semantic_query_memo_tests.rs",
+          "crates/verter_session/src/semantic_query_memo_tests/allocation_ownership_tests.rs",
           "crates/verter_session/src/semantic_query_memo_tests/cancellation_tests.rs",
           "crates/verter_session/src/semantic_query_memo_tests/object_spread_projection_tests.rs",
           "crates/verter_session/src/semantic_query_memo_tests/producer_tests.rs",
@@ -679,6 +680,7 @@
           "crates/verter_session/src/structural_carrier_producer_tests/structural_lower_tests.rs",
           "crates/verter_session/src/tests/dispatch_bridges.rs",
           "crates/verter_session/src/tests/host_manage/general.rs",
+          "crates/verter_session/src/tests/host_manage/lifecycle.rs",
           "crates/verter_session/src/tests/host_manage/workspace.rs",
           "crates/verter_session/src/tests/meta/expose.rs",
           "crates/verter_session/src/tests/meta/props.rs",
@@ -738,6 +740,7 @@
           "crates/verter_session/tests/cases/compile-fail/public_diagnostic_error_cannot_detach.rs",
           "crates/verter_session/tests/cases/compile-fail/public_owned_carriers_borrow_and_own.rs",
           "crates/verter_session/tests/cases/compile-fail/public_payload_arrays_and_members_cannot_detach.rs",
+          "crates/verter_session/tests/cases/compile-fail/public_payload_has_no_construction_copy.rs",
           "crates/verter_session/tests/cases/compile-fail/public_result_and_payload_cannot_be_extracted.rs",
           "crates/verter_session/tests/cases/compile-fail/public_surface_nested_carriers_cannot_detach.rs",
           "crates/verter_session/tests/cases/compile-fail/semantic_operand_carriers_are_sealed.rs",
@@ -798,7 +801,8 @@
           "crates/verter_session/tests/cases/g_type/type_resolution_audit_tls_propagation.rs",
           "crates/verter_session/tests/cases/relation_nominal_authority.rs",
           "crates/verter_session/tests/cases/typeinfo_ignored_test_manifest.rs",
-          "crates/verter_type_engine/tests/allocation_cases/flow_literal_provenance.rs"
+          "crates/verter_type_engine/tests/allocation_cases/flow_literal_provenance.rs",
+          "crates/verter_type_engine/tests/allocator_canaries.rs"
         ]
       },
       "pins": [

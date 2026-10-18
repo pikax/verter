@@ -53,7 +53,16 @@ pub type FactHash = [u8; 16];
 /// This type lives below semantic/session cache owners so every fact rail uses
 /// the same key identity without a back-edge.
 #[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
 )]
 #[serde(transparent)]
 pub struct InternedSpecifier(pub Arc<str>);
@@ -78,7 +87,16 @@ impl AsRef<str> for InternedSpecifier {
 
 /// An interned symbol name (export name, member name, etc.).
 #[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
 )]
 #[serde(transparent)]
 pub struct InternedName(pub Arc<str>);
@@ -103,7 +121,16 @@ impl AsRef<str> for InternedName {
 
 /// An interned wildcard pattern (e.g. `"*.css"`).
 #[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
 )]
 #[serde(transparent)]
 pub struct InternedGlobPattern(pub Arc<str>);
@@ -256,7 +283,16 @@ pub enum FactDomain {
 /// The combination of `MacroKind` + `MacroTargetKey` discriminates
 /// distinct invocations.
 #[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct MacroTargetKey {
     /// Stable index within the file's macro instance list, in lexical
@@ -274,7 +310,16 @@ pub struct MacroTargetKey {
 /// `FactKey`; editing one keeps the `FactKey` but bumps
 /// `Fact::semantic_hash` and/or `Fact::display_hash`.
 #[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum FactKey {
     // ────────────────────────────────────────────────────────────────
@@ -474,7 +519,17 @@ pub enum FactKey {
 /// here keeps `FactKey` `Hash + Eq` without dragging in a
 /// `Vec<(...)>` per variant.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum AugmentationTargetKindTag {
     ExternalSpecifier,
@@ -492,7 +547,17 @@ pub enum AugmentationTargetKindTag {
 /// specifier — the two forms occupy DISTINCT target identities without
 /// any consumer string-matching the name.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum AugmentationScopeKindTag {
     /// A `declare global {…}` block.
@@ -520,7 +585,17 @@ impl AugmentationScopeKindTag {
 /// avoid leaking that domain's serialisation contract into the fact
 /// registry. The variants must remain in lock-step.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum MacroKind {
     DefineProps,
@@ -582,7 +657,15 @@ impl FactKey {
 /// At the per-file `FileFacts` level (parse-domain), both fields are
 /// stored together because parse-time producers compute both in
 /// one pass.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub struct Fact {
     pub key: FactKey,
     /// Alpha-normalised structural fingerprint. Cosmetic edits

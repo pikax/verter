@@ -36,7 +36,11 @@ use crate::request_footprint::RequestFootprintAccumulator;
 /// [`RequestContext`].
 #[must_use]
 pub fn current_request_budget() -> Option<Arc<RequestBudget>> {
-    current_request_context().map(|ctx| Arc::clone(&ctx.projection_budget))
+    CURRENT_REQUEST_CONTEXT.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|ctx| Arc::clone(&ctx.projection_budget))
+    })
 }
 
 /// Return the stable cancellation token carried by the active request.
@@ -2442,6 +2446,15 @@ pub fn install_clear_tls_hook() {
 #[must_use]
 pub fn current_request_context() -> Option<Arc<RequestContext>> {
     CURRENT_REQUEST_CONTEXT.with(|c| c.borrow().as_ref().map(Arc::clone))
+}
+
+/// Run `read` against the request context installed on this thread, in
+/// place: `None` when none is installed. For a caller that only reads or
+/// records into the context, so the context's handle is not cloned.
+pub(crate) fn with_current_request_context<R>(
+    read: impl FnOnce(&RequestContext) -> R,
+) -> Option<R> {
+    CURRENT_REQUEST_CONTEXT.with(|c| c.borrow().as_deref().map(read))
 }
 
 /// The canonical id the currently installed request resolves for — the

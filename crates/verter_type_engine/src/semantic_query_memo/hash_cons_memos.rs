@@ -53,7 +53,7 @@ pub(crate) struct DeferredEvaluationMemoEntry {
     /// share with their readers.
     _lease_metadata: Option<verter_session_query::retention::shared::CacheHold>,
     /// The root owners the delivery's metadata names, held with it.
-    _lease_handles: Box<[verter_session_query::retention::owned::OwnedHold]>,
+    _lease_handles: verter_session_query::retention::owned::HeldHandles,
 }
 
 impl SemanticGraphStore {

@@ -215,7 +215,7 @@ pub struct NestedMacroCall {
 }
 
 /// A single import declaration extracted from a script block.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct AnalyzedImport {
     /// The import source specifier (e.g., "./types", "vue", "@/utils").
     pub source: String,
@@ -233,7 +233,16 @@ pub struct AnalyzedImport {
 }
 
 /// Syntax form that introduced a module reference.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum ModuleReferenceSyntax {
     StaticImport,
     ExportFrom,
@@ -242,14 +251,32 @@ pub enum ModuleReferenceSyntax {
 }
 
 /// Runtime resolution semantics for a module reference.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum ModuleReferenceSemantics {
     Import,
     Require,
 }
 
 /// Whether the module reference can be resolved statically.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum ModuleReferenceAnalyzability {
     Exact,
     FiniteSet,
@@ -257,7 +284,15 @@ pub enum ModuleReferenceAnalyzability {
 }
 
 /// A module reference extracted from script content.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyzedModuleReference {
     /// Syntax form that introduced the reference.
@@ -333,7 +368,7 @@ impl<'de> serde::Deserialize<'de> for AnalyzedImport {
 }
 
 /// A single specifier within an import declaration (e.g., `Foo` in `import { Foo } from "bar"`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct AnalyzedImportBinding {
     /// Local binding name as used in the script.
     pub name: String,
@@ -350,7 +385,16 @@ pub struct AnalyzedImportBinding {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum ImportBindingKind {
     Named,
@@ -403,7 +447,16 @@ impl<'de> serde::Deserialize<'de> for AnalyzedImportBinding {
 }
 
 /// Rich classification of Vue imports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum VueApiClassification {
     // Reactivity
     Ref,
@@ -473,7 +526,7 @@ pub enum VueApiClassification {
 
 /// A Vue API function call site found in the script.
 /// Tracks calls like `onMounted(cb)`, `watch(source, cb)`, `provide(key, val)`, etc.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct VueApiCallSite {
     /// Which Vue API was called.
     pub api: VueApiClassification,
@@ -495,7 +548,15 @@ pub struct VueApiCallSite {
 /// Examples:
 /// - `watch(countRef, (val, old) => ...)` → `val: number`, `old: number`
 /// - `onMounted(() => ...)` → no params
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct VueApiCallbackParam {
     /// Parameter name.
@@ -565,7 +626,16 @@ impl<'de> serde::Deserialize<'de> for VueApiCallSite {
 }
 
 /// Discriminant for DOM query API types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum DomQueryKind {
     QuerySelector,
     QuerySelectorAll,
@@ -687,7 +757,16 @@ impl VueApiClassification {
 /// Granular reactivity classification of a binding.
 /// Distinguishes ref-like (needs `.value`) from reactive-like (direct property access).
 #[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
 )]
 #[serde(rename_all = "camelCase")]
 pub enum ReactivityKind {
@@ -707,7 +786,7 @@ pub enum ReactivityKind {
 }
 
 /// A top-level variable, function, or class binding declared in the script block.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct AnalyzedBinding {
     /// Binding name as declared in source.
     pub name: String,
@@ -789,7 +868,15 @@ impl<'de> serde::Deserialize<'de> for AnalyzedBinding {
 }
 
 /// Tracks what function/expression created a binding.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum BindingInitializer {
     /// Created by a function call: `const x = foo()`
@@ -829,7 +916,16 @@ pub enum BindingInitializer {
 }
 
 /// The kind of literal value used to initialize a binding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum LiteralKind {
     String,
     Number,
@@ -842,7 +938,16 @@ pub enum LiteralKind {
 }
 
 /// Declaration kind for a top-level binding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum AnalyzedBindingKind {
     Const,
     Let,
@@ -853,7 +958,15 @@ pub enum AnalyzedBindingKind {
 }
 
 /// A single JSDoc tag extracted from a `/** ... */` comment.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct JsdocTag {
     /// Tag name without the `@` prefix (e.g., `"param"`, `"deprecated"`, `"default"`).
@@ -864,7 +977,15 @@ pub struct JsdocTag {
 }
 
 /// An individual prop field from `defineProps`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyzedPropField {
     /// Prop name as declared (e.g., `"count"` from `defineProps<{ count: number }>()`).
@@ -941,7 +1062,15 @@ pub fn is_false(v: &bool) -> bool {
 }
 
 /// An individual emit field from `defineEmits`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyzedEmitField {
     /// Event name as declared (e.g., `"custom"` from `defineEmits<{ custom: [payload: string] }>()`).
@@ -990,7 +1119,16 @@ pub struct AnalyzedEmitField {
 /// This is plain wire data. Decoding it yields no edit capability: a decoded
 /// anchor is [`MacroAnchor::Decoded`], which [`MacroAnchor::available`] never
 /// returns as an editable position.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct MemberListAnchorData {
     /// SFC-absolute byte offset of the member list's closing delimiter.
@@ -1016,7 +1154,9 @@ pub struct MemberListAnchorData {
 /// serialized anchors decode to [`MemberListAnchorData`] only. A holder of the
 /// authority can still pass any offset, so the analyzer's own derivation from
 /// a member-list node is what makes the offset correct.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct MemberListAnchor {
     insert_offset: u32,
@@ -1062,7 +1202,16 @@ impl MemberListAnchor {
 /// indistinguishable from a macro that carries no anchorable type argument, and
 /// both must yield zero actions.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, Hash,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    Hash,
+    verter_retention::heap_size::HeapSize,
 )]
 #[serde(rename_all = "camelCase")]
 pub enum MacroAnchorUnsupported {
@@ -1094,7 +1243,16 @@ pub enum MacroAnchorUnsupported {
 /// [`Self::Available`] and [`Self::Decoded`] encode as the same `available`
 /// arm, and decoding that arm always yields [`Self::Decoded`]. Deserialized
 /// analysis therefore never carries an edit capability.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(from = "MacroAnchorWire", into = "MacroAnchorWire")]
 pub enum MacroAnchor {
     /// The member list is appendable at this constructor-restricted anchor.
@@ -1184,7 +1342,17 @@ impl MacroAnchor {
 /// The sole authority for macro edit PLACEMENT. Per-slot props anchors live on
 /// [`AnalyzedSlotField::props_anchor`], structurally paired with the member
 /// they anchor rather than in a parallel array.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct MacroEditAnchors {
     /// The type argument's type-literal member list
@@ -1205,7 +1373,15 @@ impl MacroEditAnchors {
 }
 
 /// An individual slot field from `defineSlots`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyzedSlotField {
     /// Slot name (e.g., `"default"`, `"header"`).
@@ -1251,7 +1427,15 @@ pub struct AnalyzedSlotField {
 }
 
 /// A single binding property from a slot function parameter type.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyzedSlotFieldBinding {
     /// Binding name (e.g., `"item"`, `"index"`).
@@ -1286,7 +1470,16 @@ pub struct AnalyzedSlotFieldBinding {
 
 /// Full analysis of an Options API component (`export default { ... }` or
 /// `export default defineComponent({ ... })`).
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyzedOptionsApi {
     /// Whether the export is wrapped in `defineComponent()`.
@@ -1325,7 +1518,15 @@ pub struct AnalyzedOptionsApi {
 }
 
 /// A single prop from the Options API `props` option.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyzedOptionsProp {
     /// Prop name as declared.
@@ -1375,7 +1576,15 @@ pub struct AnalyzedOptionsProp {
 }
 
 /// A named field from an Options API option (data, computed, methods, etc.).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyzedOptionsField {
     /// Field name.
@@ -1385,7 +1594,15 @@ pub struct AnalyzedOptionsField {
 }
 
 /// A locally registered component from the `components` option.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyzedOptionsComponent {
     /// Component name as registered (e.g., `"MyComp"` or `"Alias"`).
@@ -1398,7 +1615,15 @@ pub struct AnalyzedOptionsComponent {
 }
 
 /// An individual exposed field from `defineExpose`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyzedExposeField {
     /// Field name as declared (e.g., `"foo"` from `defineExpose({ foo })`).
@@ -1470,7 +1695,17 @@ impl AnalyzedExposeField {
 }
 
 /// How a prop type was resolved.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum TypeResolutionSource {
     /// Resolved entirely by the Rust analyzer (inline types, simple references).
@@ -1491,6 +1726,7 @@ pub enum TypeResolutionSource {
     serde::Serialize,
     serde::Deserialize,
     verter_no_typeexpr::NoTypeExpr,
+    verter_retention::heap_size::HeapSize,
 )]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyzedDefaultValue {
@@ -1503,7 +1739,9 @@ pub struct AnalyzedDefaultValue {
 }
 
 /// A locally resolved type expansion referenced by macro type parameters.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, serde::Serialize, serde::Deserialize, verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedLocalType {
     /// The type name as referenced in the macro (e.g., `"Props"`).
@@ -1534,7 +1772,7 @@ impl PartialEq for ResolvedLocalType {
 impl Eq for ResolvedLocalType {}
 
 /// A Vue compiler macro call found in `<script setup>` (e.g., `defineProps`, `defineEmits`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct AnalyzedMacro {
     /// Which macro was called.
     pub kind: AnalyzedMacroKind,
@@ -1735,7 +1973,17 @@ impl<'de> serde::Deserialize<'de> for AnalyzedMacro {
 }
 
 /// Identifies which Vue compiler macro was called.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum AnalyzedMacroKind {
     DefineProps,
     DefineEmits,
@@ -1755,7 +2003,16 @@ pub enum AnalyzedMacroKind {
 /// derivable without resolving them), so an unresolvable nested reference
 /// is silent.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
 )]
 #[serde(rename_all = "camelCase")]
 pub enum MacroTypeDepUsage {
@@ -1788,7 +2045,15 @@ impl MacroTypeDepUsage {
 }
 
 /// Which imported types are used by which macros.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct MacroTypeDep {
     /// The type name referenced in the macro's type parameter (e.g., `"BadgeProps"`).
@@ -1810,7 +2075,15 @@ pub struct MacroTypeDep {
 }
 
 /// Per-export signature for dependency files.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportSignature {
     /// Exported name (e.g., `"MyType"`, `"default"`).
@@ -2015,7 +2288,16 @@ pub struct ResolvedTypeInfo {
 }
 
 /// How a binding is used at a particular site in script.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum ScriptUsageKind {
     /// Value read: `x` in an expression position.
@@ -2038,7 +2320,15 @@ pub enum ScriptUsageKind {
 ///
 /// Tracks where each binding is referenced (excluding its own declaration).
 /// Populated as a second pass gated by `AnalysisScope::SCRIPT_USAGES`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct ScriptBindingOccurrence {
     /// The binding name referenced.
@@ -2054,7 +2344,7 @@ pub struct ScriptBindingOccurrence {
 /// Tracks calls like `el.style.setProperty('--color', val)`,
 /// `getComputedStyle(el).getPropertyValue('--color')`, and
 /// `el.style.removeProperty('--color')`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct CssVarManipulation {
     /// The kind of manipulation (set, get, remove).
     pub kind: CssVarManipulationKind,
@@ -2105,7 +2395,16 @@ impl<'de> serde::Deserialize<'de> for CssVarManipulation {
 }
 
 /// Discriminant for CSS variable DOM manipulation APIs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum CssVarManipulationKind {
     /// `el.style.setProperty('--x', val)`
     SetProperty,
@@ -2118,7 +2417,16 @@ pub enum CssVarManipulationKind {
 /// Classification of store/state management APIs (Pinia, Vuex, convention-based).
 ///
 /// Separate from `VueApiClassification` since stores are third-party, not Vue core.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum StoreApiClassification {
     // Pinia
     PiniaDefineStore,
@@ -2140,7 +2448,15 @@ pub enum StoreApiClassification {
 }
 
 /// A store usage site in a script block.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub struct StoreUsage {
     /// The local binding name (e.g., `store`, `userStore`).
     pub binding_name: String,
@@ -2162,7 +2478,15 @@ pub struct StoreUsage {
 }
 
 /// A store definition site (e.g., `defineStore('user', { ... })`).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 pub struct StoreDefinition {
     /// The store ID (first string arg to `defineStore`, e.g., `"user"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -41,4 +41,5 @@ ignore-interior-mutability = [
   "verter_retention::owned::OwnedSlice",
   "verter_retention::owned::OwnedStr",
   "verter_retention::RetentionCharge",
+  "verter_type_engine::semantic_query_memo::arena::NodeData",
 ]

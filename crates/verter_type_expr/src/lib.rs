@@ -153,6 +153,7 @@ const _: fn() = || {
     serde::Deserialize,
     verter_no_typeexpr::NoTypeExpr,
     verter_no_storedspan::NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 #[serde(transparent)]
 pub struct TypeExprScope(pub String);

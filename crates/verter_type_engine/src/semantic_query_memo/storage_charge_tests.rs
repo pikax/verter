@@ -289,3 +289,49 @@ fn a_payload_a_reader_holds_past_the_store_stays_charged_until_its_own_drop() {
         );
     }
 }
+
+/// The candidates published since the reverse index was last read wait in
+/// a pending list, each with its own clone of its family key: that list is
+/// charged to the store while it waits and given back by the read that
+/// registers its candidates.
+#[test]
+fn pending_reverse_index_registrations_are_charged_until_the_next_read() {
+    use crate::semantic_query::{RelateMemoKey, RelationContext, RelationOutcome};
+    use verter_session_query::facts::fact_cache::{FactVersionRef, ReadSetSignature};
+
+    const PUBLISHES: usize = 64;
+    let account = account();
+    let store = SemanticGraphStore::with_account(StoreAccount::new(Arc::clone(&account)));
+    let canonical = "/ws/pending.ts";
+    for index in 0..PUBLISHES {
+        let source = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(format!(
+            "source-{index}"
+        ))));
+        let target = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(format!(
+            "target-{index}"
+        ))));
+        store.insert_relation_payload_for_tests(
+            RelateMemoKey::assignable(source, target, RelationContext::default()),
+            ReadSetSignature::new(Arc::from(vec![FactVersionRef::FileWholeHash {
+                canonical_id: canonical.to_owned(),
+                hash: [5; 16],
+            }])),
+            Arc::from(vec![Arc::<str>::from(canonical)]),
+            store.relation_payload_for_tests(RelationOutcome::Assignable),
+            0,
+        );
+    }
+    let pending = store.reverse_index_pending.lock().storage_charge_bytes();
+    assert!(
+        pending >= PUBLISHES * std::mem::size_of::<(super::family::FamilyKey, u64)>(),
+        "every waiting publish's family key is charged: {pending}"
+    );
+
+    assert_eq!(store.invalidate_canonical("/ws/unrelated.ts"), 0);
+    assert_eq!(
+        store.reverse_index_pending.lock().storage_charge_bytes(),
+        0,
+        "the read that registers the waiting publishes gives their list back"
+    );
+    assert_eq!(store.canonical_to_entries_count(canonical), PUBLISHES);
+}

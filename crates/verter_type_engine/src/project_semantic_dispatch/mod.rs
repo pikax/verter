@@ -567,6 +567,11 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// The facts the root frame of the running drive traced soundly, left
     /// by its completion for the drive's entry to seal a refusal on.
     driven_root_traced: std::cell::RefCell<Option<TracedFacts>>,
+    /// The binder the running substitution walk replaces, classified once
+    /// for every node the walk visits ([`Self::substitution_binder`]).
+    /// Emptied at each walk's entry, so it never outlives the hold the
+    /// walk's caller keeps on the binder.
+    substitution_binder: std::cell::RefCell<Option<(SemanticNodeId, substitute::BinderKind)>>,
     /// The dispatch's share of its graph's construction owner on this
     /// thread: every ordinal a live dispatcher of the graph interns or reads
     /// is owned until the last of them drops, so a producer reading a
@@ -937,6 +942,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             request_local_open: std::cell::RefCell::new(rustc_hash::FxHashSet::default()),
             self_evaluation_receipts: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             driven_root_traced: std::cell::RefCell::new(None),
+            substitution_binder: std::cell::RefCell::new(None),
             _construction: binding_graph_scope,
         }
     }
@@ -3981,9 +3987,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // reduction in `build.rs`, mapped-type `ProjectPath` member
         // projection). Idempotent per tag (sets one bit). No-op when no
         // `RequestContext` is installed on the calling thread.
-        if let Some(ctx) = crate::request_context::current_request_context() {
-            ctx.record_dispatched_query_tag(key.tag());
-        }
+        crate::request_context::with_current_request_context(|ctx| {
+            ctx.record_dispatched_query_tag(key.tag())
+        });
 
         // Admission-time canonicalisation:
         //   - `ProjectMember { base, member, mode }` rewrites to
@@ -4150,7 +4156,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Option<TracedFacts>,
     ) {
         let plain_read = publication.is_none() && operand_evidence.is_none();
-        let graph = Arc::clone(self.graph());
+        let graph = self.graph();
         // Per-key recursion sentinel: when the memo detects same-path
         // re-entry on an `Instantiate` key, extract the decl name and
         // emit `Opaque(RecursiveRef { name })`. The materialiser
@@ -4158,32 +4164,31 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // expansion, terminating recursive aliases like `type Tree =
         // { children: Tree[] }` without stack overflow.
         // Non-Instantiate re-entry falls back to `Opaque(Miss)`.
-        let sentinel_key = key.clone();
-        let sentinel = {
-            let graph = Arc::clone(&graph);
-            move || {
-                if let SemanticQueryKey::Instantiate(k) = &sentinel_key {
-                    return graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
-                        name: k.base().merged_symbol_name.clone(),
-                        args: Arc::clone(k.args()).into(),
-                    }));
-                }
-                graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss))
+        // The sentinel and the build closures borrow the entry's key and
+        // state: they run within this call or not at all, so a warm read
+        // copies nothing for a build it never runs.
+        let sentinel = || {
+            if let SemanticQueryKey::Instantiate(k) = key {
+                return graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
+                    name: k.base().merged_symbol_name.clone(),
+                    args: Arc::clone(k.args()).into(),
+                }));
             }
+            graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss))
         };
-        let key_for_build = key.clone();
+        let key_for_build = key;
         #[cfg(any(test, feature = "test-support"))]
-        let key_for_close = key.clone();
+        let key_for_close = key;
         let raw_build = move || -> crate::project_semantic_dispatch::walk::QueryBuildOutput<
             SemanticQueryValue,
         > {
-            if let SemanticQueryKey::ClassifyBroadRuntime { subject, .. } = &key_for_build {
+            if let SemanticQueryKey::ClassifyBroadRuntime { subject, .. } = key_for_build {
                 return self.build_classify_broad_runtime(subject);
             }
-            if let SemanticQueryKey::ClassifyMaterializationCycleGate(key) = &key_for_build {
+            if let SemanticQueryKey::ClassifyMaterializationCycleGate(key) = key_for_build {
                 return self.build_classify_materialization_cycle_gate(key);
             }
-            if let SemanticQueryKey::ClassifyTruthinessDomain { subject } = &key_for_build {
+            if let SemanticQueryKey::ClassifyTruthinessDomain { subject } = key_for_build {
                 return self.build_classify_truthiness_domain(*subject);
             }
             // The SOLE relation authority (design
@@ -4193,41 +4198,41 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // never-admits, undecided judgements surface `Miss`. The
             // degenerate `Opaque(Miss)` arm and the execute-invisibility
             // fence are deleted.
-            if let SemanticQueryKey::Relate { .. } = &key_for_build {
+            if let SemanticQueryKey::Relate { .. } = key_for_build {
                 return self.build_relate(&crate::semantic_query::RelateMemoKey::from_query_key(
-                    &key_for_build,
+                    key_for_build,
                 ));
             }
-            if let SemanticQueryKey::FlowReturn(key) = &key_for_build {
+            if let SemanticQueryKey::FlowReturn(key) = key_for_build {
                 return self.build_flow_return(key);
             }
-            if let SemanticQueryKey::ResolveCall(key) = &key_for_build {
+            if let SemanticQueryKey::ResolveCall(key) = key_for_build {
                 return self.build_resolve_call(key);
             }
             if let SemanticQueryKey::SignaturesOfType {
                 subject,
                 kind,
                 context,
-            } = &key_for_build
+            } = key_for_build
             {
                 return self.build_signatures_of_type(*subject, *kind, context.clone());
             }
-            if let SemanticQueryKey::ReadSignatureResult(key) = &key_for_build {
+            if let SemanticQueryKey::ReadSignatureResult(key) = key_for_build {
                 return self.build_read_signature_result(key);
             }
             if let SemanticQueryKey::ProjectObjectSpread {
                 program,
                 selector,
                 context,
-            } = &key_for_build
+            } = key_for_build
             {
                 return self.build_project_object_spread(*program, selector, *context);
             }
             let build_node = || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-            if let Some(refusal) = self.cold_build_budget_refusal(&key_for_build) {
+            if let Some(refusal) = self.cold_build_budget_refusal(key_for_build) {
                 return refusal;
             }
-            match &key_for_build {
+            match key_for_build {
                 SemanticQueryKey::ResolveDecl(decl_key) => self.build_resolve_decl(decl_key),
                 SemanticQueryKey::TypeOf {
                     value_root,
@@ -4438,7 +4443,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             };
             let output = build_node();
-            if matches!(&key_for_build, SemanticQueryKey::ResolveOverloadSet { .. }) {
+            if matches!(key_for_build, SemanticQueryKey::ResolveOverloadSet { .. }) {
                 self.overload_set_value_output(output)
             } else {
                 output.into()
@@ -4468,9 +4473,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // actually ran so the per-kind cold/warm counters reflect what
         // happened inside `execute_cooperative` (warm hits short-
         // circuit before `traced_build` fires).
-        let cold_build_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let cold_build_ran_for_closure = Arc::clone(&cold_build_ran);
-        let carrier_prelude_for_build = carrier_prelude.clone();
+        let cold_build_ran = std::cell::Cell::new(false);
+        let cold_build_ran_for_closure = &cold_build_ran;
         let basis_source = crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx);
         // Operand evidence merges ONLY into the build for the EXACT key the
         // active force targets — never into a transitively nested build this
@@ -4491,7 +4495,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let traced_build = move || -> crate::project_semantic_dispatch::walk::QueryBuildOutput<
             SemanticQueryValue,
         > {
-            cold_build_ran_for_closure.store(true, std::sync::atomic::Ordering::Relaxed);
+            cold_build_ran_for_closure.set(true);
             let _validity = crate::request_context::ExecutionValidityScope::enter();
             // Open a cold-build-local taint frame for the duration of THIS
             // build. The shared read boundary folds every nested
@@ -4511,7 +4515,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.open_cold_build(evidence_target_key.as_ref());
                     #[cfg(any(test, feature = "test-support"))]
                     if let Some(hook) = self.graph().produce_hook_for_tests() {
-                        hook(&key_for_close, &|nested| {
+                        hook(key_for_close, &|nested| {
                             let _ = self.execute_via_cold_build_helper(nested);
                         });
                     }
@@ -4524,7 +4528,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 *output,
                 build_local,
                 finalise,
-                &carrier_prelude_for_build,
+                carrier_prelude,
             );
                 rooting_for_closure.set(rooted);
             output
@@ -4710,7 +4714,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         };
         drop(execution);
-        let is_cold = cold_build_ran.load(std::sync::atomic::Ordering::Relaxed);
+        let is_cold = cold_build_ran.get();
         (cache_read, is_cold, refusal_carrier)
     }
 }
