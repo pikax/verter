@@ -1475,16 +1475,18 @@ pub(crate) struct PathWalker<'a, 'b, C: crate::resolver_core::ResolverCapabiliti
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'a, C> {
-    /// Reduce a [`SemanticNodeData::MergedDecl`] carrier to a single peer-merged
-    /// `Object` node. Each contributor's surface is extracted (an interface
-    /// body is an `Object`; an interface-with-`extends` body is an
-    /// `Intersection` whose own/heritage arms reduce via the intersection
-    /// merge first), then all contributors peer-merge via
-    /// [`merge_declaration_surfaces`]. This is the single declaration-merge
-    /// reducer every MergedDecl consumer (raise / expand / keyof / relation)
-    /// routes through.
-    pub fn reduce_merged_decl(&self, contributors: &[SemanticNodeId]) -> SemanticNodeId {
-        reduce_merged_decl_with_graph(self.graph(), contributors)
+    construction_ordinal_seam! {
+        /// Reduce a [`SemanticNodeData::MergedDecl`] carrier to a single peer-merged
+        /// `Object` node. Each contributor's surface is extracted (an interface
+        /// body is an `Object`; an interface-with-`extends` body is an
+        /// `Intersection` whose own/heritage arms reduce via the intersection
+        /// merge first), then all contributors peer-merge via
+        /// [`merge_declaration_surfaces`]. This is the single declaration-merge
+        /// reducer every MergedDecl consumer (raise / expand / keyof / relation)
+        /// routes through.
+        fn reduce_merged_decl(&self, contributors: &[SemanticNodeId]) -> SemanticNodeId {
+            reduce_merged_decl_with_graph(self.graph(), contributors)
+        }
     }
 }
 
@@ -11060,26 +11062,29 @@ enum ExpansionCombineKind {
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
-    /// Positive member evidence of an object-projection formula for macro
-    /// surface consumers (see [`spread_formula_positive_members_for_macro`]),
-    /// computed in this dispatcher's construction lane. The members' value
-    /// operands are this graph's; the canonical evidence the union merge
-    /// gathers is deposited on this dispatcher. `Err` with the connected
-    /// demand's trip when it cannot pay to read the alternatives.
-    pub fn spread_formula_positive_members_for_macro(
-        &self,
-        formula: &crate::semantic_query::ObjectProjectionFormula,
-    ) -> Result<Vec<crate::semantic_query::SurfaceMember>, crate::semantic_query::PartialReasonSet>
-    {
-        let alternatives = self.object_spread_alternatives(formula)?;
-        let mut canonical_evidence = super::canonical_algebra::CanonicalEvidence::default();
-        let members = spread_formula_positive_members_for_macro(
-            self.graph(),
-            &alternatives,
-            &mut canonical_evidence,
-        );
-        self.deposit_canonical_evidence(canonical_evidence);
-        Ok(members)
+    construction_ordinal_seam! {
+        /// Positive member evidence of an object-projection formula for macro
+        /// surface consumers (see [`spread_formula_positive_members_for_macro`]),
+        /// computed in this dispatcher's construction lane. The members' value
+        /// operands are this graph's; the canonical evidence the union merge
+        /// gathers is deposited on this dispatcher. `Err` with the connected
+        /// demand's trip when it cannot pay to read the alternatives.
+        #[must_use]
+        fn spread_formula_positive_members_for_macro(
+            &self,
+            formula: &crate::semantic_query::ObjectProjectionFormula,
+        ) -> Result<Vec<crate::semantic_query::SurfaceMember>, crate::semantic_query::PartialReasonSet>
+        {
+            let alternatives = self.object_spread_alternatives(formula)?;
+            let mut canonical_evidence = super::canonical_algebra::CanonicalEvidence::default();
+            let members = spread_formula_positive_members_for_macro(
+                self.graph(),
+                &alternatives,
+                &mut canonical_evidence,
+            );
+            self.deposit_canonical_evidence(canonical_evidence);
+            Ok(members)
+        }
     }
 
     /// A literal index absent from an exact closed domain, including the

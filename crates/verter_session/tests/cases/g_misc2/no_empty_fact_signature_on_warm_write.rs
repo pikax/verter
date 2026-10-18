@@ -1,6 +1,6 @@
 //! Architecture guard — every production cold-compute path that
 //! publishes into a fact-validated cache must wrap the cold body
-//! with `install_fact_tracer` AND admit via `insert_arc_with_kind`.
+//! with `install_fact_tracer` AND admit via `insert_value_with_kind`.
 //!
 //! ## Why
 //!
@@ -18,7 +18,7 @@
 //!    empty (or worse, an outer scope's) read-set signature.
 //!
 //! 2. **Strict admission.** The publish call uses
-//!    `ValidatedFactCache::insert_arc_with_kind(key, value, facts,
+//!    `ValidatedFactCache::insert_value_with_kind(key, value, facts,
 //!    cache_kind)`. The strict path refuses empty signatures with
 //!    a structured `FactSignatureAdmissionRefused { cache_kind: ... }`
 //!    event so a producer that accidentally short-circuited its
@@ -37,16 +37,16 @@
 //!
 //! - Any call to `install_fact_tracer(host, closure)` is recorded.
 //! - The call must be paired with a downstream
-//!   `insert_arc_with_kind(...)` on a `ValidatedFactCache`-shaped
+//!   `insert_value_with_kind(...)` on a `ValidatedFactCache`-shaped
 //!   receiver (in the same enclosing function, OR in a helper the
 //!   enclosing function calls — the guard is structural and
 //!   asserts the pairing exists in the enclosing function body).
 //!
 //! ## What this guard catches
 //!
-//! - A future cold-compute call site that adds an `insert_arc`
+//! - A future cold-compute call site that adds an `insert_value`
 //!   (loose admission) inside an `install_fact_tracer` scope — the
-//!   bare `insert_arc` writer is caught by
+//!   bare `insert_value` writer is caught by
 //!   `insert_arc_strict_admission_required.rs`; this guard cross-
 //!   checks that the tracer-wrapping wasn't pointless.
 //! - A `with_fact_tracer` cold body that does NOT route through
@@ -55,9 +55,9 @@
 //!   `with_fact_tracer` directly is permitted for caches that
 //!   publish into bespoke `DashMap`-backed caches (e.g.
 //!   `ComponentMetaResultDb`) — those don't admit into a
-//!   `ValidatedFactCache` so `insert_arc_with_kind` is N/A. The
+//!   `ValidatedFactCache` so `insert_value_with_kind` is N/A. The
 //!   guard only flags direct `with_fact_tracer` calls inside fns
-//!   that ALSO call `insert_arc_with_kind` on a known
+//!   that ALSO call `insert_value_with_kind` on a known
 //!   `ValidatedFactCache` field, which would be the wrong pairing.
 //!
 //! ## Allow-list
@@ -134,13 +134,13 @@ struct Violation {
 #[derive(Debug)]
 enum ViolationKind {
     /// `host.with_fact_tracer(...)` invoked directly from a fn
-    /// that ALSO writes through `<cache>.insert_arc_with_kind(...)`,
+    /// that ALSO writes through `<cache>.insert_value_with_kind(...)`,
     /// where `<cache>` is a `ValidatedFactCache`-shaped field. The
     /// production pattern is `install_fact_tracer` for that pairing.
     DirectWithFactTracerWithStrictAdmission,
     /// `install_fact_tracer(...)` scope present but admission goes
-    /// through the loose `<cache>.insert_arc(...)` path. The strict
-    /// admission gate (`insert_arc_with_kind`) is the production
+    /// through the loose `<cache>.insert_value(...)` path. The strict
+    /// admission gate (`insert_value_with_kind`) is the production
     /// pattern. This is the dual to
     /// `insert_arc_strict_admission_required.rs` — the strict-admission
     /// scanner catches the loose-write site itself; this guard
@@ -153,12 +153,12 @@ impl std::fmt::Display for Violation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let detail = match self.kind {
             ViolationKind::DirectWithFactTracerWithStrictAdmission => {
-                "direct `with_fact_tracer` call paired with `insert_arc_with_kind` \
+                "direct `with_fact_tracer` call paired with `insert_value_with_kind` \
                  — use `install_fact_tracer` so the shared finaliser runs"
             }
             ViolationKind::InstallFactTracerWithLooseAdmission => {
-                "`install_fact_tracer` scope paired with a loose `insert_arc(...)` admission \
-                 — switch the writer to `insert_arc_with_kind` so R20 refuses empty signatures"
+                "`install_fact_tracer` scope paired with a loose `insert_value(...)` admission \
+                 — switch the writer to `insert_value_with_kind` so R20 refuses empty signatures"
             }
         };
         write!(
@@ -173,14 +173,14 @@ impl std::fmt::Display for Violation {
 
 /// Per-function scratch state used to detect the pairing of
 /// `install_fact_tracer` / `with_fact_tracer` against
-/// `insert_arc` / `insert_arc_with_kind` within the same enclosing
+/// `insert_value` / `insert_value_with_kind` within the same enclosing
 /// fn body.
 #[derive(Default)]
 struct FnPairings {
     saw_install_fact_tracer: bool,
     saw_direct_with_fact_tracer: bool,
     saw_insert_arc_loose_on_known_cache: bool,
-    saw_insert_arc_with_kind_on_known_cache: bool,
+    saw_insert_value_with_kind_on_known_cache: bool,
 }
 
 struct Scanner<'a> {
@@ -226,7 +226,7 @@ impl<'a> Scanner<'a> {
         // in the same fn body. This is the unmigrated-pairing pattern.
         // Allow-listed call sites bypass.
         if pairings.saw_direct_with_fact_tracer
-            && pairings.saw_insert_arc_with_kind_on_known_cache
+            && pairings.saw_insert_value_with_kind_on_known_cache
             && !self.is_direct_with_fact_tracer_allowed(self.file, &fn_name)
         {
             self.violations.push(Violation {
@@ -237,7 +237,7 @@ impl<'a> Scanner<'a> {
         }
 
         // Detection 2: `install_fact_tracer` present + loose
-        // `insert_arc` admission in the same fn body. The strict
+        // `insert_value` admission in the same fn body. The strict
         // admission path is the production correctness gate;
         // skipping it under an installed tracer scope is the
         // exact "empty-signature on warm write" regression the
@@ -332,16 +332,18 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                     pairings.saw_direct_with_fact_tracer = true;
                 }
             }
-            "insert_arc" => {
+            "insert_value" => {
                 if receiver_is_known_validated_fact_cache_field(&c.receiver) {
                     if let Some(pairings) = self.current_pairings() {
                         pairings.saw_insert_arc_loose_on_known_cache = true;
                     }
                 }
             }
-            "insert_arc_with_kind" if receiver_is_known_validated_fact_cache_field(&c.receiver) => {
+            "insert_value_with_kind"
+                if receiver_is_known_validated_fact_cache_field(&c.receiver) =>
+            {
                 if let Some(pairings) = self.current_pairings() {
-                    pairings.saw_insert_arc_with_kind_on_known_cache = true;
+                    pairings.saw_insert_value_with_kind_on_known_cache = true;
                 }
             }
             _ => {}
@@ -439,12 +441,12 @@ fn scan_file(path: &Path, violations: &mut Vec<Violation>) {
     // tracer call AND a `ValidatedFactCache` admission in the same fn
     // body. The tracer call is `install_fact_tracer` or
     // `with_fact_tracer` (both contain `fact_tracer`); the admission is
-    // `insert_arc` or `insert_arc_with_kind` (both contain `insert_arc`).
+    // `insert_value` or `insert_value_with_kind` (both contain `insert_value`).
     // A file missing either substring cannot produce a pairing, so skip
     // the `syn` parse + AST walk. Both substrings are strict
     // prerequisites for the pairings this guard detects, so filtering
     // cannot hide a violation.
-    if !(src.contains("fact_tracer") && src.contains("insert_arc")) {
+    if !(src.contains("fact_tracer") && src.contains("insert_value")) {
         return;
     }
     let parsed =
@@ -479,7 +481,7 @@ fn format_violations(violations: &[Violation]) -> String {
 /// Every production cold-compute fn that pairs an installed tracer
 /// scope with an admission into a `ValidatedFactCache`-shaped
 /// receiver must use BOTH `install_fact_tracer` (for the tracer
-/// install) AND `insert_arc_with_kind` (for the admission).
+/// install) AND `insert_value_with_kind` (for the admission).
 /// Pre-existing direct `with_fact_tracer` call sites that publish
 /// into bespoke (DashMap-backed) caches are allow-listed.
 #[test]
@@ -491,12 +493,12 @@ fn cold_compute_paths_use_install_fact_tracer_and_strict_admission() {
     assert!(
         violations.is_empty(),
         "cold-compute pairings must use BOTH `install_fact_tracer` AND \
-         `insert_arc_with_kind`. The strict-admission path enforces R20 \
+         `insert_value_with_kind`. The strict-admission path enforces R20 \
          empty-signature refusal; `install_fact_tracer` ensures the \
          shared finaliser re-checks the basis and seals the read set. Allow-listed \
          direct `with_fact_tracer` call sites (bespoke DashMap caches):\n  - {}\n\n\
          Fix: route the cold body through `install_fact_tracer(host, || {{ ... }})` \
-         and admit via `<cache>.insert_arc_with_kind(key, value, facts, \"<kind>\")`.\n\n{}",
+         and admit via `<cache>.insert_value_with_kind(key, value, facts, \"<kind>\")`.\n\n{}",
         DIRECT_WITH_FACT_TRACER_ALLOW
             .iter()
             .map(|(f, fn_name)| format!("{f}::{fn_name}"))
@@ -516,13 +518,13 @@ fn cold_compute_paths_use_install_fact_tracer_and_strict_admission() {
 #[test]
 fn scanner_discriminating_property_fixtures() {
     // Fixture A: `install_fact_tracer` paired with
-    // `insert_arc_with_kind` on `self.routes` — ACCEPTED.
+    // `insert_value_with_kind` on `self.routes` — ACCEPTED.
     let fixture_a = r#"
         fn cold_compute(this: &Foo, host: &VerterHost) {
             let (_, finalise) = install_fact_tracer(host, || {
                 /* cold body */
             });
-            this.routes.insert_arc_with_kind(k, v, facts, "route_db.routes");
+            this.routes.insert_value_with_kind(k, v, facts, "route_db.routes");
         }
     "#;
     assert!(
@@ -539,7 +541,7 @@ fn scanner_discriminating_property_fixtures() {
             let (_, read_set) = host.with_fact_tracer(|| {
                 /* cold body */
             });
-            this.routes.insert_arc_with_kind(k, v, facts, "route_db.routes");
+            this.routes.insert_value_with_kind(k, v, facts, "route_db.routes");
         }
     "#;
     assert!(
@@ -548,14 +550,14 @@ fn scanner_discriminating_property_fixtures() {
     );
 
     // Fixture C: `install_fact_tracer` paired with loose
-    // `insert_arc` on `self.routes` — REJECTED (the strict gate
+    // `insert_value` on `self.routes` — REJECTED (the strict gate
     // was skipped at the admission site).
     let fixture_c = r#"
         fn cold_compute_loose_admit(this: &Foo, host: &VerterHost) {
             let (_, finalise) = install_fact_tracer(host, || {
                 /* cold body */
             });
-            this.routes.insert_arc(k, v, facts);
+            this.routes.insert_value(k, v, facts);
         }
     "#;
     assert!(
@@ -582,7 +584,7 @@ fn scanner_discriminating_property_fixtures() {
     );
 
     // Fixture E: `install_fact_tracer` paired with
-    // `insert_arc_with_kind` on a NON-listed field (the receiver
+    // `insert_value_with_kind` on a NON-listed field (the receiver
     // is not a known `ValidatedFactCache` field) — ACCEPTED. The
     // guard's known-field list is intentionally narrow to avoid
     // false-positives on unrelated method calls.
@@ -607,7 +609,7 @@ fn scanner_discriminating_property_fixtures() {
         mod tests {
             fn helper(this: &Foo, host: &VerterHost) {
                 let (_, _) = host.with_fact_tracer(|| {});
-                this.routes.insert_arc_with_kind(k, v, facts, "route_db.routes");
+                this.routes.insert_value_with_kind(k, v, facts, "route_db.routes");
             }
         }
     "#;
@@ -627,7 +629,7 @@ fn scanner_discriminating_property_fixtures() {
                 let (_, _) = host.with_fact_tracer(|| {});
             }
             inner(host);
-            this.routes.insert_arc_with_kind(k, v, facts, "route_db.routes");
+            this.routes.insert_value_with_kind(k, v, facts, "route_db.routes");
         }
     "#;
     assert!(

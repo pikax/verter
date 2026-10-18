@@ -1,21 +1,21 @@
 error[E0451]: fields `key`, `skeleton`, `bindings` and `graph` of struct `FlowGraphBundle` are private
-  --> tests/compile-fail/flow_keyed_bundle_struct_literal_not_forgeable.rs:12:9
+  --> tests/compile-fail/flow_keyed_bundle_struct_literal_not_forgeable.rs:11:9
    |
-11 |     FlowGraphBundle {
+10 |     FlowGraphBundle {
    |     --------------- in this type
-12 |         key,
+11 |         key,
    |         ^^^ private field
-13 |         skeleton: Arc::clone(bundle.skeleton()),
+12 |         skeleton: bundle.skeleton().clone(),
    |         ^^^^^^^^ private field
-14 |         bindings: Arc::clone(bundle.bindings()),
+13 |         bindings: bundle.bindings().clone(),
    |         ^^^^^^^^ private field
-15 |         graph: Arc::clone(bundle.graph()),
+14 |         graph: bundle.graph().clone(),
    |         ^^^^^ private field
 
 error[E0451]: fields `key` and `prepared` of struct `KeyedFunctionStructure` are private
-  --> tests/compile-fail/flow_keyed_bundle_struct_literal_not_forgeable.rs:23:30
+  --> tests/compile-fail/flow_keyed_bundle_struct_literal_not_forgeable.rs:22:30
    |
-23 |     KeyedFunctionStructure { key, prepared }
+22 |     KeyedFunctionStructure { key, prepared }
    |                              ^^^  ^^^^^^^^ private field
    |                              |
    |                              private field

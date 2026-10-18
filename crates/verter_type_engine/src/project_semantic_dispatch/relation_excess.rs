@@ -181,24 +181,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// The REGULARIZED form of one node: the same surface with every
-    /// `FreshOwn` member origin restamped `NonLiteral`, recursively through
-    /// member values and aliases.
-    ///
-    /// Freshness is a property of the object-literal EXPRESSION site alone.
-    /// Once a literal becomes a binding's reaching definition, later reads
-    /// of that binding are variable materialisations — the
-    /// [`ExcessPropertyOrigin::NonLiteral`] origin — so
-    /// [`Self::freshness_for_source_node`] (the single freshness authority)
-    /// answers `Regular` for them and no excess-property prepass runs.
-    ///
-    /// A node carrying no fresh member is returned unchanged, so this never
-    /// mints a peer for an already-regular surface.
-    #[allow(dead_code)] // exercised by the call-resolution tests
-    pub fn regularized_source_node(&self, node: SemanticNodeId) -> SemanticNodeId {
-        let mut memo: rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId> =
-            rustc_hash::FxHashMap::default();
-        self.regularize_node(node, &mut memo)
+    construction_ordinal_seam! {
+        /// The REGULARIZED form of one node: the same surface with every
+        /// `FreshOwn` member origin restamped `NonLiteral`, recursively through
+        /// member values and aliases.
+        ///
+        /// Freshness is a property of the object-literal EXPRESSION site alone.
+        /// Once a literal becomes a binding's reaching definition, later reads
+        /// of that binding are variable materialisations — the
+        /// [`ExcessPropertyOrigin::NonLiteral`] origin — so
+        /// [`Self::freshness_for_source_node`] (the single freshness authority)
+        /// answers `Regular` for them and no excess-property prepass runs.
+        ///
+        /// A node carrying no fresh member is returned unchanged, so this never
+        /// mints a peer for an already-regular surface.
+        #[allow(dead_code)] // exercised by the call-resolution tests
+        fn regularized_source_node(&self, node: SemanticNodeId) -> SemanticNodeId {
+            let mut memo: rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId> =
+                rustc_hash::FxHashMap::default();
+            self.regularize_node(node, &mut memo)
+        }
     }
 
     /// `memo` is both the shared-subgraph memo and the cycle guard: a node

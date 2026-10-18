@@ -215,6 +215,7 @@ fn key(name: &str) -> PropertyKey {
 fn composed_inner_spread_merges_nullable_members_inside_an_outer_union() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let null = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Null));
@@ -284,6 +285,7 @@ fn composed_inner_spread_merges_nullable_members_inside_an_outer_union() {
 fn finite_union_spread_keeps_correlated_alternatives_through_final_overwrite() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -358,6 +360,7 @@ fn finite_union_spread_keeps_correlated_alternatives_through_final_overwrite() {
 fn optional_spread_write_fold_distinguishes_policy_and_live_open_state() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let one = graph.intern_node(SemanticNodeData::Literal(
         verter_type_engine::semantic_query::LiteralValue::Number(1.0),
@@ -452,6 +455,7 @@ fn optional_spread_write_fold_distinguishes_policy_and_live_open_state() {
 fn selector_liveness_prunes_only_shadowed_recursive_key_effects() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
@@ -512,6 +516,7 @@ fn selector_liveness_prunes_only_shadowed_recursive_key_effects() {
 fn whole_program_excess_and_direct_signature_rules_survive_open_spreads() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let generic = graph.intern_node(SemanticNodeData::TypeParam {
@@ -590,6 +595,7 @@ fn whole_program_excess_and_direct_signature_rules_survive_open_spreads() {
 fn copied_index_is_writable_while_authored_direct_index_retains_readonly() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -645,6 +651,7 @@ fn copied_index_is_writable_while_authored_direct_index_retains_readonly() {
 fn accessor_effects_normalize_to_writable_property_values() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let getter = graph.intern_node(SemanticNodeData::Signature {
@@ -730,6 +737,7 @@ fn accessor_effects_normalize_to_writable_property_values() {
 fn lowering_and_navigation_use_the_program_without_eager_surface_collapse() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let expr = verter_type_expr::TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
         properties: vec![
@@ -775,6 +783,7 @@ fn lowering_and_navigation_use_the_program_without_eager_surface_collapse() {
 fn keyof_and_substitution_consume_the_canonical_program() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -950,6 +959,7 @@ fn a_refused_spread_key_read_cannot_leave_the_intersection_keyof_exact() {
 fn relation_quantifies_correlated_alternatives_and_never_shortcuts_open_identity() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -1058,6 +1068,7 @@ fn assert_object_spread_ts2590(
 fn cross_product_at_the_checker_limit_is_its_ts2590_recovery_for_every_selector() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let left = keyed_union(graph, "a", 400);
@@ -1146,6 +1157,7 @@ fn cross_product_at_the_checker_limit_is_its_ts2590_recovery_for_every_selector(
 fn unclassifiable_spread_residual_yields_indeterminate_excess_not_generic_suppression() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let generic = graph.intern_node(SemanticNodeData::TypeParam {
@@ -1279,6 +1291,7 @@ fn relate(
 fn correlated_union_spread_rejects_empty_and_accepts_each_arm() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -1326,6 +1339,7 @@ fn correlated_union_spread_rejects_empty_and_accepts_each_arm() {
 fn spread_index_signature_never_manufactures_required_named_presence() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -1383,6 +1397,7 @@ fn spread_index_signature_never_manufactures_required_named_presence() {
 fn finite_and_broad_record_targets_consume_named_presence_and_envelopes() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -1476,6 +1491,7 @@ fn finite_and_broad_record_targets_consume_named_presence_and_envelopes() {
 fn open_targets_reject_on_exact_mismatch_and_stay_unknown_on_known_subset() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -1531,6 +1547,7 @@ fn open_targets_reject_on_exact_mismatch_and_stay_unknown_on_known_subset() {
 fn optional_spread_write_fold_matrix_under_fixed_policy() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -1612,6 +1629,7 @@ fn optional_spread_write_fold_matrix_under_fixed_policy() {
 fn unique_symbol_keys_survive_spreads_without_aliasing_same_spelling() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let identity = |canonical: &str| verter_type_expr::facts::ValueDeclIdentityPart {
@@ -1690,6 +1708,7 @@ fn unique_symbol_keys_survive_spreads_without_aliasing_same_spelling() {
 fn accessor_checker_parity_getter_setter_paired_duplicate_around_spreads() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -1865,6 +1884,7 @@ fn relate_fresh_excess(
 fn generic_spread_excess_suppression_matrix_with_closed_contrast_and_healing() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let generic = graph.intern_node(SemanticNodeData::TypeParam {
@@ -2031,6 +2051,7 @@ fn identical_unresolved_program_relation_is_unknown_and_never_published() {
 fn refusal_and_cycle_partials_are_never_admitted_and_later_queries_heal() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
@@ -2113,6 +2134,7 @@ fn refusal_and_cycle_partials_are_never_admitted_and_later_queries_heal() {
 fn inference_deposits_only_from_exact_whole_branch_positions() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let one = graph.intern_node(SemanticNodeData::Literal(
@@ -2226,6 +2248,7 @@ fn inference_deposits_only_from_exact_whole_branch_positions() {
 fn joined_shallow_surface_reports_incomplete_unless_single_closed_witness() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -2345,6 +2368,7 @@ fn joined_shallow_surface_reports_incomplete_unless_single_closed_witness() {
 fn distributed_and_aliased_program_operands_reach_the_program_relation() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let base = object(graph, [surface_member("a", number, false)]);
@@ -2424,6 +2448,7 @@ fn distributed_and_aliased_program_operands_reach_the_program_relation() {
 fn program_relation_unwraps_transparent_carriers_before_projecting() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -2475,6 +2500,7 @@ fn program_relation_unwraps_transparent_carriers_before_projecting() {
 fn nested_open_program_keeps_post_open_exact_keys_proven() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let generic = graph.intern_node(SemanticNodeData::TypeParam {
@@ -2568,6 +2594,7 @@ fn projected_optional_to_required_honors_the_strict_family_config() {
 fn projected_relation_matches_numeric_and_canonical_string_keys() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let numeric_key_member = |value: SemanticNodeId| SurfaceMember {
@@ -2622,6 +2649,7 @@ fn projected_relation_matches_numeric_and_canonical_string_keys() {
 fn path_projection_joins_closed_absent_alternatives_as_optional() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -2675,6 +2703,7 @@ fn path_projection_joins_closed_absent_alternatives_as_optional() {
 fn program_relation_applies_top_bottom_rules_before_projecting() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
@@ -2742,6 +2771,7 @@ fn carrier_wrapped_identical_open_program_stays_unpublished_unknown() {
     host.ensure_indexed_ready("/w/wrap.ts")
         .expect("wrap file indexes");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     let reference = verter_type_expr::TypeExpr::Ref {
@@ -2794,6 +2824,7 @@ fn carrier_wrapped_identical_open_program_stays_unpublished_unknown() {
 fn program_index_obligations_cover_cross_domain_contributions() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -2901,6 +2932,7 @@ fn program_index_obligations_cover_cross_domain_contributions() {
 fn spread_operand_carriers_fold_to_their_concrete_surface() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
@@ -2976,6 +3008,7 @@ fn spread_operand_carriers_fold_to_their_concrete_surface() {
 fn key_liveness_keeps_the_getter_of_a_paired_accessor() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3065,6 +3098,7 @@ fn exact_optional_property_types_threads_into_consumer_projections() {
     let default_request =
         verter_type_engine::request_context::install_test_request_for("/default/main.ts");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let one = graph.intern_node(SemanticNodeData::Literal(
         verter_type_engine::semantic_query::LiteralValue::Number(1.0),
@@ -3183,6 +3217,7 @@ fn surface_member_names(view: &verter_type_engine::semantic_query::SurfaceView) 
 fn empty_path_shallow_surface_over_program_root_publishes_the_construction() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3212,6 +3247,7 @@ fn empty_path_shallow_surface_over_program_root_publishes_the_construction() {
 fn empty_path_shallow_over_open_program_root_returns_open_typed_evidence() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     // Open program `{ a: number, ...T }`: `SurfaceView::closed()` is
@@ -3274,6 +3310,7 @@ fn empty_path_shallow_over_open_program_root_returns_open_typed_evidence() {
 fn empty_path_shallow_over_correlated_program_merges_closed_alternatives() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3337,6 +3374,7 @@ fn empty_path_shallow_over_correlated_program_merges_closed_alternatives() {
 fn empty_path_shallow_over_union_with_program_arm_projects_the_arm() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3422,6 +3460,7 @@ fn empty_path_shallow_over_union_with_program_arm_projects_the_arm() {
 fn empty_path_shallow_over_intersection_with_open_program_arm_keeps_the_carrier() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3477,6 +3516,7 @@ fn empty_path_shallow_over_intersection_with_open_program_arm_keeps_the_carrier(
 fn typeinfo_surface_view_refuses_partial_terminal_reads() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3545,6 +3585,7 @@ fn typeinfo_surface_view_refuses_partial_terminal_reads() {
 fn empty_path_shallow_over_program_root_failure_is_typed_partial() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     // Chain of nested programs past the spread depth cap (8): the inner
     // projection errors, the root read must surface partiality.
@@ -3614,6 +3655,7 @@ fn numeric_surface_member(value: i64, node: SemanticNodeId) -> SurfaceMember {
 fn fold_treats_numeric_and_string_spellings_as_one_js_property() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3700,6 +3742,7 @@ fn fold_treats_numeric_and_string_spellings_as_one_js_property() {
 fn key_projection_over_spelling_overwrite_reads_the_latest_write() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3846,6 +3889,7 @@ fn macro_member_reader_publishes_open_program_positive_names_without_completenes
 fn paired_setter_excess_candidate_tracks_the_fact_key_spelling() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let getter_sig = graph.intern_node(SemanticNodeData::Signature {
@@ -3950,6 +3994,7 @@ fn paired_setter_excess_candidate_tracks_the_fact_key_spelling() {
 fn formula_closed_keyof_intersects_dual_spellings_nominally() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3990,6 +4035,7 @@ fn formula_closed_keyof_intersects_dual_spellings_nominally() {
 fn direct_write_excess_candidates_replace_dual_spelling_stale_entries() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -4330,6 +4376,7 @@ fn macro_union_merge_collapses_dual_spelling_members() {
 fn raise_fold_keeps_index_signature_off_the_single_call_fast_path() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -4398,6 +4445,7 @@ fn raise_fold_keeps_index_signature_off_the_single_call_fast_path() {
 fn union_common_member_merge_collapses_dual_spelling_members() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -4449,6 +4497,7 @@ fn union_common_member_merge_collapses_dual_spelling_members() {
 fn intersection_merge_collapses_dual_spelling_members() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -4500,6 +4549,7 @@ fn intersection_merge_collapses_dual_spelling_members() {
 fn program_index_obligations_relate_every_overlapping_source_index() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -4555,6 +4605,7 @@ fn program_index_obligations_relate_every_overlapping_source_index() {
 fn keyof_over_program_base_enumerates_closed_and_defers_open() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -4637,6 +4688,7 @@ fn keyof_over_program_base_enumerates_closed_and_defers_open() {
 fn typeinfo_join_collapses_dual_spelling_members() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -4723,6 +4775,7 @@ fn typeinfo_join_collapses_dual_spelling_members() {
 fn selector_local_closed_domain_proves_only_the_declared_keys() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -4829,6 +4882,7 @@ fn selector_local_closed_domain_proves_only_the_declared_keys() {
 fn whole_domain_closed_witness_still_answers_domain_operations() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -4875,6 +4929,7 @@ fn whole_domain_closed_witness_still_answers_domain_operations() {
 fn typeinfo_join_publishes_indeterminate_value_members_as_open_rows() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     // `{a: number, ...T}` — `a` is definitely PRESENT (a later spread

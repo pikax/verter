@@ -271,7 +271,7 @@ impl MetaSession {
             let ctx: &dyn crate::resolver_core::HostRequestContext = &session_ctx;
             let dispatch =
                 &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
-            let analysis = retained.recovery.analysis.clone();
+            let analysis = retained.recovery.analysis.0.clone();
             let signature = retained.read_set_signature.clone();
             let seed = crate::meta_resolve::output::ComponentMetaResolutionSeed::from_template(
                 &retained.recovery.resolution_template,
@@ -400,7 +400,7 @@ impl MetaSession {
                         ctx,
                         dispatch,
                         canonical.as_str(),
-                        analysis,
+                        analysis.0.clone(),
                         Some(seed),
                         // The SAME merged signal the payload-write fence below
                         // refuses on. The resolve term alone drops the whole

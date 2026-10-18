@@ -208,7 +208,7 @@ impl VerterHost {
                 // The retained refusal's status rides on the resolution.
                 // Rehydrate must not present the recovery as a complete hit.
                 resolution.completeness = status_completeness;
-                return Ok(Some((cached.analysis.clone(), resolution)));
+                return Ok(Some((cached.analysis.0.clone(), resolution)));
             }
         }
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
@@ -234,7 +234,7 @@ impl VerterHost {
         else {
             return Ok(None);
         };
-        Ok(Some((cold.analysis, cold.resolved)))
+        Ok(Some((cold.analysis.0.clone(), cold.resolved)))
     }
 
     /// The SHARED audited cold body: resolve PINNED to the caller's captured
@@ -334,7 +334,13 @@ impl VerterHost {
                     extract.fallthrough_fact_versions.as_deref(),
                     admission.as_ref(),
                 );
-                Some((extract.analysis, resolved, extract.completeness))
+                Some((
+                    crate::component_meta_cached_result::shared_component_meta_analysis(
+                        extract.analysis,
+                    ),
+                    resolved,
+                    extract.completeness,
+                ))
             },
             |computed, evidence| {
                 let Some((analysis, resolved, extract_completeness)) = computed else {
@@ -506,7 +512,7 @@ impl VerterHost {
             let ctx: &dyn crate::resolver_core::HostRequestContext = &host_ctx;
             let dispatch =
                 &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
-            let analysis = retained.recovery.analysis.clone();
+            let analysis = retained.recovery.analysis.0.clone();
             let signature = retained.read_set_signature.clone();
             let seed = crate::meta_resolve::output::ComponentMetaResolutionSeed::from_template(
                 &retained.recovery.resolution_template,
@@ -585,7 +591,7 @@ impl VerterHost {
                     host_ctx_ref,
                     dispatch,
                     canonical.as_str(),
-                    analysis,
+                    analysis.0.clone(),
                     Some(seed),
                     completeness,
                 )
@@ -673,7 +679,7 @@ impl VerterHost {
                 // The retained refusal's status rides on the resolution.
                 // Rehydrate must not present the recovery as a complete hit.
                 resolution.completeness = status_completeness;
-                return Ok(Some((cached.analysis.clone(), resolution)));
+                return Ok(Some((cached.analysis.0.clone(), resolution)));
             }
         }
         let validated_at_generation = self.project_type_store.current_project_generation();
@@ -706,7 +712,7 @@ impl VerterHost {
         };
         let mut resolved = cold.resolved;
         resolved.request_id = self.next_request_id();
-        Ok(Some((cold.analysis, resolved)))
+        Ok(Some((cold.analysis.0.clone(), resolved)))
     }
 
     /// Cache-hit path. Returns `Some((analysis, resolution))` on a
@@ -923,7 +929,7 @@ impl VerterHost {
             self.host_audit_runtime().publish_record(synthesized);
         }
 
-        Some((cached.analysis.clone(), resolution))
+        Some((cached.analysis.0.clone(), resolution))
     }
 }
 

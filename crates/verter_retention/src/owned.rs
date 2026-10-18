@@ -45,6 +45,8 @@
 //! could clone out and keep past the cell's charge, so a debug build fails
 //! the measurement that reaches one.
 
+use std::num::NonZeroU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use parking_lot::Mutex;
@@ -273,6 +275,17 @@ fn measure(node: &dyn Node, block_shared: bool) -> (usize, Box<[Arc<dyn Node>]>)
     let block = if block_shared { 0 } else { node.block_bytes() };
     let children = aliases.take_children();
     (block + heap + registration_bytes(children.len()), children)
+}
+
+/// Bytes a measurement that charges nothing counts for `node`: its block —
+/// unless weak holders share its charge — and its value's heap.
+pub(crate) fn counted_in_full(node: &dyn Node, aliases: &mut AliasSet) -> usize {
+    let block = if node.slot().lock().block_share.is_some() {
+        0
+    } else {
+        node.block_bytes()
+    };
+    block + node.value_heap_bytes(aliases)
 }
 
 /// Charge `node` for its callers if no owner has yet. Locks parent before
@@ -548,29 +561,46 @@ impl<T: Measured> Owned<T> {
         }))
     }
 
-    /// [`Self::new`] for an allocation weak holders (an interner) may keep
-    /// allocated past its value. Its block is charged at once, pinned, by a
-    /// [`BlockShare`] the cell keeps and each weak holder keeps a clone of
-    /// beside its weak view: the block's charge lasts until the cell's value
-    /// is gone AND every weak holder has let go — the block's own lifetime —
-    /// in either order. The handle's own charge covers the value's heap.
+    /// [`Self::new`] for an allocation weak views (an interner's entries,
+    /// [`Self::downgrade`]) may keep allocated past its value. Its block is
+    /// charged at once, pinned, by a [`BlockShare`] the cell keeps and every
+    /// weak view keeps a clone of: the block's charge lasts until the cell's
+    /// value is gone AND every weak view has let go — the block's own
+    /// lifetime — in either order. The handle's own charge covers the
+    /// value's heap.
     #[must_use]
-    pub fn new_with_shared_block(value: T, ctx: ChargeCtx<'_>) -> (Self, BlockShare) {
-        let share = BlockShare::for_block(Self::cell_block_bytes(), ctx);
-        let owned = Self(Arc::new(Cell {
+    pub fn new_with_shared_block(value: T, ctx: ChargeCtx<'_>) -> Self {
+        Self(Arc::new(Cell {
             slot: Mutex::new(Slot {
-                block_share: Some(share.clone()),
+                block_share: Some(BlockShare::for_block(Self::cell_block_bytes(), ctx)),
                 ..Slot::default()
             }),
             value,
-        }));
-        (owned, share)
+        }))
     }
 
     /// Charge this allocation to its callers if no owner has yet: pinned,
     /// never refused, together with every owned child it reaches.
     pub fn pin(&self, ctx: ChargeCtx<'_>) {
         pin_node(&*self.0, ctx);
+    }
+
+    /// The value, when this is its allocation's only handle: the value
+    /// leaves the allocation and the allocation's charge is released with
+    /// it, in one step. Any other holder means the handle comes back
+    /// unchanged.
+    ///
+    /// # Errors
+    ///
+    /// `this`, when another handle shares the allocation.
+    pub fn try_unwrap(this: Self) -> Result<T, Self> {
+        match Arc::try_unwrap(this.0) {
+            Ok(Cell { slot, value }) => {
+                drop(slot);
+                Ok(value)
+            }
+            Err(shared) => Err(Self(shared)),
+        }
     }
 
     /// A cache's hold on this allocation: retains its charge — and its
@@ -595,12 +625,7 @@ impl<T: Measured> Owned<T> {
         if aliases.collect_child(|| Arc::clone(&self.0) as Arc<dyn Node>) {
             return 0;
         }
-        let block = if self.0.slot.lock().block_share.is_some() {
-            0
-        } else {
-            self.0.block_bytes()
-        };
-        block + self.0.value.heap_bytes(aliases)
+        counted_in_full(&*self.0, aliases)
     }
 
     /// Bytes the allocation's charge holds; `None` while no owner has
@@ -638,11 +663,17 @@ impl<T: Measured> Owned<T> {
         Arc::as_ptr(&this.0).cast::<()>() as usize
     }
 
-    /// A weak view that keeps the cell's block — not its value or its
-    /// charge — allocated.
+    /// A weak view that keeps the cell's block — not its value — allocated,
+    /// together with the charge on that block: only an allocation built for
+    /// weak views ([`Self::new_with_shared_block`]) has one, so a weak view
+    /// never keeps a block its charge has left. `None` for any other cell.
     #[must_use]
-    pub fn downgrade(this: &Self) -> WeakOwned<T> {
-        WeakOwned(Arc::downgrade(&this.0))
+    pub fn downgrade(this: &Self) -> Option<WeakOwned<T>> {
+        let block = this.0.slot.lock().block_share.clone()?;
+        Some(WeakOwned {
+            cell: Arc::downgrade(&this.0),
+            _block: block,
+        })
     }
 
     /// Weak views of this allocation.
@@ -1010,33 +1041,41 @@ impl<T: Measured + verter_no_storedspan::__private::NoStoredSpanWitness>
 {
 }
 
-/// A weak view of an [`Owned`] allocation.
-pub struct WeakOwned<T: Measured>(Weak<Cell<T>>);
+/// A weak view of an [`Owned`] allocation ([`Owned::downgrade`]): it keeps
+/// the allocation's block, and holds a share of the charge on that block
+/// for as long as it does.
+pub struct WeakOwned<T: Measured> {
+    cell: Weak<Cell<T>>,
+    _block: BlockShare,
+}
 
 impl<T: Measured> WeakOwned<T> {
     /// The allocation, while any handle keeps it.
     #[must_use]
     pub fn upgrade(&self) -> Option<Owned<T>> {
-        self.0.upgrade().map(Owned)
+        self.cell.upgrade().map(Owned)
     }
 
     /// Live handles of the allocation.
     #[must_use]
     pub fn strong_count(&self) -> usize {
-        self.0.strong_count()
+        self.cell.strong_count()
     }
 
     /// Whether `owned` is the allocation this view names. The view keeps
     /// the block allocated, so its address is never reused while it lives.
     #[must_use]
     pub fn is(&self, owned: &Owned<T>) -> bool {
-        std::ptr::eq(self.0.as_ptr(), Arc::as_ptr(&owned.0))
+        std::ptr::eq(self.cell.as_ptr(), Arc::as_ptr(&owned.0))
     }
 }
 
 impl<T: Measured> Clone for WeakOwned<T> {
     fn clone(&self) -> Self {
-        Self(Weak::clone(&self.0))
+        Self {
+            cell: Weak::clone(&self.cell),
+            _block: self._block.clone(),
+        }
     }
 }
 
@@ -1117,33 +1156,64 @@ impl std::fmt::Debug for OwnedHold {
     }
 }
 
-/// A weak view of an [`OwnedStr`] allocation (see [`OwnedStr::downgrade`]).
-#[derive(Clone)]
-pub struct WeakOwnedStr(WeakOwned<Box<str>>);
+/// An owned string's text and the stamp naming its allocation.
+#[derive(Default)]
+struct StrText {
+    text: Box<str>,
+    /// [`OwnedStr::identity`]; 0 until first asked for.
+    stamp: AtomicU64,
+}
 
-impl WeakOwnedStr {
-    /// Whether `owned` is the string allocation this view names.
-    #[must_use]
-    pub fn is(&self, owned: &OwnedStr) -> bool {
-        self.0.is(&owned.0)
+impl StrText {
+    fn new(text: Box<str>) -> Self {
+        Self {
+            text,
+            stamp: AtomicU64::new(0),
+        }
+    }
+}
+
+impl Measured for StrText {
+    fn heap_bytes(&self, _aliases: &mut AliasSet) -> usize {
+        heap_block_bytes(self.text.len())
+    }
+}
+
+impl PartialEq for StrText {
+    fn eq(&self, other: &Self) -> bool {
+        self.text == other.text
+    }
+}
+
+impl Eq for StrText {}
+
+impl PartialOrd for StrText {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for StrText {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.text.cmp(&other.text)
     }
 }
 
 /// An owned string: a sealed, self-charged text allocation.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Default)]
-pub struct OwnedStr(Owned<Box<str>>);
+pub struct OwnedStr(Owned<StrText>);
 
 impl OwnedStr {
     /// A new owned copy of `text`.
     #[must_use]
     pub fn new(text: &str) -> Self {
-        Self(Owned::new(Box::from(text)))
+        Self(Owned::new(StrText::new(Box::from(text))))
     }
 
     /// The text.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.0.text
     }
 
     /// Offer this string to a measurement (see [`Owned::offer`]).
@@ -1183,17 +1253,30 @@ impl OwnedStr {
         Owned::ptr_eq(&this.0, &other.0)
     }
 
-    /// A weak view that names this string's allocation without keeping its
-    /// text or its charge: an identity check that outlives no owner.
+    /// A number naming this string's allocation, unique in the process and
+    /// never reused: an identity check against it keeps nothing allocated,
+    /// so it outlives no owner. Assigned on first request.
     #[must_use]
-    pub fn downgrade(this: &Self) -> WeakOwnedStr {
-        WeakOwnedStr(Owned::downgrade(&this.0))
+    pub fn identity(this: &Self) -> NonZeroU64 {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let stamp = &this.0.stamp;
+        let current = stamp.load(Ordering::Relaxed);
+        let assigned = if current != 0 {
+            current
+        } else {
+            let fresh = NEXT.fetch_add(1, Ordering::Relaxed);
+            match stamp.compare_exchange(0, fresh, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => fresh,
+                Err(raced) => raced,
+            }
+        };
+        NonZeroU64::new(assigned).expect("stamps start at one and a u64 never wraps")
     }
 
     /// Bytes one owned string of `len` bytes is charged.
     #[must_use]
     pub fn charge_for_len(len: usize) -> usize {
-        Owned::<Box<str>>::cell_block_bytes() + heap_block_bytes(len)
+        Owned::<StrText>::cell_block_bytes() + heap_block_bytes(len)
     }
 
     /// Owning handles of this string's allocation.
@@ -1212,19 +1295,19 @@ impl OwnedStr {
 impl std::ops::Deref for OwnedStr {
     type Target = str;
     fn deref(&self) -> &str {
-        &self.0
+        self.as_str()
     }
 }
 
 impl AsRef<str> for OwnedStr {
     fn as_ref(&self) -> &str {
-        &self.0
+        self.as_str()
     }
 }
 
 impl std::borrow::Borrow<str> for OwnedStr {
     fn borrow(&self) -> &str {
-        &self.0
+        self.as_str()
     }
 }
 
@@ -1255,7 +1338,7 @@ impl From<&str> for OwnedStr {
 
 impl From<String> for OwnedStr {
     fn from(text: String) -> Self {
-        Self(Owned::new(text.into_boxed_str()))
+        Self(Owned::new(StrText::new(text.into_boxed_str())))
     }
 }
 

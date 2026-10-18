@@ -229,7 +229,8 @@ pub(crate) struct InputArtifactLeases {
 struct RetainedInputs {
     indexed: FxHashMap<IndexedInputIdentity, Arc<crate::project_type_store::IndexedReady>>,
     sources: FxHashMap<u64, Arc<super::ShallowFileState>>,
-    prepared: FxHashMap<u64, Arc<super::prepared_decl::PreparedDeclBundle>>,
+    prepared:
+        FxHashMap<u64, crate::resolver_core::CachedValue<super::prepared_decl::PreparedDeclBundle>>,
 }
 /// Exact request-selected mirror authority. This fixed operation cannot expose
 /// the retained source, its workers, or any session/cache service.
@@ -337,8 +338,8 @@ impl std::fmt::Debug for InputArtifactLeases {
 impl InputArtifactLeases {
     pub(crate) fn retain_prepared(
         &self,
-        bundle: Arc<super::prepared_decl::PreparedDeclBundle>,
-    ) -> Arc<PreparedInputRecord> {
+        bundle: crate::resolver_core::CachedValue<super::prepared_decl::PreparedDeclBundle>,
+    ) -> verter_session_query::inputs::prepared::PreparedInputRef {
         let input = bundle.input_record();
         self.retained
             .write()
@@ -350,7 +351,7 @@ impl InputArtifactLeases {
     pub(crate) fn prepared(
         &self,
         input: &PreparedInputRecord,
-    ) -> Option<Arc<super::prepared_decl::PreparedDeclBundle>> {
+    ) -> Option<crate::resolver_core::CachedValue<super::prepared_decl::PreparedDeclBundle>> {
         let bundle = self
             .retained
             .read()
@@ -364,7 +365,7 @@ impl InputArtifactLeases {
 impl verter_type_engine::resolver_core::bare_name_resolve::PreparedInputSource
     for super::prepared_decl::PreparedDeclBundle
 {
-    fn scope_inputs(&self) -> Arc<PreparedInputRecord> {
+    fn scope_inputs(&self) -> verter_session_query::inputs::prepared::PreparedInputRef {
         self.input_record()
     }
 }

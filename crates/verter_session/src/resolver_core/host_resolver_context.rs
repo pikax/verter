@@ -113,7 +113,7 @@ impl RequestBoundLifecycle for HostRequestLifecycle<'_> {
         &self,
         _ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical_id: &str,
-    ) -> Option<Arc<PreparedDeclBundle>> {
+    ) -> Option<crate::resolver_core::CachedValue<PreparedDeclBundle>> {
         self.inner.prepared_decl_bundle_with_store_view(
             &self.view,
             Some(self.view.overlay().bundle_memo()),
@@ -128,7 +128,7 @@ impl RequestBoundLifecycle for HostRequestLifecycle<'_> {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<PreparedTypeDecl>>,
+        Option<verter_retention::heap_size::OwnedValue<PreparedTypeDecl>>,
         verter_session_query::inputs::prepared::PreparationFailure,
     > {
         self.inner.prepared_type_decl_in_with_store_view(
@@ -147,7 +147,7 @@ impl RequestBoundLifecycle for HostRequestLifecycle<'_> {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<PreparedValueDecl>>,
+        Option<verter_retention::heap_size::OwnedValue<PreparedValueDecl>>,
         verter_session_query::inputs::prepared::PreparationFailure,
     > {
         self.inner.prepared_value_decl_in_with_store_view(

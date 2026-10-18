@@ -258,6 +258,16 @@ pub struct IncompleteSurface<T> {
 }
 
 impl<T> SurfaceResolution<T> {
+    /// Borrow the represented value solely for internal ownership transport.
+    /// This does not discharge an incomplete claim or claim completeness.
+    pub(crate) fn represented_value(&self) -> Option<&T> {
+        match self {
+            Self::Resolved(value) | Self::OpenPresence(value) => Some(value),
+            Self::Incomplete(value) => value.partial.as_ref(),
+            Self::NoSurface(_) => None,
+        }
+    }
+
     /// The COMPLETE-claim mint: the producer resolved the full member
     /// domain. Routes through the private finalizer.
     pub(crate) fn resolved(value: T) -> Self {

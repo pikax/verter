@@ -28,6 +28,7 @@ fn on_a_small_stack<R: Send + 'static>(
         .spawn(move || {
             let host = VerterHost::new_standalone(HostConfig::default());
             let dispatch = ProjectSemanticDispatch::new(&host);
+            let _builder = dispatch.enter_construction_scope();
             probe(&dispatch)
         })
         .expect("spawn the probing thread")

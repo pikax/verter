@@ -376,7 +376,9 @@ impl SuppliedBlockScope<'_> {
 }
 
 pub(crate) struct CompilerStyleContentCapture {
-    pub(crate) analyses: Arc<Vec<verter_session_query::analysis::style::StyleBlockAnalysis>>,
+    pub(crate) analyses: verter_session_query::analysis::file_analysis::SharedList<
+        verter_session_query::analysis::style::StyleBlockAnalysis,
+    >,
     pub(crate) v_bind_vars: Vec<String>,
     pub(crate) usage_complete: bool,
     analyses_changed: bool,
@@ -1360,8 +1362,12 @@ impl VerterHost {
     pub(crate) fn hydrate_style_content(
         &self,
         canonical_id: &str,
-        styles: &Arc<Vec<verter_session_query::analysis::style::StyleBlockAnalysis>>,
-    ) -> Arc<Vec<verter_session_query::analysis::style::StyleBlockAnalysis>> {
+        styles: &verter_session_query::analysis::file_analysis::SharedList<
+            verter_session_query::analysis::style::StyleBlockAnalysis,
+        >,
+    ) -> verter_session_query::analysis::file_analysis::SharedList<
+        verter_session_query::analysis::style::StyleBlockAnalysis,
+    > {
         let default_profile = CompileProfile::default();
         let captured = self.capture_compiler_style_content(
             canonical_id,
@@ -1371,7 +1377,7 @@ impl VerterHost {
         if captured.analyses_changed {
             captured.analyses
         } else {
-            Arc::clone(styles)
+            styles.clone()
         }
     }
 
@@ -1494,7 +1500,7 @@ impl VerterHost {
         v_bind_vars.sort_unstable();
         v_bind_vars.dedup();
         CompilerStyleContentCapture {
-            analyses: Arc::new(hydrated),
+            analyses: verter_session_query::analysis::file_analysis::SharedList::new(hydrated),
             v_bind_vars,
             usage_complete,
             analyses_changed,

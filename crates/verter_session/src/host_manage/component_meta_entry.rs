@@ -117,8 +117,8 @@ fn run_warm_output_pre_evidence_hook() {
 pub(crate) struct ComponentMetaColdResult {
     /// The resolved state the analysis was extracted from.
     pub(crate) resolved: crate::meta_resolve::ResolvedComponentMetaState,
-    /// The projected analysis.
-    pub(crate) analysis: verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
+    /// The projected analysis: the cell the final-result cache shares.
+    pub(crate) analysis: crate::component_meta_cached_result::SharedComponentMetaAnalysis,
     /// The merged resolve + extract completeness.
     pub(crate) completeness: crate::meta_resolve::PublishedCompleteness,
     /// The admitted final result, when the cold publish produced one — the
@@ -547,7 +547,7 @@ impl VerterHost {
                         ctx,
                         dispatch,
                         canonical.as_str(),
-                        cached.analysis.clone(),
+                        cached.analysis.0.clone(),
                         seed,
                         // A warm entry only exists when the merged term was
                         // Complete, but the claim is stated rather than
@@ -592,7 +592,7 @@ impl VerterHost {
             let ctx: &dyn crate::resolver_core::HostRequestContext = &session_ctx;
             let dispatch =
                 &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
-            let analysis = retained.recovery.analysis.clone();
+            let analysis = retained.recovery.analysis.0.clone();
             let signature = retained.read_set_signature.clone();
             let seed = with_resolution.then(|| {
                 crate::meta_resolve::output::ComponentMetaResolutionSeed::from_template(
@@ -681,7 +681,7 @@ impl VerterHost {
                     ctx,
                     dispatch,
                     canonical.as_str(),
-                    meta,
+                    meta.0.clone(),
                     seed,
                     completeness,
                 )
@@ -971,7 +971,12 @@ impl VerterHost {
                 );
                 (
                     Some(resolved),
-                    Some((extract.analysis, extract.completeness)),
+                    Some((
+                        crate::component_meta_cached_result::shared_component_meta_analysis(
+                            extract.analysis,
+                        ),
+                        extract.completeness,
+                    )),
                 )
             },
             |computed, evidence| {
@@ -1447,7 +1452,7 @@ impl VerterHost {
         canonical: &str,
         view: &dyn crate::session_view::SessionView,
         resolved: &crate::meta_resolve::ResolvedComponentMetaState,
-        meta: verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
+        meta: crate::component_meta_cached_result::SharedComponentMetaAnalysis,
         validated_at_generation: u64,
         seed_fence: &ColdSeedFence,
         final_completeness: verter_type_engine::semantic_query::ResultCompleteness,
@@ -1530,7 +1535,7 @@ impl VerterHost {
         &self,
         canonical: &str,
         resolved: &crate::meta_resolve::ResolvedComponentMetaState,
-        meta: verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
+        meta: crate::component_meta_cached_result::SharedComponentMetaAnalysis,
         validated_at_generation: u64,
         seed_fence: &ColdSeedFence,
         final_completeness: verter_type_engine::semantic_query::ResultCompleteness,

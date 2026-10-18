@@ -529,6 +529,12 @@ fn resolve_named_symbol_request(
     let host_ctx =
         crate::resolver_core::HostResolverContext::from_current(host, &current_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    // The request composes construction ordinals across several dispatcher
+    // operations (lowered wire arguments, the bare declaration, the
+    // instantiation, alias hops) before it roots the one it delivers; the
+    // dispatcher's lane owns none of them, so the request holds an explicit
+    // builder owner that releases them all when the request returns.
+    let builder = dispatch.enter_construction_scope();
 
     // Wire-boundary lowering, INSIDE the audited request and under THIS
     // dispatch (and therefore this view), in `Navigate` mode — the args are
@@ -542,11 +548,15 @@ fn resolve_named_symbol_request(
         NamedSymbolTypeArgs::Wire(wire) => {
             let mut lowered: Vec<SemanticNodeId> = Vec::with_capacity(wire.len());
             for arg in wire {
-                match dispatch.lower_type_expr_in_scope_with_mode(
-                    canonical_id,
-                    arg.as_ref(),
-                    ProjectionMode::Navigate,
-                ) {
+                match dispatch
+                    .owning()
+                    .lower_type_expr_in_scope_with_mode(
+                        canonical_id,
+                        arg.as_ref(),
+                        ProjectionMode::Navigate,
+                    )
+                    .into_value_in(&builder)
+                {
                     Some(node) => lowered.push(node),
                     None => return (Ok(None), effective_mode),
                 }

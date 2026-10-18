@@ -388,7 +388,7 @@ fn skeleton_source_verifies_parse_key_and_language() {
     }
     let repeated = stores.bound_graph_for(&key).expect("warm graph is bound");
     assert!(
-        Arc::ptr_eq(bindings, repeated.bundle().bindings()),
+        std::ptr::eq(*bindings, repeated.bundle().bindings()),
         "all demands share the map built from the pinned retained index"
     );
     assert_eq!(stores.graphs().build_count(), 1);
@@ -687,7 +687,7 @@ fn peek_reports_none_before_build_and_the_memoized_skeleton_after() {
         .peek(&key)
         .expect("peek must see the warm entry");
     assert!(
-        Arc::ptr_eq(&peeked, &built),
+        verter_session_query::flow::bundle::FlowGraphBundleRef::ptr_eq(&peeked, &built),
         "peek must return the SAME memoized bundle, not a fresh build"
     );
     // A second peek does not build again.
@@ -763,7 +763,9 @@ fn flow_slice_stores_peek_skeleton_for_mirrors_the_graph_store_peek() {
     let peeked = stores
         .peek_skeleton_for(&key)
         .expect("peek_skeleton_for must see the warm entry");
-    assert!(Arc::ptr_eq(&peeked, &built));
+    assert!(verter_session_query::flow::bundle::SkeletonRef::ptr_eq(
+        &peeked, &built
+    ));
     assert_eq!(source.build_calls(), 1);
 }
 
@@ -907,7 +909,7 @@ pub(crate) fn two_demands_one_function_flow_graph_build() {
         .graphs
         .bound_graph(&function)
         .expect("second demand reuses");
-    assert!(Arc::ptr_eq(
+    assert!(std::ptr::eq(
         first.bundle().bindings(),
         second.bundle().bindings()
     ));
@@ -1822,4 +1824,167 @@ fn a_retained_graph_bundle_charges_its_structure_until_its_eviction() {
         charged[1] > charged[0] + 400 * std::mem::size_of::<u64>(),
         "a larger structure costs more: {charged:?}"
     );
+}
+
+#[test]
+fn a_graph_reader_keeps_its_payload_charge_after_store_teardown() {
+    use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
+    let name = "long_binding_name_".repeat(256);
+    let source = format!("function myType() {{ const {name} = 1; return {name} }}");
+    for reader_first in [false, true] {
+        let account = SemanticRetentionAccount::new(RetentionLimits {
+            aggregate_ceiling_bytes: 0,
+            active_ceiling_bytes: 0,
+            max_entry_bytes: 0,
+            pin_threshold_bytes: 0,
+        });
+        let store = FunctionFlowGraphStore::charged_to_for_test(Arc::clone(&account));
+        let key = function_key("/graph.ts", "myType", 4, &source);
+        let GraphClaim::Produce(lease) = store.claim(&key) else {
+            panic!("empty store must grant a producer");
+        };
+        let reader = lease
+            .publish(FlowGraphBundle::build(
+                KeyedFunctionStructure::bind_fixture(key.clone(), prepared_of(&source)),
+            ))
+            .expect("complete bundle is delivered even at zero headroom");
+        let bytes = account.snapshot().pinned_bytes;
+        assert!(bytes >= name.len(), "the variable spelling must be charged");
+        let alias = store.peek(&key).expect("published bundle is warm");
+        assert!(verter_session_query::flow::bundle::FlowGraphBundleRef::ptr_eq(&reader, &alias));
+        assert_eq!(
+            account.snapshot().pinned_bytes,
+            bytes,
+            "alias shares the charge"
+        );
+        drop(alias);
+        if reader_first {
+            drop(reader);
+            assert_eq!(account.snapshot().pinned_bytes, bytes);
+            drop(store);
+        } else {
+            drop(store);
+            assert_eq!(reader.skeleton().names.len(), 1);
+            assert!(
+                account.snapshot().pinned_bytes >= name.len(),
+                "a surviving reader still owns the variable spelling"
+            );
+            assert!(
+                account.snapshot().pinned_bytes < bytes,
+                "cache slot released"
+            );
+            drop(reader);
+        }
+        assert_eq!(
+            account.snapshot().total_bytes(),
+            0,
+            "final release is immediate"
+        );
+    }
+}
+
+/// A holder that keeps one part of a published bundle — its skeleton, its
+/// binding map or its graph — keeps it through the bundle's own handle, so
+/// the part's variable data stays charged after the store and every other
+/// reader let go, and its drop restores the baseline at once. No accessor
+/// hands out a part as an allocation of its own that could outlive that
+/// charge.
+#[test]
+fn a_kept_bundle_part_stays_charged_after_store_teardown() {
+    use verter_session_query::flow::bundle::{BindingsRef, GraphRef, SkeletonRef};
+    use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
+    let name = "kept_part_binding_name_".repeat(256);
+    let source = format!("function myType() {{ const {name} = 1; return {name} }}");
+    for part in 0..3 {
+        for part_first in [false, true] {
+            let account = SemanticRetentionAccount::new(RetentionLimits {
+                aggregate_ceiling_bytes: 0,
+                active_ceiling_bytes: 0,
+                max_entry_bytes: 0,
+                pin_threshold_bytes: 0,
+            });
+            let store = FunctionFlowGraphStore::charged_to_for_test(Arc::clone(&account));
+            let key = function_key("/graph.ts", "myType", 4, &source);
+            let GraphClaim::Produce(lease) = store.claim(&key) else {
+                panic!("empty store must grant a producer");
+            };
+            let reader = lease
+                .publish(FlowGraphBundle::build(
+                    KeyedFunctionStructure::bind_fixture(key.clone(), prepared_of(&source)),
+                ))
+                .expect("complete bundle is delivered even at zero headroom");
+            let published = account.snapshot().pinned_bytes;
+            let kept: Box<dyn std::any::Any> = match part {
+                0 => Box::new(SkeletonRef::of(&reader)),
+                1 => Box::new(BindingsRef::of(&reader)),
+                _ => Box::new(GraphRef::of(&reader)),
+            };
+            assert_eq!(
+                account.snapshot().pinned_bytes,
+                published,
+                "(part {part}) a kept part shares the bundle's charge"
+            );
+            drop(reader);
+            if part_first {
+                drop(kept);
+                assert_eq!(account.snapshot().pinned_bytes, published);
+                drop(store);
+            } else {
+                drop(store);
+                let surviving = account.snapshot().pinned_bytes;
+                assert!(
+                    surviving >= name.len() && surviving < published,
+                    "(part {part}) the kept part still owns the bundle's data, not its slot: \
+                     {surviving} of {published}"
+                );
+                drop(kept);
+            }
+            assert_eq!(
+                account.snapshot().total_bytes(),
+                0,
+                "(part {part}, part first {part_first}) final release is immediate"
+            );
+        }
+    }
+}
+
+#[test]
+fn graph_publication_charges_independently_allocated_equal_key_backing() {
+    use verter_session_query::retention::allocation::arc_block_bytes;
+    use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
+    let canonical = format!("/{}.ts", "module_name".repeat(256));
+    let source = "function myType() { return 1 }";
+    let mut charges = Vec::new();
+    for sharing in 0..3 {
+        let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+        let store = FunctionFlowGraphStore::charged_to_for_test(Arc::clone(&account));
+        let prepared = prepared_of(source);
+        let mut key = function_key(&canonical, "myType", 4, source);
+        if sharing == 2 {
+            key.function.declaration.name = prepared.bindings().function().declaration.name.clone();
+        }
+        let bundle_key = if sharing != 0 {
+            function_key(&canonical, "myType", 4, source)
+        } else {
+            key.clone()
+        };
+        let GraphClaim::Produce(lease) = store.claim(&key) else {
+            panic!("empty store must grant a producer");
+        };
+        drop(
+            lease
+                .publish(FlowGraphBundle::build(
+                    KeyedFunctionStructure::bind_fixture(bundle_key, prepared),
+                ))
+                .expect("equal keys permit publication"),
+        );
+        charges.push(account.snapshot().pinned_bytes);
+        drop(store);
+        assert_eq!(account.snapshot().total_bytes(), 0);
+    }
+    assert_eq!(
+        charges[1] - charges[0],
+        arc_block_bytes(canonical.len()) + arc_block_bytes("myType".len())
+    );
+    assert_eq!(charges[2] - charges[0], arc_block_bytes(canonical.len()));
 }

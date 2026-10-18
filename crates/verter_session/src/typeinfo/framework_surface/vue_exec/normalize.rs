@@ -578,10 +578,12 @@ fn index_position_source<C: verter_type_engine::resolver_core::ResolverCapabilit
     // enumerated at publication.
     if let Some(base) = type_arg_base {
         let validated = dispatch
+            .owning()
             .demand_validated_structural_node(
                 node,
                 ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
             )
+            .value()
             .is_some();
         if validated {
             return SourcePosition::Present(SemanticTypeSource::Projected(
@@ -814,10 +816,11 @@ pub(crate) fn emits_from_typeinfo_surface<C: crate::session_attachment::SessionC
         // param (`[1..]`), materialized ONCE at the terminal sink. `event_names`
         // above already realized the signature (its `first_param`), so `signature`
         // here is `Some` by construction; the `else continue` is defensive.
-        let Some(signature) = view.signature(context) else {
+        let Some(signature) = view.owning().signature(context) else {
             continue;
         };
-        let raw_params = signature.raw_params();
+        let raw_params_carrier = signature.raw_params();
+        let raw_params = raw_params_carrier.value();
         // Materialize the payload tuple ONCE at the terminal sink for DISPLAY
         // ONLY (the by-name `render_type_expr_display` form — no decision on
         // the materialized value). The tuple is a per-event SYNTHESIS over the
@@ -1259,10 +1262,14 @@ fn inherited_emit_payload_source<C: verter_type_engine::resolver_core::ResolverC
         // stable unresolved references remain Complete carriers and replay
         // faithfully beside concrete arms; operational partials and
         // unknown-materializing failures reject the route.
-        dispatch.demand_validated_structural_node(
-            member.value,
-            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
-        )?;
+        dispatch
+            .owning()
+            .demand_validated_structural_node(
+                member.value,
+                ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+            )
+            .value()
+            .as_ref()?;
         return Some(SemanticTypeSource::Projected(
             ProjectedTypeFact::MemberPath {
                 base: verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(base.clone()),
@@ -1295,14 +1302,13 @@ fn authored_candidate_matches_call_signature_payload<
     locator: &verter_type_expr::locators::MacroPayloadLocator,
     params: &[FunctionParam],
 ) -> bool {
-    let Some(raised) = dispatch
-        .raise_authored_locator_to_hot(
-            &verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(locator.clone())
-                .absolutized_against(owner_canonical),
-            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
-        )
-        .at_optional_boundary()
-    else {
+    // The raised carrier owns the candidate while it is compared.
+    let candidate = dispatch.owning().raise_authored_locator_to_hot(
+        &verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(locator.clone())
+            .absolutized_against(owner_canonical),
+        ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+    );
+    let Some(raised) = candidate.value().clone().at_optional_boundary() else {
         return false;
     };
     let Some(data) = dispatch.graph().read_in_scope(raised.node()) else {
@@ -1354,14 +1360,13 @@ fn authored_candidate_matches_member_value<
     locator: &verter_type_expr::locators::MacroPayloadLocator,
     member_value: SemanticNodeId,
 ) -> bool {
-    let Some(raised) = dispatch
-        .raise_authored_locator_to_hot(
-            &verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(locator.clone())
-                .absolutized_against(owner_canonical),
-            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
-        )
-        .at_optional_boundary()
-    else {
+    // The raised carrier owns the candidate while it is compared.
+    let candidate = dispatch.owning().raise_authored_locator_to_hot(
+        &verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(locator.clone())
+            .absolutized_against(owner_canonical),
+        ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+    );
+    let Some(raised) = candidate.value().clone().at_optional_boundary() else {
         return false;
     };
     if verter_type_engine::project_semantic_dispatch::raise::raised_shape_eq_nodes_with_dispatch(

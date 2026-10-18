@@ -134,7 +134,10 @@ pub trait IndexedInputs {
 
     // -------- Cache accessors --------------------------------------
 
-    fn prepared_decl_bundle(&self, canonical_id: &str) -> Option<Arc<PreparedInputRecord>>;
+    fn prepared_decl_bundle(
+        &self,
+        canonical_id: &str,
+    ) -> Option<verter_session_query::inputs::prepared::PreparedInputRef>;
 
     /// Materialise (or warm-read) the canonical post-parse artifact,
     /// with the publication status flowed BY VALUE — see
@@ -309,7 +312,11 @@ pub trait RouteLookup {
     fn module_export_table(
         &self,
         canonical: &str,
-    ) -> Option<Arc<verter_session_query::declarations::module_exports::ModuleExportTable>>;
+    ) -> Option<
+        verter_retention::heap_size::OwnedValue<
+            verter_session_query::declarations::module_exports::ModuleExportTable,
+        >,
+    >;
 
     fn reverse_dependency_canonicals(&self, canonical: &str) -> Vec<String>;
     fn observe_owner_import_route_witness(&self, canonical: &str);
@@ -549,7 +556,7 @@ pub trait OwnedLowering {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<PreparedTypeDecl>>,
+        Option<verter_retention::heap_size::OwnedValue<PreparedTypeDecl>>,
         verter_session_query::inputs::prepared::PreparationFailure,
     >;
 
@@ -562,7 +569,7 @@ pub trait OwnedLowering {
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
-    ) -> Option<Arc<PreparedTypeDecl>> {
+    ) -> Option<verter_retention::heap_size::OwnedValue<PreparedTypeDecl>> {
         match self.prepared_type_decl(canonical_id, owner, symbol_name) {
             Ok(decl) => decl,
             Err(failure) => {
@@ -585,7 +592,7 @@ pub trait OwnedLowering {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<PreparedValueDecl>>,
+        Option<verter_retention::heap_size::OwnedValue<PreparedValueDecl>>,
         verter_session_query::inputs::prepared::PreparationFailure,
     >;
 
@@ -602,7 +609,7 @@ pub trait OwnedLowering {
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
-    ) -> Option<Arc<PreparedValueDecl>> {
+    ) -> Option<verter_retention::heap_size::OwnedValue<PreparedValueDecl>> {
         match self.prepared_value_decl(canonical_id, owner, symbol_name) {
             Ok(decl) => decl,
             Err(failure) => {
@@ -725,7 +732,7 @@ pub trait OwnedLowering {
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> Result<
-        Option<Arc<PreparedTypeDecl>>,
+        Option<verter_retention::heap_size::OwnedValue<PreparedTypeDecl>>,
         verter_session_query::inputs::prepared::PreparationFailure,
     >;
     fn prepared_type_for_projection(

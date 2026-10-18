@@ -441,7 +441,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 .ok()
                                 .flatten()
                         })
-                        .map(|prepared| AnchorPreparedDecl::Value(Arc::new(prepared))),
+                        .map(|prepared| AnchorPreparedDecl::Value(verter_retention::heap_size::OwnedValue::new(prepared))),
                     _ => bundle
                         .as_ref()
                         .and_then(|bundle| {

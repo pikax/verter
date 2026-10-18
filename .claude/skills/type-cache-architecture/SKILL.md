@@ -209,8 +209,20 @@ and when a delivered carrier counts heap outside its handles
 (`OwnedHandles::of`). The arena pins the owned handles its payloads reach,
 so a name cloned out of a node payload stays charged after the arena lets
 go; a released slot whose payload a reader still holds keeps the payload's
-block and heap charged until the arena's next mutation after the reader
-lets go.
+block and heap charged until the last reader drops. `NodePayload::drop`
+releases that charge immediately; no arena mutation or reap is required.
+
+The cell's `Nested` box and child-registration slice are included in its
+charge. Cache holds additionally charge their backing slice for exactly
+the holds' lifetime (`HeldHandles`, also used by `RetentionCharge::holding`).
+Dropping the cache holds releases that bookkeeping while surviving cells
+return to `Pinned`. A weak view (`WeakOwned`) exists only for a cell built
+for one (`Owned::new_with_shared_block`, e.g. an interned dependency rail):
+the cell and every view share a `BlockShare`, so the block stays charged
+until both its strong owners and every view let go, in either order;
+`Owned::downgrade` of any other cell is `None`. Owned strings are named
+without a view by `OwnedStr::identity`, a never-reused stamp that keeps
+nothing allocated (the arena's thread-local scope digest uses it).
 
 **Shared registered allocations** (`verter_retention/src/shared.rs`). An allocation
 cache owners alias without handing it out — a build's fact carrier shared
@@ -241,12 +253,55 @@ the family is keyed and released with it. The origin-edge store's tables,
 edge lists, source lists and pooled fence blocks are part of the memo's
 bookkeeping pin, settled on every mutation.
 
-**Not yet charged.** The content-addressed artifact caches driven by
+**Artifact and request caches.** The content-addressed artifact caches driven by
 `cache_runtime::lookup` (`ArtifactNode`: the component-meta shape,
 declaration-lookup, owner-collection and resolvability caches, the
-flow-slice stores, the compile-output caches) claim their entries'
-evidence pages, and their entries' owned identity strings charge
-themselves, but an entry's own allocations and value carry no charge yet.
+flow-slice stores, the compile-output caches) reserve entry metadata, key,
+facts, roots and measured payloads as well as their evidence pages.
+Direct compile publication uses the same reservation path. Independently
+delivered generated code and source maps are `OwnedStr` cells.
+Fresh delivery pins them through `pin_generated_texts`, including stateless,
+refused or fenced publication, runtime-render batches, and caller-supplied
+runtime/IDE product requests. Pinning a cell already retained by a cache
+shares its existing charge.
+Flow graph publication and peeks deliver `FlowGraphBundleRef` (`OwnedValue`):
+the bundle's payload pin follows readers past store teardown, while its
+map slot and separately allocated key backing release with the entry.
+The bundle's skeleton, binding map and graph are its own data, borrowed
+only; a holder keeping one past a borrow keeps the bundle's handle
+(`SkeletonRef` / `BindingsRef` / `GraphRef`), the skeleton observation port
+included.
+Key measurement primes its alias set with the bundle's entire payload: shared backing
+counts once, while independently allocated equal strings and deep copies
+are charged separately.
+`ValidatedFactCache` delivers `OwnedValue` cells; its candidate reservation
+keeps cache bookkeeping separate from the reader-shared value charge.
+Stable component-meta requests measure their resolved state, and prepared
+bundles measure their tables and retain each lazily committed declaration
+and name-resolution table as a separate cell. Reverse-indexed candidates
+reserve their metadata and hold their owned values.
+
+`OwnedTree` measures the raw allocations reachable through a plain tree;
+it does not by itself seal independently clonable inner `Arc` fields, so
+an allocation several owners share, or a caller can keep, is its own
+owned cell: a file analysis snapshot's lists (`SharedList`, shared with the
+host analysis lists and the artifact's export signatures), template
+analyses (the raw template slot holds the one it serves, refusably with
+its evidence), module-export names, namespace targets and proofs (a
+table's retention record holds the strings its own bindings introduce
+before it claims its record and evidence; the HAMT backing keeps a
+declared per-written-slot convention), and the import-type carrier's
+specifier, and a component-meta analysis (`SharedComponentMetaAnalysis`:
+the final-result cache holds it and every `ComponentMetaDelivery` shares
+it). A terminal output unwrap (`OutputPayload::into_type_expr`)
+moves the tree out of its cell when the carrier is the cell's last holder
+(`Owned::try_unwrap`, releasing the charge as the tree leaves) and
+otherwise hands the caller an unshared deep copy
+(`verter_retention::unshared::Unshared`, `#[derive(Unshared)]`), never an
+alias of a retained payload. The parse-artifact layer (`FileArtifactStore`
+entries, `DeclBodyMemo`, scheduler snapshots) stays outside the account;
+a prepared-declaration bundle counts what it reaches of it while it lives
+and charges none of the layer's own storage.
 
 **Refusal routing.** `RetentionRefusal::{Oversized, Pressure,
 ActiveExhausted}` all map to `NonAdmissionReason::RetentionPressure`,
@@ -1115,11 +1170,18 @@ when the lease names no arena): a closing owner hands its deliveries to
 another open owner of the arena, so a delivery lives until no owner of its
 arena is open on the thread whichever owner holds it, and holding it at the
 oldest spares the hand-on at every nested scope's close. A closing owner that
-does hold deliveries merges the smaller holding into the larger.
+does hold deliveries merges the smaller holding into the larger. A
+dispatcher's construction lane is never an owner: interns, roots and
+deliveries skip it, so the outermost operation's owner releases them when the
+operation ends and a result outlives it only through the carrier it is
+delivered in (`SemanticQueryOutput`, `CacheRead`) or an explicit builder owner.
 
 Kept results: a dispatcher keeps the results its builds published
 (`keep_published`: admitted results, and request-local completions) under the
-workspace edit clocks they were computed at. A later read first performs the
+workspace edit clocks they were computed at. The kept table is a cache the
+dispatcher owns past its operations, so every entry holds a `Retained` charge
+on the process retention account: a refused reservation keeps nothing, and
+the result's delivery stays its only owner. A later read first performs the
 family memo's validated lookup. After a miss, `own_published_read` can answer
 from a kept result before a producer claim is installed, provided its edit
 clocks are current and its nodes and kernel epochs remain live. The read

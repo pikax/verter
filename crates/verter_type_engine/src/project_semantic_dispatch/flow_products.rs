@@ -17,7 +17,7 @@ use std::cell::{Cell, OnceCell, RefCell};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
-use verter_session_query::flow::binding::{FlowBindingMap, FlowBindingRef};
+use verter_session_query::flow::binding::FlowBindingRef;
 use verter_session_query::flow::bundle::{BoundFlowGraph, FlowSliceFunctionKey};
 use verter_session_query::flow::flow_graph::{FlowNodeId, FlowNodeKind, FunctionFlowGraph};
 use verter_session_query::flow::flow_ir::ReturnSlicePlan;
@@ -65,17 +65,17 @@ pub enum FlowProductKeyError {
 /// Immutable structural and binding inputs supplied by shared owners.
 #[derive(Debug, Clone)]
 pub struct FlowProductInputs {
-    graph: Arc<FunctionFlowGraph>,
+    graph: verter_session_query::flow::bundle::GraphRef,
     scope: FlowSliceFunctionKey,
-    bindings: Arc<FlowBindingMap>,
+    bindings: verter_session_query::flow::bundle::BindingsRef,
 }
 
 impl FlowProductInputs {
     pub fn for_bound_graph(bound: &BoundFlowGraph) -> Self {
         Self {
-            graph: Arc::clone(bound.bundle().graph()),
+            graph: bound.graph_ref(),
             scope: bound.key().clone(),
-            bindings: Arc::clone(bound.bundle().bindings()),
+            bindings: bound.bindings_ref(),
         }
     }
 
@@ -625,7 +625,10 @@ impl FlowProductExecution {
         bound: &BoundFlowGraph,
     ) -> Result<FlowProductContent, FlowProductKeyError> {
         if bound.key() != &self.scope.inputs.scope
-            || !Arc::ptr_eq(bound.bundle().graph(), &self.scope.inputs.graph)
+            || !verter_session_query::flow::bundle::GraphRef::ptr_eq(
+                &bound.graph_ref(),
+                &self.scope.inputs.graph,
+            )
         {
             return Err(FlowProductKeyError::GraphMismatch);
         }

@@ -4,7 +4,6 @@
 //! to a fact on ANY page — the last one included — misses the warm read.
 
 use rustc_hash::FxHashSet;
-use std::sync::Arc;
 
 use verter_session::resolver_core::ValidatedFactCache;
 use verter_session_query::facts::fact_cache::FactVersionRef;
@@ -66,7 +65,7 @@ fn signatures_around_and_beyond_one_page_are_admitted_whole() {
         };
         assert_eq!(
             cache.get_if_valid(&key, &view),
-            Some(Arc::new(value)),
+            Some(verter_retention::heap_size::OwnedValue::new(value)),
             "{width}: an unchanged world serves the candidate warm"
         );
     }

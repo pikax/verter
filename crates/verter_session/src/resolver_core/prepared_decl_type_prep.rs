@@ -98,8 +98,8 @@ pub(super) fn prepare_type_decl_from_lowered(
     // once the pool is warm.
     let name_resolution = if !symbol_name.contains('.') {
         match shared_name_resolution_base {
-            Some(base) => Arc::clone(base),
-            None => Arc::new(build_type_name_resolution_base(
+            Some(base) => base.clone(),
+            None => NameResolutionTable::new(build_type_name_resolution_base(
                 canonical_id,
                 state,
                 owner,
@@ -151,7 +151,7 @@ pub(super) fn prepare_type_decl_from_lowered(
             import_canonicalization,
             interner,
         );
-        Arc::new(table)
+        NameResolutionTable::new(table)
     };
 
     finish_prepared_type_decl(
@@ -336,7 +336,7 @@ pub(super) fn prepare_authored_partial_type_decl(
         lowered.as_ref(),
         deps,
         external_deps,
-        Arc::new(table),
+        NameResolutionTable::new(table),
         interner,
     )
     .map(Some)

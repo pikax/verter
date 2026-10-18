@@ -2721,7 +2721,7 @@ fn test_component_prop_completions_from_macros() {
     // Child analysis: has defineProps with prop_fields and defineEmits with emit_fields
     // but empty template.prop_definitions / emit_definitions (the normal state)
     let child_analysis = FileAnalysisSnapshot {
-        macros: std::sync::Arc::new(vec![
+        macros: verter_session_query::analysis::file_analysis::SharedList::new(vec![
             AnalyzedMacro {
                 edit_anchors: Default::default(),
                 kind: AnalyzedMacroKind::DefineProps,
