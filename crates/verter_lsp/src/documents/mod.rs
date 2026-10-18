@@ -713,7 +713,7 @@ impl DocumentRegistry {
         &self,
         canonical_id: &str,
         attempted_source: &str,
-        outcome: &Result<bool, verter_session::HostError>,
+        outcome: &Result<bool, &verter_session::HostError>,
         ide_read_succeeded: bool,
         projection_installed: bool,
     ) {
@@ -1036,11 +1036,11 @@ impl DocumentRegistry {
         // Trigger compilation to populate the TSX cache (upsert only parses).
         // IDE-sync: drive the IDE/TSX surface explicitly. This profile asks for
         // the IDE product and template data, so it publishes no runtime node at
-        // all; `ensure_ide_compiled` is the route that serves what is read.
-        // `get_ide` below then reads the source map.
+        // all; `compile_ide` is the route that serves what is read, including
+        // an artifact the cache declined to keep.
         let carrier_compile = is_carrier.then(|| {
             self.host()
-                .ensure_ide_compiled(&canonical_id, &self.tsx_profile.read())
+                .compile_ide(&canonical_id, &self.tsx_profile.read())
         });
 
         let registered = is_carrier
@@ -1066,10 +1066,10 @@ impl DocumentRegistry {
         //    server refines it with resolver-backed rewrite segments once
         //    ownership is ready). Plain scripts carry a zero-line prelude —
         //    their provider buffer is the source verbatim.
-        let carrier_ide_read = if is_carrier {
-            self.host().get_ide(&canonical_id, &self.tsx_profile.read())
-        } else {
-            None
+        let carrier_ide_read = match &carrier_compile {
+            Some(Ok(ide)) => ide.clone(),
+            Some(Err(_)) => self.host().get_ide(&canonical_id, &self.tsx_profile.read()),
+            None => None,
         };
         let projection = if is_carrier {
             carrier_ide_read
@@ -1089,7 +1089,7 @@ impl DocumentRegistry {
             self.account_carrier_ide_content_verdict(
                 &canonical_id,
                 &source,
-                outcome,
+                &outcome.as_ref().map(Option::is_some),
                 carrier_ide_read.is_some(),
                 projection.is_some(),
             );
@@ -1724,16 +1724,9 @@ impl DocumentRegistry {
         // Main-less carrier (Svelte) has a `CachedTsx` but no `Main`, so
         // `ensure_compiled` (which demands `Main`) would return
         // `MissingVirtualNode` and abort here even though the IDE TSX exists.
-        // `ensure_ide_compiled` resolves through the `Ide` demand; `Ok(false)`
-        // (a genuine no-IDE surface) skips, `Ok(true)` proceeds to `get_ide`.
-        if !self
-            .host()
-            .ensure_ide_compiled(&canonical_id, &profile)
-            .ok()?
-        {
-            return None;
-        }
-        let resp = self.host().get_ide(&canonical_id, &profile)?;
+        // `compile_ide` resolves through the `Ide` demand; `Ok(None)`
+        // (a genuine no-IDE surface) skips, `Ok(Some)` serves the artifact.
+        let resp = self.host().compile_ide(&canonical_id, &profile).ok()??;
         #[cfg(test)]
         self.run_after_compile_hook(uri);
         // A `didChange` that committed while the compile ran makes this
@@ -1806,12 +1799,10 @@ impl DocumentRegistry {
         self.host().ensure_loaded(&canonical_id);
         // IDE-sync: drive the IDE/TSX surface (not the runtime `Main`) so a
         // Main-less carrier (Svelte) refreshes its mapper. `Ok(false)` (no IDE
-        // surface) and `Err` yield no response; `Ok(true)` proceeds to `get_ide`.
-        let ensured = self.host().ensure_ide_compiled(&canonical_id, &profile);
-        let resp = match &ensured {
-            Ok(true) => self.host().get_ide(&canonical_id, &profile),
-            _ => None,
-        };
+        // surface) and `Err` yield no response; `Ok(Some)` is the response.
+        let ensured = self.host().compile_ide(&canonical_id, &profile);
+        let resp = ensured.as_ref().ok().cloned().flatten();
+        let ensured = ensured.as_ref().map(Option::is_some);
         #[cfg(test)]
         self.run_after_compile_hook(uri);
         // SOURCE-IDENTITY FENCE (see `attempted` above): a `didChange` that
@@ -1942,10 +1933,10 @@ impl DocumentRegistry {
         // report the surface missing. An `Err` (a genuine compile failure) leaves
         // `ide` `None` exactly as before.
         let profile = self.tsx_profile.read().clone();
-        let _ = self.host().ensure_ide_compiled(&canonical_id, &profile);
         let ide = self
             .host()
-            .get_ide(&canonical_id, &profile)
+            .compile_ide(&canonical_id, &profile)
+            .unwrap_or_else(|_| self.host().get_ide(&canonical_id, &profile))
             .map(|t| CodeBlock {
                 code: t.code.to_string(),
                 source_map: t.source_map.map(|m| m.to_string()),

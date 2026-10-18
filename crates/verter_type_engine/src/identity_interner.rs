@@ -4,7 +4,7 @@
 //! high volume — canonical file ids and symbol names flowing into
 //! [`verter_session_query::type_solver::host::ResolvedRootIdentity`]
 //! and the prepared-declaration surface — so every identity for the same
-//! `(path, name)` shares one `Arc<str>` allocation instead of cloning a
+//! `(path, name)` shares one owned string allocation instead of cloning a
 //! fresh `String`.
 //!
 //! Ownership: exactly one pool per
@@ -13,30 +13,34 @@
 //! minting boundaries receive a handle to the store's pool.
 //!
 //! Identity semantics: the pool is an ALLOCATION dedup only. Equality and
-//! hashing of interned values remain content-based everywhere (`Arc<str>`
-//! derives delegate to `str`); no pointer identity or intern ordinal ever
-//! enters a cache key.
+//! hashing of interned values remain content-based everywhere
+//! ([`OwnedStr`] delegates to `str`); no pointer identity or intern ordinal
+//! ever enters a cache key.
 //!
-//! Bounding: the pool holds NO private byte quota. Every pooled entry —
-//! its `Arc` block and its map slot ([`pooled_entry_bytes`]) — is reserved
-//! against the one shared
+//! Bounding: the pool holds NO private byte quota. Every pooled string is
+//! an [`OwnedStr`] charged by its own cell, which the pool HOLDS (a
+//! refusable cache hold), and its map slot ([`pooled_slot_bytes`]) is a
+//! separate charge — both against the one shared
 //! [`SemanticRetentionAccount`](verter_session_query::retention::SemanticRetentionAccount),
 //! so the pool's growth competes with every other host-owned store for
 //! the same ratified aggregate ceiling instead of carrying a parallel
-//! budget beside it.
+//! budget beside it. A string handed out keeps its allocation's charge in
+//! every clone: when the pool drops its hold the charge passes to the
+//! callers still holding the string, so an identity a caller keeps after
+//! the pool is gone stays charged until its last handle drops.
 //!
-//! Pressure handling: when the account refuses a payload, the pool SHEDS
-//! — it drops entries only the pool still references (`Arc` strong count
-//! of 1 under the pool lock), which actually frees their memory and
-//! releases their charges, then retries the reservation once. If the
-//! account still refuses, the string is returned UN-POOLED: the caller
-//! keeps a correct allocation, the pool simply loses dedup for it.
-//! Shedding only drops the POOL's reference — every `Arc<str>` previously
-//! handed out stays alive and valid.
+//! Pressure handling: when the account refuses, the pool SHEDS — it drops
+//! entries only the pool still references, which frees their memory and
+//! releases their charges, then retries once. If the account still
+//! refuses, the string is returned UN-POOLED: the caller keeps a correct
+//! allocation, charged by whichever owner keeps it, and the pool simply
+//! loses dedup for it. Shedding only drops the POOL's reference — every
+//! string previously handed out stays alive, valid and charged.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use verter_session_query::retention::owned::{ChargeCtx, OwnedHold, OwnedStr};
 use verter_session_query::retention::{
     ChargeClass, RetentionAdmission, RetentionCharge, SemanticRetentionAccount,
 };
@@ -53,32 +57,46 @@ pub struct IdentityInterner {
     inner: parking_lot::Mutex<InternerShard>,
 }
 
+/// One pooled string's charges: the pool's hold on the string's own cell
+/// and the charge of its map slot. A removal drops both together, so the
+/// release is exactly-once.
+pub(crate) struct PooledCharges {
+    _hold: OwnedHold,
+    _slot: RetentionCharge,
+}
+
 #[derive(Default)]
 struct InternerShard {
-    /// The pooled strings, each mapped to the retention charge that
-    /// keeps its payload accounted.
+    /// The pooled strings, each mapped to the charges that keep it
+    /// accounted.
     ///
-    /// The KEY is the pooled `Arc<str>` — an immutable, content-hashed
-    /// identity — and the charge is the VALUE, so the map's key type
-    /// stays free of the account's interior mutability. Holding the
-    /// charge beside its string is what makes the pool's release
-    /// exactly-once: a removal drops both together, and there is no
-    /// separate bookkeeping step a shed path could skip.
-    entries: HashMap<Arc<str>, RetentionCharge>,
-    /// Summed charges of pooled entries ([`pooled_entry_bytes`]) —
-    /// diagnostics only. The authoritative bound is the shared account.
+    /// The KEY is the pooled [`OwnedStr`] — an immutable, content-hashed
+    /// identity — and the charges are the VALUE, so the map's key type
+    /// stays free of the account's interior mutability.
+    entries: HashMap<OwnedStr, PooledCharges>,
+    /// Summed slot and string charges of pooled entries
+    /// ([`pooled_entry_bytes`]) — diagnostics only. The authoritative bound
+    /// is the shared account.
     retained_bytes: usize,
 }
 
-/// The bytes one pooled string costs: its `Arc` block (the text and its
-/// counters) and its slot in the pool's map (the key, the charge beside it
-/// and the table's control byte).
+/// The bytes one pooled string's map slot costs: the key, the charges
+/// beside it and the table's control byte.
+#[must_use]
+pub fn pooled_slot_bytes() -> usize {
+    std::mem::size_of::<(OwnedStr, PooledCharges)>() + 1
+}
+
+/// The bytes one pooled string of `text_len` bytes costs: its own cell's
+/// charge and its map slot.
 #[must_use]
 pub fn pooled_entry_bytes(text_len: usize) -> usize {
-    verter_session_query::retention::allocation::arc_block_bytes(text_len)
-        + std::mem::size_of::<(Arc<str>, RetentionCharge)>()
-        + 1
+    OwnedStr::charge_for_len(text_len) + pooled_slot_bytes()
 }
+
+/// Handles of a pooled string: the pool's key, the hold on its cell, and
+/// nothing else, so a string only the pool still references is sheddable.
+const POOL_ONLY_HANDLES: usize = 2;
 
 impl IdentityInterner {
     /// Construct a pool charging `account`.
@@ -96,31 +114,31 @@ impl IdentityInterner {
         Self::new(SemanticRetentionAccount::process_local())
     }
 
-    /// The pooled `Arc<str>` for `s`'s content, admitting a new shared
-    /// allocation on first sight. Steady state a hit is one map lookup
-    /// and one refcount bump — no allocation.
+    /// The pooled string for `s`'s content, admitting a new allocation on
+    /// first sight. Steady state a hit is one map lookup and one refcount
+    /// bump — no allocation.
     #[must_use]
-    pub fn intern(&self, s: &str) -> Arc<str> {
+    pub fn intern(&self, s: &str) -> OwnedStr {
         let mut inner = self.inner.lock();
         if let Some((existing, _)) = inner.entries.get_key_value(s) {
-            return Arc::clone(existing);
+            return existing.clone();
         }
-        let value: Arc<str> = Arc::from(s);
+        let value = OwnedStr::from(s);
         self.admit_locked(&mut inner, &value);
         value
     }
 
-    /// Intern an EXISTING `Arc<str>` without copying: a pool miss admits
+    /// Intern an EXISTING owned string without copying: a pool miss admits
     /// the caller's own allocation; a hit returns the pooled one so
     /// content-equal identities converge onto a single allocation.
     #[must_use]
-    pub fn intern_arc(&self, s: &Arc<str>) -> Arc<str> {
+    pub fn intern_owned(&self, s: &OwnedStr) -> OwnedStr {
         let mut inner = self.inner.lock();
-        if let Some((existing, _)) = inner.entries.get_key_value(s.as_ref()) {
-            return Arc::clone(existing);
+        if let Some((existing, _)) = inner.entries.get_key_value(s.as_str()) {
+            return existing.clone();
         }
         self.admit_locked(&mut inner, s);
-        Arc::clone(s)
+        s.clone()
     }
 
     /// Currently charged bytes of the pooled entries (always ≤ the budget).
@@ -140,35 +158,52 @@ impl IdentityInterner {
         self.inner.lock().entries.is_empty()
     }
 
-    /// Reserve `value`'s payload against the shared account and pool it.
+    /// Hold `value` and reserve its slot against the shared account, and
+    /// pool it.
     ///
     /// On refusal the pool SHEDS its pool-only entries (releasing their
-    /// charges) and retries the reservation exactly once. A second
-    /// refusal leaves the string un-pooled: the caller keeps a correct
-    /// allocation and the pool simply does not dedup it. The pool never
-    /// stores an entry whose bytes it did not reserve, so its charged
-    /// total always equals its retained payload.
-    fn admit_locked(&self, inner: &mut InternerShard, value: &Arc<str>) {
-        let len = pooled_entry_bytes(value.len());
-        let charge = match self.account.reserve(ChargeClass::Retained, len) {
-            RetentionAdmission::Admitted(charge) => charge,
-            RetentionAdmission::Refused(_) => {
+    /// charges) and retries exactly once. A second refusal leaves the
+    /// string un-pooled: the caller keeps a correct allocation and the pool
+    /// simply does not dedup it. The pool never stores an entry whose
+    /// charges it did not take, so its charged total always equals its
+    /// retained payload.
+    fn admit_locked(&self, inner: &mut InternerShard, value: &OwnedStr) {
+        let charges = match self.charge(value) {
+            Some(charges) => charges,
+            None => {
                 Self::shed_pool_only_locked(inner);
-                match self.account.reserve(ChargeClass::Retained, len) {
-                    RetentionAdmission::Admitted(charge) => charge,
-                    RetentionAdmission::Refused(_) => return,
+                match self.charge(value) {
+                    Some(charges) => charges,
+                    None => return,
                 }
             }
         };
-        if inner.entries.insert(Arc::clone(value), charge).is_none() {
-            inner.retained_bytes += len;
+        let bytes = charges._hold.bytes() + charges._slot.bytes();
+        if inner.entries.insert(value.clone(), charges).is_none() {
+            inner.retained_bytes += bytes;
         }
     }
 
-    /// Drop every entry ONLY the pool still references (`Arc` strong
-    /// count of 1 under the pool lock — no external handle can exist or
-    /// be minted concurrently for such an entry), actually freeing their
-    /// memory and releasing their charges.
+    /// The pool's charges for `value`: a hold on its cell and its slot's
+    /// reservation, or `None` when the account refuses either.
+    fn charge(&self, value: &OwnedStr) -> Option<PooledCharges> {
+        let hold = value.hold(ChargeCtx::new(&self.account)).ok()?;
+        match self
+            .account
+            .reserve(ChargeClass::Retained, pooled_slot_bytes())
+        {
+            RetentionAdmission::Admitted(slot) => Some(PooledCharges {
+                _hold: hold,
+                _slot: slot,
+            }),
+            RetentionAdmission::Refused(_) => None,
+        }
+    }
+
+    /// Drop every entry ONLY the pool still references (its key and its
+    /// hold are the string's only handles under the pool lock — no
+    /// external handle can exist or be minted concurrently for such an
+    /// entry), actually freeing their memory and releasing their charges.
     ///
     /// Entries an external holder still references are left alone: their
     /// bytes stay alive whether or not the pool indexes them, so dropping
@@ -177,9 +212,9 @@ impl IdentityInterner {
     /// the caller must tolerate a second refusal.
     fn shed_pool_only_locked(inner: &mut InternerShard) {
         let mut shed = 0usize;
-        inner.entries.retain(|value, _charge| {
-            if Arc::strong_count(value) == 1 {
-                shed += pooled_entry_bytes(value.len());
+        inner.entries.retain(|value, charges| {
+            if OwnedStr::strong_count(value) == POOL_ONLY_HANDLES {
+                shed += charges._hold.bytes() + charges._slot.bytes();
                 false
             } else {
                 true
@@ -194,9 +229,7 @@ impl IdentityInterner {
     #[cfg(test)]
     pub(crate) fn with_entries_for_test<R>(
         &self,
-        f: impl FnOnce(
-            &HashMap<Arc<str>, RetentionCharge, std::collections::hash_map::RandomState>,
-        ) -> R,
+        f: impl FnOnce(&HashMap<OwnedStr, PooledCharges, std::collections::hash_map::RandomState>) -> R,
     ) -> R {
         f(&self.inner.lock().entries)
     }
@@ -216,7 +249,6 @@ impl std::fmt::Debug for IdentityInterner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use verter_session_query::retention::RetentionLimits;
 
     /// A private account with a tight ceiling, so a pressure test never
@@ -230,6 +262,15 @@ mod tests {
         }))
     }
 
+    fn unbounded() -> Arc<SemanticRetentionAccount> {
+        SemanticRetentionAccount::new(RetentionLimits {
+            aggregate_ceiling_bytes: usize::MAX,
+            active_ceiling_bytes: usize::MAX,
+            pin_threshold_bytes: usize::MAX,
+            max_entry_bytes: usize::MAX,
+        })
+    }
+
     #[test]
     fn intern_dedupes_content_equal_strings_to_one_allocation() {
         let pool = IdentityInterner::with_process_local_account();
@@ -238,57 +279,120 @@ mod tests {
         // return the SAME allocation (content-keyed, not pointer-keyed).
         let other_source = String::from("/src/runtime/components/Button.vue");
         let b = pool.intern(&other_source);
-        assert!(Arc::ptr_eq(&a, &b), "content-equal interns must share");
-        assert_eq!(a.as_ref(), "/src/runtime/components/Button.vue");
+        assert!(OwnedStr::ptr_eq(&a, &b), "content-equal interns must share");
+        assert_eq!(a.as_str(), "/src/runtime/components/Button.vue");
         assert_eq!(pool.len(), 1);
     }
 
     #[test]
-    fn intern_arc_admits_existing_allocation_without_copy_and_dedupes() {
+    fn intern_owned_admits_existing_allocation_without_copy_and_dedupes() {
         let pool = IdentityInterner::with_process_local_account();
-        let existing: Arc<str> = Arc::from("Props");
-        let admitted = pool.intern_arc(&existing);
+        let existing = OwnedStr::from("Props");
+        let admitted = pool.intern_owned(&existing);
         // First admission reuses the caller's allocation (no copy).
-        assert!(Arc::ptr_eq(&admitted, &existing));
+        assert!(OwnedStr::ptr_eq(&admitted, &existing));
         // A later plain intern of equal content resolves to the same one.
         let again = pool.intern("Props");
-        assert!(Arc::ptr_eq(&again, &existing));
+        assert!(OwnedStr::ptr_eq(&again, &existing));
     }
 
     /// The pool carries NO private byte quota: its bound is the shared
-    /// account's headroom, and every pooled payload is charged there.
+    /// account's headroom, and every pooled string and slot is charged
+    /// there.
     #[test]
-    fn pooled_payload_is_charged_to_the_shared_account() {
-        let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+    fn pooled_string_and_slot_are_charged_to_the_shared_account() {
+        let account = unbounded();
         let pool = IdentityInterner::new(Arc::clone(&account));
-        let before = account.snapshot().retained_bytes;
         let held = pool.intern("/src/components/Charged.vue");
         assert_eq!(
-            account.snapshot().retained_bytes - before,
+            account.snapshot().retained_bytes,
             pooled_entry_bytes(held.len()),
-            "the pooled allocation and its slot must be charged to the shared account"
+            "the pooled string's cell and its slot are retained against the shared account"
         );
         assert!(
             pooled_entry_bytes(held.len()) > held.len(),
             "the charge covers the allocation, not only its text"
         );
-        drop(pool);
+        drop((pool, held));
         assert_eq!(
-            account.snapshot().retained_bytes,
-            before,
-            "dropping the pool must release exactly the bytes it charged"
+            account.snapshot().total_bytes(),
+            0,
+            "dropping the pool and the string releases exactly what was charged"
         );
     }
 
+    /// A string a caller keeps after the pool is gone keeps its own charge
+    /// — passed to the caller, whole — until its last handle drops, in
+    /// either release order.
     #[test]
-    fn retained_bytes_never_exceed_the_account_ceiling_and_extant_arcs_survive() {
+    fn a_kept_identity_outlives_the_pool_charged_until_its_last_handle_drops() {
+        for pool_first in [true, false] {
+            let account = unbounded();
+            let pool = IdentityInterner::new(Arc::clone(&account));
+            let name = "n".repeat(10_000);
+            let kept = pool.intern(&name);
+            let clone = kept.clone();
+            drop(kept);
+            let string = OwnedStr::charge_for_len(name.len());
+            if pool_first {
+                drop(pool);
+                let snapshot = account.snapshot();
+                assert_eq!(
+                    (snapshot.retained_bytes, snapshot.pinned_bytes),
+                    (0, string),
+                    "the kept clone owns the string's charge, pinned, once the pool is gone"
+                );
+                drop(clone);
+            } else {
+                drop(clone);
+                assert_eq!(
+                    account.snapshot().retained_bytes,
+                    pooled_entry_bytes(name.len()),
+                    "the pool alone keeps the string retained"
+                );
+                drop(pool);
+            }
+            assert_eq!(
+                account.snapshot().total_bytes(),
+                0,
+                "the last handle restores the baseline without a reap"
+            );
+        }
+    }
+
+    /// At zero headroom nothing pools, and a caller's string is still a
+    /// correct allocation that its owners charge where they keep it.
+    #[test]
+    fn at_zero_headroom_an_identity_is_returned_unpooled_and_uncharged() {
+        let account = SemanticRetentionAccount::new(RetentionLimits {
+            aggregate_ceiling_bytes: 0,
+            ..RetentionLimits::defaults()
+        });
+        let pool = IdentityInterner::new(Arc::clone(&account));
+        let kept = pool.intern("/src/Zero.vue");
+        assert_eq!(kept.as_str(), "/src/Zero.vue");
+        assert!(pool.is_empty());
+        assert_eq!(account.snapshot().total_bytes(), 0);
+        kept.pin(ChargeCtx::new(&account));
+        assert_eq!(
+            account.snapshot().pinned_bytes,
+            OwnedStr::charge_for_len(kept.len()),
+            "a caller's pin is never refused"
+        );
+        drop(pool);
+        drop(kept);
+        assert_eq!(account.snapshot().total_bytes(), 0);
+    }
+
+    #[test]
+    fn retained_bytes_never_exceed_the_account_ceiling_and_extant_strings_survive() {
         // Ceiling fits roughly three of the ~32-byte strings below.
         let ceiling = 3 * pooled_entry_bytes(32) + 16;
         let pool = pool_with_ceiling(ceiling);
         let strings: Vec<String> = (0..8)
             .map(|i| format!("/src/components/Component{i:02}.vue"))
             .collect();
-        let mut held: Vec<Arc<str>> = Vec::new();
+        let mut held: Vec<OwnedStr> = Vec::new();
         for s in &strings {
             held.push(pool.intern(s));
             assert!(
@@ -297,15 +401,15 @@ mod tests {
                 pool.retained_bytes()
             );
         }
-        // Every Arc handed out remains alive and content-correct even
+        // Every string handed out remains alive and content-correct even
         // though the pool shed entries to stay under the ceiling.
-        for (arc, s) in held.iter().zip(&strings) {
-            assert_eq!(arc.as_ref(), s.as_str());
+        for (kept, s) in held.iter().zip(&strings) {
+            assert_eq!(kept.as_str(), s.as_str());
         }
         // The pool still functions after shedding: re-interning yields a
-        // usable, content-equal Arc.
+        // usable, content-equal string.
         let re = pool.intern(&strings[0]);
-        assert_eq!(re.as_ref(), strings[0].as_str());
+        assert_eq!(re.as_str(), strings[0].as_str());
     }
 
     #[test]
@@ -322,7 +426,7 @@ mod tests {
         let _trigger = pool.intern("/src/components/OverflowXYZ.vue");
         let again = pool.intern("/src/components/HeldAlive000.vue");
         assert!(
-            Arc::ptr_eq(&again, &kept),
+            OwnedStr::ptr_eq(&again, &kept),
             "externally held entry must survive pool-only-first shedding"
         );
     }
@@ -332,15 +436,15 @@ mod tests {
         let pool = pool_with_ceiling(16);
         let big = "x".repeat(64);
         let a = pool.intern(&big);
-        assert_eq!(a.as_ref(), big.as_str());
+        assert_eq!(a.as_str(), big.as_str());
         assert_eq!(
             pool.retained_bytes(),
             0,
-            "a payload the account refuses must not pool"
+            "a string the account refuses must not pool"
         );
         // Not deduped (each call allocates) — but always correct.
         let b = pool.intern(&big);
-        assert!(!Arc::ptr_eq(&a, &b));
+        assert!(!OwnedStr::ptr_eq(&a, &b));
         assert_eq!(a, b, "content equality holds regardless of pooling");
     }
 
@@ -351,8 +455,8 @@ mod tests {
         // non-resistant hasher. Widening this signature breaks the witness.
         fn witness(
             entries: &std::collections::HashMap<
-                Arc<str>,
-                verter_session_query::retention::RetentionCharge,
+                OwnedStr,
+                PooledCharges,
                 std::collections::hash_map::RandomState,
             >,
         ) -> usize {

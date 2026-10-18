@@ -2426,7 +2426,8 @@ struct CallArgumentLiteralPolicy {
 /// parameter the position's contextual type names — the only parameter
 /// whose deposits from that position keep it. A position holding an
 /// equal literal under a contextual type that is no literal context for
-/// it contributes nothing, so its deposits widen.
+/// it relates with that literal already widened, so its deposits never
+/// read this record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ContextKeptLiteral {
     pub(crate) literal: SemanticNodeId,
@@ -3001,6 +3002,22 @@ impl CheckerDispatchTransaction {
         self.relation.sessions.push(session);
         self.relation.collecting_ids.push(id);
         id
+    }
+
+    /// The sessions that may still collect: on the transaction and
+    /// collecting, or taken out of it by a continuation that holds them.
+    /// Test-only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn collecting_sessions_for_tests(&self) -> usize {
+        self.relation
+            .collecting_ids
+            .iter()
+            .filter(|&&id| {
+                self.relation.session_position(id).is_none_or(|position| {
+                    self.relation.sessions[position].state == InferenceSessionState::Collecting
+                })
+            })
+            .count()
     }
 
     /// The active (innermost `Collecting`) session, if any.

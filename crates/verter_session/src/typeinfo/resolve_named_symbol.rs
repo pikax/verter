@@ -1028,7 +1028,7 @@ pub(crate) fn materialize_through_aliases(
             ) =>
             {
                 let key = SemanticQueryKey::TemplateLiteralReduce {
-                    pattern: Arc::clone(quasis),
+                    pattern: (*quasis).clone(),
                     args: Arc::from(&expressions[..]),
                     context: dispatch.template_literal_reduce_context(),
                 };

@@ -117,9 +117,45 @@ pub(super) struct InflightState {
     /// result never re-populates the cache.
     pub(super) aborted: bool,
     /// The wakers of subscribers that polled the flight while it was
-    /// unresolved, each registered under this lock; the flight wakes every
-    /// one once it resolves ([`FlightCell::wake_subscribers`]).
-    pub(super) wakers: Vec<std::task::Waker>,
+    /// unresolved, each registered under this lock with its subscription's
+    /// own registration id; the flight wakes every one once it resolves
+    /// ([`FlightCell::wake_subscribers`]). Two subscriptions polled with the
+    /// same executor waker hold two registrations, so withdrawing one never
+    /// withdraws the other.
+    pub(super) wakers: Vec<(WakeRegistration, std::task::Waker)>,
+    /// The id the next waker registration on this flight takes.
+    pub(super) next_registration: u64,
+}
+
+/// One subscription's waker registration on a flight.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct WakeRegistration(u64);
+
+impl InflightState {
+    /// Register `waker` for one subscription, returning its registration.
+    pub(super) fn register_waker(&mut self, waker: std::task::Waker) -> WakeRegistration {
+        let registration = WakeRegistration(self.next_registration);
+        self.next_registration += 1;
+        self.wakers.push((registration, waker));
+        registration
+    }
+
+    /// Withdraw exactly `registration`, leaving every other subscription's.
+    pub(super) fn withdraw_waker(&mut self, registration: WakeRegistration) {
+        self.wakers.retain(|(id, _)| *id != registration);
+    }
+
+    /// Whether `registration` is still on the flight with a waker that wakes
+    /// the same task as `waker`.
+    pub(super) fn holds_waker(
+        &self,
+        registration: WakeRegistration,
+        waker: &std::task::Waker,
+    ) -> bool {
+        self.wakers
+            .iter()
+            .any(|(id, registered)| *id == registration && registered.will_wake(waker))
+    }
 }
 
 impl FlightCell {
@@ -132,7 +168,7 @@ impl FlightCell {
     pub(super) fn wake_subscribers(&self) {
         self.ready.notify_all();
         let wakers = std::mem::take(&mut self.state.lock().wakers);
-        for waker in wakers {
+        for (_, waker) in wakers {
             waker.wake();
         }
     }
@@ -437,14 +473,17 @@ impl super::SemanticGraphStore {
 
     /// Release an inline flight that cannot publish a decided member.
     /// Waiting top-level callers wake on the abort sentinel and retry
-    /// admission.
+    /// admission. The sentinel is the payload-free superseded abort a joiner
+    /// of an aborted flight already reads: a relation that stops part-way can
+    /// abandon thousands of members, and a per-member message would hold an
+    /// allocation for each until the relation returns.
     pub fn abort_inline_member_flight(&self, flight: &InlineMemberFlight) {
         {
             let mut state = flight.inflight.state.lock();
             state.aborted = true;
             if state.completed.is_none() {
-                state.completed = Some(QueryResult::Error(QueryError::Other(
-                    verter_type_expr::OwnedStr::from("inline member flight abandoned"),
+                state.completed = Some(QueryResult::Error(QueryError::ExecutionAborted(
+                    crate::semantic_query::ExecutionAbort::Superseded,
                 )));
                 state.dep_signature = Some(empty_signature());
             }

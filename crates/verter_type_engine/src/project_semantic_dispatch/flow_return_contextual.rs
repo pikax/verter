@@ -379,7 +379,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
                         param_index: *param_index,
                         constraint: Some(constraint),
                         default: *default,
-                        display_name: std::sync::Arc::clone(display_name),
+                        display_name: (*display_name).clone(),
                     }),
                     _ => return None,
                 };

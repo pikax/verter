@@ -13,7 +13,15 @@ use crate::function_program::{
 };
 
 /// A resolved value reference. Names are display metadata, never lookup keys.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_no_typeexpr::NoTypeExpr)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum FlowBindingRef {
     Local(SkeletonBindingId),
     Captured(FlowBindingIdentity),
@@ -34,7 +42,7 @@ pub enum FlowBindingMapError {
 
 /// A validated bijection over all value-bearing declarations of one function.
 /// Type-only skeleton bindings intentionally have no value identity.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct FlowBindingMap {
     function: FunctionProgramKey,
     identities: Arc<[Option<FlowBindingIdentity>]>,
@@ -49,7 +57,7 @@ pub struct FlowBindingMap {
 }
 
 /// An exact declaration address. Equality is also the actual lookup-work probe.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, verter_retention::heap_size::HeapSize)]
 struct DeclarationSpan(FrameSpan);
 
 impl PartialEq for DeclarationSpan {
@@ -69,7 +77,7 @@ impl std::hash::Hash for DeclarationSpan {
 }
 
 /// Constant-size structural facts for one canonical runtime declaration group.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct FlowRuntimeBindingShape {
     pub has_var: bool,
     pub has_destructured_var: bool,
@@ -84,7 +92,7 @@ pub enum FlowBindingOccurrence<'a> {
     Missing,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 enum IndexedOccurrence {
     Resolved(FlowBindingRef),
     UnmodeledLocal,

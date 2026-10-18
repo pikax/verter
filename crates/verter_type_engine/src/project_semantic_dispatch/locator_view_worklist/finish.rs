@@ -9,7 +9,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
     ) -> ReferenceProjectionPlan {
         let (name, _bare_scope) = data.bare_ref_head().expect("BareRef head");
-        let name = Arc::clone(name);
+        let name = Arc::<str>::from(name);
         let type_args: Arc<[SemanticNodeId]> =
             Arc::from(data.carrier_type_args().to_vec().into_boxed_slice());
         if type_args.is_empty() {
@@ -341,7 +341,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             param_index: *param_index,
                             constraint: new_constraint,
                             default: new_default,
-                            display_name: Arc::clone(display_name),
+                            display_name: (*display_name).clone(),
                         },
                     )
                 }
@@ -475,7 +475,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 graph.intern_preserving_scope(
                     node,
                     SemanticNodeData::TemplateLiteral {
-                        quasis: Arc::clone(quasis),
+                        quasis: (*quasis).clone(),
                         expressions: crate::semantic_query::PayloadArray::from(expressions.into_boxed_slice()),
                     },
                 )
@@ -629,7 +629,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let type_parameters: Vec<_> = type_parameters
                     .iter()
                     .map(|parameter| TypeParamDecl {
-                        name: Arc::clone(&parameter.name),
+                        name: parameter.name.clone(),
                         param: projected(memo, parameter.param, context),
                         constraint: parameter
                             .constraint

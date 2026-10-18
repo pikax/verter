@@ -153,6 +153,7 @@ const _: fn() = || {
     serde::Deserialize,
     verter_no_typeexpr::NoTypeExpr,
     verter_no_storedspan::NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 #[serde(transparent)]
 pub struct TypeExprScope(pub String);
@@ -190,6 +191,7 @@ impl TypeExprScope {
     serde::Deserialize,
     verter_no_typeexpr::NoTypeExpr,
     verter_no_storedspan::NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum SyntheticCarrierSurfaceKind {
     SlotBinding,
@@ -218,6 +220,7 @@ pub enum SyntheticCarrierSurfaceKind {
     serde::Deserialize,
     verter_no_typeexpr::NoTypeExpr,
     verter_no_storedspan::NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct SyntheticCarrierKey {
     pub scope_canonical_id: Arc<str>,
@@ -240,7 +243,8 @@ pub struct SyntheticCarrierKey {
 /// `cycle_guard::hash_type_expr` routes a `TypeExpr` through `Hash`). The
 /// manual impl emits a BYTE-IDENTICAL stream to the former derive
 /// (pinned by `tests/cases/hash_byte_stream_contract.rs`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
+#[heap_size(iterative)]
 pub enum TypeExpr {
     // -- Terminals --
     /// A primitive type name: `string`, `number`, `boolean`, `symbol`,
@@ -443,7 +447,7 @@ pub enum TypeExpr {
 // ---------------------------------------------------------------------------
 
 /// A snapshot of one conditional branch frame at the moment recursion was detected.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct RecursiveConditionalFrame {
     pub branch: RecursiveConditionalBranch,
     pub decided: bool,
@@ -452,7 +456,7 @@ pub struct RecursiveConditionalFrame {
 }
 
 /// Which branch of a conditional type was active.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum RecursiveConditionalBranch {
     True,
     False,
@@ -474,6 +478,7 @@ pub enum RecursiveConditionalBranch {
     serde::Deserialize,
     verter_no_typeexpr::NoTypeExpr,
     verter_no_storedspan::NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 #[serde(rename_all = "camelCase")]
 pub enum PrimitiveName {
@@ -544,6 +549,7 @@ impl fmt::Display for PrimitiveName {
     serde::Deserialize,
     verter_no_typeexpr::NoTypeExpr,
     verter_no_storedspan::NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 #[serde(tag = "literalKind", rename_all = "camelCase")]
 pub enum LiteralValue {
@@ -592,7 +598,16 @@ impl Hash for LiteralValue {
 }
 
 /// A reference to a value binding (for `typeof` expressions).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct ValueRef {
     /// Dotted path segments: `typeof a.b.c` → `["a", "b", "c"]`.
@@ -606,7 +621,16 @@ pub struct ValueRef {
 }
 
 /// A single element in a tuple type.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct TupleElement {
     /// Optional label name.
@@ -620,14 +644,32 @@ pub struct TupleElement {
 }
 
 /// An object type expression.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct ObjectExpr {
     pub properties: Vec<ObjectMember>,
 }
 
 /// A member of an object type.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(tag = "memberKind", rename_all = "camelCase")]
 pub enum ObjectMember {
     /// Named property: `name: Type` or `name?: Type`.
@@ -656,7 +698,17 @@ pub enum ObjectMember {
 /// Every span is in the owning file's source coordinates. `None` only for a
 /// genuinely synthetic member (one with no single source site); never as a
 /// "not implemented" placeholder.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, verter_no_typeexpr::NoTypeExpr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_retention::heap_size::HeapSize,
+)]
 pub struct MemberSpans {
     /// Span of the whole member declaration (`name?: T` / `name(): T`).
     pub declaration: Option<Span>,
@@ -685,7 +737,9 @@ impl MemberSpans {
 }
 
 /// OXC-derived spans for a call / construct / method function signature.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize,
+)]
 pub struct FunctionSpans {
     /// Span of the whole signature declaration.
     pub signature: Option<Span>,
@@ -694,7 +748,9 @@ pub struct FunctionSpans {
 }
 
 /// OXC-derived spans for an index signature (`[k: K]: V`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize,
+)]
 pub struct IndexSignatureSpans {
     /// Span of the whole index-signature declaration.
     pub declaration: Option<Span>,
@@ -734,6 +790,7 @@ pub struct IndexSignatureSpans {
     serde::Deserialize,
     verter_no_typeexpr::NoTypeExpr,
     verter_no_storedspan::NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 #[serde(rename_all = "lowercase")]
 pub enum MemberVisibility {
@@ -817,7 +874,16 @@ impl MemberVisibility {
 /// `spans` carries OXC declaration-site provenance (see [`MemberSpans`]) and is
 /// in-memory-only — it is intentionally excluded from the JSON wire shape (the
 /// manual `to_json_value` / `type_expr_from_json` helpers do not serialize it).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct ObjectProperty {
@@ -966,7 +1032,16 @@ impl ObjectProperty {
 /// An index signature: `[key: KeyType]: ValueType`.
 ///
 /// `spans` carries OXC declaration-site provenance and is in-memory-only.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct IndexSignature {
@@ -1019,7 +1094,16 @@ impl IndexSignature {
 /// A method signature in an object type.
 ///
 /// `spans` carries OXC declaration-site provenance and is in-memory-only.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct MethodSignature {
@@ -1063,6 +1147,7 @@ pub struct MethodSignature {
     serde::Deserialize,
     verter_no_typeexpr::NoTypeExpr,
     verter_no_storedspan::NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 #[serde(rename_all = "camelCase")]
 pub enum ObjectMethodKind {
@@ -1187,7 +1272,16 @@ impl MethodSignature {
 /// A function type expression.
 ///
 /// `spans` carries OXC declaration-site provenance and is in-memory-only.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct FunctionExpr {
@@ -1280,7 +1374,16 @@ impl FunctionExpr {
 /// `asserts x is T` narrows it wherever the call returns; `asserts x`
 /// (no `ty`) narrows it by truthiness; `this is T` / `asserts this is T` /
 /// `asserts this` talk about the receiver instead of a parameter.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct TypePredicate {
     /// What the predicate talks about.
@@ -1307,7 +1410,16 @@ impl TypePredicate {
 }
 
 /// The subject of a [`TypePredicate`].
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum TypePredicateSubject {
     /// The parameter with this authored name (`x is T`).
@@ -1329,7 +1441,9 @@ pub enum TypePredicateSubject {
 /// semantic form) intentionally does not preserve the fact, so it must not split
 /// otherwise-equal parameters across cache keys or equivalence checks. `span`
 /// remains part of identity (it is a real provenance coordinate).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, serde::Serialize, serde::Deserialize, verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct FunctionParam {
@@ -1427,7 +1541,16 @@ impl FunctionParam {
 }
 
 /// A type parameter declaration: `T extends Constraint = Default`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct TypeParam {
     pub name: String,
@@ -1440,7 +1563,17 @@ pub struct TypeParam {
 }
 
 /// Modifier for mapped type `optional` and `readonly` fields.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum MappedModifier {
     /// No modifier applied.

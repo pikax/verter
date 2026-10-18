@@ -41,6 +41,12 @@ const LAYER_1_IDENTITY_SPAN_LANGUAGE_CONTRACTS: &[&str] = &[
     // analyzer; its direct dependents are pinned by
     // `analyzer_mint_authority_is_reachable_only_by_its_sanctioned_dependents`.
     "verter_analyzer_mint",
+    // The one process-local semantic-retention account and its sealed
+    // self-charged allocation primitives. Every crate that retains a
+    // semantic allocation (the type-expression DTO included) charges it
+    // through here, so it depends only on the leaf utilities above.
+    "verter_retention",
+    "verter_retention_derive",
 ];
 
 const LAYER_2_SYNTAX_FRONTENDS_AND_NEUTRAL_DTOS: &[&str] = &[

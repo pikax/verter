@@ -37,6 +37,7 @@ use crate::TopLevelOwnerId;
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct DeclContributorAnchor {
     /// Index into the retained `Program` body identifying the contributing
@@ -65,6 +66,7 @@ pub struct DeclContributorAnchor {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct SourceSynthetic;
 
@@ -80,6 +82,7 @@ pub struct SourceSynthetic;
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum MemberSpansOrigin {
     /// An authored member reached by descending `member_path` member-ordinals
@@ -107,6 +110,7 @@ pub enum MemberSpansOrigin {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum IndexSignatureSpansOrigin {
     /// The index-signature member reached by `member_path` from the decl body.
@@ -130,6 +134,7 @@ pub enum IndexSignatureSpansOrigin {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum FunctionSpansOrigin {
     /// The decl body at `anchor` is itself a bare function type
@@ -157,6 +162,7 @@ pub enum FunctionSpansOrigin {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum FunctionParamSelector {
     /// A positional parameter, in LOWERED order: an authored `this` receiver
@@ -179,6 +185,7 @@ pub enum FunctionParamSelector {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct FunctionParamSpanOrigin {
     /// Origin of the enclosing function.

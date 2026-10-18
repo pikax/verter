@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::{facts::FunctionReturnSource, TypeExpr};
 
 /// A parsed value expression evaluated without reconstructing source text.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, verter_retention::heap_size::HeapSize)]
 pub enum IndexedValueExpression {
     /// A call-free value expression lowered through ordinary value inference.
     Value(TypeExpr),
@@ -30,14 +30,14 @@ pub enum IndexedValueExpression {
 }
 
 /// Call vs construct for an indexed value expression.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub enum IndexedValueCallKind {
     Call,
     Construct,
 }
 
 /// The authored literal interpretation of one indexed call argument.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub enum IndexedValueLiteralMode {
     /// The argument is a bare literal expression: its literal content is
     /// subject to the parameter's widening rule.
@@ -48,7 +48,7 @@ pub enum IndexedValueLiteralMode {
 }
 
 /// One indexed call argument.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, verter_retention::heap_size::HeapSize)]
 pub struct IndexedValueCallArg {
     pub expression: IndexedValueExpression,
     pub point: u32,
@@ -70,7 +70,7 @@ pub struct IndexedValueCallArg {
 /// Where the checker reports a relation failure an expression's value
 /// causes, and how it elaborates the failure into the expression's parts
 /// (`elaborateError`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct IndexedReportSite {
     /// The start of the node the checker reports at.
     pub point: u32,
@@ -81,7 +81,7 @@ pub struct IndexedReportSite {
 
 /// An authored expression form the checker elaborates a relation failure
 /// into (`elaborateError`), through parentheses.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub enum IndexedElaborationForm {
     /// An arrow function whose body is one expression and none of whose
     /// parameters is annotated (`elaborateArrowFunction`): its returned
@@ -101,7 +101,7 @@ pub enum IndexedElaborationForm {
 }
 
 /// One member of an [`IndexedElaborationForm::Object`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct IndexedElaboratedProperty {
     /// The member's name.
     pub name: Arc<str>,
@@ -140,7 +140,7 @@ impl IndexedReportSite {
 
 /// One direct call/construct record. Children are parsed typed IR; no raw
 /// expression text is retained.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, verter_retention::heap_size::HeapSize)]
 pub struct IndexedValueCall {
     pub point: u32,
     /// The start of the node the checker reports a diagnostic about the

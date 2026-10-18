@@ -252,11 +252,10 @@ impl OwnedHeap for QueryError {
             QueryError::UnsupportedIntrinsic { name } | QueryError::Other(name) => {
                 name.owned_heap_bytes(aliases)
             }
-            QueryError::BudgetExceeded(failure) => failure.context.owned_heap_bytes(aliases),
+            QueryError::BudgetExceeded(failure) => failure.context.offer(aliases),
             QueryError::AliasCycle { chain } => chain.owned_heap_bytes(aliases),
             QueryError::RecursiveRef { name, args } => {
-                name.owned_heap_bytes(aliases)
-                    + arc_slice_block_bytes(args.operands_arc(), aliases).unwrap_or(0)
+                name.owned_heap_bytes(aliases) + args.operands_owned().offer(aliases)
             }
             QueryError::DeclPlaceholder {
                 canonical_id, name, ..
@@ -408,27 +407,5 @@ impl super::CanonicalTypeSubstitution {
     /// its root attachment's owner.
     pub(crate) fn key_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
         self.0.offer(aliases) + self.1 .0.owned_heap_bytes(aliases)
-    }
-}
-
-impl super::PendingSubstitutionFrame {
-    /// The frame's pair list.
-    pub(crate) fn key_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
-        let Self { pairs } = self;
-        arc_slice_block_bytes(pairs, aliases).unwrap_or(0)
-    }
-}
-
-impl super::ConditionalPendingSubstitution {
-    /// Both branch frames; the distribution parameter is a node id.
-    pub(crate) fn key_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
-        let Self {
-            true_branch,
-            false_branch,
-            distribution,
-        } = self;
-        true_branch.key_heap_bytes(aliases)
-            + false_branch.key_heap_bytes(aliases)
-            + copy_inline(distribution)
     }
 }

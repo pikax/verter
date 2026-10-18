@@ -28,7 +28,7 @@ use super::{PrimitiveKind, SemanticNodeId};
 /// types decided it — and, for TS2589, where a sound proof certifies that
 /// the operation can never reach a value — a [`RecoveryBasis::Certified`]
 /// recovery, complete and kept like any semantic answer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct CheckerDiagnostic {
     /// The diagnostic the checker reports.
     pub code: CheckerDiagnosticCode,
@@ -67,7 +67,7 @@ impl CheckerDiagnostic {
 }
 
 /// The checker diagnostics an operation here can raise.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum CheckerDiagnosticCode {
     /// TS2769: several arity-fitting overloads reject the call.
     NoMatchingOverload,
@@ -275,7 +275,9 @@ pub(crate) fn format_message(template: &str, arguments: &[impl AsRef<str>]) -> S
 }
 
 /// The type operation that raised a [`CheckerDiagnostic`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, verter_retention::heap_size::HeapSize,
+)]
 pub enum CheckerDiagnosticOperation {
     /// The lib `Awaited<T>` conditional over an authored `Awaited<X>`
     /// application.
@@ -312,7 +314,7 @@ pub enum CheckerDiagnosticOperation {
 }
 
 /// Why a checker recovery is the answer: what the recovery proves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum RecoveryBasis {
     /// The types decide the diagnostic, independent of any allowance: a
     /// diagnostic the checker derives from the types themselves, or a

@@ -450,7 +450,13 @@ pub const LAYOUT_QUERY_OUTCOME_SET: usize = 32;
 /// It also includes the candidate's `Arc` cost receipt: a stored result
 /// that carried no receipt could only be served free, so the word is the
 /// price of every warm read charging what its computation cost.
-pub const LAYOUT_MEMO_ENTRY: usize = 152;
+///
+/// And the word holding whether the candidate is in the reverse index yet:
+/// a candidate is registered there only when the index is next read, so
+/// one evicted before that is never registered or pruned, and the flag on
+/// the candidate keeps that state with it rather than in a side-table to
+/// keep consistent with `entries`.
+pub const LAYOUT_MEMO_ENTRY: usize = 160;
 
 #[cfg(target_pointer_width = "64")]
 const _: () = {

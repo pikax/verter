@@ -115,7 +115,10 @@ impl SemanticGraphStore {
         if !node_roots::NodeRootScope::holds(&self.arena.core) {
             return None;
         }
-        match node_roots::NodeRootSet::acquire(Arc::clone(&self.arena.core), vec![id]) {
+        match node_roots::NodeRootSet::acquire(
+            Arc::clone(&self.arena.core),
+            smallvec::smallvec![id],
+        ) {
             Ok(roots) => Some(node_data_lease::NodeDataLease {
                 data: self.arena.get(id)?,
                 root: node_roots::NodeRoot::from_roots(id, roots),
@@ -278,14 +281,17 @@ impl SemanticGraphStore {
     /// owner minted. Test builds expose the ordinal read as a fixture seam.
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
-    pub fn node_data(&self, id: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
+    pub fn node_data(&self, id: SemanticNodeId) -> Option<crate::semantic_query_memo::NodeData> {
         self.arena.get(id)
     }
 
     /// Construction-ordinal read; see the test-build variant.
     #[cfg(not(any(test, feature = "test-support")))]
     #[must_use]
-    pub(crate) fn node_data(&self, id: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
+    pub(crate) fn node_data(
+        &self,
+        id: SemanticNodeId,
+    ) -> Option<crate::semantic_query_memo::NodeData> {
         self.arena.get(id)
     }
 }

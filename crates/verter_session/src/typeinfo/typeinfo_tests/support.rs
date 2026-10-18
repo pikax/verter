@@ -624,12 +624,11 @@ pub(crate) fn template_literal_reduce_read_with_work_limit(
         dispatch.set_connected_limits_for_tests(work_limit, 24);
     }
     let read = dispatch.execute_read(SemanticQueryKey::TemplateLiteralReduce {
-        pattern: Arc::from(
+        pattern: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
             quasis
                 .iter()
-                .map(|quasi| Arc::from(*quasi))
-                .collect::<Vec<Arc<str>>>()
-                .into_boxed_slice(),
+                .map(|quasi| verter_type_expr::OwnedStr::from(*quasi))
+                .collect::<Vec<_>>(),
         ),
         args: Arc::from(args.into_boxed_slice()),
         context: dispatch.template_literal_reduce_context(),

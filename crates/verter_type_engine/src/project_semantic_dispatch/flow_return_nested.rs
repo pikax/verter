@@ -451,6 +451,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         hash_key: site.slice_key.clone(),
                         slice_hash: planned.hash(),
                     },
+                    &planned,
                 )?;
                 Some((
                     planned,
@@ -510,7 +511,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             &content.bindings,
             skeleton,
             bound,
-            planned.as_deref(),
+            planned.as_deref().map(|planned| &**planned),
             anchor,
             &key,
             outer_env,

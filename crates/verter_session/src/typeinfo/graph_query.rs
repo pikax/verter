@@ -673,7 +673,7 @@ mod tests {
             domain: SessionBudgetDomain::ProjectionOperation,
             limit: 2000,
             actual: 2001,
-            context: "semantic dispatch".to_string(),
+            context: "semantic dispatch".into(),
         });
         let (error, detail) = fault_error(&fault);
         // The projection-operation fuse has no wire variant; it must
@@ -696,7 +696,7 @@ mod tests {
             domain: SessionBudgetDomain::SolverResolveSteps,
             limit: 5000,
             actual: 5001,
-            context: String::new(),
+            context: String::new().into(),
         });
         let (error, detail) = fault_error(&fault);
         match error.kind.as_ref() {

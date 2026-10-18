@@ -30,6 +30,7 @@ use crate::TopLevelOwnerId;
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum LocatorSymbolSpace {
     /// Type-space declaration (interface, type alias, enum/class type half).
@@ -53,6 +54,7 @@ pub enum LocatorSymbolSpace {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct AuthoredAnchor {
     /// Canonical id of the file whose parse produced the authored body.
@@ -283,6 +285,7 @@ impl verter_retention::owned::Measured for TypeBodyPathStep {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct TypeBodySlot {
     /// The owning declaration.
@@ -306,6 +309,7 @@ pub struct TypeBodySlot {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum FunctionReturnLocator {
     /// An authored TS return annotation (`(): T`).
@@ -345,6 +349,7 @@ impl FunctionReturnLocator {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct SymbolBodyLocator {
     /// The resolvable symbol.
@@ -364,6 +369,7 @@ pub struct SymbolBodyLocator {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct TypeArgLocator {
     /// The owning declaration.
@@ -386,6 +392,7 @@ pub struct TypeArgLocator {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum MacroPayloadPosition {
     /// The generic type argument of a `define*<T>()` macro call.
@@ -414,6 +421,7 @@ pub enum MacroPayloadPosition {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct MacroPayloadLocator {
     /// The owning declaration whose retained snapshot backs this payload.
@@ -439,6 +447,7 @@ pub struct MacroPayloadLocator {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum AuthoredAugmentationScope {
     /// A `declare global { ... }` block.
@@ -472,6 +481,7 @@ pub enum AuthoredAugmentationScope {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct AugmentationBodyLocator {
     /// The augmenter file + the augmented symbol name + its space.
@@ -509,6 +519,7 @@ pub struct AugmentationBodyLocator {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct JsdocTypedefBodyLocator {
     /// The typedef alias declaration (producing canonical + typedef NAME + the
@@ -533,6 +544,7 @@ pub struct JsdocTypedefBodyLocator {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum AuthoredBodyLocator {
     /// (a) a top-level declaration body (or a named sub-slot of it).

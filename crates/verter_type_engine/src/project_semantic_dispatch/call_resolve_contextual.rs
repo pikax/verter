@@ -66,6 +66,24 @@ pub(super) struct ContextualCandidateBindings {
 }
 
 impl ContextualCallState {
+    /// The suspended candidate collector this continuation holds: its
+    /// session and how many deposits it holds.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(in crate::project_semantic_dispatch) fn held_collector_for_tests(
+        &self,
+    ) -> Option<(u64, usize)> {
+        let session = self.active.as_ref()?.session.as_ref()?;
+        Some((session.id.0, session.collected_candidates_for_tests()))
+    }
+
+    /// The contextual target the held collector waits to relate a typed
+    /// callback to.
+    pub(in crate::project_semantic_dispatch) fn pending_delivery_target(
+        &self,
+    ) -> Option<SemanticNodeId> {
+        self.active.as_ref()?.pending_target
+    }
+
     pub(super) fn was_context_sensitive(&self, index: usize) -> bool {
         self.original
             .as_ref()
@@ -246,7 +264,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let (_, target) = progress.deferred[progress.cursor];
         let id = progress.session.as_ref().expect("suspended collector").id;
         let declared = Arc::clone(&progress.parameters);
-        self.restore_contextual_session(&mut progress.session);
+        self.restore_collecting_session(&mut progress.session);
         let mut budget = CallResolutionBudget::new(&self.connected_demand);
         let result = (|| {
             let target = self.resolved_reduction_view(target);
@@ -292,7 +310,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     .map(|(contextual, _)| Some(contextual))
             }
         })();
-        progress.session = Some(self.take_contextual_session(id));
+        progress.session = Some(self.take_collecting_session(id));
         result
     }
     pub(super) fn isolate_contextual_call(
@@ -607,7 +625,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 .dispatch_txn
                 .borrow_mut()
                 .push_collecting_session(setup, None);
-            let session = self.take_contextual_session(id);
+            let session = self.take_collecting_session(id);
             (
                 ContextualCandidate {
                     signature: candidate.clone(),
@@ -642,7 +660,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             )
         };
         let declared = Arc::clone(&progress.parameters);
-        self.restore_contextual_session(&mut progress.session);
+        self.restore_collecting_session(&mut progress.session);
         let result = (|| {
             if progress.pending_target.is_some() {
                 let (position, _) = progress.deferred[progress.cursor];
@@ -874,7 +892,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             state.resume_at = None;
             Ok(std::mem::take(&mut progress.arguments))
         })();
-        progress.session = Some(self.take_contextual_session(session_id));
+        progress.session = Some(self.take_collecting_session(session_id));
         if matches!(
             result,
             Err(ContextualCandidateFailure::Degraded(
@@ -890,7 +908,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 fixed: progress.fixed,
                 diagnostic: state.diagnostic,
             });
-            progress.session.as_mut().expect("collector").abandon();
+            // Nothing holds the finished collector any more: it returns to
+            // the transaction abandoned, as a rejected candidate's does.
+            self.restore_collecting_session(&mut progress.session);
+            self.abandon_session(session_id);
         }
         result
     }
@@ -928,7 +949,25 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
     }
 
-    fn take_contextual_session(&self, id: SessionId) -> InferenceSession {
+    /// Release the suspended candidate collector a contextual continuation
+    /// holds, which no delivery will advance: it returns to the transaction
+    /// abandoned, as a rejected candidate's does.
+    pub(in crate::project_semantic_dispatch) fn release_contextual_collector(
+        &self,
+        state: &mut ContextualCallState,
+    ) {
+        let Some(session) = state.active.take().and_then(|progress| progress.session) else {
+            return;
+        };
+        let id = session.id;
+        self.restore_collecting_session(&mut Some(session));
+        self.abandon_session(id);
+    }
+
+    /// Take a collecting session out of the transaction, for its candidate's
+    /// continuation to hold while something that must not deposit into it
+    /// runs.
+    pub(super) fn take_collecting_session(&self, id: SessionId) -> InferenceSession {
         let mut txn = self.dispatch_txn.borrow_mut();
         let position = txn
             .relation
@@ -937,7 +976,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         txn.relation.sessions.remove(position)
     }
 
-    fn restore_contextual_session(&self, session: &mut Option<InferenceSession>) {
+    /// Return a held collecting session to the transaction, in session order.
+    pub(super) fn restore_collecting_session(&self, session: &mut Option<InferenceSession>) {
         let mut active = session.take().expect("suspended collector");
         let mut txn = self.dispatch_txn.borrow_mut();
         active.opened_at_depth = txn.reentry().depth();

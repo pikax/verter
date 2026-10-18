@@ -320,12 +320,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // `ResolvedDeclSlotIdentity` slot (built via `type_slot_for`); the
         // cold build re-sources the live whole_hash from
         // `ensure_indexed_ready_serve`.
-        let root_canonical: std::sync::Arc<str> =
-            std::sync::Arc::clone(&resolved_root.canonical_id);
+        let root_canonical = resolved_root.canonical_id.clone();
         let base = dispatch.type_slot_for(
-            std::sync::Arc::clone(&root_canonical),
+            root_canonical.clone(),
             resolved_root.owner,
-            std::sync::Arc::clone(&resolved_root.symbol_name),
+            resolved_root.symbol_name.clone(),
         );
         let root_inst_ctx = dispatch.instantiate_context_for(
             &root_canonical,

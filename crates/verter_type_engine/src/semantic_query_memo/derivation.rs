@@ -95,6 +95,43 @@ pub const DERIVATION_EDGE_BUCKET_CAP: usize = 4096;
 /// (origin edges are not an invalidation source — see the module docs).
 pub const DERIVATION_EDGES_PER_BUCKET_CAP: usize = 64;
 
+/// Granule the edge store's own storage is charged in.
+const STORAGE_GRANULE: usize = 4 * 1024;
+
+/// Bytes one bucket of the edge table holds: its key, its edge list's
+/// header and its control byte.
+const EDGE_TABLE_BUCKET_BYTES: usize =
+    std::mem::size_of::<((SemanticNodeId, OriginEdgeKind), EdgeBucket)>() + 1;
+
+/// Bytes one bucket of the fence pool's table holds.
+const POOL_TABLE_BUCKET_BYTES: usize = std::mem::size_of::<(u64, Vec<Weak<EdgeFence>>)>() + 1;
+
+/// The block one pooled fence keeps allocated: its pool `Weak` keeps the
+/// block, whose value the last edge drops, until the pool compacts it.
+fn fence_block_bytes() -> usize {
+    verter_session_query::retention::allocation::arc_block_bytes(std::mem::size_of::<EdgeFence>())
+}
+
+/// Bytes one edge bucket keeps: its edge and identity lists' backing and
+/// every edge's source list.
+fn bucket_bytes(bucket: &EdgeBucket) -> usize {
+    use verter_session_query::retention::allocation::{arc_block_bytes, vec_bytes};
+    vec_bytes(&bucket.edges)
+        + vec_bytes(&bucket.identities)
+        + bucket
+            .edges
+            .iter()
+            .map(|edge| arc_block_bytes(std::mem::size_of_val::<[SemanticNodeId]>(&edge.sources)))
+            .sum::<usize>()
+}
+
+/// Bytes one pool bucket keeps: its `Weak` list's backing and every pooled
+/// fence's block.
+fn pool_bucket_bytes(bucket: &Vec<Weak<EdgeFence>>) -> usize {
+    verter_session_query::retention::allocation::vec_bytes(bucket)
+        + bucket.len() * fence_block_bytes()
+}
+
 /// Sibling edge store for the derivation/origin layer. Co-owned by
 /// [`super::SemanticGraphStore`] but conceptually a separate graph: edges
 /// are keyed by `(result_node, kind)` and hold the source-set + per-edge
@@ -119,7 +156,7 @@ pub const DERIVATION_EDGES_PER_BUCKET_CAP: usize = 64;
 /// edge lifetime — see the module docs. Both maps are dropped wholesale
 /// by [`DerivationStore::clear`] on a project-generation reset.
 pub(crate) struct DerivationStore {
-    edges: FxHashMap<(SemanticNodeId, OriginEdgeKind), Vec<OriginEdge>>,
+    edges: FxHashMap<(SemanticNodeId, OriginEdgeKind), EdgeBucket>,
     /// Dep-signature interner. Maps a signature's content hash to
     /// [`Weak`] references to the canonical `Arc<EdgeFence>`s handed to
     /// edges. `intern_signature` upgrades the `Weak`s: a live upgrade of an
@@ -144,25 +181,98 @@ pub(crate) struct DerivationStore {
     /// (per-bucket FIFO + bucket-level FIFO) drops; reset to 0 by
     /// [`Self::clear`].
     total_edges: usize,
+    /// The store's own tables, edge lists, source lists and pooled fence
+    /// blocks, pinned and settled on every mutation; the rails the fences
+    /// hold are charged by their own cells.
+    storage: Storage,
+}
+
+/// The edge store's pinned storage charge.
+struct Storage {
+    account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    pin: Option<verter_session_query::retention::granular::GranularPin>,
+    /// The live total last settled.
+    charged_live: usize,
+}
+
+impl Storage {
+    fn settle(&mut self, added: usize, freed: usize) {
+        self.charged_live = self.charged_live + added - freed;
+        if added == freed {
+            return;
+        }
+        let account = &self.account;
+        let pin = self.pin.get_or_insert_with(|| {
+            verter_session_query::retention::granular::GranularPin::new(account, STORAGE_GRANULE)
+        });
+        if added > freed {
+            pin.add(added - freed);
+        } else {
+            pin.sub(freed - added);
+        }
+    }
+
+    fn charged(&self) -> usize {
+        self.pin.as_ref().map_or(
+            0,
+            verter_session_query::retention::granular::GranularPin::charged,
+        )
+    }
 }
 
 impl Default for DerivationStore {
     fn default() -> Self {
-        Self::new()
+        Self::charged(&verter_session_query::retention::SemanticRetentionAccount::process_local())
     }
 }
 
 impl DerivationStore {
-    /// Construct a derivation store with the edge-bucket retention budget
-    /// set to its default cap.
-    pub(super) fn new() -> Self {
+    /// A derivation store whose own storage is charged to `account`, with
+    /// the edge-bucket retention budget set to its default cap.
+    pub(super) fn charged(
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) -> Self {
         Self {
             edges: FxHashMap::default(),
             signature_pool: FxHashMap::default(),
             pool_entries: 0,
             edge_budget: GlobalRetentionBudget::new(DERIVATION_EDGE_BUCKET_CAP),
             total_edges: 0,
+            storage: Storage {
+                account: Arc::clone(account),
+                pin: None,
+                charged_live: 0,
+            },
         }
+    }
+
+    /// The table bytes of both maps: their capacity.
+    fn table_bytes(&self) -> usize {
+        self.edges.capacity() * EDGE_TABLE_BUCKET_BYTES
+            + self.signature_pool.capacity() * POOL_TABLE_BUCKET_BYTES
+    }
+
+    /// Everything the store's storage holds, walked in full.
+    fn storage_bytes(&self) -> usize {
+        self.table_bytes()
+            + self.edges.values().map(bucket_bytes).sum::<usize>()
+            + self
+                .signature_pool
+                .values()
+                .map(pool_bucket_bytes)
+                .sum::<usize>()
+    }
+
+    /// Re-measure the whole store and settle its charge to it.
+    fn settle_in_full(&mut self) {
+        let live = self.storage_bytes();
+        let charged = self.storage.charged_live;
+        self.storage.settle(live, charged);
+    }
+
+    /// Bytes the store's own storage is charged.
+    pub(super) fn storage_charge_bytes(&self) -> usize {
+        self.storage.charged()
     }
 
     /// The pooled fence for `sig`, sharing a live edge's when one holds an
@@ -199,11 +309,15 @@ impl DerivationStore {
             None => None,
         };
         let arc = Arc::new(EdgeFence::retained(sig, hold));
-        self.signature_pool
-            .entry(hash)
-            .or_default()
-            .push(Arc::downgrade(&arc));
+        let table_before = self.table_bytes();
+        let bucket_before = self.signature_pool.get(&hash).map_or(0, pool_bucket_bytes);
+        let bucket = self.signature_pool.entry(hash).or_default();
+        bucket.push(Arc::downgrade(&arc));
+        let bucket_after = pool_bucket_bytes(bucket);
         self.pool_entries += 1;
+        let table_after = self.table_bytes();
+        self.storage
+            .settle(table_after + bucket_after, table_before + bucket_before);
         #[cfg(any(test, feature = "test-support"))]
         crate::capture_token::with_active_capture(|t| t.record_signature_intern(false));
         // Compact dead `Weak`s write-side. The pool's reclamation is
@@ -219,6 +333,7 @@ impl DerivationStore {
                 !bucket.is_empty()
             });
             self.pool_entries = self.signature_pool.values().map(Vec::len).sum();
+            self.settle_in_full();
         }
         Some(arc)
     }
@@ -227,10 +342,13 @@ impl DerivationStore {
         &mut self,
         result: SemanticNodeId,
         kind: OriginEdgeKind,
+        identity: u64,
         edge: OriginEdge,
     ) {
         let bucket_key = (result, kind);
         let is_new_bucket = !self.edges.contains_key(&bucket_key);
+        let table_before = self.table_bytes();
+        let bucket_before = self.edges.get(&bucket_key).map_or(0, bucket_bytes);
         // Append the edge, then apply the PER-BUCKET FIFO cap inside the
         // SAME `&mut self` step. The bucket `Vec` is insertion-ordered
         // (push at the back), so the oldest edge is at the front and a
@@ -243,7 +361,7 @@ impl DerivationStore {
         // would grow append-only with the re-derivation count.
         //
         // An evicted `OriginEdge` is dropped here, which drops its
-        // `edge_dep_signature: Arc<DepSignature>`. When the last live
+        // `edge_dep_signature: Arc<EdgeFence>`. When the last live
         // edge holding a pooled signature is evicted, that fence's
         // `signature_pool` `Weak` becomes non-upgradeable and is reaped
         // by the compaction in `intern_signature`. Per-bucket FIFO
@@ -252,14 +370,16 @@ impl DerivationStore {
         // the oldest edge degrades only the audit trace, never
         // correctness.
         let bucket = self.edges.entry(bucket_key).or_default();
-        bucket.push(edge);
+        bucket.push(identity, edge);
         self.total_edges += 1;
         while bucket.len() > DERIVATION_EDGES_PER_BUCKET_CAP {
             // Oldest = front (insertion order). Dropping it releases its
             // dep-signature `Arc`.
-            bucket.remove(0);
+            bucket.evict_oldest();
             self.total_edges -= 1;
         }
+        let bucket_after = bucket_bytes(bucket);
+        let mut evicted = 0;
         // Bounded retention: a newly-keyed `(result, kind)` bucket
         // records an admission; the oldest buckets past the cap are
         // FIFO-evicted. Fresh content versions intern fresh
@@ -283,9 +403,15 @@ impl DerivationStore {
             for (_victim_seq, victim) in self.edge_budget.record_admission(seq, bucket_key) {
                 if let Some(dropped) = self.edges.remove(&victim) {
                     self.total_edges -= dropped.len();
+                    evicted += bucket_bytes(&dropped);
                 }
             }
         }
+        let table_after = self.table_bytes();
+        self.storage.settle(
+            table_after + bucket_after,
+            table_before + bucket_before + evicted,
+        );
     }
 
     /// Drop every edge bucket and every pooled signature, and clear the
@@ -302,6 +428,7 @@ impl DerivationStore {
         self.pool_entries = 0;
         self.edge_budget.clear();
         self.total_edges = 0;
+        self.settle_in_full();
     }
 
     /// Document-close release: drop every bucket keyed by a released
@@ -333,6 +460,7 @@ impl DerivationStore {
             self.edge_budget.forget_key_under_exclusive_lock(key);
         }
         self.total_edges -= dropped_edges;
+        self.settle_in_full();
         victims.len()
     }
 
@@ -350,7 +478,7 @@ impl DerivationStore {
         &self,
         result: SemanticNodeId,
         kind: OriginEdgeKind,
-    ) -> Option<&Vec<OriginEdge>> {
+    ) -> Option<&EdgeBucket> {
         self.edges.get(&(result, kind))
     }
 
@@ -368,7 +496,7 @@ impl DerivationStore {
         self.edges
             .get(&(result, kind))
             .into_iter()
-            .flat_map(|v| v.iter())
+            .flat_map(|bucket| bucket.edges.iter())
     }
 
     pub(super) fn origins(
@@ -379,7 +507,7 @@ impl DerivationStore {
             .iter()
             .filter_map(move |((r, kind), edges)| {
                 if *r == result {
-                    Some(edges.iter().map(move |e| (*kind, e)))
+                    Some(edges.edges.iter().map(move |e| (*kind, e)))
                 } else {
                     None
                 }
@@ -394,7 +522,7 @@ impl DerivationStore {
     pub(super) fn edge_count(&self) -> usize {
         verter_debug_assert_eq!(
             self.total_edges,
-            self.edges.values().map(Vec::len).sum::<usize>(),
+            self.edges.values().map(EdgeBucket::len).sum::<usize>(),
             "total_edges counter desynced from the actual bucket edge sum",
         );
         self.total_edges
@@ -405,20 +533,94 @@ impl DerivationStore {
     /// percentiles without exposing the underlying map shape.
     pub(super) fn iter_edges(
         &self,
-    ) -> impl Iterator<Item = (&SemanticNodeId, &OriginEdgeKind, &Vec<OriginEdge>)> {
+    ) -> impl Iterator<Item = (&SemanticNodeId, &OriginEdgeKind, &[OriginEdge])> {
         self.edges
             .iter()
-            .map(|((node, kind), edges)| (node, kind, edges))
+            .map(|((node, kind), bucket)| (node, kind, bucket.edges.as_slice()))
     }
 
     pub(super) fn all_edges(&self) -> Vec<(SemanticNodeId, OriginEdgeKind, OriginEdge)> {
         self.edges
             .iter()
-            .flat_map(|((node, kind), edges)| {
-                edges.iter().map(move |edge| (*node, *kind, edge.clone()))
+            .flat_map(|((node, kind), bucket)| {
+                bucket
+                    .edges
+                    .iter()
+                    .map(move |edge| (*node, *kind, edge.clone()))
             })
             .collect()
     }
+}
+
+/// One `(result, kind)` bucket: its edges in insertion order, beside each
+/// edge's identity key ([`edge_identity_key`]). The duplicate-edge probe
+/// compares the keys and confirms only a matching key on the whole edge.
+#[derive(Default)]
+pub(super) struct EdgeBucket {
+    edges: Vec<OriginEdge>,
+    identities: Vec<u64>,
+}
+
+impl EdgeBucket {
+    fn push(&mut self, identity: u64, edge: OriginEdge) {
+        self.edges.push(edge);
+        self.identities.push(identity);
+    }
+
+    fn evict_oldest(&mut self) {
+        self.edges.remove(0);
+        self.identities.remove(0);
+    }
+
+    fn len(&self) -> usize {
+        self.edges.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.edges.is_empty()
+    }
+
+    fn retain(&mut self, mut keep: impl FnMut(&OriginEdge) -> bool) {
+        let mut index = 0;
+        while index < self.edges.len() {
+            if keep(&self.edges[index]) {
+                index += 1;
+            } else {
+                self.edges.remove(index);
+                self.identities.remove(index);
+            }
+        }
+    }
+
+    /// Whether the bucket already holds `edge`, whose identity key is
+    /// `identity`: the same interned signature, sources and metadata.
+    pub(super) fn holds(&self, identity: u64, edge: &OriginEdge) -> bool {
+        for index in 0..self.identities.len() {
+            if self.identities[index] == identity {
+                let held = &self.edges[index];
+                if Arc::ptr_eq(&held.edge_dep_signature, &edge.edge_dep_signature)
+                    && held.sources == edge.sources
+                    && held.meta == edge.meta
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
+/// The identity key of an edge with interned signature `signature` over
+/// `sources`: equal edges have equal keys. It narrows the duplicate-edge
+/// probe; a key match is confirmed on the whole edge.
+pub(super) fn edge_identity_key(signature: &Arc<EdgeFence>, sources: &[SemanticNodeId]) -> u64 {
+    const MIX: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut key = (Arc::as_ptr(signature) as *const u8 as usize as u64).wrapping_mul(MIX);
+    key = (key.rotate_left(5) ^ sources.len() as u64).wrapping_mul(MIX);
+    for source in sources {
+        key = (key.rotate_left(5) ^ source.0).wrapping_mul(MIX);
+    }
+    key
 }
 
 /// Pick the percentile-`p` value out of an already-sorted ascending

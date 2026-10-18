@@ -848,12 +848,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     /// `node`'s data through its aliases and declaration carriers.
-    fn settled_data(&self, node: SemanticNodeId) -> Option<std::sync::Arc<SemanticNodeData>> {
+    fn settled_data(&self, node: SemanticNodeId) -> Option<crate::semantic_query_memo::NodeData> {
         self.graph().node_data(self.settle_through_carriers(node)?)
     }
 
     /// `node`'s structural data, its references resolved.
-    fn structural_data(&self, node: SemanticNodeId) -> Option<std::sync::Arc<SemanticNodeData>> {
+    fn structural_data(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<crate::semantic_query_memo::NodeData> {
         let transit =
             crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                 crate::semantic_query::ProjectionMode::Navigate,

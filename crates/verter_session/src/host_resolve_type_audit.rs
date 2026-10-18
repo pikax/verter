@@ -562,7 +562,7 @@ mod request_error_classification_tests {
             domain: BudgetDomain::SolverResolveSteps,
             limit: 10,
             actual: 11,
-            context: "test".to_string(),
+            context: "test".into(),
         }
     }
 

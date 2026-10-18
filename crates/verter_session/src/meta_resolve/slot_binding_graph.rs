@@ -1304,7 +1304,7 @@ fn named_reference_carrier_source(
                 let (name, _scope) = data.bare_ref_head()?;
                 return Some(verter_type_expr::facts::SemanticTypeSource::Closed(
                     verter_type_expr::facts::ClosedTypeFact::Leaf(
-                        verter_type_expr::facts::LeafTypeFact::Ref(name.as_ref().to_string()),
+                        verter_type_expr::facts::LeafTypeFact::Ref(name.to_string()),
                     ),
                 ));
             }
