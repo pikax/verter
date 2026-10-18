@@ -1594,27 +1594,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// answers here and evaluates anything else as it would anywhere.
     /// `None` when no decision runs here, or for any other query.
     pub(super) fn read_at_decision_seam(&self, key: &SemanticQueryKey) -> Option<ValueRead> {
-        self.read_at_decision_seam_inner(key, false)
-    }
-
-    // A call's declared return is an operand of the enclosing decision or
-    // typeof frame even when a signature probe evaluates its body inline.
-    pub(super) fn read_declared_return_at_seam(&self, key: &SemanticQueryKey) -> Option<ValueRead> {
-        self.read_at_decision_seam_inner(key, true)
-    }
-
-    pub(super) fn return_demand_waits(&self) -> bool {
-        self.decision_seam
-            .borrow()
-            .as_ref()
-            .is_some_and(|seam| !seam.needs.is_empty())
-    }
-
-    fn read_at_decision_seam_inner(
-        &self,
-        key: &SemanticQueryKey,
-        nested_return: bool,
-    ) -> Option<ValueRead> {
         if !matches!(
             key,
             SemanticQueryKey::Instantiate(_) | SemanticQueryKey::TypeOf { .. }
@@ -1638,7 +1617,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .cloned();
             let read = match answered {
                 Some(delivery) => Seam::Answered(delivery),
-                None if seam.nested > 0 && !nested_return => return None,
+                None if seam.nested > 0 => return None,
                 None if seam.needs.iter().any(|(needed, claim)| {
                     needed == key && claim.checking_site() == self.checking_site.get()
                 }) =>
@@ -1667,6 +1646,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             },
         })
+    }
+
+    /// Whether the running decision waits on a need its run reached.
+    pub(super) fn return_demand_waits(&self) -> bool {
+        self.decision_seam
+            .borrow()
+            .as_ref()
+            .is_some_and(|seam| !seam.needs.is_empty())
     }
 
     fn with_decision_seam(&self, update: impl FnOnce(&mut DecisionSeam)) {
@@ -2309,6 +2296,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             },
         })
+    }
+
+    /// Whether a read made here is an operand of the stepping flow frame:
+    /// its own body is evaluating, so the read answers from the frame's
+    /// deliveries or becomes its need.
+    pub(super) fn flow_seam_reads_here(&self) -> bool {
+        self.flow_seam
+            .borrow()
+            .as_ref()
+            .is_some_and(|seam| self.flow_seam_is_open(seam))
     }
 
     /// Whether the flow evaluation's own body is evaluating here: not a

@@ -2149,14 +2149,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         ))
     }
 
-    /// Read a lazy declared return's instantiation demand in place.
+    /// Read a lazy declared return's instantiation demand in place: an
+    /// operand of the flow frame whose own body makes the call, or a drive
+    /// of its own outside any. Anywhere else inside a running drive — a
+    /// body a signature probe evaluates inline beneath a decision, a
+    /// callee evaluated inline — the read would start that return's work
+    /// natively beneath the call, one native level per declared return a
+    /// chain of calls reaches, so it is not made there and the call keeps
+    /// its lazy carrier for the demand that reads it.
     fn read_declared_call_return(
         &self,
         key: crate::semantic_query::SemanticQueryKey,
-    ) -> crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>> {
-        self.read_declared_return_at_seam(&key)
-            .map(super::narrow_value_cache_read)
-            .unwrap_or_else(|| self.execute_read(key))
+    ) -> Option<crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>> {
+        if crate::semantic_execution::drive_running() && !self.flow_seam_reads_here() {
+            return None;
+        }
+        Some(self.execute_read(key))
     }
 
     /// A call's value once its lazy declared return (`key`) is checked in
@@ -2167,7 +2175,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         original: IndexedValue,
         key: crate::semantic_query::SemanticQueryKey,
     ) -> IndexedValue {
-        let read = self.read_declared_call_return(key);
+        let Some(read) = self.read_declared_call_return(key) else {
+            return original;
+        };
         match read.value {
             QueryResult::Value(node)
                 if self.declared_return_is_recovery(read.partial_reasons(), node) =>
@@ -11161,7 +11171,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         node: SemanticNodeId,
     ) -> Option<crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>> {
         self.indexed_call_return_key(node)
-            .map(|key| self.read_declared_call_return(key))
+            .and_then(|key| self.read_declared_call_return(key))
     }
     fn normalize_expression_tuple_spread(
         &self,
@@ -28758,17 +28768,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // Check this expression's lazy declared return before a type
                 // assertion or a later type demand can change its checking
                 // site. Keep a complete carrier's authored display identity.
+                // Only the checker's recovery replaces the carrier: any other
+                // partial read keeps it.
                 if let Some(read) = self.dispatch.declared_call_return_read(returned) {
-                    let reasons = read.partial_reasons();
-                    if let (true, QueryResult::Value(node)) = (read.result_is_partial(), read.value)
-                    {
-                        if reasons
-                            .contains(crate::semantic_query::PartialReasonSet::OPERATION_BUDGET)
-                        {
-                            self.record_degradation(
-                                crate::semantic_query::FlowReturnDegradation::OperationBudget,
-                            );
-                        }
+                    let budget = read
+                        .partial_reasons()
+                        .contains(crate::semantic_query::PartialReasonSet::OPERATION_BUDGET);
+                    if let QueryResult::Value(node) = read.value {
                         let diagnostic = self.dispatch.arena().node_data(node).and_then(|data| {
                             match data.as_ref() {
                                 SemanticNodeData::Opaque(QueryError::CheckerRecovery {
@@ -28778,10 +28784,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                 _ => None,
                             }
                         });
+                        if budget {
+                            self.record_degradation(
+                                crate::semantic_query::FlowReturnDegradation::OperationBudget,
+                            );
+                        }
                         if let Some(diagnostic) = diagnostic {
                             self.record_checker_diagnostic(diagnostic);
                         }
-                        returned = node;
+                        if budget || diagnostic.is_some() {
+                            returned = node;
+                        }
                     }
                 }
                 Some(Positional::Value(CallValue::of_resolved_call(

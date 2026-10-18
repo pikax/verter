@@ -141,10 +141,21 @@ returns retained) when no arm survives an edge.
 
 A lazy declared call return is checked at its expression site before a later
 consumer can choose a type site. Indexed initializers await the return's
-instantiation (`IndexedNext::AwaitReturn`). A typeof frame keeps the operand
-answers and claims of inline signature probes (`TypeofFrameBuild`); a new
-return demand discards the tentative projection under `observe_read` and
-retries it after the runtime delivers the operand. A pending probe prevents
-its tentative source shape from warming. Complete returns retain their
-named carrier; checker recoveries retain the expression diagnostic. These
-reads never drive another execution inside a frame step.
+instantiation (`IndexedNext::AwaitReturn`). A flow body checks it as an
+operand of its own flow frame, or as a drive of its own outside any drive.
+Anywhere else inside a running drive — a body an inline signature probe
+evaluates beneath a decision, a callee evaluated inline — the check is not
+made and the call keeps its lazy carrier: starting the return's work there
+would nest natively, one level per declared return a chain of calls reaches.
+A typeof frame keeps the operand answers and claims of the reads its
+projection makes (`TypeofFrameBuild`); a new demand discards the tentative
+projection under `observe_read` and retries it after the runtime delivers
+the operand. A pending probe prevents its tentative source shape from
+warming. Only a checker recovery replaces a call's carrier, with its
+expression diagnostic; any other read keeps the named carrier. These reads
+never drive another execution inside a frame step.
+
+A semantic task's demand identity is the query together with its checking
+site (`QueryDemand`): a result completed at one site never answers a need at
+the other, and a need closes a cycle only through an open demand at its own
+site.
