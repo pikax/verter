@@ -1132,6 +1132,12 @@ impl PreparedFunctionBodySkeleton {
     pub fn into_parts(self) -> (FunctionBodySkeleton, FlowBindingMap) {
         (self.skeleton, self.bindings)
     }
+
+    /// A fixture structure of `skeleton` and the `bindings` built over it.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn fixture(skeleton: FunctionBodySkeleton, bindings: FlowBindingMap) -> Self {
+        Self { skeleton, bindings }
+    }
 }
 
 /// Resolve the authored access occurrences against one exact indexed inventory.

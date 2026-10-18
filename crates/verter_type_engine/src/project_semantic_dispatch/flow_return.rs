@@ -62,7 +62,7 @@ use verter_session_query::flow::completion::{
 };
 use verter_session_query::flow::{
     binding::{FlowBindingMap, FlowBindingRef as FlowProductSubject},
-    skeleton::{FunctionBodySkeleton, SkeletonBindingId},
+    skeleton::SkeletonBindingId,
 };
 
 /// A distributed intersection and whether one combination's collapse was
@@ -6981,9 +6981,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             param_names: &ir.params,
             binder_env: &binder_env,
             enclosing_frames: EnclosingFrames::default(),
-            bindings: Arc::clone(&ir.bindings),
-            skeleton: Arc::clone(&skeleton),
-            flow_graph: Arc::clone(bound.bundle().graph()),
+            bindings: ir.bindings.clone(),
+            skeleton: skeleton.clone(),
+            flow_graph: bound.graph_ref(),
             execution_selection,
             plan: demand_carrier
                 .as_ref()
@@ -7097,7 +7097,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             frame_product_evidence = finished.ok().flatten();
             degradation = evaluator.degradation;
-            frame_bindings = Arc::clone(&evaluator.bindings);
+            frame_bindings = evaluator.bindings.clone();
             frame_products = evaluator.products.clone();
             // Fold in every cross-file heritage hop the `instanceof`
             // narrowing observed (see the field doc on
@@ -10276,7 +10276,7 @@ pub(super) trait FlowDemandDriver {
     fn flow_slice_skeleton(
         &self,
         key: &verter_session_query::flow::bundle::FlowSliceFunctionKey,
-    ) -> Option<Arc<FunctionBodySkeleton>>;
+    ) -> Option<verter_session_query::flow::bundle::SkeletonRef>;
     fn flow_slice_lowered(
         &self,
         key: crate::cache_runtime::flow_slice_node::FlowSliceLoweredKey,
@@ -10706,7 +10706,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     fn flow_slice_skeleton(
         &self,
         key: &verter_session_query::flow::bundle::FlowSliceFunctionKey,
-    ) -> Option<Arc<FunctionBodySkeleton>> {
+    ) -> Option<verter_session_query::flow::bundle::SkeletonRef> {
         self.flow_slice_driver().skeleton_for(key)
     }
     fn flow_slice_lowered(
@@ -11449,7 +11449,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     fn flow_slice_skeleton(
         &self,
         key: &verter_session_query::flow::bundle::FlowSliceFunctionKey,
-    ) -> Option<Arc<FunctionBodySkeleton>> {
+    ) -> Option<verter_session_query::flow::bundle::SkeletonRef> {
         self.driver.flow_slice_skeleton(key)
     }
     fn flow_slice_lowered(
@@ -12146,9 +12146,9 @@ struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
     /// DISJOINT slot spaces — a lexical `const` / `let` binding and a
     /// function-scoped `var` of the same name are different subjects, so
     /// neither can read the other's product.
-    bindings: Arc<FlowBindingMap>,
-    skeleton: Arc<FunctionBodySkeleton>,
-    flow_graph: Arc<verter_session_query::flow::flow_graph::FunctionFlowGraph>,
+    bindings: verter_session_query::flow::bundle::BindingsRef,
+    skeleton: verter_session_query::flow::bundle::SkeletonRef,
+    flow_graph: verter_session_query::flow::bundle::GraphRef,
     execution_selection: Arc<super::flow_solve::FlowExecutionSelection>,
     plan: Option<Arc<super::flow_solve::FlowDemandPlan>>,
     anchor: u32,
@@ -26303,8 +26303,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         declared_evolving_captures: &[verter_session_query::function_program::FlowBindingIdentity],
         declared_return: Option<&verter_session_query::flow::slice::GatedType>,
         declared_predicate: Option<&verter_session_query::flow::slice::SlicePredicate>,
-        bindings: &Arc<FlowBindingMap>,
-        skeleton: Arc<FunctionBodySkeleton>,
+        bindings: &verter_session_query::flow::bundle::BindingsRef,
+        skeleton: verter_session_query::flow::bundle::SkeletonRef,
         bound: verter_session_query::flow::bundle::BoundFlowGraph,
         planned: Option<&crate::cache_runtime::flow_slice_node::PlannedFlowSlice>,
         anchor: u32,

@@ -3665,7 +3665,11 @@ impl ProfileState {
 /// can carry a generation the successor reaches again.
 #[derive(Debug)]
 pub(crate) struct RawTemplateAnalysisEntry {
-    pub(crate) template: Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
+    pub(crate) template: verter_session_query::retention::heap_size::OwnedValue<
+        verter_session_query::analysis::template::TemplateAnalysisSnapshot,
+    >,
+    /// The slot's cache hold on the template, refused with the slot.
+    _template_hold: verter_session_query::retention::owned::OwnedHold,
     /// Scheduler source version of the source read the template's
     /// inputs were captured from.
     pub(crate) source_version: verter_scheduler::node::SourceVersion,
@@ -3861,7 +3865,9 @@ impl DerivedRawState {
     /// newer-generation compute already installed.
     pub(crate) fn install_raw_template_analysis(
         &mut self,
-        template: Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
+        template: verter_session_query::retention::heap_size::OwnedValue<
+            verter_session_query::analysis::template::TemplateAnalysisSnapshot,
+        >,
         admission: RawTemplateSlotAdmission,
         account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) {
@@ -3884,8 +3890,17 @@ impl DerivedRawState {
             {
                 return;
             }
+            // The slot retains the template it serves, refusably: refused,
+            // the slot is left as it was and the template stays its
+            // callers' alone.
+            let Ok(template_hold) = template.hold(
+                verter_session_query::retention::owned::ChargeCtx::new(account),
+            ) else {
+                return;
+            };
             self.raw_template_analysis = Some(RawTemplateAnalysisEntry {
                 template,
+                _template_hold: template_hold,
                 source_version,
                 template_class_signature,
             });

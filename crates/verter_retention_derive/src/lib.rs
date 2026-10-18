@@ -15,6 +15,12 @@
 //! Type parameters gain a `HeapSize` bound; field types gain none, so a
 //! recursive type (an enum holding `Arc<Self>`) derives without the trait
 //! solver recursing.
+//!
+//! `#[derive(Unshared)]` — a deep copy that shares no raw allocation with
+//! its source, for `verter_retention::unshared::Unshared`. Every field of
+//! every variant is copied through `Unshared`; `#[unshared(clone)]` copies a
+//! field whose `Clone` already shares no raw allocation (a span, a plain
+//! enum, a self-charged owned handle).
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
@@ -200,4 +206,108 @@ fn iterative(attrs: &[syn::Attribute]) -> syn::Result<bool> {
         })?;
     }
     Ok(iterative)
+}
+
+/// Derive `Unshared` for a `struct` or `enum`. Rejects `union`.
+#[proc_macro_derive(Unshared, attributes(unshared))]
+pub fn derive_unshared(item: TokenStream) -> TokenStream {
+    match syn::parse::<DeriveInput>(item) {
+        Ok(input) => unshared_impl(&input)
+            .unwrap_or_else(|err| err.to_compile_error())
+            .into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+/// Whether `field` carries `#[unshared(clone)]`.
+fn unshared_by_clone(field: &Field) -> syn::Result<bool> {
+    let mut clone = false;
+    for attr in &field.attrs {
+        if !attr.path().is_ident("unshared") {
+            continue;
+        }
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("clone") {
+                clone = true;
+                Ok(())
+            } else {
+                Err(meta.error("expected `clone`"))
+            }
+        })?;
+    }
+    Ok(clone)
+}
+
+/// The construction of `fields` from their unshared copies, each bound to
+/// its pattern binding.
+fn unshared_fields(
+    fields: &Fields,
+    bound: &[(&Field, proc_macro2::Ident)],
+) -> syn::Result<proc_macro2::TokenStream> {
+    let mut copies = Vec::with_capacity(bound.len());
+    for (field, binding) in bound {
+        copies.push(if unshared_by_clone(field)? {
+            quote! { ::core::clone::Clone::clone(#binding) }
+        } else {
+            quote! { ::verter_retention::unshared::Unshared::unshared(#binding) }
+        });
+    }
+    Ok(match fields {
+        Fields::Named(_) => {
+            let names = bound.iter().map(|(_, name)| name);
+            quote! { { #(#names: #copies),* } }
+        }
+        Fields::Unnamed(_) => quote! { ( #(#copies),* ) },
+        Fields::Unit => quote! {},
+    })
+}
+
+fn unshared_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let ident = &input.ident;
+    let mut generics = input.generics.clone();
+    for param in generics.type_params_mut() {
+        param
+            .bounds
+            .push(parse_quote!(::verter_retention::unshared::Unshared));
+    }
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+    let body = match &input.data {
+        Data::Struct(data) => {
+            let (pattern, bound) = pattern(&data.fields);
+            let build = unshared_fields(&data.fields, &bound)?;
+            quote! {
+                let Self #pattern = self;
+                Self #build
+            }
+        }
+        Data::Enum(data) => {
+            let mut arms = Vec::with_capacity(data.variants.len());
+            for variant in &data.variants {
+                let name = &variant.ident;
+                let (pattern, bound) = pattern(&variant.fields);
+                let build = unshared_fields(&variant.fields, &bound)?;
+                arms.push(quote! { Self::#name #pattern => Self::#name #build, });
+            }
+            if arms.is_empty() {
+                quote! { match *self {} }
+            } else {
+                quote! { match self { #(#arms)* } }
+            }
+        }
+        Data::Union(data) => {
+            return Err(syn::Error::new_spanned(
+                data.union_token,
+                "Unshared cannot be derived for a union",
+            ))
+        }
+    };
+    Ok(quote! {
+        impl #impl_generics ::verter_retention::unshared::Unshared for #ident #ty_generics
+            #where_clause
+        {
+            fn unshared(&self) -> Self {
+                #body
+            }
+        }
+    })
 }

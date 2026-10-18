@@ -406,6 +406,13 @@ pub fn owned_tree<T: HeapSize + Send + Sync + 'static>(value: T) -> OwnedTree<T>
     Owned::new(Tree(value))
 }
 
+impl<T> Tree<T> {
+    /// The tree, out of its cell's value ([`Owned::try_unwrap`]).
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+}
+
 impl<T> std::ops::Deref for Tree<T> {
     type Target = T;
     fn deref(&self) -> &T {
@@ -560,6 +567,13 @@ impl<T: HeapSize + Send + Sync + 'static + std::fmt::Debug> std::fmt::Debug for 
 impl<T: HeapSize + Send + Sync + 'static + Default> Default for OwnedValue<T> {
     fn default() -> Self {
         Self::new(T::default())
+    }
+}
+
+impl<T: HeapSize + Send + Sync + 'static + serde::Serialize> serde::Serialize for OwnedValue<T> {
+    /// Serializes as its value.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        (**self).serialize(serializer)
     }
 }
 

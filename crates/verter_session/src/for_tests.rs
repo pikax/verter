@@ -231,18 +231,13 @@ pub fn dispatch_inject_parse_fact_for_tests(
     verter_type_engine::project_semantic_dispatch::DispatchInjectParseFactGuard::arm(fact)
 }
 
-/// Test-visibility shim exposing the canonical
-/// [`execute_type_node`](verter_type_engine::semantic_query::SemanticQueryApi::execute_type_node)
-/// to integration-test crates (dispatch is `pub(crate)`); it returns the typed
-/// [`SemanticQueryOutput<SemanticNodeId>`](verter_type_engine::semantic_query::SemanticQueryOutput)
-/// verbatim — NOT a stripped node API and NOT a second resolver/admission path.
-/// `ProjectSemanticDispatch` is `pub(crate)`, so test crates in
-/// `crates/verter_session/tests/**` cannot construct it directly; this forwards
-/// to the one canonical dispatch and hands back its result unchanged.
 /// Hand `nodes` — construction ordinals a helper's own dispatcher produced —
 /// to the caller's construction scope once that dispatcher is gone, so the
 /// caller reads them for as long as its scope lives. With no caller scope
-/// they are released with the dispatcher.
+/// they are released with the dispatcher. Every ordinal handed here is one
+/// the still-live dispatcher produced — a recursion result included, which
+/// is an allocated opaque node — so a failed rooting is a lost handoff and
+/// panics rather than leaving the caller an ordinal nothing owns.
 fn hand_to_caller_scope<'h>(
     host: &'h crate::VerterHost,
     dispatch: verter_type_engine::project_semantic_dispatch::ThreadDispatch<
@@ -255,11 +250,21 @@ fn hand_to_caller_scope<'h>(
         .project_type_store()
         .semantic_graph()
         .root_nodes(nodes)
-        .unwrap_or_default();
+        .unwrap_or_else(|error| {
+            panic!("a node the live dispatcher produced must root for its caller: {error:?}")
+        });
     drop(dispatch);
     roots.retain_for_construction();
 }
 
+/// Test-visibility shim exposing the canonical
+/// [`execute_type_node`](verter_type_engine::semantic_query::SemanticQueryApi::execute_type_node)
+/// to integration-test crates (dispatch is `pub(crate)`); it returns the typed
+/// [`SemanticQueryOutput<SemanticNodeId>`](verter_type_engine::semantic_query::SemanticQueryOutput)
+/// verbatim — NOT a stripped node API and NOT a second resolver/admission path.
+/// `ProjectSemanticDispatch` is `pub(crate)`, so test crates in
+/// `crates/verter_session/tests/**` cannot construct it directly; this forwards
+/// to the one canonical dispatch and hands back its result unchanged.
 pub fn dispatch_execute_type_node_for_tests(
     host: &crate::VerterHost,
     key: verter_type_engine::semantic_query::SemanticQueryKey,
