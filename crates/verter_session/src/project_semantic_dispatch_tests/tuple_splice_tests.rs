@@ -422,6 +422,30 @@ fn an_expression_splice_past_the_limit_is_ts2800() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Checking for a tuple product must not materialize recursive nominal
+/// members through a generic return alias either.
+#[test]
+fn nominal_returns_through_aliases_keep_their_complete_carrier() {
+    let host = super::checker_probe_lane_tests::probe_host(ProbeProject {
+        ambient_lib: Some(super::differential_global_library_tests::GLOBALS_LIB),
+        ..ProbeProject::default()
+    });
+    let source = r#"
+        type Wrapped<T> = Promise<T>;
+        declare function wrapped<T>(value: T): Wrapped<T>;
+        export function held() { return wrapped(1); }
+    "#;
+    let result = flow_return_audited_on_host(&host, source, "held")
+        .into_result()
+        .expect("the declared call return is available");
+    assert!(
+        result.fact().status().is_complete(),
+        "{:?}",
+        result.fact().status()
+    );
+    assert!(result.degradation().is_none(), "{:?}", result.degradation());
+}
+
 /// The product built, refused or left unpaid by one splice, read directly
 /// inside a connected demand with `work` units and `bytes` construction
 /// bytes: the shape, the work and bytes it charged, and the demand's trip.
