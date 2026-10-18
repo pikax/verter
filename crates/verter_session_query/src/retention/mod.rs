@@ -6,6 +6,7 @@
 pub use verter_retention::*;
 
 pub mod allocation;
+pub mod heap_size_foreign;
 pub(crate) mod resident;
 pub mod resolution_charge;
 

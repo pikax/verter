@@ -279,7 +279,7 @@ fn raise_and_reduce_preserves_open_keyof_over_type_parameter() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let keyof = graph.intern_node(SemanticNodeData::KeyOf { base: type_param });
 
@@ -345,7 +345,9 @@ fn raise_and_reduce_template_literal_becomes_unknown_hard_stop() {
         .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let template = graph.intern_node(SemanticNodeData::TemplateLiteral {
-        quasis: Arc::from(vec![Arc::from("prefix-")].into_boxed_slice()),
+        quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+            vec![verter_type_expr::OwnedStr::from("prefix-")].into_boxed_slice(),
+        ),
         expressions: verter_type_engine::semantic_query::PayloadArray::from(
             Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
         ),
@@ -498,7 +500,7 @@ fn utility_enumeration_domain_open_for_unbound_generic_closed_for_concrete() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let props_base_open = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: DeclIdentity {
@@ -682,7 +684,7 @@ fn utility_enumeration_domain_open_via_indexed_access_and_mapped_keyspace() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
 
     // IndexedAccess { object: concrete, index: TypeNode(open K) }.
@@ -723,7 +725,7 @@ fn utility_enumeration_domain_open_via_indexed_access_and_mapped_keyspace() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("MapBinder"),
+        display_name: verter_type_expr::OwnedStr::from("MapBinder"),
     });
     let mapped_open_keyspace = graph.intern_node(SemanticNodeData::Mapped {
         source: concrete_object,
@@ -801,14 +803,14 @@ fn utility_enumeration_domain_mapped_name_remap_binder_bound_outer_open() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
     let outer_t = graph.intern_node(SemanticNodeData::TypeParam {
         decl: DeclIdentity::synthetic("T"),
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
 
     let make_mapped = |remap: SemanticNodeId| {
@@ -828,8 +830,12 @@ fn utility_enumeration_domain_mapped_name_remap_binder_bound_outer_open() {
     };
     let template = |interpolant: SemanticNodeId| {
         graph.intern_node(SemanticNodeData::TemplateLiteral {
-            quasis: Arc::from(
-                vec![Arc::<str>::from("on"), Arc::<str>::from("")].into_boxed_slice(),
+            quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+                vec![
+                    verter_type_expr::OwnedStr::from("on"),
+                    verter_type_expr::OwnedStr::from(""),
+                ]
+                .into_boxed_slice(),
             ),
             expressions: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![interpolant].into_boxed_slice(),
@@ -864,7 +870,9 @@ fn utility_enumeration_domain_mapped_name_remap_binder_bound_outer_open() {
 
     // CLOSED control: a CONCRETE name-remap (no interpolant).
     let closed_remap = graph.intern_node(SemanticNodeData::TemplateLiteral {
-        quasis: Arc::from(vec![Arc::<str>::from("on")].into_boxed_slice()),
+        quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+            vec![verter_type_expr::OwnedStr::from("on")].into_boxed_slice(),
+        ),
         expressions: verter_type_engine::semantic_query::PayloadArray::from(
             Vec::new().into_boxed_slice(),
         ),

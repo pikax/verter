@@ -970,3 +970,74 @@ fn dropping_a_pending_subscription_releases_its_edge_and_waker() {
     drop((first, second));
     assert_eq!(store.wait_graph_counts_for_tests(), (0, 0));
 }
+
+/// Two subscriptions polled with the same executor waker hold two
+/// registrations: dropping one withdraws only its own, so the producer
+/// settling afterwards still wakes the survivor, which reads the value.
+#[test]
+fn dropping_one_subscription_keeps_a_shared_wakers_other_registration() {
+    let (host, hash) = keyed_host();
+    let store = SemanticGraphStore::new();
+    let first = store.task_registry_for_tests().register_task();
+    let second = store.task_registry_for_tests().register_task();
+    let third = store.task_registry_for_tests().register_task();
+    let (claimed, _first_attempt) = claim(&store, &host, &first);
+    let Claim::Produce(lease) = claimed else {
+        panic!("the first claim of a cold key produces it");
+    };
+    let (subscribed, mut dropped_attempt) = claim(&store, &host, &second);
+    let Claim::Subscribed(mut dropped) = subscribed else {
+        panic!("another task's claim subscribes to the open producer");
+    };
+    let (subscribed, mut attempt) = claim(&store, &host, &third);
+    let Claim::Subscribed(mut survivor) = subscribed else {
+        panic!("a third task's claim subscribes to the open producer");
+    };
+    let counter = Arc::new(CountingWaker(Default::default()));
+    let waker = std::task::Waker::from(Arc::clone(&counter));
+    for (subscription, attempt) in [
+        (&mut dropped, &mut dropped_attempt),
+        (&mut survivor, &mut attempt),
+    ] {
+        let mut capture = ReadCapture::default();
+        assert!(subscription
+            .poll(&host, host.request_flags(), attempt, &mut capture, &waker)
+            .is_pending());
+    }
+    drop(dropped);
+    let mut capture = ReadCapture::default();
+    let flags = host.request_flags();
+    let Ok(mut settled) = lease.settle(&host, flags, keyed_output(&store, hash), None) else {
+        panic!("an uncancelled producer settles");
+    };
+    settled
+        .admit(&host, flags, &mut capture)
+        .expect("an uncancelled producer is admitted");
+    let _ = settled.complete(&host, &mut capture);
+    assert_eq!(
+        counter.0.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the surviving subscription's registration wakes its task"
+    );
+    let mut capture = ReadCapture::default();
+    match survivor.poll(
+        &host,
+        host.request_flags(),
+        &mut attempt,
+        &mut capture,
+        &waker,
+    ) {
+        std::task::Poll::Ready(Joined::Read(read)) => assert!(
+            matches!(read.value(), QueryResult::Value(_)),
+            "the woken survivor reads the producer's value"
+        ),
+        std::task::Poll::Ready(Joined::Retry) => panic!("a same-view subscriber reuses the value"),
+        std::task::Poll::Ready(Joined::Recursive(recursion)) => {
+            panic!("no cycle of waits exists: {recursion:?}")
+        }
+        std::task::Poll::Pending => panic!("a settled producer resolves the survivor"),
+    }
+    drop(survivor);
+    drop((first, second, third));
+    assert_eq!(store.wait_graph_counts_for_tests(), (0, 0));
+}

@@ -170,7 +170,6 @@ struct StagedMember {
     eviction: family::EvictionVictim,
     /// The value a waiting joiner receives when the flight completes.
     completed: QueryResult<SemanticQueryValue>,
-    admission_seq: u64,
     flight: InlineMemberFlight,
 }
 
@@ -446,8 +445,7 @@ impl SemanticGraphStore {
             .iter()
             .map(|member| (&member.family, &member.entry))
             .collect();
-        let direct_edges = reverse_index::ReverseIndexInputs::new(carrier, &dispatch_dep_signature)
-            .direct_edge_count();
+        let direct_edges = reverse_index::direct_edge_count(carrier, &dispatch_dep_signature);
         let retentions = match self.reserve_scc_batch(&staged_entries, direct_edges) {
             Ok(retentions) => retentions,
             Err(_) => {
@@ -484,8 +482,6 @@ impl SemanticGraphStore {
             }
         }
 
-        let reverse_index_inputs =
-            reverse_index::ReverseIndexInputs::new(carrier, &dispatch_dep_signature);
         let mut entries = self.entries_lock_diagnosed();
         let root_is_published = entries.get(&required_root.family).is_some_and(|slots| {
             slots
@@ -540,8 +536,6 @@ impl SemanticGraphStore {
                 member.family_charge,
                 member.entry,
                 member.eviction,
-                &reverse_index_inputs,
-                member.admission_seq,
             );
             if is_new {
                 newly_keyed.push(member.family.clone());
@@ -612,6 +606,7 @@ impl SemanticGraphStore {
             retention: None,
             validated_at_generation,
             admission_seq: 0,
+            reverse_indexed: false,
             cost_receipt: Arc::clone(cost_receipt),
         })
     }
@@ -753,8 +748,7 @@ impl SemanticGraphStore {
         flight: InlineMemberFlight,
         ctx: Option<&dyn crate::resolver_core::ResolverContext<C>>,
     ) -> StagedMember {
-        let admission_seq = self.alloc_candidate_admission_seq();
-        entry.admission_seq = admission_seq;
+        entry.admission_seq = self.alloc_candidate_admission_seq();
         let QueryResult::Value(value) = &entry.result else {
             unreachable!("a staged SCC member always carries a decided value")
         };
@@ -777,7 +771,6 @@ impl SemanticGraphStore {
             entry,
             eviction,
             completed,
-            admission_seq,
             flight,
         }
     }
@@ -799,8 +792,6 @@ impl SemanticGraphStore {
         family_charge: Option<verter_session_query::retention::RetentionCharge>,
         entry: MemoEntry,
         eviction: family::EvictionVictim,
-        reverse_index_inputs: &reverse_index::ReverseIndexInputs,
-        admission_seq: u64,
     ) -> NewlyKeyedFamily {
         let cap = family.candidate_cap();
         let Some((slots, family_was_new)) =
@@ -808,6 +799,7 @@ impl SemanticGraphStore {
         else {
             return NewlyKeyedFamily(false);
         };
+        let admission_seq = entry.admission_seq;
         let outcome = slots.publish(
             ModeSlot::Single,
             entry,
@@ -823,13 +815,11 @@ impl SemanticGraphStore {
                 displaced_entry,
             );
         }
-        reverse_index::register_reverse_index(
-            &self.canonical_to_entries,
-            family,
-            &populated_slots,
-            reverse_index_inputs,
-            admission_seq,
-        );
+        // The member enters the reverse index when the index is next read,
+        // under the `entries` lock this publish holds.
+        if !populated_slots.is_empty() {
+            self.defer_reverse_index_registration(family, admission_seq, entries.len());
+        }
         NewlyKeyedFamily(family_was_new && !populated_slots.is_empty())
     }
 
@@ -877,27 +867,14 @@ impl SemanticGraphStore {
         entry.admission_seq = admission_seq;
         // A seed is charged like every published candidate; one the account
         // refuses is not seeded.
-        let reverse_index_inputs =
-            reverse_index::ReverseIndexInputs::new(&carrier, &dispatch_dep_signature);
-        let Ok(retention) = self.reserve_memo_candidate(
-            &entry,
-            &family,
-            1,
-            reverse_index_inputs.direct_edge_count(),
-        ) else {
+        let direct_edges = reverse_index::direct_edge_count(&carrier, &dispatch_dep_signature);
+        let Ok(retention) = self.reserve_memo_candidate(&entry, &family, 1, direct_edges) else {
             return;
         };
         entry.retention = Some(retention);
         let mut entries = self.entries_lock_diagnosed();
-        let NewlyKeyedFamily(is_new) = self.publish_staged_locked(
-            &mut entries,
-            &family,
-            None,
-            entry,
-            eviction,
-            &reverse_index_inputs,
-            admission_seq,
-        );
+        let NewlyKeyedFamily(is_new) =
+            self.publish_staged_locked(&mut entries, &family, None, entry, eviction);
         // A seeded ROOT is a lone family, not a component: it takes the
         // ordinary unexempted admission, exactly like `warm_publish_one`.
         if is_new {

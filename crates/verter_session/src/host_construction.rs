@@ -945,7 +945,7 @@ impl VerterHost {
     #[must_use]
     pub fn semantic_dispatch(
         &self,
-    ) -> verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+    ) -> verter_type_engine::project_semantic_dispatch::ThreadDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     > {

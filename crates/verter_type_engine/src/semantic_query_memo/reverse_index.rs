@@ -48,6 +48,15 @@
 //! ([`ReceiptReverseIndex::charging_registrations`]). There is no
 //! account-less index: [`Default`] charges the process-local account.
 //!
+//! **Registration on read (family memo).** Publishing a family-memo
+//! candidate leaves it unindexed and notes its family and admission sequence
+//! in [`PendingRegistrations`]; the next read of the index registers exactly
+//! those candidates under the same `entries` lock hold as that read
+//! ([`SemanticGraphStore::index_unregistered_candidates_locked`](super::SemanticGraphStore)),
+//! so its work follows the publishes since the previous read, not the memo's
+//! size. A read therefore sees every resident candidate, and a candidate
+//! displaced or evicted before any read is dropped with nothing to unlink.
+//!
 //! **Locking.** One leaf mutex guards the whole index; no other lock is
 //! taken while it is held, and evidence the index drops is released after
 //! it unlocks. Callers register and unregister inside their own consistency
@@ -813,38 +822,136 @@ impl MemoRegistration {
 /// registration change in one step.
 pub(super) type CanonicalToEntries = ReceiptReverseIndex<u64, MemoRegistration>;
 
-/// One publication's registration inputs, reused by every member of a
-/// publication batch: the carrier and the dispatch-fence canonicals.
-pub(super) struct ReverseIndexInputs<'a> {
-    carrier: &'a Arc<[FactVersionRef]>,
-    extras: SmallVec<[&'a str; 8]>,
+/// The edges a family-memo candidate registers names: one per distinct
+/// dispatch-fence canonical and one from its carrier when the carrier holds
+/// any fact. Zero when it registers nothing.
+pub(super) fn direct_edge_count(
+    read_set_signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
+    dispatch_dep_signature: &DepSignature,
+) -> usize {
+    dispatch_fence_canonicals(dispatch_dep_signature).len()
+        + usize::from(!read_set_signature.facts.is_empty())
 }
 
-impl<'a> ReverseIndexInputs<'a> {
-    pub(super) fn new(
-        read_set_signature: &'a verter_session_query::facts::fact_cache::ReadSetSignature,
-        dispatch_dep_signature: &'a DepSignature,
-    ) -> Self {
+/// A dispatch fence's canonicals, each once.
+fn dispatch_fence_canonicals(dispatch_dep_signature: &DepSignature) -> SmallVec<[&str; 8]> {
+    dedup_canonicals(
+        dispatch_dep_signature
+            .iter()
+            .map(|crate::semantic_query::DepEntry(canonical, _)| canonical.as_ref()),
+    )
+}
+
+/// The family-memo candidates published since the reverse index was last
+/// read, so the read registers exactly those instead of walking every
+/// resident family. Locked only while the family memo's `entries` lock is
+/// held (`entries → pending`), so it never contends.
+///
+/// The list is charged, pinned, while it waits: its backing by capacity and
+/// the boxes each entry's family-key clone copies (the clone shares the
+/// key's `Arc`s and owned names, which keep their own charges). The read
+/// that takes the list gives the charge back.
+pub(super) struct PendingRegistrations {
+    /// Each publish's family and admission sequence, in publish order. An
+    /// entry whose candidate was displaced or evicted before the read
+    /// finds nothing to register.
+    published: Vec<(FamilyKey, u64)>,
+    /// The list grew to the memo's resident family count (repeat publishes
+    /// into resident families, or candidates evicted unread) and was
+    /// dropped: the next read registers every unindexed resident candidate
+    /// in one walk. The list therefore never outgrows the memo it indexes,
+    /// and the walk costs no more per publish than the list it replaces.
+    overflowed: bool,
+    /// The heap the waiting family-key clones copied.
+    key_heap: usize,
+    account: Arc<SemanticRetentionAccount>,
+    pin: Option<GranularPin>,
+}
+
+/// What a reverse-index read registers.
+pub(super) enum PendingWork {
+    /// Nothing was published since the previous read.
+    None,
+    /// These publishes' candidates.
+    Published(Vec<(FamilyKey, u64)>),
+    /// Every unindexed resident candidate.
+    All,
+}
+
+impl PendingRegistrations {
+    /// An empty list whose storage is charged to `account`.
+    pub(super) fn charged(account: &Arc<SemanticRetentionAccount>) -> Self {
         Self {
-            carrier: &read_set_signature.facts,
-            extras: dedup_canonicals(
-                dispatch_dep_signature
-                    .iter()
-                    .map(|crate::semantic_query::DepEntry(canonical, _)| canonical.as_ref()),
-            ),
+            published: Vec::new(),
+            overflowed: false,
+            key_heap: 0,
+            account: Arc::clone(account),
+            pin: None,
         }
     }
 
-    /// The edges a candidate registered from these inputs names: one per
-    /// dispatch-fence canonical and one from its carrier. Zero when it
-    /// registers nothing.
-    pub(super) fn direct_edge_count(&self) -> usize {
-        self.extras.len() + usize::from(!self.carrier.is_empty())
+    /// Note one published candidate; `resident_families` is the memo's
+    /// family count after the publish.
+    pub(super) fn note(
+        &mut self,
+        family: &FamilyKey,
+        admission_seq: u64,
+        resident_families: usize,
+    ) {
+        if self.overflowed {
+            return;
+        }
+        if self.published.len() >= resident_families {
+            self.published = Vec::new();
+            self.overflowed = true;
+            self.key_heap = 0;
+            self.settle();
+            return;
+        }
+        self.published.push((family.clone(), admission_seq));
+        self.key_heap += super::family_footprint::family_key_clone_heap_bytes(family).bytes;
+        self.settle();
+    }
+
+    /// Bytes the pending list is charged.
+    pub(super) fn storage_charge_bytes(&self) -> usize {
+        self.pin.as_ref().map_or(0, GranularPin::charged)
+    }
+
+    /// Settle the charge with the list's backing and its keys' heap.
+    fn settle(&mut self) {
+        let bytes =
+            verter_session_query::retention::allocation::vec_bytes(&self.published) + self.key_heap;
+        let account = &self.account;
+        let pin = self
+            .pin
+            .get_or_insert_with(|| GranularPin::new(account, INDEX_STORAGE_GRANULE));
+        let used = pin.used();
+        if bytes > used {
+            pin.add(bytes - used);
+        } else if used > bytes {
+            pin.sub(used - bytes);
+        }
+    }
+
+    /// Take the registration work a read owes, leaving none pending.
+    pub(super) fn take(&mut self) -> PendingWork {
+        let published = std::mem::take(&mut self.published);
+        let overflowed = std::mem::take(&mut self.overflowed);
+        self.key_heap = 0;
+        self.settle();
+        if overflowed {
+            PendingWork::All
+        } else if published.is_empty() {
+            PendingWork::None
+        } else {
+            PendingWork::Published(published)
+        }
     }
 }
 
 /// What one family-memo candidate's registration keeps, by the edges naming
-/// it ([`ReverseIndexInputs::direct_edge_count`]): its node, its edges, and
+/// it ([`direct_edge_count`]): its node, its edges, and
 /// the one `Arc<FamilyKey>` clone it names its family by — its block and the
 /// boxes the clone copies, plus the owned names the clone shares with
 /// `family`, handed back for the candidate to hold. The evidence it shares
@@ -870,29 +977,39 @@ pub(super) fn registration_footprint(
     }
 }
 
-/// Register the just-published candidate `admission_seq` for every slot
-/// its publication populated. Caller holds the `entries` lock.
-pub(super) fn register_reverse_index(
+/// Register `entry`, the candidate it was admitted as, for `slot`: the first
+/// of its slots registers its carrier and dispatch-fence canonicals, each
+/// later one joins that registration. A candidate with no direct edge
+/// registers nothing. Caller holds the `entries` lock.
+pub(super) fn register_candidate(
     canonical_to_entries: &CanonicalToEntries,
-    family: &FamilyKey,
-    populated_slots: &[ModeSlot],
-    inputs: &ReverseIndexInputs<'_>,
-    admission_seq: u64,
+    family: &Arc<FamilyKey>,
+    slot: ModeSlot,
+    entry: &MemoEntry,
 ) {
-    if populated_slots.is_empty() || inputs.direct_edge_count() == 0 {
+    if canonical_to_entries.update(&entry.admission_seq, |registration| {
+        if !registration.slots.contains(&slot) {
+            registration.slots.push(slot);
+        }
+        true
+    }) {
+        return;
+    }
+    let extras = dispatch_fence_canonicals(&entry.dispatch_dep_signature);
+    if entry.read_set_signature.facts.is_empty() && extras.is_empty() {
         return;
     }
     // The index's lock acquisition, as request audit contention.
     #[cfg(feature = "semantic-observe")]
     crate::request_observers::record_family_map_lock_acquisition(std::time::Duration::ZERO);
     canonical_to_entries.register(
-        admission_seq,
+        entry.admission_seq,
         MemoRegistration {
-            family: Arc::new(family.clone()),
-            slots: populated_slots.iter().copied().collect(),
+            family: Arc::clone(family),
+            slots: smallvec::smallvec![slot],
         },
-        inputs.carrier,
-        inputs.extras.iter().copied(),
+        &entry.read_set_signature.facts,
+        extras,
     );
 }
 
@@ -904,6 +1021,9 @@ pub(super) fn drain_candidate_reverse_index_registrations(
     slot: ModeSlot,
     entry: &MemoEntry,
 ) {
+    if !entry.reverse_indexed {
+        return;
+    }
     canonical_to_entries.update(&entry.admission_seq, |registration| {
         registration.slots.retain(|registered| *registered != slot);
         !registration.slots.is_empty()
@@ -919,6 +1039,9 @@ pub(super) fn drain_family_slots_registrations(
 ) -> bool {
     let mut pruned_any = false;
     for (slot, entry) in slots.iter_populated_slots_all() {
+        if !entry.reverse_indexed {
+            continue;
+        }
         pruned_any |= canonical_to_entries.update(&entry.admission_seq, |registration| {
             registration.slots.retain(|registered| *registered != slot);
             !registration.slots.is_empty()

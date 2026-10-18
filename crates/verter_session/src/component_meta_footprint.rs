@@ -51,28 +51,81 @@ pub(crate) fn cached_result_footprint(
         canonical_id,
         whole_hash,
     } = result;
-    let mut meter = Meter::default();
+    let mut aliases = AliasSet::new();
+    let mut meter = Meter::new(&mut aliases);
     let m = &mut meter;
     let bytes =
         analysis.heap(m) + resolution_template.heap(m) + canonical_id.heap(m) + inline(whole_hash);
     verter_session_query::retention::Footprint {
         bytes,
-        handles: meter.aliases.take_handles(),
+        handles: aliases.take_handles(),
+    }
+}
+
+/// A resolved component-meta state — the value the stable component-meta
+/// request cache retains — measured whole: its analysis snapshot, its
+/// resolution payload, its synthesis diagnostics and its audit sidecar.
+impl verter_retention::heap_size::HeapSize for crate::meta_resolve::ResolvedComponentMetaState {
+    fn heap_size<'t>(
+        &'t self,
+        meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+    ) -> usize {
+        let Self {
+            snapshot,
+            mode,
+            whole_hash,
+            resolved_macros,
+            resolved_type_registry,
+            resolved_type_registry_meta,
+            evaluated_types,
+            fact_versions,
+            compute_audit,
+            surface_identities,
+            origin_graph,
+            request_id,
+            synthesis_diagnostics,
+            completeness,
+            synthesis_should_suppress,
+        } = self;
+        let analysis = snapshot.heap_size(meter) + compute_audit.heap_size(meter);
+        let mut payload = Meter::new(meter.handles());
+        let m = &mut payload;
+        analysis
+            + mode.heap(m)
+            + whole_hash.heap(m)
+            + resolved_macros.heap(m)
+            + resolved_type_registry.heap(m)
+            + resolved_type_registry_meta.heap(m)
+            + evaluated_types.heap(m)
+            + fact_vec_bytes(fact_versions, &mut *m.aliases)
+            + surface_identities.heap(m)
+            + origin_graph.heap(m)
+            + inline(request_id)
+            + synthesis_diagnostics.heap(m)
+            + completeness.heap(m)
+            + synthesis_should_suppress.heap(m)
     }
 }
 
 /// One measurement: the `Arc` allocations already counted, by handle and
 /// by borrowed payload address.
-#[derive(Default)]
-struct Meter {
-    aliases: AliasSet,
+struct Meter<'a> {
+    aliases: &'a mut AliasSet,
     /// Payload addresses of `Arc` allocations whose owner exposes only a
     /// borrow. Every such address names an allocation the measured value
     /// holds for the whole measurement.
     borrowed: FxHashSet<usize>,
 }
 
-impl Meter {
+impl<'a> Meter<'a> {
+    /// A measurement offering owned handles to `aliases`.
+    fn new(aliases: &'a mut AliasSet) -> Self {
+        Self {
+            aliases,
+            borrowed: FxHashSet::default(),
+        }
+    }
+
     /// `true` the first time the `Arc` payload at `value` is offered.
     fn first_borrow<T: ?Sized>(&mut self, value: &T) -> bool {
         self.borrowed
@@ -82,7 +135,7 @@ impl Meter {
 
 /// Heap a payload value owns beyond its inline bytes.
 trait PayloadHeap {
-    fn heap(&self, m: &mut Meter) -> usize;
+    fn heap(&self, m: &mut Meter<'_>) -> usize;
 }
 
 /// A `Copy` value owns no heap.
@@ -91,7 +144,7 @@ fn inline<T: Copy>(_value: &T) -> usize {
 }
 
 /// An `Arc<T>` block and its payload's heap, once per measurement.
-fn arc_heap<T: PayloadHeap>(value: &Arc<T>, m: &mut Meter) -> usize {
+fn arc_heap<T: PayloadHeap>(value: &Arc<T>, m: &mut Meter<'_>) -> usize {
     if m.aliases.first(value) {
         arc_block_bytes(std::mem::size_of::<T>()) + (**value).heap(m)
     } else {
@@ -100,7 +153,7 @@ fn arc_heap<T: PayloadHeap>(value: &Arc<T>, m: &mut Meter) -> usize {
 }
 
 /// An `Arc<[T]>` payload its owner exposes only as a borrowed slice.
-fn borrowed_arc_slice<T: PayloadHeap>(slice: &[T], m: &mut Meter) -> usize {
+fn borrowed_arc_slice<T: PayloadHeap>(slice: &[T], m: &mut Meter<'_>) -> usize {
     if m.first_borrow(slice) {
         arc_block_bytes(std::mem::size_of_val(slice))
             + slice.iter().map(|item| item.heap(m)).sum::<usize>()
@@ -110,7 +163,7 @@ fn borrowed_arc_slice<T: PayloadHeap>(slice: &[T], m: &mut Meter) -> usize {
 }
 
 /// An `Arc<T>` payload its owner exposes only as a borrow.
-fn borrowed_arc_value<T: PayloadHeap>(value: &T, m: &mut Meter) -> usize {
+fn borrowed_arc_value<T: PayloadHeap>(value: &T, m: &mut Meter<'_>) -> usize {
     if m.first_borrow(value) {
         arc_block_bytes(std::mem::size_of::<T>()) + value.heap(m)
     } else {
@@ -119,7 +172,7 @@ fn borrowed_arc_value<T: PayloadHeap>(value: &T, m: &mut Meter) -> usize {
 }
 
 /// An `Arc<str>` payload its owner exposes only as a borrowed `str`.
-fn borrowed_arc_str(text: &str, m: &mut Meter) -> usize {
+fn borrowed_arc_str(text: &str, m: &mut Meter<'_>) -> usize {
     if m.first_borrow(text) {
         arc_block_bytes(text.len())
     } else {
@@ -128,21 +181,21 @@ fn borrowed_arc_str(text: &str, m: &mut Meter) -> usize {
 }
 
 impl PayloadHeap for String {
-    fn heap(&self, _m: &mut Meter) -> usize {
+    fn heap(&self, _m: &mut Meter<'_>) -> usize {
         heap_block_bytes(self.capacity())
     }
 }
 
 impl PayloadHeap for Arc<str> {
-    fn heap(&self, m: &mut Meter) -> usize {
-        arc_str_bytes(self, &mut m.aliases)
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
+        arc_str_bytes(self, &mut *m.aliases)
     }
 }
 
 impl PayloadHeap for verter_type_expr::OwnedStr {
     /// An owned string: charged by its own cell.
-    fn heap(&self, m: &mut Meter) -> usize {
-        self.offer(&mut m.aliases)
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
+        self.offer(&mut *m.aliases)
     }
 }
 
@@ -150,20 +203,20 @@ impl<T: verter_session_query::retention::owned::Measured> PayloadHeap
     for verter_type_expr::OwnedSlice<T>
 {
     /// An owned slice: charged by its own cell.
-    fn heap(&self, m: &mut Meter) -> usize {
-        self.offer(&mut m.aliases)
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
+        self.offer(&mut *m.aliases)
     }
 }
 
 impl<T: PayloadHeap> PayloadHeap for Vec<T> {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         vec_bytes(self) + self.iter().map(|item| item.heap(m)).sum::<usize>()
     }
 }
 
 impl<T: PayloadHeap> PayloadHeap for Arc<[T]> {
-    fn heap(&self, m: &mut Meter) -> usize {
-        let Some(block) = arc_slice_block_bytes(self, &mut m.aliases) else {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
+        let Some(block) = arc_slice_block_bytes(self, &mut *m.aliases) else {
             return 0;
         };
         block + self.iter().map(|item| item.heap(m)).sum::<usize>()
@@ -171,19 +224,19 @@ impl<T: PayloadHeap> PayloadHeap for Arc<[T]> {
 }
 
 impl<T: PayloadHeap> PayloadHeap for Option<T> {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         self.as_ref().map_or(0, |value| value.heap(m))
     }
 }
 
 impl<T: PayloadHeap> PayloadHeap for Box<T> {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         box_bytes::<T>() + (**self).heap(m)
     }
 }
 
 impl<A: PayloadHeap, B: PayloadHeap, C: PayloadHeap> PayloadHeap for (A, B, C) {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         self.0.heap(m) + self.1.heap(m) + self.2.heap(m)
     }
 }
@@ -192,7 +245,7 @@ impl<A: PayloadHeap, B: PayloadHeap, C: PayloadHeap> PayloadHeap for (A, B, C) {
 macro_rules! inline_copy {
     ($($t:ty),* $(,)?) => {$(
         impl PayloadHeap for $t {
-            fn heap(&self, _m: &mut Meter) -> usize {
+            fn heap(&self, _m: &mut Meter<'_>) -> usize {
                 inline(self)
             }
         }
@@ -204,7 +257,7 @@ macro_rules! inline_copy {
 macro_rules! fieldless {
     ($($t:path { $($v:ident),* $(,)? })*) => {$(
         impl PayloadHeap for $t {
-            fn heap(&self, _m: &mut Meter) -> usize {
+            fn heap(&self, _m: &mut Meter<'_>) -> usize {
                 use $t as Enum;
                 match self {
                     $(Enum::$v)|* => 0,
@@ -382,7 +435,7 @@ fieldless! {
 // ---------------------------------------------------------------------------
 
 impl PayloadHeap for ResolutionTemplate {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let ResolutionTemplate {
             mode,
             whole_hash,
@@ -402,7 +455,7 @@ impl PayloadHeap for ResolutionTemplate {
             + resolved_type_registry.heap(m)
             + resolved_type_registry_meta.heap(m)
             + evaluated_types.heap(m)
-            + fact_vec_bytes(fact_versions, &mut m.aliases)
+            + fact_vec_bytes(fact_versions, &mut *m.aliases)
             + surface_identities.heap(m)
             + origin_graph.heap(m)
             + completeness.heap(m)
@@ -411,7 +464,7 @@ impl PayloadHeap for ResolutionTemplate {
 }
 
 impl PayloadHeap for crate::resolver_core::ResolvedMacroMeta {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             macro_index,
             macro_kind,
@@ -434,14 +487,14 @@ impl PayloadHeap for crate::resolver_core::ResolvedMacroMeta {
 }
 
 impl PayloadHeap for crate::resolver_core::ResolvedTypeRegistryMeta {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self { name, declaration } = self;
         name.heap(m) + declaration.heap(m)
     }
 }
 
 impl PayloadHeap for verter_session_query::declarations::metadata::ResolvedTypeDeclaration {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             requested_name,
             declaration_id,
@@ -464,7 +517,7 @@ impl PayloadHeap for verter_session_query::declarations::metadata::ResolvedTypeD
 }
 
 impl PayloadHeap for crate::resolver_core::ResolvedNativeProp {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             name,
             is_optional,
@@ -481,14 +534,14 @@ impl PayloadHeap for crate::resolver_core::ResolvedNativeProp {
 }
 
 impl PayloadHeap for crate::resolver_core::ResolvedJsdocBlock {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self { description, tags } = self;
         description.heap(m) + tags.heap(m)
     }
 }
 
 impl PayloadHeap for crate::resolver_core::ResolvedJsdocTag {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             name,
             text,
@@ -507,14 +560,14 @@ impl PayloadHeap for crate::resolver_core::ResolvedJsdocTag {
 impl PayloadHeap for verter_protocol::graph::snapshot::ResolvedJsdocTypeOutput {
     /// The display text and the graph snapshot's tables, which clones of
     /// one snapshot share.
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self { display, graph } = self;
-        display.heap(m) + graph.owned_heap_bytes(&mut m.aliases)
+        display.heap(m) + graph.owned_heap_bytes(&mut *m.aliases)
     }
 }
 
 impl PayloadHeap for crate::meta_resolve::SurfaceNodeIdentities {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             prop_node_ids,
             emit_node_ids,
@@ -531,7 +584,7 @@ impl PayloadHeap for crate::meta_resolve::SurfaceNodeIdentities {
 }
 
 impl PayloadHeap for verter_protocol::types::OriginGraphDto {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             nodes,
             edges,
@@ -542,14 +595,14 @@ impl PayloadHeap for verter_protocol::types::OriginGraphDto {
 }
 
 impl PayloadHeap for verter_protocol::types::OriginNodeDto {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self { id, kind, label } = self;
         id.heap(m) + kind.heap(m) + label.heap(m)
     }
 }
 
 impl PayloadHeap for verter_protocol::types::OriginEdgeDto {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             source,
             target,
@@ -565,7 +618,7 @@ impl PayloadHeap for verter_protocol::types::OriginEdgeDto {
 // ---------------------------------------------------------------------------
 
 impl PayloadHeap for tx::ExpandedComponentTypes {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             props,
             define_props,
@@ -588,7 +641,7 @@ impl PayloadHeap for tx::ExpandedComponentTypes {
 }
 
 impl PayloadHeap for tx::ExpandedField {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             name,
             owner,
@@ -613,7 +666,7 @@ impl PayloadHeap for tx::ExpandedField {
 }
 
 impl PayloadHeap for tx::ExpandedMacroProps {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             macro_index,
             result,
@@ -623,7 +676,7 @@ impl PayloadHeap for tx::ExpandedMacroProps {
 }
 
 impl PayloadHeap for tx::ExpandedMacroObjectShape {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             macro_index,
             result,
@@ -633,7 +686,7 @@ impl PayloadHeap for tx::ExpandedMacroObjectShape {
 }
 
 impl PayloadHeap for tx::ExpandedMacroExposed {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             macro_index,
             fields,
@@ -643,7 +696,7 @@ impl PayloadHeap for tx::ExpandedMacroExposed {
 }
 
 impl<T: PayloadHeap> PayloadHeap for tx::ExpansionResult<T> {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             value,
             exactness,
@@ -655,7 +708,7 @@ impl<T: PayloadHeap> PayloadHeap for tx::ExpansionResult<T> {
 }
 
 impl PayloadHeap for tx::ExpandedObjectShape {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             domain_guarantee,
             properties,
@@ -670,7 +723,7 @@ impl PayloadHeap for tx::ExpandedObjectShape {
 }
 
 impl PayloadHeap for tx::ExpandedProperty {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             name,
             ty,
@@ -689,7 +742,7 @@ impl PayloadHeap for tx::ExpandedProperty {
 }
 
 impl PayloadHeap for tx::ExpandedIndexSignature {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             key_type,
             value_type,
@@ -700,7 +753,7 @@ impl PayloadHeap for tx::ExpandedIndexSignature {
 }
 
 impl PayloadHeap for tx::ExpandedCallSignature {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             parameters,
             return_type,
@@ -711,7 +764,7 @@ impl PayloadHeap for tx::ExpandedCallSignature {
 }
 
 impl PayloadHeap for tx::ExpandedParameter {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             name,
             ty,
@@ -723,7 +776,7 @@ impl PayloadHeap for tx::ExpandedParameter {
 }
 
 impl PayloadHeap for tx::ExpansionMetadata {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             exactness,
             execution_status,
@@ -734,7 +787,7 @@ impl PayloadHeap for tx::ExpansionMetadata {
 }
 
 impl PayloadHeap for tx::ExpansionDiagnostic {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             reason,
             context,
@@ -749,7 +802,7 @@ impl PayloadHeap for tx::ExpansionDiagnostic {
 // ---------------------------------------------------------------------------
 
 impl PayloadHeap for cm::ComponentMetaAnalysis {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             domain_guarantees,
             props,
@@ -804,14 +857,14 @@ impl PayloadHeap for cm::ComponentMetaAnalysis {
 }
 
 impl PayloadHeap for cm::MetadataFactGuarantee {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self { kind, causes, open } = self;
         kind.heap(m) + causes.heap(m) + open.heap(m)
     }
 }
 
 impl PayloadHeap for cm::ComponentDomainGuarantees {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             props,
             events,
@@ -822,7 +875,7 @@ impl PayloadHeap for cm::ComponentDomainGuarantees {
 }
 
 impl PayloadHeap for cm::MacroExpansionDiagnostics {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             macro_kind,
             macro_index,
@@ -839,14 +892,14 @@ impl PayloadHeap for cm::MacroExpansionDiagnostics {
 }
 
 impl PayloadHeap for verter_session_query::analysis::types::JsdocTag {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self { name, text } = self;
         name.heap(m) + text.heap(m)
     }
 }
 
 impl PayloadHeap for cm::PropAnalysis {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             name,
             callable_role,
@@ -873,7 +926,7 @@ impl PayloadHeap for cm::PropAnalysis {
 }
 
 impl PayloadHeap for cm::EventAnalysis {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             name,
             payload,
@@ -898,7 +951,7 @@ impl PayloadHeap for cm::EventAnalysis {
 }
 
 impl PayloadHeap for cm::SlotAnalysis {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             name,
             is_scoped,
@@ -925,7 +978,7 @@ impl PayloadHeap for cm::SlotAnalysis {
 }
 
 impl PayloadHeap for cm::SlotBindingAnalysis {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             name,
             publication,
@@ -936,14 +989,14 @@ impl PayloadHeap for cm::SlotBindingAnalysis {
 }
 
 impl PayloadHeap for cm::ModelAnalysis {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self { name, type_source } = self;
         name.heap(m) + type_source.heap(m)
     }
 }
 
 impl PayloadHeap for cm::ExposedAnalysis {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             name,
             type_source,
@@ -960,7 +1013,7 @@ impl PayloadHeap for cm::ExposedAnalysis {
 }
 
 impl PayloadHeap for cm::PublicInstanceAnalysis {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             members,
             completeness,
@@ -970,7 +1023,7 @@ impl PayloadHeap for cm::PublicInstanceAnalysis {
 }
 
 impl PayloadHeap for cm::PublicInstanceMemberAnalysis {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             name,
             kind,
@@ -991,7 +1044,7 @@ impl PayloadHeap for cm::PublicInstanceMemberAnalysis {
 }
 
 impl PayloadHeap for cm::OrderedSfcStructureAnalysis {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             schema_version,
             artifact_token,
@@ -1012,7 +1065,7 @@ impl PayloadHeap for cm::OrderedSfcStructureAnalysis {
 }
 
 impl PayloadHeap for cm::ResolvedTypeAnalysis {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             name,
             type_source,
@@ -1023,7 +1076,7 @@ impl PayloadHeap for cm::ResolvedTypeAnalysis {
 }
 
 impl PayloadHeap for cm::ComponentUsageAnalysis {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             name,
             import_source,
@@ -1054,14 +1107,14 @@ impl PayloadHeap for cm::ComponentUsageAnalysis {
 }
 
 impl PayloadHeap for cm::ComponentBindingUsageAnalysis {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self { name, modifiers } = self;
         name.heap(m) + modifiers.heap(m)
     }
 }
 
 impl PayloadHeap for cm::ComponentEventUsageAnalysis {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             name,
             handler_expression,
@@ -1073,7 +1126,7 @@ impl PayloadHeap for cm::ComponentEventUsageAnalysis {
 }
 
 impl PayloadHeap for cm::ComponentPropUsageAnalysis {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             name,
             is_bound,
@@ -1094,14 +1147,14 @@ impl PayloadHeap for cm::ComponentPropUsageAnalysis {
 }
 
 impl PayloadHeap for cm::ComponentVModelUsageAnalysis {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self { binding_name } = self;
         binding_name.heap(m)
     }
 }
 
 impl PayloadHeap for cm::TemplateRefAnalysis {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             name,
             is_dynamic,
@@ -1112,7 +1165,7 @@ impl PayloadHeap for cm::TemplateRefAnalysis {
 }
 
 impl PayloadHeap for cm::ImportAnalysis {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             source,
             is_type_only,
@@ -1123,7 +1176,7 @@ impl PayloadHeap for cm::ImportAnalysis {
 }
 
 impl PayloadHeap for cm::ImportBindingAnalysis {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             name,
             kind,
@@ -1135,7 +1188,7 @@ impl PayloadHeap for cm::ImportBindingAnalysis {
 }
 
 impl PayloadHeap for cm::BindingAnalysis {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             name,
             kind,
@@ -1156,14 +1209,14 @@ impl PayloadHeap for cm::BindingAnalysis {
 }
 
 impl PayloadHeap for cm::VueApiCallAnalysis {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self { api, arg_value } = self;
         api.heap(m) + arg_value.heap(m)
     }
 }
 
 impl PayloadHeap for cm::StyleAnalysis {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             lang,
             scoped,
@@ -1190,14 +1243,14 @@ impl PayloadHeap for cm::StyleAnalysis {
 }
 
 impl PayloadHeap for cm::SelectorAnalysis {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self { text, specificity } = self;
         text.heap(m) + specificity.heap(m)
     }
 }
 
 impl PayloadHeap for cm::ComponentMetaFlags {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             async_setup,
             has_reactive_state,
@@ -1224,7 +1277,7 @@ impl PayloadHeap for cm::ComponentMetaFlags {
 }
 
 impl PayloadHeap for cm::RootReachability {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::NoFallthrough { reason } => reason.heap(m),
             Self::Branches { branches } => branches.heap(m),
@@ -1233,7 +1286,7 @@ impl PayloadHeap for cm::RootReachability {
 }
 
 impl PayloadHeap for cm::RootBranch {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             branch_index,
             condition_text,
@@ -1250,7 +1303,7 @@ impl PayloadHeap for cm::RootBranch {
 }
 
 impl PayloadHeap for cm::RootTargetRef {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::NativeElement { element_index, tag } => element_index.heap(m) + tag.heap(m),
             Self::DynamicComponentUsage {
@@ -1273,7 +1326,7 @@ impl PayloadHeap for cm::RootTargetRef {
 }
 
 impl PayloadHeap for cm::UnresolvedRootTargetReason {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::UnsupportedBuiltin { tag } => tag.heap(m),
             Self::DynamicComponentIs
@@ -1286,7 +1339,7 @@ impl PayloadHeap for cm::UnresolvedRootTargetReason {
 }
 
 impl PayloadHeap for cm::ConsumedRootBindings {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             attrs,
             listeners,
@@ -1301,7 +1354,7 @@ impl PayloadHeap for cm::ConsumedRootBindings {
 }
 
 impl PayloadHeap for cm::PartialBranchReason {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::GenericResolution { failure } => failure.heap(m),
             Self::DynamicAttrName | Self::DynamicListenerName | Self::UnknownSpread => 0,
@@ -1310,7 +1363,7 @@ impl PayloadHeap for cm::PartialBranchReason {
 }
 
 impl PayloadHeap for cm::UnresolvedBranchReason {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Cycle { canonical_id } => canonical_id.heap(m),
             Self::UnresolvedChildImport { import_source } => import_source.heap(m),
@@ -1322,7 +1375,7 @@ impl PayloadHeap for cm::UnresolvedBranchReason {
 }
 
 impl PayloadHeap for cm::MemberProvenance {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Declared => 0,
             Self::Inherited { sources } => sources.heap(m),
@@ -1331,7 +1384,7 @@ impl PayloadHeap for cm::MemberProvenance {
 }
 
 impl PayloadHeap for cm::InheritedSource {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::NativeTag { tag } => tag.heap(m),
             Self::Component { canonical_id } => canonical_id.heap(m),
@@ -1340,7 +1393,7 @@ impl PayloadHeap for cm::InheritedSource {
 }
 
 impl PayloadHeap for cm::MemberAvailability {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Always => 0,
             Self::Conditional { branch_keys } => branch_keys.heap(m),
@@ -1349,7 +1402,7 @@ impl PayloadHeap for cm::MemberAvailability {
 }
 
 impl PayloadHeap for cm::AcceptedPropAnalysis {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             name,
             callable_role,
@@ -1372,7 +1425,7 @@ impl PayloadHeap for cm::AcceptedPropAnalysis {
 }
 
 impl PayloadHeap for cm::AcceptedEventAnalysis {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             name,
             payload,
@@ -1393,7 +1446,7 @@ impl PayloadHeap for cm::AcceptedEventAnalysis {
 }
 
 impl PayloadHeap for cm::FallthroughSurface {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::None { reason } => reason.heap(m),
             Self::Branches { branches } => branches.heap(m),
@@ -1402,7 +1455,7 @@ impl PayloadHeap for cm::FallthroughSurface {
 }
 
 impl PayloadHeap for cm::FallthroughPropEntry {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             name,
             callable_role,
@@ -1419,7 +1472,7 @@ impl PayloadHeap for cm::FallthroughPropEntry {
 }
 
 impl PayloadHeap for cm::FallthroughEventEntry {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             name,
             payload,
@@ -1436,7 +1489,7 @@ impl PayloadHeap for cm::FallthroughEventEntry {
 }
 
 impl PayloadHeap for cm::BranchStatus {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Resolved => 0,
             Self::PartiallyUnresolved { reasons } => reasons.heap(m),
@@ -1446,7 +1499,7 @@ impl PayloadHeap for cm::BranchStatus {
 }
 
 impl PayloadHeap for cm::ResolvedRootStep {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::NativeTag { tag } => tag.heap(m),
             Self::Component {
@@ -1459,7 +1512,7 @@ impl PayloadHeap for cm::ResolvedRootStep {
 }
 
 impl PayloadHeap for cm::FallthroughBranch {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             branch_key,
             condition_text,
@@ -1482,14 +1535,14 @@ impl PayloadHeap for cm::FallthroughBranch {
 // ---------------------------------------------------------------------------
 
 impl PayloadHeap for verter_type_expr::TypeExprScope {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self(scope) = self;
         scope.heap(m)
     }
 }
 
 impl PayloadHeap for verter_type_expr::PropCallableRole {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::SvelteSnippet {
                 symbol,
@@ -1503,7 +1556,7 @@ impl PayloadHeap for verter_type_expr::PropCallableRole {
 }
 
 impl PayloadHeap for verter_type_expr::ResolvedSymbolIdentity {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             canonical_id,
             owner,
@@ -1514,7 +1567,7 @@ impl PayloadHeap for verter_type_expr::ResolvedSymbolIdentity {
 }
 
 impl PayloadHeap for verter_type_expr::ReactiveWrapperRole {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Unresolved { reason } => reason.heap(m),
             Self::Ref
@@ -1530,7 +1583,7 @@ impl PayloadHeap for verter_type_expr::ReactiveWrapperRole {
 
 impl PayloadHeap for publ::TypePublication {
     /// Fields are private; each is reached through its accessor.
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         self.authority().heap(m) + self.evidence().map_or(0, |e| e.heap(m)) + self.result().heap(m)
     }
 }
@@ -1538,7 +1591,7 @@ impl PayloadHeap for publ::TypePublication {
 impl PayloadHeap for publ::ResolvedTypeAuthority {
     /// Fields are private: the outcome is borrowed in place, the diagnostic
     /// list is an `Arc` slice exposed only as a borrow.
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         self.outcome().heap(m)
             + self.provenance().heap(m)
             + borrowed_arc_slice(self.diagnostics(), m)
@@ -1546,7 +1599,7 @@ impl PayloadHeap for publ::ResolvedTypeAuthority {
 }
 
 impl PayloadHeap for publ::ResolvedTypeOutcome {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Present { source, exactness } => arc_heap(source, m) + exactness.heap(m),
             Self::Absent { absence } => absence.heap(m),
@@ -1556,7 +1609,7 @@ impl PayloadHeap for publ::ResolvedTypeOutcome {
 }
 
 impl PayloadHeap for publ::TypedResolutionFailure {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::SourceConstruction(failure) => failure.heap(m),
         }
@@ -1564,7 +1617,7 @@ impl PayloadHeap for publ::TypedResolutionFailure {
 }
 
 impl PayloadHeap for publ::ResolutionDiagnostic {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             kind,
             context,
@@ -1577,7 +1630,7 @@ impl PayloadHeap for publ::ResolutionDiagnostic {
 impl PayloadHeap for publ::AuthoredTypeEvidence {
     /// Fields are private: the authored locator is borrowed in place, the
     /// text is an `Arc<str>` exposed only as a borrow.
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         self.source().locator().heap(m)
             + borrowed_arc_str(self.text(), m)
             + self.provenance().heap(m)
@@ -1585,7 +1638,7 @@ impl PayloadHeap for publ::AuthoredTypeEvidence {
 }
 
 impl PayloadHeap for publ::PublicationResult {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Failed {
                 failure,
@@ -1613,7 +1666,7 @@ impl PayloadHeap for publ::PublicationResult {
 }
 
 impl PayloadHeap for publ::PublicationReason {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::ResolvedExactConcrete
             | Self::ResolvedExactSymbolic
@@ -1625,7 +1678,7 @@ impl PayloadHeap for publ::PublicationReason {
 }
 
 impl PayloadHeap for publ::PublicationPolicy {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         self.incomplete_reason().heap(m)
             + self.symbolic_equivalence().map_or(0, |proof| proof.heap(m))
     }
@@ -1633,7 +1686,7 @@ impl PayloadHeap for publ::PublicationPolicy {
 
 impl PayloadHeap for publ::SymbolicEquivalenceProof {
     /// Both bound sources; the kind is inline.
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         inline(&self.kind())
             + self.resolved_source().heap(m)
             + self.authored_source().locator().heap(m)
@@ -1641,7 +1694,7 @@ impl PayloadHeap for publ::SymbolicEquivalenceProof {
 }
 
 impl PayloadHeap for publ::PublicationProvenance {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Resolved { provenance } => provenance.heap(m),
             Self::Authored { provenance } => provenance.heap(m),
@@ -1650,7 +1703,7 @@ impl PayloadHeap for publ::PublicationProvenance {
 }
 
 impl PayloadHeap for fx::SourcePosition {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Absent(absence) => absence.heap(m),
             Self::Present(source) => source.heap(m),
@@ -1660,7 +1713,7 @@ impl PayloadHeap for fx::SourcePosition {
 }
 
 impl PayloadHeap for fx::SemanticTypeSource {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Authored(locator) => locator.heap(m),
             Self::Projected(fact) => fact.heap(m),
@@ -1672,7 +1725,7 @@ impl PayloadHeap for fx::SemanticTypeSource {
 }
 
 impl PayloadHeap for verter_type_expr::SyntheticCarrierKey {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             scope_canonical_id,
             surface_kind,
@@ -1689,7 +1742,7 @@ impl PayloadHeap for verter_type_expr::SyntheticCarrierKey {
 }
 
 impl PayloadHeap for loc::AuthoredAnchor {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             canonical_id,
             owner,
@@ -1701,21 +1754,21 @@ impl PayloadHeap for loc::AuthoredAnchor {
 }
 
 impl PayloadHeap for loc::TypeBodySlot {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self { anchor, path } = self;
         anchor.heap(m) + path.heap(m)
     }
 }
 
 impl PayloadHeap for loc::SymbolBodyLocator {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self { anchor } = self;
         anchor.heap(m)
     }
 }
 
 impl PayloadHeap for loc::TypeArgLocator {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             anchor,
             path,
@@ -1726,7 +1779,7 @@ impl PayloadHeap for loc::TypeArgLocator {
 }
 
 impl PayloadHeap for loc::MacroPayloadLocator {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             anchor,
             macro_index,
@@ -1737,7 +1790,7 @@ impl PayloadHeap for loc::MacroPayloadLocator {
 }
 
 impl PayloadHeap for loc::AuthoredAugmentationScope {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Global => 0,
             Self::Module { specifier } => specifier.heap(m),
@@ -1746,7 +1799,7 @@ impl PayloadHeap for loc::AuthoredAugmentationScope {
 }
 
 impl PayloadHeap for loc::AugmentationBodyLocator {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             anchor,
             scope,
@@ -1757,14 +1810,14 @@ impl PayloadHeap for loc::AugmentationBodyLocator {
 }
 
 impl PayloadHeap for loc::JsdocTypedefBodyLocator {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self { anchor, path } = self;
         anchor.heap(m) + path.heap(m)
     }
 }
 
 impl PayloadHeap for loc::AuthoredBodyLocator {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::DeclBody(slot) => slot.heap(m),
             Self::AugmentationBody(locator) => locator.heap(m),
@@ -1775,7 +1828,7 @@ impl PayloadHeap for loc::AuthoredBodyLocator {
 }
 
 impl PayloadHeap for loc::FunctionReturnLocator {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Authored(slot) | Self::Jsdoc(slot) => slot.heap(m),
         }
@@ -1783,7 +1836,7 @@ impl PayloadHeap for loc::FunctionReturnLocator {
 }
 
 impl PayloadHeap for fx::ProjectedTypeFact {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Member(member) => member.heap(m),
             Self::IndexSignature(signature) => signature.heap(m),
@@ -1809,13 +1862,13 @@ impl PayloadHeap for fx::ProjectedTypeFact {
 impl PayloadHeap for fx::CallableOccurrenceHandle {
     /// Fields are private: the member path is an `Arc` slice exposed only
     /// as a borrow; the subject is an inline ordinal.
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         borrowed_arc_slice(self.path(), m)
     }
 }
 
 impl PayloadHeap for fx::ProjectedMemberFact {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             key,
             optional,
@@ -1842,7 +1895,7 @@ impl PayloadHeap for fx::ProjectedMemberFact {
 }
 
 impl PayloadHeap for fx::ProjectedIndexSignatureFact {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             key_name,
             key_type,
@@ -1861,7 +1914,7 @@ impl PayloadHeap for fx::ProjectedIndexSignatureFact {
 }
 
 impl PayloadHeap for fx::ProjectedSurfaceFact {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             members,
             call_signatures,
@@ -1878,7 +1931,7 @@ impl PayloadHeap for fx::ProjectedSurfaceFact {
 }
 
 impl PayloadHeap for fx::FunctionSignatureFact {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             type_parameters,
             parameters,
@@ -1897,7 +1950,7 @@ impl PayloadHeap for fx::FunctionSignatureFact {
 }
 
 impl PayloadHeap for fx::NarrowTypeParam {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             name,
             ordinal,
@@ -1916,7 +1969,7 @@ impl PayloadHeap for fx::NarrowTypeParam {
 }
 
 impl PayloadHeap for fx::FunctionParamFact {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             name,
             optional,
@@ -1935,14 +1988,14 @@ impl PayloadHeap for fx::FunctionParamFact {
 }
 
 impl PayloadHeap for so::FunctionParamSpanOrigin {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self { function, param } = self;
         function.heap(m) + param.heap(m)
     }
 }
 
 impl PayloadHeap for so::FunctionSpansOrigin {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::AliasBody { anchor } => anchor.heap(m),
             Self::Member {
@@ -1955,7 +2008,7 @@ impl PayloadHeap for so::FunctionSpansOrigin {
 }
 
 impl PayloadHeap for so::MemberSpansOrigin {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Authored {
                 anchor,
@@ -1967,7 +2020,7 @@ impl PayloadHeap for so::MemberSpansOrigin {
 }
 
 impl PayloadHeap for so::IndexSignatureSpansOrigin {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Authored {
                 anchor,
@@ -1979,7 +2032,7 @@ impl PayloadHeap for so::IndexSignatureSpansOrigin {
 }
 
 impl PayloadHeap for fx::FunctionReturnSource {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Declared(locator) => locator.heap(m),
             Self::Flow(identity) => identity.heap(m),
@@ -1989,7 +2042,7 @@ impl PayloadHeap for fx::FunctionReturnSource {
 }
 
 impl PayloadHeap for fx::FlowFunctionReturnIdentity {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             anchor,
             function_part,
@@ -2000,7 +2053,7 @@ impl PayloadHeap for fx::FlowFunctionReturnIdentity {
 }
 
 impl PayloadHeap for fx::FunctionPartIdentity {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::DeclarationBody | Self::Initializer => 0,
             Self::Member { member_path } => member_path.heap(m),
@@ -2010,7 +2063,7 @@ impl PayloadHeap for fx::FunctionPartIdentity {
 }
 
 impl PayloadHeap for fx::AuthoredReferenceHeadFact {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::NotReference | Self::Unavailable => 0,
             Self::Bare { local_name, args } => local_name.heap(m) + args.heap(m),
@@ -2029,7 +2082,7 @@ impl PayloadHeap for fx::AuthoredReferenceHeadFact {
 }
 
 impl PayloadHeap for fx::AuthoredReferenceArgLocator {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Value(locator) => locator.heap(m),
             Self::MacroPayload { payload, arg_index } => payload.heap(m) + arg_index.heap(m),
@@ -2038,7 +2091,7 @@ impl PayloadHeap for fx::AuthoredReferenceArgLocator {
 }
 
 impl PayloadHeap for fx::KeyTypeShape {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::String | Self::Number | Self::Symbol => 0,
             Self::Other(slot) => slot.heap(m),
@@ -2047,7 +2100,7 @@ impl PayloadHeap for fx::KeyTypeShape {
 }
 
 impl PayloadHeap for fx::DeclarationOrigin {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Declared(name) => name.heap(m),
             Self::Synthetic => 0,
@@ -2056,7 +2109,7 @@ impl PayloadHeap for fx::DeclarationOrigin {
 }
 
 impl<C: PayloadHeap, I: PayloadHeap> PayloadHeap for verter_type_expr::AuthoredPropertyKey<C, I> {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::String(text) => text.heap(m),
             Self::Number(index) => index.heap(m),
@@ -2067,7 +2120,7 @@ impl<C: PayloadHeap, I: PayloadHeap> PayloadHeap for verter_type_expr::AuthoredP
 }
 
 impl<I: PayloadHeap> PayloadHeap for verter_type_expr::PropertyKey<I> {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::String(text) => text.heap(m),
             Self::Number(index) => index.heap(m),
@@ -2077,7 +2130,7 @@ impl<I: PayloadHeap> PayloadHeap for verter_type_expr::PropertyKey<I> {
 }
 
 impl PayloadHeap for fx::ValueDeclIdentityPart {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             canonical_id,
             owner,
@@ -2089,7 +2142,7 @@ impl PayloadHeap for fx::ValueDeclIdentityPart {
 }
 
 impl PayloadHeap for fx::ClosedTypeFact {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Leaf(leaf) => leaf.heap(m),
             Self::LeafUnion(leaves) => leaves.heap(m),
@@ -2102,7 +2155,7 @@ impl PayloadHeap for fx::ClosedTypeFact {
 }
 
 impl PayloadHeap for fx::LeafTypeFact {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Primitive(primitive) => primitive.heap(m),
             Self::StringLiteral(text) | Self::NumberLiteral(text) | Self::Ref(text) => text.heap(m),
@@ -2112,14 +2165,14 @@ impl PayloadHeap for fx::LeafTypeFact {
 }
 
 impl PayloadHeap for fx::ObjectShapeFact {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self { members } = self;
         members.heap(m)
     }
 }
 
 impl PayloadHeap for fx::ObjectMemberFact {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Property(property) => property.heap(m),
             Self::Method(method) => method.heap(m),
@@ -2133,7 +2186,7 @@ impl PayloadHeap for fx::ObjectMemberFact {
 }
 
 impl PayloadHeap for fx::ObjectPropertyFact {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             key,
             optional,
@@ -2152,7 +2205,7 @@ impl PayloadHeap for fx::ObjectPropertyFact {
 }
 
 impl PayloadHeap for fx::ObjectMethodFact {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             key,
             optional,
@@ -2171,7 +2224,7 @@ impl PayloadHeap for fx::ObjectMethodFact {
 }
 
 impl PayloadHeap for fx::IndexSignatureFact {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             key_name,
             key_type,
@@ -2188,21 +2241,21 @@ impl PayloadHeap for fx::IndexSignatureFact {
 }
 
 impl PayloadHeap for fx::SpreadMemberFact {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self { ty } = self;
         ty.heap(m)
     }
 }
 
 impl PayloadHeap for fx::TuplePayloadFact {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self { readonly, elements } = self;
         readonly.heap(m) + elements.heap(m)
     }
 }
 
 impl PayloadHeap for fx::TupleElementFact {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             label,
             optional,
@@ -2214,14 +2267,14 @@ impl PayloadHeap for fx::TupleElementFact {
 }
 
 impl PayloadHeap for fx::IndexedAccessFact {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self { object, index_path } = self;
         object.heap(m) + index_path.heap(m)
     }
 }
 
 impl PayloadHeap for fx::ResolvedLocalShape {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Object(members) => members.heap(m),
             Self::Tuple(tuple) => tuple.heap(m),
@@ -2233,7 +2286,7 @@ impl PayloadHeap for fx::ResolvedLocalShape {
 }
 
 impl PayloadHeap for fx::SynthesizedMemberFact {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             name,
             optional,
@@ -2245,7 +2298,7 @@ impl PayloadHeap for fx::SynthesizedMemberFact {
 }
 
 impl PayloadHeap for fx::FactOrLocator {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Leaf(leaf) => leaf.heap(m),
             Self::LeafUnion(leaves) => leaves.heap(m),
@@ -2257,7 +2310,7 @@ impl PayloadHeap for fx::FactOrLocator {
 }
 
 impl PayloadHeap for fx::SynthesizedLeafMember {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self { name, optional, ty } = self;
         name.heap(m) + optional.heap(m) + ty.heap(m)
     }
@@ -2270,7 +2323,7 @@ impl PayloadHeap for fx::SynthesizedLeafMember {
 impl PayloadHeap for inv::CarrierBlockInventory {
     /// Fields are private: each table is an `Arc` payload exposed only as a
     /// borrow. The memoised identity and structure hash are inline.
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         borrowed_arc_slice(self.source_spaces(), m)
             + borrowed_arc_value(self.normalized_names(), m)
             + borrowed_arc_slice(self.blocks(), m)
@@ -2279,7 +2332,7 @@ impl PayloadHeap for inv::CarrierBlockInventory {
 }
 
 impl PayloadHeap for inv::SourceSpaceDescriptor {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             id,
             identity,
@@ -2298,7 +2351,7 @@ impl PayloadHeap for inv::SourceSpaceDescriptor {
 }
 
 impl PayloadHeap for inv::SourceSpaceIdentity {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::RegisteredSnapshot { snapshot } => snapshot.heap(m),
             Self::DerivedTransformOutput {
@@ -2319,27 +2372,27 @@ impl PayloadHeap for inv::SourceSpaceIdentity {
 impl PayloadHeap for verter_language::registered_source_authority::RegisteredSourceSnapshotId {
     /// Fixed-width digests and counters plus interned language identities,
     /// which are pooled (see the module docs).
-    fn heap(&self, _m: &mut Meter) -> usize {
+    fn heap(&self, _m: &mut Meter<'_>) -> usize {
         0
     }
 }
 
 impl PayloadHeap for inv::ArtifactBlockRef {
     /// Fields are private: a fixed-width artifact identity and a block id.
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         inline(self.artifact_identity()) + self.block_id().heap(m)
     }
 }
 
 impl PayloadHeap for inv::NormalizedNameTable {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self { values } = self;
         values.heap(m)
     }
 }
 
 impl PayloadHeap for inv::CarrierBlock {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Section { id, role, syntax } => id.heap(m) + role.heap(m) + syntax.heap(m),
             Self::MarkupRoot { id, node } => id.heap(m) + node.heap(m),
@@ -2348,7 +2401,7 @@ impl PayloadHeap for inv::CarrierBlock {
 }
 
 impl PayloadHeap for inv::SectionRole {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::TemplateHost => 0,
             Self::Script { role, dialect } => role.heap(m) + dialect.heap(m),
@@ -2363,7 +2416,7 @@ impl PayloadHeap for inv::SectionRole {
 }
 
 impl PayloadHeap for inv::ScriptSourceType {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::JavaScript | Self::TypeScript | Self::Jsx | Self::Tsx | Self::Missing => 0,
             Self::Custom {
@@ -2375,7 +2428,7 @@ impl PayloadHeap for inv::ScriptSourceType {
 }
 
 impl PayloadHeap for inv::StyleDialect {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Css
             | Self::Scss
@@ -2393,7 +2446,7 @@ impl PayloadHeap for inv::StyleDialect {
 }
 
 impl PayloadHeap for inv::StyleModule {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::None | Self::Default => 0,
             Self::Named { name } => name.heap(m),
@@ -2402,7 +2455,7 @@ impl PayloadHeap for inv::StyleModule {
 }
 
 impl PayloadHeap for inv::TaggedSyntax {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             authored_name,
             normalized_name,
@@ -2431,7 +2484,7 @@ impl PayloadHeap for inv::TaggedSyntax {
 }
 
 impl PayloadHeap for inv::SyntaxTermination {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Closed | Self::SelfClosing | Self::Void | Self::UnclosedEof => 0,
             Self::Recovered {
@@ -2443,7 +2496,7 @@ impl PayloadHeap for inv::SyntaxTermination {
 }
 
 impl PayloadHeap for inv::CarrierAttribute {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Named {
                 id,
@@ -2509,7 +2562,7 @@ impl PayloadHeap for inv::CarrierAttribute {
 }
 
 impl PayloadHeap for inv::AttributeValue {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Missing => 0,
             Self::Static {
@@ -2546,7 +2599,7 @@ impl PayloadHeap for inv::AttributeValue {
 }
 
 impl PayloadHeap for inv::AttributeValuePart {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Static { raw, decoded } => raw.heap(m) + decoded.heap(m),
             Self::Expression {
@@ -2569,7 +2622,7 @@ impl PayloadHeap for inv::AttributeValuePart {
 }
 
 impl PayloadHeap for inv::DirectiveFamily {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Vue(kind) => kind.heap(m),
             Self::Svelte(kind) => kind.heap(m),
@@ -2578,7 +2631,7 @@ impl PayloadHeap for inv::DirectiveFamily {
 }
 
 impl PayloadHeap for inv::SvelteDirectiveKind {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Bind
             | Self::On
@@ -2600,7 +2653,7 @@ impl PayloadHeap for inv::SvelteDirectiveKind {
 }
 
 impl PayloadHeap for inv::DirectiveArgument {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::None => 0,
             Self::Static { name } => name.heap(m),
@@ -2622,7 +2675,7 @@ impl PayloadHeap for inv::DirectiveArgument {
 }
 
 impl PayloadHeap for inv::MarkupSyntaxArena {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             roots,
             nodes,
@@ -2633,7 +2686,7 @@ impl PayloadHeap for inv::MarkupSyntaxArena {
 }
 
 impl PayloadHeap for inv::MarkupSyntaxNode {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             id,
             root_block,
@@ -2651,7 +2704,7 @@ impl PayloadHeap for inv::MarkupSyntaxNode {
 }
 
 impl PayloadHeap for inv::MarkupNodeKind {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Element(element) => element.heap(m),
             Self::Text { content_span } => content_span.heap(m),
@@ -2733,7 +2786,7 @@ impl PayloadHeap for inv::MarkupNodeKind {
 }
 
 impl PayloadHeap for inv::MarkupElementSyntax {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             authored_name,
             normalized_name,
@@ -2772,7 +2825,7 @@ impl PayloadHeap for inv::MarkupElementSyntax {
 }
 
 impl PayloadHeap for inv::MarkupElementKind {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Native
             | Self::Component
@@ -2786,7 +2839,7 @@ impl PayloadHeap for inv::MarkupElementKind {
 }
 
 impl PayloadHeap for inv::SvelteSpecialElementKind {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Head
             | Self::Window
@@ -2804,7 +2857,7 @@ impl PayloadHeap for inv::SvelteSpecialElementKind {
 }
 
 impl PayloadHeap for inv::SvelteControlBlockSyntax {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             head,
             opening_span,
@@ -2821,7 +2874,7 @@ impl PayloadHeap for inv::SvelteControlBlockSyntax {
 }
 
 impl PayloadHeap for inv::SvelteControlBlockHead {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::If { condition } => condition.heap(m),
             Self::Each {
@@ -2845,7 +2898,7 @@ impl PayloadHeap for inv::SvelteControlBlockHead {
 }
 
 impl PayloadHeap for inv::SvelteAwaitInlineBranch {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::None => 0,
             Self::Then {
@@ -2863,7 +2916,7 @@ impl PayloadHeap for inv::SvelteAwaitInlineBranch {
 }
 
 impl PayloadHeap for inv::SvelteClauseSyntax {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             head,
             marker_span,
@@ -2875,7 +2928,7 @@ impl PayloadHeap for inv::SvelteClauseSyntax {
 }
 
 impl PayloadHeap for inv::SvelteClauseHead {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Else => 0,
             Self::ElseIf { condition } => condition.heap(m),
@@ -2885,7 +2938,7 @@ impl PayloadHeap for inv::SvelteClauseHead {
 }
 
 impl PayloadHeap for inv::SvelteStandaloneTagSyntax {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             family,
             opening_span,
@@ -2904,7 +2957,7 @@ impl PayloadHeap for inv::SvelteStandaloneTagSyntax {
 }
 
 impl PayloadHeap for inv::SvelteStandaloneTagFamily {
-    fn heap(&self, m: &mut Meter) -> usize {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
             Self::Render
             | Self::Html

@@ -47,9 +47,9 @@ fn alpha_fact_at(
 ) -> FactVersionRef {
     FactVersionRef::ProgramAnalysis(ProgramAnalysisFactRef::FlowBody {
         function: verter_session_query::facts::fact_cache::ProgramAnalysisFunctionRef {
-            canonical_id: Arc::from(canonical_id),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical_id),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            merged_symbol_name: Arc::from("alpha"),
+            merged_symbol_name: verter_type_expr::OwnedStr::from("alpha"),
             symbol_space: verter_session_query::facts::SymbolSpace::Value,
             function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
             overload_ordinal,

@@ -181,7 +181,7 @@ impl<'a, 'ctx, C: crate::resolver_core::ResolverCapabilities> CallableNodeView<'
         Self { dispatch, root }
     }
 
-    fn data(&self, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
+    fn data(&self, node: SemanticNodeId) -> Option<crate::semantic_query_memo::NodeData> {
         node_data_for(self.dispatch.graph(), node)
     }
 
@@ -759,7 +759,7 @@ impl<'a, 'ctx, C: crate::resolver_core::ResolverCapabilities> CallableNodeView<'
                                     elements
                                         .iter()
                                         .map(|element| PositionalParamNode {
-                                            label: element.label.clone(),
+                                            label: element.label.as_deref().map(Arc::<str>::from),
                                             ty: element.value,
                                         })
                                         .collect(),
@@ -1038,7 +1038,7 @@ impl<'a, 'ctx, C: crate::resolver_core::ResolverCapabilities> CallableNodeView<'
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> SignatureNodeView<'_, '_, C> {
-    fn data(&self, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
+    fn data(&self, node: SemanticNodeId) -> Option<crate::semantic_query_memo::NodeData> {
         node_data_for(self.dispatch.graph(), node)
     }
 
@@ -1177,7 +1177,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> SignatureNodeView<'_, '_, C>
                 {
                     for element in elements.iter() {
                         out.push(PositionalParamNode {
-                            label: element.label.clone(),
+                            label: element.label.as_deref().map(Arc::<str>::from),
                             ty: element.value,
                         });
                     }
@@ -1185,7 +1185,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> SignatureNodeView<'_, '_, C>
                 continue;
             }
             out.push(PositionalParamNode {
-                label: param.name.clone(),
+                label: param.name.as_deref().map(Arc::<str>::from),
                 ty: param.ty,
             });
         }

@@ -413,7 +413,7 @@ defineProps<Props>()
     let (name, scope) = data
         .bare_ref_head()
         .expect("defineProps<Props> must preserve its unresolved bare carrier");
-    assert_eq!(name.as_ref(), "Props");
+    assert_eq!(name, "Props");
     assert!(matches!(
         scope,
         verter_type_engine::semantic_query::NodeScopeId::File {

@@ -29,7 +29,7 @@ fn opaque_sentinel_summary_is_typed_only_genuine_unknown_is_always_materialized(
                 domain: verter_session_query::inputs::budget::BudgetDomain::ProjectionOperation,
                 limit: 1,
                 actual: 2,
-                context: "opaque-sentinel summary fixture".to_string(),
+                context: "opaque-sentinel summary fixture".into(),
             },
         ),
         QueryError::UnstableState { attempts: 3 },
@@ -429,12 +429,14 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
         verter_type_expr::LiteralValue::String("lit".to_string()),
     ));
     let infer = graph.intern_node(SemanticNodeData::Infer {
-        name: StdArc::from("I"),
+        name: verter_type_expr::OwnedStr::from("I"),
         binder: graph.alloc_infer_binder_id(),
         constraint: None,
     });
     let template = graph.intern_node(SemanticNodeData::TemplateLiteral {
-        quasis: StdArc::from(vec![StdArc::from("q")].into_boxed_slice()),
+        quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+            vec![verter_type_expr::OwnedStr::from("q")].into_boxed_slice(),
+        ),
         expressions: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(
             Vec::new().into_boxed_slice(),
         )),
@@ -449,7 +451,7 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: StdArc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let synthetic = graph.intern_node(SemanticNodeData::SyntheticBinding {
         id: SyntheticBindingId {
@@ -884,7 +886,9 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
         (
             "template.expression",
             graph.intern_node(SemanticNodeData::TemplateLiteral {
-                quasis: StdArc::from(vec![StdArc::from("x")].into_boxed_slice()),
+                quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+                    vec![verter_type_expr::OwnedStr::from("x")].into_boxed_slice(),
+                ),
                 expressions: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(
                     vec![dangling].into_boxed_slice(),
                 )),
@@ -920,7 +924,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
                 param_index: 0,
                 constraint: Some(dangling),
                 default: None,
-                display_name: StdArc::from("T"),
+                display_name: verter_type_expr::OwnedStr::from("T"),
             }),
         ),
         (
@@ -935,7 +939,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
                 param_index: 0,
                 constraint: None,
                 default: Some(dangling),
-                display_name: StdArc::from("T"),
+                display_name: verter_type_expr::OwnedStr::from("T"),
             }),
         ),
     ];

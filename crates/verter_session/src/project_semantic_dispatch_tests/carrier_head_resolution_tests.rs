@@ -197,7 +197,7 @@ fn eager_lower_subject(
 ) -> SemanticNodeId {
     let scope = file_scope(dispatch, canonical);
     let env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
-    let name_resolution: FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> =
+    let name_resolution: FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity> =
         FxHashMap::default();
     let scope_payload = dispatch.ctx.prepared_decl_bundle(canonical).map(|bundle| {
         verter_type_engine::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
@@ -649,10 +649,7 @@ fn carrier_head_namespace_sibling_bare_name_diverges_recorded_for_producer_flip(
         dispatch.graph().node_data(via_carrier).as_deref()
     );
     match dispatch.graph().node_data(via_carrier).as_deref() {
-        Some(data)
-            if data
-                .bare_ref_head()
-                .is_some_and(|(n, _)| n.as_ref() == "Sib") => {}
+        Some(data) if data.bare_ref_head().is_some_and(|(n, _)| n == "Sib") => {}
         other => panic!(
             "the preserved divergent terminal must still be the `BareRef(\"Sib\")` \
              carrier; got {other:?}"
@@ -674,10 +671,10 @@ fn carrier_head_namespace_sibling_bare_name_diverges_recorded_for_producer_flip(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             )
         });
-        let mut name_resolution: FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> =
+        let mut name_resolution: FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity> =
             FxHashMap::default();
         name_resolution.insert(
-            std::sync::Arc::from("Sib"),
+            verter_type_expr::OwnedStr::from("Sib"),
             ResolvedRootIdentity::new("/ns.ts", "NS.Sib"),
         );
         let shadowing = ScopeShadowing::from_scope_payload(scope_payload.as_ref());
@@ -888,7 +885,7 @@ fn generic_head_of_an_active_declaration_keeps_its_back_edge_where_its_position_
                 Some(SemanticNodeData::Opaque(
                     verter_type_engine::semantic_query::QueryError::RecursiveRef { name, args },
                 )) => {
-                    assert_eq!(name.as_ref(), "G");
+                    assert_eq!(name, "G");
                     assert_eq!(args.len(), 1, "the back-edge records its own arguments");
                 }
                 other => panic!(
@@ -1090,7 +1087,7 @@ fn eager_resolved_with_name_resolution(
     });
     // Build the populated name_resolution from the consumer's import binding so
     // the FAST-PATH fires (mirrors the prepared-decl map's import entry).
-    let mut name_resolution: FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> =
+    let mut name_resolution: FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity> =
         FxHashMap::default();
     if let Some(bundle) = dispatch.ctx.prepared_decl_bundle(canonical) {
         if let Some(owner_scope) =
@@ -1105,7 +1102,8 @@ fn eager_resolved_with_name_resolution(
                     )
                     .0
                 {
-                    name_resolution.insert(std::sync::Arc::from(local.as_str()), identity);
+                    name_resolution
+                        .insert(verter_type_expr::OwnedStr::from(local.as_str()), identity);
                 }
             }
         }
@@ -1243,7 +1241,7 @@ fn carrier_resolver_context_drives_shared_head_resolver() {
     let scope = file_scope(&dispatch, "/ctx.ts");
 
     let env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
-    let name_resolution: FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> =
+    let name_resolution: FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity> =
         FxHashMap::default();
     let scope_payload = dispatch.ctx.prepared_decl_bundle("/ctx.ts").map(|bundle| {
         verter_type_engine::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
@@ -1595,7 +1593,7 @@ fn navigate_unresolvable_ref_head_preserves_bare_ref_carrier_with_args() {
     let (name, scope) = data
         .bare_ref_head()
         .expect("Navigate transit must preserve the unresolved head as a BareRef carrier");
-    assert_eq!(name.as_ref(), "Unknown", "the authored head name survives");
+    assert_eq!(name, "Unknown", "the authored head name survives");
     match scope {
         NodeScopeId::File { canonical_id, .. } => assert_eq!(
             canonical_id.as_ref(),

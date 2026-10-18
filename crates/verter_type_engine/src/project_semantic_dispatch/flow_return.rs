@@ -25,6 +25,7 @@
 
 use std::sync::Arc;
 use verter_session_query::source::demand::ExpressionSourceDemand as _;
+use verter_type_expr::OwnedStr;
 
 use super::call_resolve::union_self_roots;
 use super::dispatch_txn::flow_obligation_state::{
@@ -323,6 +324,9 @@ pub mod flow_admission_fault_injection {
         /// Optional observer of actual preparation refusals, including inline demands.
         pub refused_preparations:
             std::sync::Mutex<Option<Vec<crate::semantic_query::FlowReturnKey>>>,
+        /// What happened to each contextual call a flow frame held.
+        pub contextual_routes:
+            std::sync::Mutex<Vec<crate::project_semantic_dispatch::ContextualRouteEventForTests>>,
         #[cfg(any(test, feature = "test-support"))]
         pub observe_product_execution: AtomicBool,
         #[cfg(any(test, feature = "test-support"))]
@@ -1847,7 +1851,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// value's `typeof` (`id(y)` reads `typeof y`) with that `typeof` as its
     /// need, and resumes with its value as `delivery`: a chain of values
     /// each initialized from a call over the one before is then a chain of
-    /// frames.
+    /// frames. A call whose resolution is a machinery root
+    /// ([`Self::call_resumes_on_the_runtime`]) is its need too, resolved by
+    /// a frame of its own, and the run resumes with its result.
     pub(super) fn drain_indexed_value(
         &self,
         canonical: &str,
@@ -1855,7 +1861,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         root: &verter_type_expr::IndexedValueExpression,
         run: &mut IndexedValueRun,
         suspend: bool,
-        delivery: Option<crate::semantic_query::SemanticNodeId>,
+        delivery: Option<super::query_frames::FrameDelivery>,
     ) -> IndexedValuePoll {
         use verter_type_expr::IndexedValueExpression;
         enum Phase {
@@ -1884,9 +1890,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 Phase::Enter
             }
             IndexedNext::AwaitReference => Phase::Deliver(Some(IndexedValue {
-                node: delivery.expect("a run waiting on a value resumes with it"),
+                node: self
+                    .consume_frame_delivery(
+                        delivery.expect("a run waiting on a value resumes with it"),
+                    )
+                    .node,
                 fresh: false,
             })),
+            IndexedNext::AwaitCall => Phase::Deliver(self.indexed_call_delivered(
+                delivery.expect("a run waiting on a call resumes with its resolution"),
+            )),
             IndexedNext::Finished => unreachable!("a finished run is not drained again"),
         };
         loop {
@@ -2029,16 +2042,56 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             else {
                 unreachable!("the call on top")
             };
+            let callee = callee.expect("a resolved call has a callee");
+            if suspend {
+                let Some(key) =
+                    self.indexed_call_key(canonical, owner, call, callee, receiver.flatten(), args)
+                else {
+                    phase = Phase::Deliver(None);
+                    continue;
+                };
+                if self.call_resumes_on_the_runtime(&key) {
+                    *next = IndexedNext::AwaitCall;
+                    return IndexedValuePoll::Need(
+                        crate::semantic_query::SemanticQueryKey::ResolveCall(Box::new(key)),
+                    );
+                }
+                phase = Phase::Deliver(self.resolve_indexed_call_key(key, hold_flow_result));
+                continue;
+            }
             phase = Phase::Deliver(self.resolve_indexed_call(
                 canonical,
                 owner,
                 call,
-                callee.expect("a resolved call has a callee"),
+                callee,
                 receiver.flatten(),
                 args,
                 hold_flow_result,
             ));
         }
+    }
+
+    /// The value a call's resolution, resolved by a frame of its own,
+    /// delivers to the indexed run waiting on it: exactly what
+    /// [`Self::resolve_indexed_call`] reads from the executor.
+    fn indexed_call_delivered(
+        &self,
+        delivery: super::query_frames::FrameDelivery,
+    ) -> Option<IndexedValue> {
+        let value = match self.read_frame_delivery(delivery).value {
+            QueryResult::Value(crate::semantic_query::SemanticQueryValue::ResolveCall(result)) => {
+                let return_type = super::return_equation::resolved_call_return_type(&result);
+                Some(IndexedValue {
+                    node: return_type,
+                    fresh: self.call_result_is_fresh_literal(&result, return_type),
+                })
+            }
+            _ => None,
+        };
+        if value.is_none() {
+            crate::request_context::mark_request_result_partial();
+        }
+        value
     }
 
     /// The `typeof` an indexed leaf that names a value reads (`y` in
@@ -2152,6 +2205,36 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         args: Vec<crate::semantic_query::CallArgKey>,
         hold_flow_result: bool,
     ) -> Option<IndexedValue> {
+        let key = self.indexed_call_key(canonical, owner, call, callee, receiver, args)?;
+        self.resolve_indexed_call_key(key, hold_flow_result)
+    }
+
+    /// Resolve one indexed call's key through the executor.
+    fn resolve_indexed_call_key(
+        &self,
+        key: crate::semantic_query::ResolveCallKey,
+        hold_flow_result: bool,
+    ) -> Option<IndexedValue> {
+        let (result, held) =
+            self.execute_indexed_resolve_call_with_flow_hold(key, hold_flow_result);
+        if result.is_none() && !held {
+            crate::request_context::mark_request_result_partial();
+        }
+        result
+    }
+
+    /// The executor key of one indexed call over its evaluated callee,
+    /// receiver and arguments; `None` when its explicit type arguments do
+    /// not lower.
+    fn indexed_call_key(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        call: &verter_type_expr::IndexedValueCall,
+        callee: crate::semantic_query::SemanticNodeId,
+        receiver: Option<crate::semantic_query::SemanticNodeId>,
+        args: Vec<crate::semantic_query::CallArgKey>,
+    ) -> Option<crate::semantic_query::ResolveCallKey> {
         use verter_type_expr::IndexedValueCallKind;
         let explicit_type_args = call
             .explicit_type_args
@@ -2170,29 +2253,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let callee = receiver.map_or(callee, |receiver| {
             self.bind_callee_receiver(callee, receiver)
         });
-        let (result, held) = self.execute_indexed_resolve_call_with_flow_hold(
-            crate::semantic_query::ResolveCallKey {
-                point: crate::semantic_query::ProgramPointId {
-                    canonical_id: verter_type_expr::OwnedStr::from(canonical),
-                    offset: call.point,
-                },
-                callee,
-                kind: match call.kind {
-                    IndexedValueCallKind::Call => crate::semantic_query::CallKind::Call,
-                    IndexedValueCallKind::Construct => crate::semantic_query::CallKind::Construct,
-                },
-                receiver,
-                args: Arc::from(args.into_boxed_slice()),
-                explicit_type_args: Arc::from(explicit_type_args.into_boxed_slice()),
-                flow: crate::semantic_query::FlowNarrowingKey::empty(),
-                context: self.resolve_call_context_for(canonical),
+        Some(crate::semantic_query::ResolveCallKey {
+            point: crate::semantic_query::ProgramPointId {
+                canonical_id: verter_type_expr::OwnedStr::from(canonical),
+                offset: call.point,
             },
-            hold_flow_result,
-        );
-        if result.is_none() && !held {
-            crate::request_context::mark_request_result_partial();
-        }
-        result
+            callee,
+            kind: match call.kind {
+                IndexedValueCallKind::Call => crate::semantic_query::CallKind::Call,
+                IndexedValueCallKind::Construct => crate::semantic_query::CallKind::Construct,
+            },
+            receiver,
+            args: Arc::from(args.into_boxed_slice()),
+            explicit_type_args: Arc::from(explicit_type_args.into_boxed_slice()),
+            flow: crate::semantic_query::FlowNarrowingKey::empty(),
+            context: self.resolve_call_context_for(canonical),
+        })
     }
 
     /// Consume an inferred declaration's indexed semantic expression source.
@@ -2222,7 +2298,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(observed) => observed.resume(self),
             None => self.begin_read_observation(),
         };
-        let mut delivered = delivery.map(|delivery| self.consume_frame_delivery(delivery));
+        let mut delivered = delivery;
         let owner = run.owner;
         let value = loop {
             let indexed = match &mut run.state {
@@ -3214,6 +3290,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// refused admission — aborts and retires the ENTIRE deferred batch
     /// without publishing anything, so `ReturnOnly` stays non-publishing
     /// and no torn or provisional member can warm.
+    ///
+    /// A root demanded outside any drive evaluates as a frame of the
+    /// continuation runtime, whose completion releases the batch the same
+    /// way, by the same publication.
     pub(super) fn execute_flow_return_cold_build(
         &self,
         key: SemanticQueryKey,
@@ -3222,6 +3302,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             matches!(key, SemanticQueryKey::FlowReturn(_)),
             "the flow-return executor admits FlowReturn keys only"
         );
+        if self.drives_on_the_runtime(&key) {
+            return self.drive_query(key);
+        }
         let SemanticQueryKey::FlowReturn(root_key) = key.clone() else {
             unreachable!("the flow-return executor admits FlowReturn keys only")
         };
@@ -3236,7 +3319,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// Drain the SCC-closed member batch onto the root's published
     /// carrier, fenced on the FLOW root's own published candidate.
-    fn flow_return_drain_completed_members(
+    pub(super) fn flow_return_drain_completed_members(
         &self,
         root_key: &FlowReturnKey,
         carrier: &crate::semantic_query_memo::PublishedMemoCandidate,
@@ -6022,33 +6105,36 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             scope_payload.as_ref(),
         );
         let name_resolution: rustc_hash::FxHashMap<
-            std::sync::Arc<str>,
+            verter_type_expr::OwnedStr,
             verter_session_query::type_solver::host::ResolvedRootIdentity,
         > = rustc_hash::FxHashMap::default();
         // Seed from the ENCLOSING environment, then let this clause
         // shadow it.
         let mut env: rustc_hash::FxHashMap<String, SemanticNodeId> =
             outer.map(|outer| outer.env.clone()).unwrap_or_default();
-        let intern_binder = |name: &Arc<str>,
+        let intern_binder = |name: &OwnedStr,
                              constraint: Option<SemanticNodeId>,
                              default: Option<SemanticNodeId>| {
             let decl_name = match nested_at {
-                Some(offset) => Arc::from(format!("{name}\u{1}{offset}").as_str()),
-                None => Arc::clone(name),
+                Some(offset) => OwnedStr::from(format!("{name}\u{1}{offset}")),
+                None => name.clone(),
             };
             graph.intern_node(SemanticNodeData::TypeParam {
                 decl: crate::semantic_query::DeclIdentity::from_scope(&scope, decl_name),
                 param_index: 0,
                 constraint,
                 default,
-                display_name: Arc::clone(name),
+                display_name: name.clone(),
             })
         };
         // PASS 1 — every binder of this clause, bare. Sibling references
         // in a constraint / default resolve against these, in either
         // direction.
         for tp in type_parameters.iter() {
-            env.insert(tp.name.to_string(), intern_binder(&tp.name, None, None));
+            env.insert(
+                tp.name.to_string(),
+                intern_binder(&OwnedStr::from(&tp.name), None, None),
+            );
         }
         // PASS 2 — the constraints and defaults, lowered under the
         // composed environment, then the final binders.
@@ -6072,7 +6158,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             };
             let constraint = tp.constraint.as_ref().map(&mut lower);
             let default = tp.default.as_ref().map(&mut lower);
-            let display_name: Arc<str> = Arc::clone(&tp.name);
+            let display_name = OwnedStr::from(&tp.name);
             let binder = intern_binder(&display_name, constraint, default);
             finalized.push((tp.name.to_string(), binder));
             type_param_decls.push(crate::semantic_query::TypeParamDecl {
@@ -6456,7 +6542,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     hash_key: slice_key,
                     slice_hash: planned.hash(),
                 };
-                match self.flow_slice_driver().lookup_lowered(lowered_key) {
+                match self
+                    .flow_slice_driver()
+                    .lookup_lowered(lowered_key, &planned)
+                {
                     None => {
                         return degraded(FlowReturnFailure::Unresolved, self_roots);
                     }
@@ -9335,6 +9424,8 @@ enum IndexedNext {
     Enter { hold: bool, as_callee: bool },
     /// Take the delivered value as the leaf's at its position.
     AwaitReference,
+    /// Take the delivered resolution as the value of the call it resolves.
+    AwaitCall,
     /// Nothing: the run finished.
     Finished,
 }
@@ -9535,7 +9626,7 @@ pub(super) struct FlowBinderEnv {
     shadowing: crate::resolver_core::scope_shadowing::ScopeShadowing,
     /// The (empty) explicit name-resolution overlay.
     name_resolution: rustc_hash::FxHashMap<
-        Arc<str>,
+        verter_type_expr::OwnedStr,
         verter_session_query::type_solver::host::ResolvedRootIdentity,
     >,
     /// Binder name → interned `TypeParam` node.
@@ -10044,6 +10135,7 @@ use branches::{BranchStep, DeadPath, Entered};
 use nested::{NestedChildParts, NestedDemand, NestedSignatureStep};
 #[path = "flow_return_operators.rs"]
 mod operators;
+pub(super) use call_stack::HeldContextualRoute;
 use call_stack::{CallArgumentWait, CallDrive, CallFunctionWait, CallInFlight, CallStep};
 
 #[path = "flow_return_call_effects.rs"]
@@ -10104,7 +10196,14 @@ pub(super) trait FlowDemandDriver {
     fn flow_slice_lowered(
         &self,
         key: crate::cache_runtime::flow_slice_node::FlowSliceLoweredKey,
-    ) -> Option<Arc<verter_session_query::flow::flow_ir::FlowSliceIR>>;
+        planned: &verter_session_query::retention::heap_size::OwnedTree<
+            crate::cache_runtime::flow_slice_node::PlannedFlowSlice,
+        >,
+    ) -> Option<
+        verter_session_query::retention::heap_size::OwnedTree<
+            verter_session_query::flow::flow_ir::FlowSliceIR,
+        >,
+    >;
     fn flow_slice_hash(
         &self,
         key: crate::cache_runtime::flow_slice_node::FlowSliceHashKey,
@@ -10357,7 +10456,7 @@ pub(super) trait FlowDemandDriver {
     ) -> ReunionReduction;
     fn reduce_template_literal_nodes(
         &self,
-        quasis: &[Arc<str>],
+        quasis: &[OwnedStr],
         args: &[SemanticNodeId],
         eval_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Result<SemanticNodeId, crate::semantic_query::PartialReasonSet>;
@@ -10391,7 +10490,7 @@ pub(super) trait FlowDemandDriver {
         expr: &TypeExpr,
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
-        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+        name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
         shadowing: &ScopeShadowing,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
@@ -10435,6 +10534,26 @@ pub(super) trait FlowDemandDriver {
     fn arena(&self) -> super::arena_ops::ArenaOps<'_>;
     fn call_undecided_relations(&self) -> u64;
     fn discard_call_relation_observations(&self, count: u64);
+    /// Count again the undecided relations a held executor attempt
+    /// observed, for the run that resumes it.
+    fn restore_call_relation_observations(&self, count: u64);
+    /// Open a window in which a contextual callback types while its call's
+    /// collector waits ([`ProjectSemanticDispatch::open_contextual_window`]).
+    fn open_contextual_window(&self) -> bool;
+    fn close_contextual_window(&self);
+    /// Whether the running flow evaluation waits on a demand its frame must
+    /// produce first.
+    fn contextual_window_waits(&self) -> bool;
+    /// Whether relating a typed callback to its call's held contextual
+    /// target waits on a demand the frame must produce first
+    /// ([`ProjectSemanticDispatch::contextual_delivery_waits`]).
+    fn contextual_delivery_waits(
+        &self,
+        state: &super::call_resolve::ContextualCallState,
+        typed: SemanticNodeId,
+    ) -> bool;
+    fn hold_contextual_route(&self, route: HeldContextualRoute);
+    fn take_held_contextual_route(&self, asked: &ResolveCallKey) -> Option<HeldContextualRoute>;
     fn pending_obligation_count(&self) -> usize;
     fn enter_lexical_demand(&self, canonical: Arc<str>) -> super::LexicalDemandScopeGuard<'_>;
     fn presence_intersection_for_flow(
@@ -10496,8 +10615,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     fn flow_slice_lowered(
         &self,
         key: crate::cache_runtime::flow_slice_node::FlowSliceLoweredKey,
-    ) -> Option<Arc<verter_session_query::flow::flow_ir::FlowSliceIR>> {
-        self.flow_slice_driver().lookup_lowered(key)
+        planned: &verter_session_query::retention::heap_size::OwnedTree<
+            crate::cache_runtime::flow_slice_node::PlannedFlowSlice,
+        >,
+    ) -> Option<
+        verter_session_query::retention::heap_size::OwnedTree<
+            verter_session_query::flow::flow_ir::FlowSliceIR,
+        >,
+    > {
+        self.flow_slice_driver().lookup_lowered(key, planned)
     }
     fn flow_slice_hash(
         &self,
@@ -10931,7 +11057,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     }
     fn reduce_template_literal_nodes(
         &self,
-        quasis: &[Arc<str>],
+        quasis: &[OwnedStr],
         args: &[SemanticNodeId],
         eval_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Result<SemanticNodeId, crate::semantic_query::PartialReasonSet> {
@@ -10981,7 +11107,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         expr: &TypeExpr,
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
-        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+        name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
         shadowing: &ScopeShadowing,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
@@ -11061,6 +11187,32 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     fn discard_call_relation_observations(&self, count: u64) {
         let mut txn = self.dispatch_txn.borrow_mut();
         txn.call.undecided_relations = txn.call.undecided_relations.saturating_sub(count);
+    }
+    fn restore_call_relation_observations(&self, count: u64) {
+        let mut txn = self.dispatch_txn.borrow_mut();
+        txn.call.undecided_relations = txn.call.undecided_relations.saturating_add(count);
+    }
+    fn open_contextual_window(&self) -> bool {
+        ProjectSemanticDispatch::open_contextual_window(self)
+    }
+    fn close_contextual_window(&self) {
+        ProjectSemanticDispatch::close_contextual_window(self);
+    }
+    fn contextual_window_waits(&self) -> bool {
+        ProjectSemanticDispatch::contextual_window_waits(self)
+    }
+    fn contextual_delivery_waits(
+        &self,
+        state: &super::call_resolve::ContextualCallState,
+        typed: SemanticNodeId,
+    ) -> bool {
+        ProjectSemanticDispatch::contextual_delivery_waits(self, state, typed)
+    }
+    fn hold_contextual_route(&self, route: HeldContextualRoute) {
+        ProjectSemanticDispatch::hold_contextual_route(self, route);
+    }
+    fn take_held_contextual_route(&self, asked: &ResolveCallKey) -> Option<HeldContextualRoute> {
+        ProjectSemanticDispatch::take_held_contextual_route(self, asked)
     }
     fn pending_obligation_count(&self) -> usize {
         self.dispatch_txn
@@ -11185,8 +11337,15 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     fn flow_slice_lowered(
         &self,
         key: crate::cache_runtime::flow_slice_node::FlowSliceLoweredKey,
-    ) -> Option<Arc<verter_session_query::flow::flow_ir::FlowSliceIR>> {
-        self.driver.flow_slice_lowered(key)
+        planned: &verter_session_query::retention::heap_size::OwnedTree<
+            crate::cache_runtime::flow_slice_node::PlannedFlowSlice,
+        >,
+    ) -> Option<
+        verter_session_query::retention::heap_size::OwnedTree<
+            verter_session_query::flow::flow_ir::FlowSliceIR,
+        >,
+    > {
+        self.driver.flow_slice_lowered(key, planned)
     }
     fn flow_slice_hash(
         &self,
@@ -11596,7 +11755,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     }
     fn reduce_template_literal_nodes(
         &self,
-        quasis: &[Arc<str>],
+        quasis: &[OwnedStr],
         args: &[SemanticNodeId],
         eval_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Result<SemanticNodeId, crate::semantic_query::PartialReasonSet> {
@@ -11647,7 +11806,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         expr: &TypeExpr,
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
-        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+        name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
         shadowing: &ScopeShadowing,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
@@ -11726,6 +11885,31 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     }
     fn discard_call_relation_observations(&self, count: u64) {
         self.driver.discard_call_relation_observations(count);
+    }
+    fn restore_call_relation_observations(&self, count: u64) {
+        self.driver.restore_call_relation_observations(count);
+    }
+    fn open_contextual_window(&self) -> bool {
+        self.driver.open_contextual_window()
+    }
+    fn close_contextual_window(&self) {
+        self.driver.close_contextual_window();
+    }
+    fn contextual_window_waits(&self) -> bool {
+        self.driver.contextual_window_waits()
+    }
+    fn contextual_delivery_waits(
+        &self,
+        state: &super::call_resolve::ContextualCallState,
+        typed: SemanticNodeId,
+    ) -> bool {
+        self.driver.contextual_delivery_waits(state, typed)
+    }
+    fn hold_contextual_route(&self, route: HeldContextualRoute) {
+        self.driver.hold_contextual_route(route);
+    }
+    fn take_held_contextual_route(&self, asked: &ResolveCallKey) -> Option<HeldContextualRoute> {
+        self.driver.take_held_contextual_route(asked)
     }
     fn pending_obligation_count(&self) -> usize {
         self.driver.pending_obligation_count()
@@ -26034,7 +26218,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 let node = self.unmodeled_position();
                 params.push(node);
                 signature_params.push(crate::semantic_query::FunctionParam {
-                    name: param.name.clone(),
+                    name: param.name.as_deref().map(OwnedStr::from),
                     ty: node,
                     optional: param.optional,
                     rest: param.rest,
@@ -26065,7 +26249,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             };
             params.push(node);
             signature_params.push(crate::semantic_query::FunctionParam {
-                name: param.name.clone(),
+                name: param.name.as_deref().map(OwnedStr::from),
                 ty: node,
                 optional: param.optional,
                 rest: param.rest,
@@ -28266,11 +28450,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 }
                 call_stack::ResolveCallProgress::Function(function) => {
                     let call_stack::RouteFunction { at, request } = *function;
+                    let window = self.open_function_argument_window(&at);
                     let node = self.eval_nested_demand(request.demand);
+                    if window {
+                        self.dispatch.close_contextual_window();
+                    }
                     progress = self.deliver_resolve_call_function(
                         at,
                         request.mark,
                         Positional::Value(node),
+                        window,
                     );
                 }
             }

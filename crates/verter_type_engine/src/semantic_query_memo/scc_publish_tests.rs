@@ -111,21 +111,31 @@ fn an_scc_member_shares_the_carrier_charge_and_keeps_it_after_the_root_drains() 
     // The owned allocations its bookkeeping reaches (its satisfied point's
     // path) are charged by their own cells, retained with it.
     let member_own_handles = handles.charged_bytes();
+    let own_holds = handles.len();
     drop(handles);
+    // The slices keeping its holds — on its carrier, on what it delivers
+    // and on its own bookkeeping's owned allocations — are charged with
+    // them: one pointer per carrier hold, one fat cell pointer per owned
+    // hold.
+    let (carrier_holds, delivered_holds) = members[0].hold_slice_lens();
+    let cell_pointer = 2 * std::mem::size_of::<usize>();
+    let slices =
+        verter_session_query::retention::allocation::heap_block_bytes(
+            carrier_holds * std::mem::size_of::<usize>(),
+        ) + verter_session_query::retention::allocation::heap_block_bytes(
+            delivered_holds * cell_pointer,
+        ) + verter_session_query::retention::allocation::heap_block_bytes(own_holds * cell_pointer);
     // What the member newly retains, from its allocations alone: its own
-    // bookkeeping and its own (empty) relation-binding value, an owned cell
-    // charged by itself. The carrier and self-root list are the root's
+    // bookkeeping. Its relation-binding value is empty, an owned slice that
+    // allocates nothing. The carrier and self-root list are the root's
     // already.
-    let member_value = verter_session_query::retention::owned::Owned::<
-        Box<[crate::semantic_query::InferBinding]>,
-    >::cell_block_bytes();
     // Its delivery's metadata, pinned to the delivery until now, is adopted
     // into retention with it.
     let member_metadata = member.lease.own_charge_bytes_for_tests();
     let delta = account.snapshot().retained_bytes - after_root;
     assert_eq!(
         delta,
-        member_own + member_own_handles + member_value + member_metadata,
+        member_own + member_own_handles + member_metadata + slices,
         "the member pays its own bookkeeping and its own value — never the shared \
          carrier or self-root list a second time"
     );

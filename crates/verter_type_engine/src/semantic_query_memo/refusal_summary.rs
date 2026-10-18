@@ -107,11 +107,7 @@ impl RefusalSummary {
     /// carrier's evidence pages are claimed into this reservation, a page
     /// being charged once however many summaries and candidates share it
     /// ([`verter_session_query::facts::receipt::reserve_retained_with_evidence`]).
-    /// The owned allocations the paid lists reach are returned with them,
-    /// for the summary's charge to hold.
-    fn own_retained_footprint(
-        &self,
-    ) -> (usize, verter_session_query::retention::owned::OwnedHandles) {
+    fn own_retained_footprint(&self) -> verter_session_query::retention::Footprint {
         use verter_session_query::retention::allocation::{arc_block_bytes, AliasSet};
         let mut aliases = AliasSet::new();
         let bytes = arc_block_bytes(std::mem::size_of::<Self>())
@@ -125,7 +121,10 @@ impl RefusalSummary {
                 .request
                 .as_ref()
                 .map_or(0, |spent| spent.owned_heap_bytes(&mut aliases));
-        (bytes, aliases.take_handles())
+        verter_session_query::retention::Footprint {
+            bytes,
+            handles: aliases.take_handles(),
+        }
     }
 
     /// The canonicals the summary registers under besides its carrier: its
@@ -292,19 +291,14 @@ impl SemanticGraphStore {
             Ok(shared) => shared,
             Err(refusal) => return refuse(refusal),
         };
-        let (own_bytes, own_handles) = summary.own_retained_footprint();
+        let own_footprint = summary.own_retained_footprint();
         match verter_session_query::facts::receipt::reserve_retained_with_evidence(
             self.retention_account(),
-            own_bytes,
+            own_footprint.bytes,
             &[&summary.carrier.facts],
         ) {
             RetentionAdmission::Admitted(own) => {
-                let own = match own_handles.retained_with(
-                    own,
-                    verter_session_query::retention::owned::ChargeCtx::new(
-                        self.retention_account(),
-                    ),
-                ) {
+                let own = match own_footprint.handles.retained_with(own, self.charge_ctx()) {
                     Ok(own) => own,
                     Err(refusal) => return refuse(refusal),
                 };

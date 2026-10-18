@@ -118,7 +118,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             return GlobalWrapper::Absent;
         };
         let slot = self.type_slot_for(
-            Arc::clone(&declaration.canonical_id),
+            declaration.canonical_id.clone(),
             declaration.owner,
             Arc::from(name),
         );
@@ -526,7 +526,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         };
 
         let slot = self.type_slot_for(
-            Arc::clone(&declaration.canonical_id),
+            declaration.canonical_id.clone(),
             declaration.owner,
             Arc::from(name),
         );

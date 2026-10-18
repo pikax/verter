@@ -1111,7 +1111,7 @@ fn sample_budget_failure() -> BudgetExceededFailure {
         domain: BudgetDomain::ProjectionOperation,
         limit: 1,
         actual: 2,
-        context: "typeinfo-fault-test".to_string(),
+        context: "typeinfo-fault-test".into(),
     }
 }
 
