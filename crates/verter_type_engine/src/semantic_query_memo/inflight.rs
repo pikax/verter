@@ -473,14 +473,17 @@ impl super::SemanticGraphStore {
 
     /// Release an inline flight that cannot publish a decided member.
     /// Waiting top-level callers wake on the abort sentinel and retry
-    /// admission.
+    /// admission. The sentinel is the payload-free superseded abort a joiner
+    /// of an aborted flight already reads: a relation that stops part-way can
+    /// abandon thousands of members, and a per-member message would hold an
+    /// allocation for each until the relation returns.
     pub fn abort_inline_member_flight(&self, flight: &InlineMemberFlight) {
         {
             let mut state = flight.inflight.state.lock();
             state.aborted = true;
             if state.completed.is_none() {
-                state.completed = Some(QueryResult::Error(QueryError::Other(
-                    verter_type_expr::OwnedStr::from("inline member flight abandoned"),
+                state.completed = Some(QueryResult::Error(QueryError::ExecutionAborted(
+                    crate::semantic_query::ExecutionAbort::Superseded,
                 )));
                 state.dep_signature = Some(empty_signature());
             }
