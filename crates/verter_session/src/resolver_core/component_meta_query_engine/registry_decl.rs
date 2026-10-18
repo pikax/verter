@@ -462,12 +462,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let body_root = {
             let dispatch = self.semantic_dispatch();
             dispatch
-                .raise_authored_locator_to_hot(
+                .owning().raise_authored_locator_to_hot(
                     &body_locator,
                     verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Navigate,
                     ),
-                )
+                ).into_value_in(self.builder())
                 .at_optional_boundary()
                 .map(|hot| hot.node())?
         };

@@ -127,7 +127,9 @@ impl SemanticGraphStore {
     /// root, so the lease outlives the scope. A slot a legacy close already
     /// released reads as the unresolved placeholder with no root, exactly as
     /// the production close lifecycle reports it, and none of its children
-    /// can be borrowed through it.
+    /// can be borrowed through it. Under counted ownership a released slot is
+    /// a label kept past its owner, never a plausible payload: it reads
+    /// nothing.
     pub fn read_in_scope(&self, id: SemanticNodeId) -> Option<node_data_lease::NodeDataLease> {
         if !node_roots::NodeRootScope::holds(&self.arena.core) {
             return None;
@@ -140,6 +142,7 @@ impl SemanticGraphStore {
                 data: self.arena.get(id)?,
                 root: node_roots::NodeRoot::from_roots(id, roots),
             }),
+            Err(QueryError::StaleSemanticOperand) if self.arena.core.counted() => None,
             Err(QueryError::StaleSemanticOperand) => Some(node_data_lease::NodeDataLease {
                 data: self.arena.get(id)?,
                 root: node_roots::NodeRoot::from_roots(id, Default::default()),

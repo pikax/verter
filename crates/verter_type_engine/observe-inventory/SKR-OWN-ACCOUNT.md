@@ -167,7 +167,11 @@ copy, never an alias of a retained payload.
   its file's shallow state and the raw declaration facts its records copy
   from the lowered bodies (heritage bases, member names, closedness, member
   paths, binding keys): its own tree counts what it reaches while it lives
-  and charges none of the artifact layer's own storage.
+  and charges none of the artifact layer's own storage. Charging this
+  layer (artifact-store entries, the scheduler snapshots and
+  `DeclBodyMemo` growth) is owned by the follow-up task
+  SKR-OWN-ACCOUNT-ARTIFACTS, which runs after this one; this task does not
+  implement it.
 - **Persistent export structure.** The module-export HAMT is a third-party
   structure whose node layout is not observable; its backing is charged by
   the declared per-written-slot path-copy convention above.

@@ -102,6 +102,11 @@ impl SemanticDeliveryLease {
     pub fn signature(&self) -> Option<&SignatureEpochLease> {
         self.0.as_ref().and_then(|owner| owner.signature.as_ref())
     }
+    /// Another handle on this delivery that no construction owner captures:
+    /// the owner taking it keeps it itself.
+    pub(super) fn share(&self) -> Self {
+        Self(self.0.clone())
+    }
     /// The shared owner every clone of this delivery names, or `None` for
     /// an empty delivery.
     pub(super) fn owner_identity(&self) -> Option<usize> {
@@ -260,17 +265,43 @@ impl SemanticGraphStore {
                 .transpose()?
         };
         self.pin_delivered_allocations(&delivered);
-        let lease = SemanticDeliveryLease(Some(
+        let account = self.retention_account();
+        if key_roots.operands().is_empty() {
+            let lease = SemanticDeliveryLease(Some(
+                DeliveryOwner {
+                    roots,
+                    signature,
+                    key_roots,
+                    _own: None,
+                }
+                .charged(account),
+            ));
+            lease.capture();
+            return Ok(lease);
+        }
+        // A cache candidate's key operands are the cache's to keep, never
+        // the reader's: this thread's construction owner receives a
+        // delivery of the value alone, and the candidate keeps its own
+        // owner rooting both.
+        SemanticDeliveryLease(Some(
+            DeliveryOwner {
+                roots: roots.clone(),
+                signature: signature.clone(),
+                key_roots: NodeRootSet::default(),
+                _own: None,
+            }
+            .charged(account),
+        ))
+        .capture();
+        Ok(SemanticDeliveryLease(Some(
             DeliveryOwner {
                 roots,
                 signature,
                 key_roots,
                 _own: None,
             }
-            .charged(self.retention_account()),
-        ));
-        lease.capture();
-        Ok(lease)
+            .charged(account),
+        )))
     }
 
     /// `lease` itself when it already roots, in this graph's arena, every

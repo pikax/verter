@@ -853,8 +853,11 @@ fn a_signature_set_roots_its_candidates_in_the_graph_that_published_them() {
         host.as_ref(),
         CountedOwnershipHarness::new(),
     );
+    // The fixture composes construction ordinals across operations, so it
+    // holds an explicit builder owner; the dispatcher's lane owns nothing.
+    let builder = d.enter_construction_scope();
     let [overloaded, _] = subjects(&d);
-    // Another graph's dispatcher, opened after `d`: its scope is the newest.
+    // Another graph's dispatcher, opened after `d`: its lane is the newest.
     let other = ProjectSemanticDispatch::with_ownership_harness(
         host.as_ref(),
         CountedOwnershipHarness::new(),
@@ -869,6 +872,7 @@ fn a_signature_set_roots_its_candidates_in_the_graph_that_published_them() {
     };
     let value = ready.value;
     let graph = Arc::clone(d.graph());
+    drop(builder);
     drop(d);
     graph.invalidate_all();
     graph.signature_store().replace_epoch().unwrap();
@@ -917,11 +921,13 @@ fn a_cloned_signature_set_owns_its_candidate_nodes_through_its_final_holder() {
         CountedOwnershipHarness::new(),
     );
     let graph = Arc::clone(d.graph());
+    let builder = d.enter_construction_scope();
     let [overloaded, _] = subjects(&d);
     let value = d
         .signature_set_value(overloaded, SignatureKind::Call)
         .expect("an overloaded callable answers")
         .clone();
+    drop(builder);
     drop(d);
     graph.invalidate_all();
     graph.signature_store().replace_epoch().unwrap();
@@ -968,11 +974,15 @@ fn a_cloned_signature_set_keeps_its_candidate_table_charged_through_its_final_ho
         CountedOwnershipHarness::with_account(StoreAccount::new(Arc::clone(&account))),
     );
     let graph = Arc::clone(d.graph());
+    // The fixture composes construction ordinals across operations, so it
+    // holds an explicit builder owner; the dispatcher's lane owns nothing.
+    let builder = d.enter_construction_scope();
     let [overloaded, _] = subjects(&d);
     let value = d
         .signature_set_value(overloaded, SignatureKind::Call)
         .expect("an overloaded callable answers")
         .clone();
+    drop(builder);
     drop(d);
     graph.invalidate_all();
     graph.signature_store().replace_epoch().unwrap();

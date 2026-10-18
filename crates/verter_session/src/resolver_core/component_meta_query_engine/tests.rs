@@ -1105,30 +1105,10 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
     );
 }
 
-/// Function generic shadowing through the dispatch instantiation path
-/// (`instantiate_local_generic_ref_via_dispatch`), the route that
-/// survives the prepared-substitution slow-lane deletion.
-///
-/// Legacy `substitute_function_expr` (surface.rs) removed the function's
-/// OWN type parameters from the substitution map before substituting the
-/// params/return, so an inner `<T>` that SHADOWS the outer generic `T`
-/// was preserved (not replaced by the outer argument). Dispatch's
-/// function-lowering (`lower.rs` `TypeExpr::Function`) is a possible
-/// gap because it lowers params/return with the OUTER `env`
-/// unchanged.
-///
-/// Fixture: `type F<T> = <T>(x: T) => T` instantiated as `F<string>`.
-/// The instantiation binds the OUTER `T -> string`, but the function
-/// body's own `<T>` must shadow that binding — so the parameter type and
-/// return type must REMAIN the inner type parameter `T`, NOT collapse to
-/// `string`.
-///
-/// Discriminator: if function-lower used the outer env unchanged the
-/// param/return would lower to `Primitive(String)` (the negative
-/// assertions below would flip RED); shadowing keeps them as the inner
-/// type parameter named `T`.
+/// Expanded generic aliases use their exact lexical owner and substitute
+/// outer arguments without capturing an inner function's shadowing binder.
 #[test]
-fn instantiate_generic_function_alias_preserves_shadowing_inner_type_param_via_dispatch() {
+fn expanded_generic_aliases_preserve_owner_scopes_and_inner_shadowing() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));
@@ -1137,6 +1117,10 @@ fn instantiate_generic_function_alias_preserves_shadowing_inner_type_param_via_d
         Arc::from(
             r#"<script lang="ts">
 type F<T> = <T>(x: T) => T
+export type Shared<T> = { moduleOnly: T }
+</script>
+<script setup lang="ts">
+type Shared<T> = { instanceOnly: T }
 </script>
 <template><div /></template>"#,
         ),
@@ -1236,6 +1220,48 @@ type F<T> = <T>(x: T) => T
         "inner <T> shadows the outer T: return type must remain the inner type parameter T, \
          got {return_ty:?}",
     );
+
+    for (owner, field, argument) in [
+        (
+            verter_type_expr::TopLevelOwnerId::module(0),
+            "moduleOnly",
+            PrimitiveName::String,
+        ),
+        (
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            "instanceOnly",
+            PrimitiveName::Number,
+        ),
+    ] {
+        let expression = TypeExpr::named_with_args("Shared", vec![TypeExpr::Primitive(argument)]);
+        let projected = super::surface::lower_and_project_to_expanded_node(
+            query_engine.dispatch,
+            "/src/App.vue",
+            owner,
+            &expression,
+        )
+        .and_then(|node| {
+            super::surface::materialize_route_projection_node(query_engine.dispatch, &node)
+        })
+        .expect("the owner-local generic alias projects to its substituted body");
+        let TypeExpr::Object(object) = &projected else {
+            panic!("an expanded object for {owner:?}: {projected:?}");
+        };
+        assert_eq!(
+            object.properties.len(),
+            1,
+            "only the selected owner's field is present"
+        );
+        let ObjectMember::Property(property) = &object.properties[0] else {
+            panic!("the alias contains one property");
+        };
+        assert_eq!(property.string_name(), Some(field));
+        assert_eq!(
+            property.ty,
+            TypeExpr::Primitive(argument),
+            "the type argument is preserved"
+        );
+    }
 }
 
 #[test]

@@ -948,98 +948,102 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         (outcome.node, outcome.completeness, outcome.cache_suppress)
     }
 
-    /// Demand-point structural-fact normalizer for node-domain fact readers
-    /// (e.g. [`CallableNodeView`](crate::project_semantic_dispatch::callable_view::CallableNodeView)).
-    ///
-    /// Resolves a node to its concrete STRUCTURAL BODY at a GENUINE fact demand:
-    /// first evaluate deferred shells
-    /// ([`Self::evaluate_deferred_semantic_node_with_context`] — which unwraps
-    /// `Alias` / `KeyOf` / `IndexedAccess` / `Mapped` / `Conditional` /
-    /// `TemplateLiteral` / decl-placeholder / bare-import carriers), then resolve
-    /// a RESIDUAL `DeclRef` via the shared `ResolveDecl` query and a residual
-    /// `InstantiationRef` via the shared `Instantiate` query — the two carriers
-    /// the deferred-shell evaluator deliberately leaves carrier-shaped so an
-    /// intermediate indexed-access hop stays symbolic (see the `_ => break node`
-    /// arm of [`Self::evaluate_deferred_outcome`] and the matching `relation.rs`
-    /// demand note) — then RE-EVALUATE the materialised body. The loop is bounded
-    /// by exact-identity cycle detection plus the connected work envelope and is FAIL-CLOSED:
-    /// on a cycle, no progress, depth exhaustion, or a `Recursive`/`Error` query
-    /// result it returns the current node unchanged (which may still be a
-    /// carrier — the caller fails closed, never fabricating a fact).
-    ///
-    /// This GENERALIZES the relation-oracle demand-resolve pattern (the
-    /// `InstantiationRef` materialisation in `relation::record_target_shape`) to
-    /// BOTH residual carriers. It is NOT a second resolver: every resolution step
-    /// delegates to the existing shared `ResolveDecl` / `Instantiate` queries
-    /// (the callable realizer [`realize_callable_member`](crate::project_semantic_dispatch::callable_view::realize_callable_member)
-    /// classifies over exactly this primitive), records their dep-signature facts into the active tracer, and
-    /// folds their partial / suppress signals — so a node-domain reader's
-    /// cache-validity signature observes exactly the facts the resolution
-    /// depended on. It NEVER lowers through `TypeExpr` and NEVER walks structure
-    /// beyond recognising these carrier shells (shallow-by-default: a child node
-    /// is normalised only when a reader reaches its OWN concrete fact demand —
-    /// this primitive does not enumerate object surfaces, walk members, or expand
-    /// keyspaces).
-    ///
-    /// Returns the typed [`StructuralFactDemandOutcome`]: `Complete(node)` on a
-    /// terminal structural body or a STABLE carrier-stop (an honest miss, a
-    /// no-progress fix-point); `Partial(reasons)` — with NO node — when the
-    /// resolution was operationally truncated or faulted (connected work or
-    /// query-depth exhaustion, cycle, unstable state, non-`Miss` fault, missing
-    /// arena data, or a partial nested read). A consumer classifies ONLY a
-    /// `Complete` node.
-    ///
-    /// MUST NOT be used by carrier-PRESERVING readers (e.g.
-    /// `first_param_object_surface`): resolving a `DeclRef` subject there would
-    /// break the symbolic indexed-access preservation policy (`AppProps['avatar']`).
-    /// The semantic demand identity is the caller's `context`; the primitive only
-    /// uses the helper contexts `ResolveDecl` / `Instantiate` themselves require.
-    pub fn normalize_node_for_structural_fact_demand(
-        &self,
-        node: SemanticNodeId,
-        context: ProjectionReductionContext,
-    ) -> StructuralFactDemandOutcome {
-        // Full structural-fact demand: resolve BOTH residual carriers
-        // (`DeclRef` via `ResolveDecl`, `InstantiationRef` via `Instantiate`).
-        self.resolve_structural_fact_demand(node, context, true, true)
+    construction_ordinal_seam! {
+        /// Demand-point structural-fact normalizer for node-domain fact readers
+        /// (e.g. [`CallableNodeView`](crate::project_semantic_dispatch::callable_view::CallableNodeView)).
+        ///
+        /// Resolves a node to its concrete STRUCTURAL BODY at a GENUINE fact demand:
+        /// first evaluate deferred shells
+        /// ([`Self::evaluate_deferred_semantic_node_with_context`] — which unwraps
+        /// `Alias` / `KeyOf` / `IndexedAccess` / `Mapped` / `Conditional` /
+        /// `TemplateLiteral` / decl-placeholder / bare-import carriers), then resolve
+        /// a RESIDUAL `DeclRef` via the shared `ResolveDecl` query and a residual
+        /// `InstantiationRef` via the shared `Instantiate` query — the two carriers
+        /// the deferred-shell evaluator deliberately leaves carrier-shaped so an
+        /// intermediate indexed-access hop stays symbolic (see the `_ => break node`
+        /// arm of [`Self::evaluate_deferred_outcome`] and the matching `relation.rs`
+        /// demand note) — then RE-EVALUATE the materialised body. The loop is bounded
+        /// by exact-identity cycle detection plus the connected work envelope and is FAIL-CLOSED:
+        /// on a cycle, no progress, depth exhaustion, or a `Recursive`/`Error` query
+        /// result it returns the current node unchanged (which may still be a
+        /// carrier — the caller fails closed, never fabricating a fact).
+        ///
+        /// This GENERALIZES the relation-oracle demand-resolve pattern (the
+        /// `InstantiationRef` materialisation in `relation::record_target_shape`) to
+        /// BOTH residual carriers. It is NOT a second resolver: every resolution step
+        /// delegates to the existing shared `ResolveDecl` / `Instantiate` queries
+        /// (the callable realizer [`realize_callable_member`](crate::project_semantic_dispatch::callable_view::realize_callable_member)
+        /// classifies over exactly this primitive), records their dep-signature facts into the active tracer, and
+        /// folds their partial / suppress signals — so a node-domain reader's
+        /// cache-validity signature observes exactly the facts the resolution
+        /// depended on. It NEVER lowers through `TypeExpr` and NEVER walks structure
+        /// beyond recognising these carrier shells (shallow-by-default: a child node
+        /// is normalised only when a reader reaches its OWN concrete fact demand —
+        /// this primitive does not enumerate object surfaces, walk members, or expand
+        /// keyspaces).
+        ///
+        /// Returns the typed [`StructuralFactDemandOutcome`]: `Complete(node)` on a
+        /// terminal structural body or a STABLE carrier-stop (an honest miss, a
+        /// no-progress fix-point); `Partial(reasons)` — with NO node — when the
+        /// resolution was operationally truncated or faulted (connected work or
+        /// query-depth exhaustion, cycle, unstable state, non-`Miss` fault, missing
+        /// arena data, or a partial nested read). A consumer classifies ONLY a
+        /// `Complete` node.
+        ///
+        /// MUST NOT be used by carrier-PRESERVING readers (e.g.
+        /// `first_param_object_surface`): resolving a `DeclRef` subject there would
+        /// break the symbolic indexed-access preservation policy (`AppProps['avatar']`).
+        /// The semantic demand identity is the caller's `context`; the primitive only
+        /// uses the helper contexts `ResolveDecl` / `Instantiate` themselves require.
+        fn normalize_node_for_structural_fact_demand(
+            &self,
+            node: SemanticNodeId,
+            context: ProjectionReductionContext,
+        ) -> StructuralFactDemandOutcome {
+            // Full structural-fact demand: resolve BOTH residual carriers
+            // (`DeclRef` via `ResolveDecl`, `InstantiationRef` via `Instantiate`).
+            self.resolve_structural_fact_demand(node, context, true, true)
+        }
     }
 
-    /// Carrier-PRESERVING sibling of
-    /// [`Self::normalize_node_for_structural_fact_demand`] for readers that must
-    /// reach an UNINSTANTIATED `InstantiationRef` carrier (e.g. the validated
-    /// Svelte-snippet positional reader
-    /// [`CallableNodeView::validated_snippet_positional_params`](crate::project_semantic_dispatch::callable_view::CallableNodeView),
-    /// and the Vue slot-binding `Pick` source-root read).
-    ///
-    /// It is [`Self::normalize_node_for_structural_fact_demand`] MINUS the
-    /// `InstantiationRef`-instantiate arm: it evaluates deferred shells and
-    /// resolves a residual `DeclRef` through the shared `ResolveDecl` query (the
-    /// SAME `ScopeId { canonical_id, local_scope: None }` shape), re-evaluating
-    /// each hop, BUT it STOPS at an `InstantiationRef` root and NEVER calls
-    /// `Instantiate` on it — it returns the un-instantiated `InstantiationRef`
-    /// node so the caller can read its `args` (a positional generic-contract
-    /// read legitimate ONLY under a validated boundary such as the Svelte
-    /// `Snippet<Params>` contract or the Vue `Pick<Root, K>` DTO policy). The
-    /// `Instantiate`-first demand primitive would CONSUME the `args` tuple
-    /// (`Snippet<[T]>` → the Snippet interface `Object`, losing the carrier
-    /// args), so a carrier-reading reader must peel through THIS primitive first.
-    ///
-    /// Bounded (exact-identity cycle detection + connected work envelope) and fail-closed:
-    /// returns the typed [`StructuralFactDemandOutcome`] — the peel's
-    /// deliberate `InstantiationRef` stop and an honest miss / stable
-    /// no-progress are `Complete`, while a cycle, connected operational limit,
-    /// fault, or partial nested read is `Partial(reasons)` with NO node. It is
-    /// NOT a second resolver: the `DeclRef` step delegates to the shared
-    /// `ResolveDecl` query and records the same dep-signature / suppress facts as
-    /// the demand primitive it derives from.
-    pub fn peel_node_for_uninstantiated_carrier_fact_demand(
-        &self,
-        node: SemanticNodeId,
-        context: ProjectionReductionContext,
-    ) -> StructuralFactDemandOutcome {
-        // Carrier-preserving peel: resolve `DeclRef` shells but STOP at an
-        // `InstantiationRef` (do NOT instantiate — leave the args readable).
-        self.resolve_structural_fact_demand(node, context, false, true)
+    construction_ordinal_seam! {
+        /// Carrier-PRESERVING sibling of
+        /// [`Self::normalize_node_for_structural_fact_demand`] for readers that must
+        /// reach an UNINSTANTIATED `InstantiationRef` carrier (e.g. the validated
+        /// Svelte-snippet positional reader
+        /// [`CallableNodeView::validated_snippet_positional_params`](crate::project_semantic_dispatch::callable_view::CallableNodeView),
+        /// and the Vue slot-binding `Pick` source-root read).
+        ///
+        /// It is [`Self::normalize_node_for_structural_fact_demand`] MINUS the
+        /// `InstantiationRef`-instantiate arm: it evaluates deferred shells and
+        /// resolves a residual `DeclRef` through the shared `ResolveDecl` query (the
+        /// SAME `ScopeId { canonical_id, local_scope: None }` shape), re-evaluating
+        /// each hop, BUT it STOPS at an `InstantiationRef` root and NEVER calls
+        /// `Instantiate` on it — it returns the un-instantiated `InstantiationRef`
+        /// node so the caller can read its `args` (a positional generic-contract
+        /// read legitimate ONLY under a validated boundary such as the Svelte
+        /// `Snippet<Params>` contract or the Vue `Pick<Root, K>` DTO policy). The
+        /// `Instantiate`-first demand primitive would CONSUME the `args` tuple
+        /// (`Snippet<[T]>` → the Snippet interface `Object`, losing the carrier
+        /// args), so a carrier-reading reader must peel through THIS primitive first.
+        ///
+        /// Bounded (exact-identity cycle detection + connected work envelope) and fail-closed:
+        /// returns the typed [`StructuralFactDemandOutcome`] — the peel's
+        /// deliberate `InstantiationRef` stop and an honest miss / stable
+        /// no-progress are `Complete`, while a cycle, connected operational limit,
+        /// fault, or partial nested read is `Partial(reasons)` with NO node. It is
+        /// NOT a second resolver: the `DeclRef` step delegates to the shared
+        /// `ResolveDecl` query and records the same dep-signature / suppress facts as
+        /// the demand primitive it derives from.
+        fn peel_node_for_uninstantiated_carrier_fact_demand(
+            &self,
+            node: SemanticNodeId,
+            context: ProjectionReductionContext,
+        ) -> StructuralFactDemandOutcome {
+            // Carrier-preserving peel: resolve `DeclRef` shells but STOP at an
+            // `InstantiationRef` (do NOT instantiate — leave the args readable).
+            self.resolve_structural_fact_demand(node, context, false, true)
+        }
     }
 
     /// Declaration-KEEPING sibling of
