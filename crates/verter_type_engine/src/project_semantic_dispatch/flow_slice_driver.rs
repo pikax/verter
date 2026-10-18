@@ -1,7 +1,7 @@
 //! Request-local flow artifact execution. Shared stores expose claims and
 //! immutable products; this driver alone requests owned source lowering.
-use verter_session_query::flow::bundle::FlowGraphBundle;
 use verter_session_query::flow::bundle::FlowSliceFunctionKey;
+use verter_session_query::flow::bundle::{FlowGraphBundle, FlowGraphBundleRef};
 
 use crate::cache_runtime::flow_slice_node::*;
 use crate::cache_runtime::node::{ArtifactNode, ComputeCtx, QueryFlightKey};
@@ -70,7 +70,7 @@ impl<'a> FlowSliceDriver<'a> {
     pub fn graph_bundle(
         &self,
         key: &FlowSliceFunctionKey,
-    ) -> Result<Option<Arc<FlowGraphBundle>>, FlowBindingMapError> {
+    ) -> Result<Option<FlowGraphBundleRef>, FlowBindingMapError> {
         if self.flags.is_cancelled() {
             crate::request_context::observe_execution_abort(
                 crate::semantic_query::ExecutionAbort::Cancelled,

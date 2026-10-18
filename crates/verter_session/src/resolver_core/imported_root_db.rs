@@ -78,7 +78,7 @@ impl ImportedRootResult {
 /// of silently inheriting an empty fact signature that an enclosing memo would
 /// then observe as "nothing to invalidate on".
 pub(crate) struct ImportedRootFlightOutcome {
-    pub(crate) root: Arc<ImportedRootResult>,
+    pub(crate) root: crate::resolver_core::CachedValue<ImportedRootResult>,
     pub(crate) facts: Arc<[FactVersionRef]>,
     pub(crate) admitted: bool,
 }
@@ -103,7 +103,7 @@ impl ImportedRootDb {
         provider_canonical: &str,
         imported_name: &str,
         view: &V,
-    ) -> Option<Arc<ImportedRootResult>> {
+    ) -> Option<crate::resolver_core::CachedValue<ImportedRootResult>> {
         let key = (provider_canonical.to_owned(), imported_name.to_owned());
         self.roots.get_if_valid(&key, view)
     }
@@ -114,7 +114,7 @@ impl ImportedRootDb {
         &self,
         provider_canonical: &str,
         imported_name: &str,
-    ) -> Option<Arc<ImportedRootResult>> {
+    ) -> Option<crate::resolver_core::CachedValue<ImportedRootResult>> {
         let key = (provider_canonical.to_owned(), imported_name.to_owned());
         self.roots.get_if_valid(&key, &PermissiveStoreView)
     }
@@ -128,7 +128,7 @@ impl ImportedRootDb {
         view: &V,
         host: &crate::VerterHost,
         resolve: F,
-    ) -> Option<Arc<ImportedRootResult>>
+    ) -> Option<crate::resolver_core::CachedValue<ImportedRootResult>>
     where
         V: StoreView + ?Sized,
         F: Fn() -> Option<(ImportedRootResult, Vec<FactVersionRef>)>,
@@ -158,7 +158,10 @@ impl ImportedRootDb {
         view: &V,
         host: &crate::VerterHost,
         resolve: F,
-    ) -> Option<(Arc<ImportedRootResult>, Arc<[FactVersionRef]>)>
+    ) -> Option<(
+        crate::resolver_core::CachedValue<ImportedRootResult>,
+        Arc<[FactVersionRef]>,
+    )>
     where
         V: StoreView + ?Sized,
         F: Fn() -> Option<(ImportedRootResult, Vec<FactVersionRef>)>,
@@ -206,7 +209,7 @@ impl ImportedRootDb {
         imported_name: &str,
         view: &V,
         resolve: F,
-    ) -> Option<Arc<ImportedRootResult>>
+    ) -> Option<crate::resolver_core::CachedValue<ImportedRootResult>>
     where
         V: StoreView + ?Sized,
         F: Fn() -> Option<(ImportedRootResult, Vec<FactVersionRef>)>,
@@ -257,8 +260,8 @@ impl ImportedRootDb {
 
     /// R20 instrumentation: `admission_refused_count` on the
     /// backing `ValidatedFactCache`. Producers that admit via the
-    /// loose `insert_arc` path keep this counter at 0; only strict-
-    /// mode admissions via `insert_arc_with_kind` advance it.
+    /// loose `insert_value` path keep this counter at 0; only strict-
+    /// mode admissions via `insert_value_with_kind` advance it.
     #[must_use]
     pub fn admission_refused_count(&self) -> u64 {
         self.roots.admission_refused_count()

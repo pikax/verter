@@ -1,9 +1,8 @@
 // A bound graph takes its key from the keyed bundle it handles: there is
 // no constructor accepting a separately supplied key.
-use std::sync::Arc;
-use verter_session_query::flow::bundle::{BoundFlowGraph, FlowGraphBundle, FlowSliceFunctionKey};
+use verter_session_query::flow::bundle::{BoundFlowGraph, FlowGraphBundleRef, FlowSliceFunctionKey};
 
-fn pair(key: FlowSliceFunctionKey, bundle: Arc<FlowGraphBundle>) -> BoundFlowGraph {
+fn pair(key: FlowSliceFunctionKey, bundle: FlowGraphBundleRef) -> BoundFlowGraph {
     BoundFlowGraph::new(key, bundle)
 }
 

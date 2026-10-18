@@ -999,7 +999,13 @@
         }
       ],
       "allowedImportDirection": {
-        "verter": ["verter_audit", "verter_session_query", "verter_span", "verter_type_expr"],
+        "verter": [
+          "verter_audit",
+          "verter_retention",
+          "verter_session_query",
+          "verter_span",
+          "verter_type_expr"
+        ],
         "external": ["indexmap", "rustc_hash", "tracing"],
         "crateInternal": [
           "cache_runtime",

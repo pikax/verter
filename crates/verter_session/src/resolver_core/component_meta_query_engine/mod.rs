@@ -232,7 +232,11 @@ pub(crate) struct ObservedPreparedTypeDecl {
     /// absent from the keyed canonical — a genuine absence OR a broken-lease
     /// transient (see the type docs; the two are told apart by the
     /// cacheability rail, never by this field).
-    pub(crate) decl: Option<std::sync::Arc<verter_session_query::type_solver::PreparedTypeDecl>>,
+    pub(crate) decl: Option<
+        verter_retention::heap_size::OwnedValue<
+            verter_session_query::type_solver::PreparedTypeDecl,
+        >,
+    >,
     /// The keyed canonical the prepared decl was resolved for.
     pub(crate) canonical_id: String,
     /// The defining-file content version the prepared-decl bundle was
@@ -322,7 +326,7 @@ pub(crate) struct FastShallowFieldExpr {
 /// | `declarations` / `resolvable` / `owner_collection_exprs` | (b) | Same kind — pre-lowering memos keyed on `(canonical, name)` strings. |
 /// | `scope_payloads` | (a) | Per-request `Arc<DeclarationScopePayload>` clones; the bundle is ctx-owned, this just reuses the Arc within one request. |
 /// | `scope_shadowings` | (a) | Per-request `Arc<ScopeShadowing>` memo derived from `scope_payloads`; built once per scope so the Pick/Omit gate is O(1) per field. Shares `scope_payloads`'s request-local lifecycle. |
-/// | `prepared_type_decls` | (a) | Arc-cache for `Arc<PreparedTypeDecl>` from ctx; no semantic computation — only refcount avoidance. |
+/// | `prepared_type_decls` | (a) | Arc-cache for `verter_retention::heap_size::OwnedValue<PreparedTypeDecl>` from ctx; no semantic computation — only refcount avoidance. |
 /// | `prepared_*_query_count`, `prepared_*_hit_count` | (a) | `#[cfg(test)]` instrumentation counters. |
 /// | `fuse_budgets` / `fuse_state` | (a) | Engine-construction-scoped fuse rails (§1.4). |
 ///
@@ -393,7 +397,11 @@ pub struct ComponentMetaQueryEngine<'a> {
     /// Request-local memoization for prepared declaration lookups.
     prepared_type_decls: FxHashMap<
         (String, verter_type_expr::TopLevelOwnerId, String),
-        Option<std::sync::Arc<verter_session_query::type_solver::PreparedTypeDecl>>,
+        Option<
+            verter_retention::heap_size::OwnedValue<
+                verter_session_query::type_solver::PreparedTypeDecl,
+            >,
+        >,
     >,
     #[cfg(test)]
     prepared_type_decl_query_count: usize,

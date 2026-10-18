@@ -412,7 +412,7 @@ fn carrier_companion_refuses_return_only_projection() {
     state.ide_path = Some(format!("{canonical_id}.tsx"));
     state.api_path = Some(format!("{canonical_id}.verter.ts"));
     let ide = verter_session::IdeResponse {
-        code: Arc::from("import Child from './Child.vue'; void Child;\n"),
+        code: verter_type_expr::OwnedStr::from("import Child from './Child.vue'; void Child;\n"),
         source_map: None,
         is_jsx: false,
         destructured_block: None,
