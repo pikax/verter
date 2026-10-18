@@ -1372,10 +1372,10 @@ impl SyntheticBindingId {
     #[must_use]
     pub fn from_carrier_key(key: &verter_type_expr::SyntheticCarrierKey) -> Self {
         Self {
-            scope_canonical_id: OwnedStr::from(key.scope_canonical_id.clone()),
+            scope_canonical_id: key.scope_canonical_id.clone(),
             surface_kind: key.surface_kind,
             slot_name: key.slot_name.as_ref().map(OwnedStr::from),
-            binding_name: OwnedStr::from(key.binding_name.clone()),
+            binding_name: key.binding_name.clone(),
         }
     }
 

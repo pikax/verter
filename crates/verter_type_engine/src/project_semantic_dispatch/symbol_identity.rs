@@ -319,7 +319,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         }
                         let read = self.execute_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                             scope: ScopeId::file(symbol.canonical_id.clone(), symbol.owner),
-                            name: verter_type_expr::OwnedStr::from(symbol.symbol.clone()),
+                            name: symbol.symbol.clone(),
                         }));
                         subject = match self.identity_read_subject(read) {
                             Ok(next) => IdentitySubject::Node(next),
@@ -463,7 +463,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     last_symbol = Some(symbol.clone());
                     let read = self.execute_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                         scope: ScopeId::file(symbol.canonical_id.clone(), symbol.owner),
-                        name: verter_type_expr::OwnedStr::from(symbol.symbol.clone()),
+                        name: symbol.symbol.clone(),
                     }));
                     subject = match self.identity_read_subject(read) {
                         Ok(node) => IdentitySubject::Node(node),
