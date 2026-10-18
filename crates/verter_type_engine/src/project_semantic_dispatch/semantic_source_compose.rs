@@ -8,6 +8,7 @@
 //! ENTRIES, strict-raise sink, and locator absolutization stay in the parent module.
 
 use std::sync::Arc;
+use verter_type_expr::OwnedStr;
 
 use verter_type_expr::facts::{
     FactOrLocator, FunctionSignatureFact, IndexedAccessFact, LeafTypeFact, ObjectMemberFact,
@@ -56,7 +57,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .map(|state| state.whole_hash)
             .unwrap_or_default();
         NodeScopeId::File {
-            canonical_id: Arc::from(ctx.scope_canonical_id),
+            canonical_id: verter_type_expr::OwnedStr::from(ctx.scope_canonical_id),
             owner: ctx.scope_owner,
             whole_hash,
             local_scope: None,
@@ -731,7 +732,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .iter()
             .enumerate()
             .map(|(ordinal, param)| crate::semantic_query::FunctionParam {
-                name: param.name.as_deref().map(Arc::from),
+                name: param.name.as_deref().map(OwnedStr::from),
                 ty: match param.ty.as_ref() {
                     Some(slot) => self.raise_required_interior(
                         ctx,
@@ -856,12 +857,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             },
                         )
                     });
-                    let display_name: Arc<str> = Arc::from(param.name.as_str());
+                    let display_name = OwnedStr::from(param.name.as_str());
                     let param_node = self.graph().intern_node_with_scope(
                         SemanticNodeData::TypeParam {
                             decl: crate::semantic_query::DeclIdentity::from_scope(
                                 &scope,
-                                Arc::clone(&display_name),
+                                display_name.clone(),
                             ),
                             // The shared signature-scoped binder convention
                             // (`BinderIdentityMode::Signature`): display-name-keyed
@@ -869,7 +870,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             param_index: 0,
                             constraint,
                             default,
-                            display_name: Arc::clone(&display_name),
+                            display_name: OwnedStr::from(&display_name),
                         },
                         scope.clone(),
                     );
@@ -888,7 +889,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     source.with_bindings(
                         type_parameters
                             .iter()
-                            .map(|parameter| (parameter.name.clone(), parameter.param)),
+                            .map(|parameter| (Arc::<str>::from(&parameter.name), parameter.param)),
                     ),
                 )
             }
@@ -938,7 +939,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .iter()
             .enumerate()
             .map(|(ordinal, element)| TupleElement {
-                label: element.label.as_deref().map(Arc::from),
+                label: element.label.as_deref().map(OwnedStr::from),
                 value: ctx.with_interior_step(
                     crate::project_semantic_dispatch::interior_source::InteriorSourceStep::TupleElement {
                         ordinal: ordinal as u32,
@@ -981,7 +982,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             node = self.graph().intern_node_with_scope(
                 SemanticNodeData::IndexedAccess {
                     object: node,
-                    index: IndexKey::String(Arc::from(key.as_str())),
+                    index: IndexKey::String(verter_type_expr::OwnedStr::from(key.as_str())),
                 },
                 scope.clone(),
             );
@@ -993,10 +994,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 /// Map a fact-side declaration origin onto the graph member's origin file.
 fn declaration_origin_file(
     origin: &verter_type_expr::facts::DeclarationOrigin,
-) -> Option<Arc<str>> {
+) -> Option<verter_type_expr::OwnedStr> {
     match origin {
         verter_type_expr::facts::DeclarationOrigin::Declared(canonical) => {
-            Some(Arc::clone(canonical))
+            Some(verter_type_expr::OwnedStr::from(canonical))
         }
         verter_type_expr::facts::DeclarationOrigin::Synthetic => None,
     }

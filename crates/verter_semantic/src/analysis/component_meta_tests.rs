@@ -31,9 +31,9 @@ pub(crate) fn closed_string(value: &str) -> SemanticTypeSource {
 pub(crate) fn test_payload(field_index: u32) -> MacroPayloadLocator {
     MacroPayloadLocator {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(""),
+            canonical_id: verter_type_expr::OwnedStr::from(""),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("default"),
+            symbol: verter_type_expr::OwnedStr::from("default"),
             space: LocatorSymbolSpace::Value,
         },
         macro_index: 0,
@@ -5800,7 +5800,7 @@ fn slot_merge_replaces_evidence_atomically_and_failed_authority_is_absorbing() {
     let old_locator = verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
         verter_type_expr::locators::TypeBodySlot {
             anchor: test_payload(1).anchor,
-            path: Arc::from([]),
+            path: verter_type_expr::OwnedSlice::from([]),
         },
     );
     // SAFETY: the fixture supplies one atomic authored locator/text row.

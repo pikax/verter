@@ -11,8 +11,6 @@
 //! (never a materialized `TypeExpr` — materialization happens only at the
 //! sealed output sink).
 
-use std::sync::Arc;
-
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_session_query::analysis::component_meta::ResolvedTypeAnalysis;
 use verter_session_query::type_solver::host::ResolvedRootIdentity;
@@ -284,10 +282,10 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
             .map(|state| state.whole_hash)
             .unwrap_or_default();
         DeclIdentity {
-            canonical_id: Arc::from(canonical_source),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical_source),
             owner,
             whole_hash,
-            decl_name: Arc::from(name),
+            decl_name: verter_type_expr::OwnedStr::from(name),
         }
     }
 

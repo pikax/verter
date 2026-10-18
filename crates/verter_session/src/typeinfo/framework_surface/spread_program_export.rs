@@ -306,10 +306,10 @@ mod spread_program_wire_tests {
     fn program_keys_encode_typed_number_symbol_and_computed_forms() {
         use verter_type_expr::{AuthoredPropertyKey, CanonicalIndexInt, ValueDeclIdentityPart};
         let symbol = || ValueDeclIdentityPart {
-            canonical_id: Arc::from("/w/brand.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/w/brand.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("tag"),
-            member_path: Arc::from([]),
+            symbol: verter_type_expr::OwnedStr::from("tag"),
+            member_path: verter_type_expr::OwnedSlice::from([]),
         };
         let property = |key: AuthoredPropertyKey<TypeExpr, ValueDeclIdentityPart>| {
             ObjectMember::Property(ObjectProperty::synthetic_public_key(

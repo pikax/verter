@@ -143,9 +143,9 @@ fn resolve_local_frontier_body(
         .type_decl_in(owner, symbol_name)
         .map(|lowered| {
             let anchor = AuthoredAnchor {
-                canonical_id: Arc::from(canonical_id),
+                canonical_id: verter_type_expr::OwnedStr::from(canonical_id),
                 owner,
-                symbol: Arc::from(symbol_name),
+                symbol: verter_type_expr::OwnedStr::from(symbol_name),
                 space: LocatorSymbolSpace::Type,
             };
             // The memo's content-free mirror facts are the type-parameter
@@ -161,7 +161,7 @@ fn resolve_local_frontier_body(
                 .map(|param| {
                     let reanchor = |slot: &TypeBodySlot| TypeBodySlot {
                         anchor: anchor.clone(),
-                        path: Arc::clone(&slot.path),
+                        path: slot.path.clone(),
                     };
                     NarrowTypeParam {
                         name: param.name.clone(),
@@ -305,7 +305,7 @@ impl ExternalTypeFrontier {
                     domain: BudgetDomain::Frontier,
                     limit: self.budgets.frontier_symbol_visits,
                     actual: self.counters.frontier_symbol_visits,
-                    context: format!("{}::{}", pending.canonical_id, pending.exported_name),
+                    context: format!("{}::{}", pending.canonical_id, pending.exported_name).into(),
                 };
                 self.budget_failure = Some(failure.clone());
                 return Err(failure);
@@ -1596,9 +1596,9 @@ mod tests {
         );
 
         let expected_anchor = AuthoredAnchor {
-            canonical_id: Arc::from("/src/types.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/src/types.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("Props"),
+            symbol: verter_type_expr::OwnedStr::from("Props"),
             space: LocatorSymbolSpace::Type,
         };
         assert_eq!(
@@ -1612,7 +1612,10 @@ mod tests {
 
         let bound_slot = |ordinal: u32, position: TypeParamBoundPosition| TypeBodySlot {
             anchor: expected_anchor.clone(),
-            path: Arc::from(vec![TypeBodyPathStep::TypeParamBound { ordinal, position }]),
+            path: verter_type_expr::OwnedSlice::from(vec![TypeBodyPathStep::TypeParamBound {
+                ordinal,
+                position,
+            }]),
         };
         assert_eq!(
             resolved.type_parameters,
@@ -1669,14 +1672,17 @@ mod tests {
             "the local default-export definition with an eval env should fully resolve"
         );
         let default_anchor = AuthoredAnchor {
-            canonical_id: Arc::from("/src/defaults.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/src/defaults.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("default"),
+            symbol: verter_type_expr::OwnedStr::from("default"),
             space: LocatorSymbolSpace::Type,
         };
         let default_bound_slot = |ordinal: u32, position: TypeParamBoundPosition| TypeBodySlot {
             anchor: default_anchor.clone(),
-            path: Arc::from(vec![TypeBodyPathStep::TypeParamBound { ordinal, position }]),
+            path: verter_type_expr::OwnedSlice::from(vec![TypeBodyPathStep::TypeParamBound {
+                ordinal,
+                position,
+            }]),
         };
         assert_eq!(
             default_resolved.type_parameters,

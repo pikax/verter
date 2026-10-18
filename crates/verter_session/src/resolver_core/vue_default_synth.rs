@@ -190,9 +190,9 @@ mod tests {
     fn payload_locator(macro_index: u32) -> MacroPayloadLocator {
         MacroPayloadLocator {
             anchor: AuthoredAnchor {
-                canonical_id: Arc::from("/App.vue"),
+                canonical_id: verter_type_expr::OwnedStr::from("/App.vue"),
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
-                symbol: Arc::from("default"),
+                symbol: verter_type_expr::OwnedStr::from("default"),
                 space: LocatorSymbolSpace::Value,
             },
             macro_index,

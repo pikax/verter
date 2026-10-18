@@ -508,7 +508,7 @@ pub enum RootReachability {
 }
 
 /// Why a component has no fallthrough surface.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub enum NoFallthroughReason {
     /// `defineOptions({ inheritAttrs: false })` or Options API `inheritAttrs: false`.
     InheritAttrsFalse,
@@ -583,7 +583,7 @@ pub enum RootTargetRef {
 }
 
 /// Why a root target cannot be resolved for fallthrough inheritance.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, verter_retention::heap_size::HeapSize)]
 pub enum UnresolvedRootTargetReason {
     /// `<component :is="...">` — dynamic component.
     DynamicComponentIs,
@@ -616,7 +616,7 @@ pub struct ConsumedRootBindings {
 }
 
 /// Why generic-root specialization could not resolve a concrete instantiation.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, verter_retention::heap_size::HeapSize)]
 pub enum GenericResolutionFailure {
     SpreadInput,
     DynamicKey,
@@ -627,7 +627,7 @@ pub enum GenericResolutionFailure {
 }
 
 /// Known lower-bound causes for a partially resolved fallthrough branch.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, verter_retention::heap_size::HeapSize)]
 pub enum PartialBranchReason {
     DynamicAttrName,
     DynamicListenerName,
@@ -636,7 +636,7 @@ pub enum PartialBranchReason {
 }
 
 /// Why a fallthrough branch could not be resolved at all.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, verter_retention::heap_size::HeapSize)]
 pub enum UnresolvedBranchReason {
     Cycle { canonical_id: String },
     DynamicComponentIs,
@@ -647,7 +647,7 @@ pub enum UnresolvedBranchReason {
 }
 
 /// How a member arrived on the accepted surface.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, verter_retention::heap_size::HeapSize)]
 pub enum MemberProvenance {
     /// Member is declared locally (defineProps / defineEmits / Options API).
     Declared,
@@ -656,7 +656,7 @@ pub enum MemberProvenance {
 }
 
 /// A single inheritance source.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, verter_retention::heap_size::HeapSize)]
 pub enum InheritedSource {
     /// Inherited from a native HTML element.
     NativeTag { tag: String },
@@ -665,7 +665,7 @@ pub enum InheritedSource {
 }
 
 /// Whether a member is always available or only in certain branches.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, verter_retention::heap_size::HeapSize)]
 pub enum MemberAvailability {
     /// Available in all branches (unconditional single-root or all branches).
     Always,
@@ -674,7 +674,7 @@ pub enum MemberAvailability {
 }
 
 /// Kind of accepted prop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub enum AcceptedPropKind {
     /// Locally declared prop.
     DeclaredProp,
@@ -683,7 +683,7 @@ pub enum AcceptedPropKind {
 }
 
 /// Kind of accepted event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub enum AcceptedEventKind {
     /// Locally declared emit.
     DeclaredEmit,
@@ -692,7 +692,7 @@ pub enum AcceptedEventKind {
 }
 
 /// Whether the accepted surface is exact or only a lower bound.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub enum AcceptedSurfaceCompleteness {
     /// All accepted members are known exactly.
     Exact,
@@ -701,7 +701,7 @@ pub enum AcceptedSurfaceCompleteness {
 }
 
 /// An accepted prop on the computed call-site surface.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub struct AcceptedPropAnalysis {
     pub name: String,
     /// Typed callable role preserved through accepted-surface inheritance.
@@ -722,7 +722,7 @@ pub struct AcceptedPropAnalysis {
 }
 
 /// An accepted event on the computed call-site surface.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub struct AcceptedEventAnalysis {
     pub name: String,
     /// The accepted event's resolved payload SOURCE POSITION (`Absent` =
@@ -740,7 +740,7 @@ pub struct AcceptedEventAnalysis {
 }
 
 /// The branch-structured inherited surface. Declared members do NOT appear here.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, verter_retention::heap_size::HeapSize)]
 pub enum FallthroughSurface {
     /// No fallthrough inheritance.
     None { reason: NoFallthroughReason },
@@ -749,7 +749,7 @@ pub enum FallthroughSurface {
 }
 
 /// An inherited prop entry in a fallthrough branch.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, verter_retention::heap_size::HeapSize)]
 pub struct FallthroughPropEntry {
     pub name: String,
     /// Typed callable role inherited from the producing prop.
@@ -767,7 +767,7 @@ pub struct FallthroughPropEntry {
 }
 
 /// An inherited event entry in a fallthrough branch.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, verter_retention::heap_size::HeapSize)]
 pub struct FallthroughEventEntry {
     pub name: String,
     /// The inherited event's resolved payload SOURCE POSITION (`Absent` =
@@ -783,7 +783,7 @@ pub struct FallthroughEventEntry {
 }
 
 /// Status of a fallthrough branch.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, verter_retention::heap_size::HeapSize)]
 pub enum BranchStatus {
     /// All members in this branch are exactly known.
     Resolved,
@@ -794,7 +794,7 @@ pub enum BranchStatus {
 }
 
 /// A single step in the root resolution chain.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, verter_retention::heap_size::HeapSize)]
 pub enum ResolvedRootStep {
     /// Native HTML element target.
     NativeTag { tag: String },
@@ -811,7 +811,7 @@ pub enum ResolvedRootStep {
 }
 
 /// A single branch in the fallthrough surface.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, verter_retention::heap_size::HeapSize)]
 pub struct FallthroughBranch {
     /// Deterministic branch key (e.g., "0", "0.1", "2.0.3").
     pub branch_key: String,

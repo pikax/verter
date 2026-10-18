@@ -96,7 +96,7 @@ fn file_scope_in_owner(
         .shallow_file_state(canonical)
         .expect("file must be indexed in the hermetic host");
     NodeScopeId::File {
-        canonical_id: Arc::from(canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical),
         owner,
         whole_hash: shallow.whole_hash,
         local_scope: None,
@@ -154,7 +154,7 @@ pub(super) fn import_type_carrier(
     graph.intern_node_with_scope(
         SemanticNodeData::new_import_type(
             Arc::from(specifier),
-            qualifier,
+            verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(qualifier),
             Arc::from(arg_nodes.into_boxed_slice()),
             typeof_query,
         ),
@@ -169,7 +169,8 @@ fn resolve_subject(
     carrier: SemanticNodeId,
     mode: ProjectionMode,
 ) -> SemanticNodeId {
-    let empty_path: Arc<[PathSegment]> = Arc::from(Vec::new().into_boxed_slice());
+    let empty_path: verter_type_expr::OwnedSlice<PathSegment> =
+        verter_type_expr::OwnedSlice::default();
     match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: carrier,
         path: empty_path,
@@ -196,7 +197,7 @@ fn eager_lower_subject(
 ) -> SemanticNodeId {
     let scope = file_scope(dispatch, canonical);
     let env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
-    let name_resolution: FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> =
+    let name_resolution: FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity> =
         FxHashMap::default();
     let scope_payload = dispatch.ctx.prepared_decl_bundle(canonical).map(|bundle| {
         verter_type_engine::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
@@ -648,10 +649,7 @@ fn carrier_head_namespace_sibling_bare_name_diverges_recorded_for_producer_flip(
         dispatch.graph().node_data(via_carrier).as_deref()
     );
     match dispatch.graph().node_data(via_carrier).as_deref() {
-        Some(data)
-            if data
-                .bare_ref_head()
-                .is_some_and(|(n, _)| n.as_ref() == "Sib") => {}
+        Some(data) if data.bare_ref_head().is_some_and(|(n, _)| n == "Sib") => {}
         other => panic!(
             "the preserved divergent terminal must still be the `BareRef(\"Sib\")` \
              carrier; got {other:?}"
@@ -673,10 +671,10 @@ fn carrier_head_namespace_sibling_bare_name_diverges_recorded_for_producer_flip(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             )
         });
-        let mut name_resolution: FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> =
+        let mut name_resolution: FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity> =
             FxHashMap::default();
         name_resolution.insert(
-            std::sync::Arc::from("Sib"),
+            verter_type_expr::OwnedStr::from("Sib"),
             ResolvedRootIdentity::new("/ns.ts", "NS.Sib"),
         );
         let shadowing = ScopeShadowing::from_scope_payload(scope_payload.as_ref());
@@ -816,9 +814,9 @@ fn bare_ref_head_recursive_ref_terminates_bounded() {
             // INSIDE `build_instantiate`'s push/pop window for `Tree`.
             let pushed = dispatch.push_instantiate_active(
                 (
-                    Arc::from("/tree.ts"),
+                    verter_type_expr::OwnedStr::from("/tree.ts"),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    Arc::from("Tree"),
+                    verter_type_expr::OwnedStr::from("Tree"),
                 ),
                 Arc::from([]),
             );
@@ -873,9 +871,9 @@ fn generic_head_of_an_active_declaration_keeps_its_back_edge_where_its_position_
             );
             let pushed = dispatch.push_instantiate_active(
                 (
-                    Arc::from("/grow.ts"),
+                    verter_type_expr::OwnedStr::from("/grow.ts"),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    Arc::from("G"),
+                    verter_type_expr::OwnedStr::from("G"),
                 ),
                 Arc::from(vec![string].into_boxed_slice()),
             );
@@ -887,7 +885,7 @@ fn generic_head_of_an_active_declaration_keeps_its_back_edge_where_its_position_
                 Some(SemanticNodeData::Opaque(
                     verter_type_engine::semantic_query::QueryError::RecursiveRef { name, args },
                 )) => {
-                    assert_eq!(name.as_ref(), "G");
+                    assert_eq!(name, "G");
                     assert_eq!(args.len(), 1, "the back-edge records its own arguments");
                 }
                 other => panic!(
@@ -1089,7 +1087,7 @@ fn eager_resolved_with_name_resolution(
     });
     // Build the populated name_resolution from the consumer's import binding so
     // the FAST-PATH fires (mirrors the prepared-decl map's import entry).
-    let mut name_resolution: FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> =
+    let mut name_resolution: FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity> =
         FxHashMap::default();
     if let Some(bundle) = dispatch.ctx.prepared_decl_bundle(canonical) {
         if let Some(owner_scope) =
@@ -1104,7 +1102,8 @@ fn eager_resolved_with_name_resolution(
                     )
                     .0
                 {
-                    name_resolution.insert(std::sync::Arc::from(local.as_str()), identity);
+                    name_resolution
+                        .insert(verter_type_expr::OwnedStr::from(local.as_str()), identity);
                 }
             }
         }
@@ -1156,7 +1155,7 @@ fn normal_path_walker_reenters_carrier_normalization_behind_alias() {
     // Project `.a` over the alias-wrapped carrier in Navigate.
     let projected = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: alias,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![PathSegment::Member(
                 verter_type_engine::semantic_query::PropertyKey::identifier("a"),
             )]
@@ -1209,7 +1208,7 @@ fn normal_path_walker_unresolvable_carrier_behind_alias_misses() {
 
     let projected = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: alias,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![PathSegment::Member(
                 verter_type_engine::semantic_query::PropertyKey::identifier("a"),
             )]
@@ -1242,7 +1241,7 @@ fn carrier_resolver_context_drives_shared_head_resolver() {
     let scope = file_scope(&dispatch, "/ctx.ts");
 
     let env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
-    let name_resolution: FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> =
+    let name_resolution: FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity> =
         FxHashMap::default();
     let scope_payload = dispatch.ctx.prepared_decl_bundle("/ctx.ts").map(|bundle| {
         verter_type_engine::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
@@ -1448,7 +1447,7 @@ fn carrier_head_preserves_local_scope_in_rehydrated_scope() {
     // A carrier scope carrying a NON-None `local_scope`.
     let local: u32 = 0xABCD;
     let scope_with_local = NodeScopeId::File {
-        canonical_id: Arc::from("/ls.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/ls.ts"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: shallow.whole_hash,
         local_scope: Some(local),
@@ -1594,7 +1593,7 @@ fn navigate_unresolvable_ref_head_preserves_bare_ref_carrier_with_args() {
     let (name, scope) = data
         .bare_ref_head()
         .expect("Navigate transit must preserve the unresolved head as a BareRef carrier");
-    assert_eq!(name.as_ref(), "Unknown", "the authored head name survives");
+    assert_eq!(name, "Unknown", "the authored head name survives");
     match scope {
         NodeScopeId::File { canonical_id, .. } => assert_eq!(
             canonical_id.as_ref(),
@@ -1800,9 +1799,9 @@ defineProps<Copy<ImportedProps>>()
         let read = dispatch.execute_read(SemanticQueryKey::Instantiate(
             verter_type_engine::semantic_query::InstantiateKey::new(
                 dispatch.type_slot_for(
-                    Arc::clone(&base.canonical_id),
+                    base.canonical_id.clone(),
                     base.owner,
-                    Arc::clone(&base.decl_name),
+                    base.decl_name.clone(),
                 ),
                 args,
                 instantiate_context,
@@ -1834,7 +1833,7 @@ defineProps<Copy<ImportedProps>>()
 
         let navigate_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
             base: product.hot.node(),
-            path: Arc::from([]),
+            path: verter_type_expr::OwnedSlice::from([]),
             context: ProjectionReductionContext::structural_transit_with_mode(
                 ProjectionMode::Navigate,
             ),
@@ -1858,9 +1857,9 @@ defineProps<Copy<ImportedProps>>()
             crate::meta_resolve::projectors::build_owner_decl_identity(&host, canonical, mac.owner);
         let payload_read = dispatch.execute_read(SemanticQueryKey::ResolveMacroPayload {
             owner: dispatch.type_slot_for(
-                Arc::clone(&owner.canonical_id),
+                owner.canonical_id.clone(),
                 owner.owner,
-                Arc::clone(&owner.decl_name),
+                owner.decl_name.clone(),
             ),
             macro_index,
             macro_kind: mac.kind,
@@ -1875,7 +1874,7 @@ defineProps<Copy<ImportedProps>>()
         };
         let payload_surface_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
             base: payload,
-            path: Arc::from([]),
+            path: verter_type_expr::OwnedSlice::from([]),
             context: runtime_context,
         });
         assert!(!payload_surface_read.result_is_partial());
@@ -1941,7 +1940,7 @@ defineProps<{ setupOnly: string }>()
     );
     let parent_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base: parent_carrier,
-        path: Arc::from([]),
+        path: verter_type_expr::OwnedSlice::from([]),
         context,
     });
     assert!(
@@ -1966,7 +1965,7 @@ defineProps<{ setupOnly: string }>()
     let _completeness = verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
     let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base: carrier,
-        path: Arc::from([]),
+        path: verter_type_expr::OwnedSlice::from([]),
         context,
     });
 

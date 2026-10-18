@@ -747,10 +747,10 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
             // would REPLACE the advertised set with a smaller one, and the
             // engine would fall back to parsing the raw carrier as TypeScript.
             block_in_place_if_available(|| {
-                let _ = documents
+                documents
                     .host()
-                    .ensure_ide_compiled(req.canonical_id, &profile);
-                documents.host().get_ide(req.canonical_id, &profile)
+                    .compile_ide(req.canonical_id, &profile)
+                    .unwrap_or_else(|_| documents.host().get_ide(req.canonical_id, &profile))
             })
         })
     } else {

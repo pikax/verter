@@ -76,7 +76,7 @@ pub fn compute_flow_slice_hash_thread_invocations() -> u64 {
 /// computation" is the separate behavioral half, held by the
 /// `compute_flow_slice_hash_thread_invocations` counter binding (the
 /// `test-support`-feature-gated accessor consumer guard tests bind to).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct FlowSliceHash(Hash16);
 
 impl std::fmt::Debug for FlowSliceHash {

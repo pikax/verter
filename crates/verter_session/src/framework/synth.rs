@@ -135,7 +135,7 @@ impl ComponentDefaultSynth for SvelteComponentDefaultSynth {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+
     use verter_session_query::analysis::types::{AnalyzedMacro, AnalyzedMacroKind};
     use verter_span::Span;
     use verter_type_expr::locators::{
@@ -161,9 +161,9 @@ mod tests {
             resolved_local_types: Vec::new(),
             parsed_type_argument: Some(MacroPayloadLocator {
                 anchor: AuthoredAnchor {
-                    canonical_id: Arc::from("/App.vue"),
+                    canonical_id: verter_type_expr::OwnedStr::from("/App.vue"),
                     owner: verter_type_expr::TopLevelOwnerId::instance(0),
-                    symbol: Arc::from("default"),
+                    symbol: verter_type_expr::OwnedStr::from("default"),
                     space: LocatorSymbolSpace::Value,
                 },
                 macro_index: 0,

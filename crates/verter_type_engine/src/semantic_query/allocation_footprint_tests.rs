@@ -3,6 +3,7 @@ use std::sync::Arc;
 use super::*;
 use crate::project_semantic_dispatch::walk::{DiagnosticError, WalkerDiagnostics};
 use crate::semantic_query::demand::{Demand, MaterializedPoint};
+use verter_session_query::retention::allocation::arc_block_bytes;
 use verter_session_query::retention::owned::{OwnedSlice, OwnedStr};
 
 fn arm(name: &str, owner: &str) -> ShallowDiagnostic {
@@ -17,8 +18,8 @@ fn arm(name: &str, owner: &str) -> ShallowDiagnostic {
 fn a_diagnostic_rail_is_charged_for_the_text_its_diagnostics_name() {
     let short = WalkerDiagnostics::new(vec![arm("A", "/a.ts")]);
     let long = WalkerDiagnostics::new(vec![arm(&"n".repeat(9_000), "/a.ts")]);
-    let short_bytes = short.owned_heap_bytes(&mut AliasSet::new());
-    let long_bytes = long.owned_heap_bytes(&mut AliasSet::new());
+    let short_bytes = short.owned_heap_bytes(&mut AliasSet::estimating());
+    let long_bytes = long.owned_heap_bytes(&mut AliasSet::estimating());
     // The former per-diagnostic proxy charged both 256 bytes.
     assert!(long_bytes >= short_bytes + 8_900);
 }
@@ -26,31 +27,33 @@ fn a_diagnostic_rail_is_charged_for_the_text_its_diagnostics_name() {
 #[test]
 fn a_nested_error_and_its_declaration_are_charged() {
     let decl = DeclIdentity {
-        canonical_id: Arc::from("/decl.ts"),
+        canonical_id: OwnedStr::from("/decl.ts"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: Default::default(),
-        decl_name: Arc::from("Decl"),
+        decl_name: OwnedStr::from("Decl"),
     };
     let message: Arc<str> = Arc::from("m".repeat(5_000));
     let diagnostic = ShallowDiagnostic::InstantiationError {
         decl,
-        error: DiagnosticError::for_tests(QueryError::Other(Arc::clone(&message))),
+        error: DiagnosticError::for_tests(QueryError::Other(verter_type_expr::OwnedStr::from(
+            message.clone(),
+        ))),
     };
-    assert!(diagnostic.owned_heap_bytes(&mut AliasSet::new()) >= 5_000);
+    assert!(diagnostic.owned_heap_bytes(&mut AliasSet::estimating()) >= 5_000);
 }
 
 #[test]
 fn a_materialised_point_is_charged_for_its_path_text() {
     let path = ProjectionPath::from_segments([PathSegment::Member(PropertyKey::String(
-        Arc::from("p".repeat(4_000)),
+        OwnedStr::from("p".repeat(4_000)),
     ))]);
     let mut demand = Demand::identity();
     demand.projection.path = path;
     let set = MaterializedSet(Arc::from(vec![MaterializedPoint::new(demand)]));
     let empty = MaterializedSet::empty();
     assert!(
-        set.owned_heap_bytes(&mut AliasSet::new())
-            >= empty.owned_heap_bytes(&mut AliasSet::new()) + 4_000,
+        set.owned_heap_bytes(&mut AliasSet::estimating())
+            >= empty.owned_heap_bytes(&mut AliasSet::estimating()) + 4_000,
         "the former per-point proxy charged 96 bytes whatever the path"
     );
 }
@@ -63,7 +66,7 @@ fn one_charge_counts_a_shared_allocation_once() {
         owner_canonical: name.clone(),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
     }]);
-    let bytes = rail.owned_heap_bytes(&mut AliasSet::new());
+    let bytes = rail.owned_heap_bytes(&mut AliasSet::estimating());
     assert!(bytes >= 3_000);
     assert!(bytes < 6_000, "one name aliased twice is one allocation");
 }
@@ -73,7 +76,7 @@ use crate::semantic_query::SemanticNodeId;
 fn flow_key(canonical: Arc<str>) -> crate::semantic_query::FlowReturnKey {
     crate::semantic_query::FlowReturnKey {
         function: flow_slot(canonical),
-        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
         demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
         input: crate::semantic_query::FlowInputContext::empty(),
         context: crate::semantic_query::FlowReturnContext {
@@ -116,7 +119,7 @@ fn nodes(count: u64) -> OwnedSlice<SemanticNodeId> {
 }
 
 fn value_bytes(value: SemanticQueryValue) -> usize {
-    value.owned_heap_bytes(&mut AliasSet::new())
+    value.owned_heap_bytes(&mut AliasSet::estimating())
 }
 
 /// The backing an owned slice of `count` elements adds over an empty one.
@@ -145,13 +148,13 @@ fn a_flow_return_is_charged_for_its_nested_backing() {
         .with_checker_diagnostics(diagnostics)
         .with_exact_return_keys(ExactReturnKeyDomain::for_footprint_tests(
             flow_key(Arc::clone(&canonical)),
-            Arc::from(vec![long_key]),
-            Arc::from(vec![]),
+            verter_type_expr::OwnedSlice::from(vec![long_key]),
+            Box::new([]),
         ))
         .with_independent_member(ExactMemberValue::for_footprint_tests(
             flow_key(Arc::clone(&canonical)),
             SemanticNodeId(1),
-            Arc::from(vec![(long_root, [0; 16])]),
+            Box::from(vec![(verter_type_expr::OwnedStr::from(long_root), [0; 16])]),
         ));
 
     let small_bytes = value_bytes(SemanticQueryValue::FlowReturn(
@@ -227,17 +230,17 @@ fn a_flow_return_counts_an_allocation_it_reaches_twice_once() {
 
     const TEXT: usize = 6_000;
     let canonical: Arc<str> = Arc::from("/a.ts");
-    let shared: Arc<str> = Arc::from("s".repeat(TEXT));
+    let shared = OwnedStr::from("s".repeat(TEXT));
     let result = FlowReturnResult::for_footprint_tests(SemanticNodeId(1), nodes(0))
         .with_exact_return_keys(ExactReturnKeyDomain::for_footprint_tests(
             flow_key(Arc::clone(&canonical)),
-            Arc::from(vec![Arc::clone(&shared), Arc::clone(&shared)]),
-            Arc::from(vec![]),
+            OwnedSlice::from(vec![shared.clone(), shared.clone()]),
+            Box::new([]),
         ))
         .with_independent_member(ExactMemberValue::for_footprint_tests(
             flow_key(Arc::clone(&canonical)),
             SemanticNodeId(1),
-            Arc::from(vec![(Arc::clone(&shared), [0; 16])]),
+            Box::from(vec![(shared.clone(), [0; 16])]),
         ));
     let bytes = value_bytes(SemanticQueryValue::FlowReturn(
         verter_session_query::retention::owned::Owned::new(result),
@@ -284,19 +287,21 @@ fn an_object_projection_is_charged_for_its_excess_candidate_text() {
     let formula = |excess| {
         SemanticQueryValue::ObjectProjection(evaluator_support::formula([
             evaluator_support::alternative(evaluator_support::AlternativeInput {
-                positive: Arc::from([]),
+                positive: verter_type_expr::OwnedSlice::from([]),
                 selector: ObjectProjectionSelector::Surface,
                 closed: true,
-                residual_operands: Arc::from([]),
-                indeterminate_possible_writes: Arc::from([]),
-                indices: Arc::from([]),
-                signatures: Arc::from([]),
+                residual_operands: verter_type_expr::OwnedSlice::from([]),
+                indeterminate_possible_writes: verter_type_expr::OwnedSlice::from([]),
+                indices: verter_type_expr::OwnedSlice::from([]),
+                signatures: verter_type_expr::OwnedSlice::from([]),
                 excess,
             }),
         ]))
     };
     let eligible = formula(ExcessEligibility::Eligible {
-        direct_candidates: Arc::from(vec![PropertyKey::String(Arc::from("x".repeat(TEXT)))]),
+        direct_candidates: verter_type_expr::OwnedSlice::from(vec![PropertyKey::String(
+            OwnedStr::from("x".repeat(TEXT)),
+        )]),
     });
     let indeterminate = formula(ExcessEligibility::Indeterminate);
     assert!(value_bytes(eligible) >= value_bytes(indeterminate) + arc_block_bytes(TEXT));
@@ -320,9 +325,11 @@ fn a_relation_is_charged_for_its_recursion_identities() {
         })
     };
     let side: Box<[(u64, u16)]> = (0..IDENTITIES as u64).map(|id| (id, 1)).collect();
-    let with = relation(Some(Arc::new(RecursionIdentities {
-        sides: [side.clone(), side],
-    })));
+    let with = relation(Some(verter_session_query::retention::owned::Owned::new(
+        RecursionIdentities {
+            sides: [side.clone(), side],
+        },
+    )));
     let without = relation(None);
     let lists = 2 * heap_block_bytes(IDENTITIES * std::mem::size_of::<(u64, u16)>());
     assert!(value_bytes(with) >= value_bytes(without) + lists);

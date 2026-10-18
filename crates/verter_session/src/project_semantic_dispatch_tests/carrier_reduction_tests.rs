@@ -75,14 +75,14 @@ fn typeof_carrier_node(
     let arg_node = graph.intern_node(SemanticNodeData::Primitive(arg));
     let value_root = ValueRootKey {
         scope: ScopeId {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
-        name: Arc::from(name),
+        name: verter_type_expr::OwnedStr::from(name),
     };
     let path: Arc<[Arc<str>]> = Arc::from(
         path.iter()
@@ -91,7 +91,11 @@ fn typeof_carrier_node(
             .into_boxed_slice(),
     );
     let args: Arc<[SemanticNodeId]> = Arc::from(vec![arg_node].into_boxed_slice());
-    graph.intern_node(SemanticNodeData::new_typeof(value_root, path, args))
+    graph.intern_node(SemanticNodeData::new_typeof(
+        value_root,
+        verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(path),
+        args,
+    ))
 }
 
 /// `(type_parameter_count, param0_primitive_name)` for a `Function` node, or
@@ -225,7 +229,7 @@ fn walk_typeof_carrier_applies_instantiation_args() {
     let resolved = verter_type_engine::project_semantic_dispatch::walk::probe_walk_typeof_resolved(
         &dispatch,
         carrier,
-        Arc::from(
+        verter_type_expr::OwnedSlice::from(
             vec![PathSegment::Member(
                 verter_type_engine::semantic_query::PropertyKey::identifier("__probe__"),
             )]
@@ -290,18 +294,20 @@ fn walk_typeof_internal_path_projects_in_navigate_not_caller_mode() {
     let graph = dispatch.graph();
     let value_root = ValueRootKey {
         scope: ScopeId {
-            canonical_id: Arc::from("/holder.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/holder.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
-        name: Arc::from("C"),
+        name: verter_type_expr::OwnedStr::from("C"),
     };
     let carrier = graph.intern_node(SemanticNodeData::new_typeof(
         value_root,
-        Arc::from(vec![Arc::<str>::from("make")].into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(
+            vec![verter_type_expr::OwnedStr::from("make")].into_boxed_slice(),
+        ),
         Arc::from(Vec::new().into_boxed_slice()),
     ));
 
@@ -312,7 +318,7 @@ fn walk_typeof_internal_path_projects_in_navigate_not_caller_mode() {
         verter_type_engine::project_semantic_dispatch::walk::probe_walk_typeof_internal_path_mode(
             &dispatch,
             carrier,
-            Arc::from(
+            verter_type_expr::OwnedSlice::from(
                 vec![PathSegment::Member(
                     verter_type_engine::semantic_query::PropertyKey::identifier("__probe__"),
                 )]
@@ -503,18 +509,18 @@ fn typeof_carrier_arity_overflow_is_honest_miss_after_projection() {
     let b = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let value_root = ValueRootKey {
         scope: ScopeId {
-            canonical_id: Arc::from("/one.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/one.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
-        name: Arc::from("g"),
+        name: verter_type_expr::OwnedStr::from("g"),
     };
     let carrier = graph.intern_node(SemanticNodeData::new_typeof(
         value_root,
-        Arc::from(Vec::new().into_boxed_slice()),
+        verter_type_expr::OwnedSlice::default(),
         Arc::from(vec![a, b].into_boxed_slice()),
     ));
 
@@ -695,9 +701,9 @@ fn typeof_resolution_stays_within_instantiate_window() {
             // Instantiate the self-referential `SelfT`; its body `typeof selfV`
             // resolves back to `SelfT` while `SelfT` is on the active stack.
             let self_t = ResolvedDeclSlotIdentity::type_slot_unscoped(
-                std::sync::Arc::from("/leak.ts"),
+                verter_type_expr::OwnedStr::from("/leak.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                std::sync::Arc::from("SelfT"),
+                verter_type_expr::OwnedStr::from("SelfT"),
             );
             let key = SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
                 self_t,

@@ -118,9 +118,9 @@ impl SemanticGraphStore {
             let mut state = inflight.state.lock();
             state.aborted = true;
             if state.completed.is_none() {
-                state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
-                    "aborted by test_trigger_inflight_abort",
-                ))));
+                state.completed = Some(QueryResult::Error(QueryError::Other(
+                    verter_type_expr::OwnedStr::from("aborted by test_trigger_inflight_abort"),
+                )));
                 state.dep_signature = Some(empty_signature());
             }
         }
@@ -172,6 +172,17 @@ impl SemanticGraphStore {
     pub fn test_joiner_on_condvar_count(&self) -> usize {
         self.joiner_on_condvar_count
             .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Test-only work counter: how many candidates reverse-index reads
+    /// have inspected while registering unindexed candidates, so a test
+    /// can bound the registration work one read does.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_reverse_index_registration_visits(&self) -> usize {
+        self.reverse_index_registration_visits
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Test-only observability accessor: how many joiners forked away from

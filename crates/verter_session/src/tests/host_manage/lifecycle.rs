@@ -304,12 +304,12 @@ fn explicit_overlay_materialization_refusal_fails_closed_at_request_boundaries()
 
     let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("Ready"),
+            symbol: verter_type_expr::OwnedStr::from("Ready"),
             space: LocatorSymbolSpace::Type,
         },
-        path: Arc::from([]),
+        path: verter_type_expr::OwnedSlice::from([]),
     });
     let port = crate::query_host_port::SessionQueryHostPort::new(&ctx);
     let answer = port.lower_authored_body(&locator);
@@ -891,7 +891,7 @@ fn a_close_never_revokes_a_held_node_and_drains_when_the_holder_drops() {
         assert!(graph.node_is_live(*id), "node {id:?} stays live while held");
         let now = graph.node_data(*id).expect("still readable");
         assert!(
-            Arc::ptr_eq(&now, payload),
+            verter_type_engine::semantic_query_memo::NodeData::ptr_eq(&now, payload),
             "node {id:?} reads the same payload it read before the close"
         );
     }
@@ -907,6 +907,215 @@ fn a_close_never_revokes_a_held_node_and_drains_when_the_holder_drops() {
         1,
         "the close was applied once, synchronously"
     );
+}
+
+/// A close running on another thread while a real request is mid-flight
+/// never revokes what that request computed: every read the request makes
+/// of its resolved declaration during and after the close reads the same
+/// payload, the request keeps executing against the closed document without
+/// a panic, and the declaration is destroyed once the request ends.
+///
+/// Discriminating against a close that destroys the closed content while a
+/// request is still running (a canonical sweep or an epoch-root drop): the
+/// request's next read of the node it resolved finds the placeholder.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_concurrent_close_never_revokes_an_in_flight_requests_nodes() {
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{
+        BinderScopeId, QueryResult, ResolveDeclKey, ScopeId, SemanticQueryApi, SemanticQueryKey,
+        SemanticQueryOutput,
+    };
+    const ICON: &str = "/src/types/icon.ts";
+    let (_ws, host) = close_lifecycle_fixture();
+    let graph = host.project_type_store().semantic_graph();
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: ScopeId {
+            canonical_id: verter_type_expr::OwnedStr::from(ICON),
+            owner,
+            local_scope: None,
+            binder_scope_id: BinderScopeId::file_scope(owner),
+        },
+        name: verter_type_expr::OwnedStr::from("IconProps"),
+    });
+    let request = ProjectSemanticDispatch::new(&host);
+    let QueryResult::Value(SemanticQueryOutput { value: node, .. }) =
+        request.execute_type_node(key.clone())
+    else {
+        panic!("IconProps resolves");
+    };
+    let payload = graph.node_data(node).expect("the request's node is live");
+
+    let reads = std::thread::scope(|scope| {
+        let closer = scope.spawn(|| host.evict(ICON));
+        let mut reads = 0usize;
+        loop {
+            let finished = closer.is_finished();
+            let now = graph.node_data(node).expect("still readable");
+            assert!(
+                verter_type_engine::semantic_query_memo::NodeData::ptr_eq(&now, &payload),
+                "read {reads} during the close switched payloads"
+            );
+            reads += 1;
+            if finished {
+                break;
+            }
+        }
+        closer.join().expect("the close completes");
+        reads
+    });
+    assert!(reads > 0);
+    assert_eq!(host.retention_snapshot().closes.closes_applied, 1);
+    assert!(
+        graph.node_is_live(node),
+        "the running request still owns it"
+    );
+
+    // The request keeps executing against the closed document.
+    let _ = request.execute_type_node(key);
+    assert!(verter_type_engine::semantic_query_memo::NodeData::ptr_eq(
+        &graph.node_data(node).expect("still readable"),
+        &payload
+    ));
+    drop(request);
+    assert!(
+        !graph.node_is_live(node),
+        "the closed declaration is destroyed once the request ends"
+    );
+}
+
+/// A close of a document while a real request is parked inside the cold
+/// build of one of its declarations — after that build read another of the
+/// document's declarations through the cache, before it settles and
+/// publishes — never hands out a destroyed node: the parked request returns
+/// a readable answer (or a typed refusal), and whatever its publication left
+/// in the cache is rooted, so a later request reads a live, readable answer
+/// after the parked request is gone.
+///
+/// The close runs on the test thread at an observed rendezvous inside the
+/// producer, never on scheduling luck. Discriminating against a close that
+/// revokes a mid-build operand, or a settlement that publishes a node the
+/// close already orphaned: the parked request's answer, or the warm answer
+/// served from its publication, reads the destroyed placeholder.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_close_during_a_parked_cold_build_never_publishes_or_returns_a_destroyed_node() {
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{
+        BinderScopeId, QueryResult, ResolveDeclKey, ScopeId, SemanticQueryApi, SemanticQueryKey,
+        SemanticQueryOutput,
+    };
+    const ICON: &str = "/src/types/icon.ts";
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        ICON,
+        "export interface IconProps { name: string; size: number }\n\
+         export interface IconBox { props: IconProps; label: string }\n",
+    );
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    assert!(host.ensure_loaded(ICON));
+    let graph = host.project_type_store().semantic_graph();
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let decl = |name: &str| {
+        SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: ScopeId {
+                canonical_id: verter_type_expr::OwnedStr::from(ICON),
+                owner,
+                local_scope: None,
+                binder_scope_id: BinderScopeId::file_scope(owner),
+            },
+            name: verter_type_expr::OwnedStr::from(name),
+        })
+    };
+    let parked = decl("IconBox");
+    let operand = decl("IconProps");
+
+    struct HookGuard<'s>(&'s verter_type_engine::semantic_query_memo::SemanticGraphStore);
+    impl Drop for HookGuard<'_> {
+        fn drop(&mut self) {
+            self.0.set_produce_hook_for_tests(None);
+        }
+    }
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let park_once = std::sync::atomic::AtomicBool::new(true);
+    let held_key = parked.clone();
+    graph.set_produce_hook_for_tests(Some(Arc::new(move |key, nested| {
+        if key == &held_key && park_once.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            // The build reads a same-document declaration through the
+            // cache before it parks: a non-permanent operand it holds.
+            nested(operand.clone());
+            let _ = ready_tx.send(());
+            let _ = release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(10));
+        }
+    })));
+    let _hook = HookGuard(graph);
+
+    let returned_live = std::thread::scope(|threads| {
+        let producer = threads.spawn(|| {
+            let request = ProjectSemanticDispatch::new(&host);
+            let answer = request.execute_type_node(parked.clone());
+            // Read while the request still owns what it returned.
+            let readable = match &answer {
+                QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
+                    let live = graph.node_is_live(*node);
+                    assert!(
+                        live,
+                        "the parked request's answer is live while it holds it"
+                    );
+                    graph.node_data(*node).expect("a live node reads");
+                    true
+                }
+                // A typed refusal is an allowed outcome; a panic is not.
+                QueryResult::Error(_) | QueryResult::Recursive(_) => false,
+            };
+            drop(request);
+            readable
+        });
+        let ready = ready_rx.recv_timeout(std::time::Duration::from_secs(10));
+        if ready.is_err() {
+            let _ = release_tx.send(());
+            let _ = producer.join();
+            panic!("the request must park inside its cold build: {ready:?}");
+        }
+        host.evict(ICON);
+        assert_eq!(
+            host.retention_snapshot().closes.closes_applied,
+            1,
+            "the close ran while the build was parked"
+        );
+        let _ = release_tx.send(());
+        producer.join().expect("the parked request completes")
+    });
+    assert!(
+        returned_live,
+        "the parked request answers its declaration after the close"
+    );
+
+    // Whatever the parked build published is rooted: a later request reads
+    // a live, readable answer.
+    let request = ProjectSemanticDispatch::new(&host);
+    let QueryResult::Value(SemanticQueryOutput { value: node, .. }) =
+        request.execute_type_node(parked)
+    else {
+        panic!("IconBox resolves after the close");
+    };
+    assert!(
+        graph.node_is_live(node),
+        "the later answer is live, never the destroyed placeholder"
+    );
+    graph.node_data(node).expect("a live node reads");
 }
 
 /// With nothing holding the closed content, the close destroys it inline.

@@ -72,7 +72,7 @@ enum CallableAnchor {
     NotCallable,
     /// The callable carries an authored occurrence; its declaring canonical
     /// scopes the lookup.
-    Authored(Arc<str>),
+    Authored(verter_type_expr::OwnedStr),
     /// The callable is rootless (no authored occurrence): only a lexical
     /// demand canonical can scope the lookup.
     Rootless,
@@ -118,7 +118,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             return GlobalWrapper::Absent;
         };
         let slot = self.type_slot_for(
-            Arc::clone(&declaration.canonical_id),
+            declaration.canonical_id.clone(),
             declaration.owner,
             Arc::from(name),
         );
@@ -143,12 +143,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// The file a wrapper read that names no declaration of its own is
     /// scoped by: the innermost demand site (a flow's member read pushes its
     /// own file), else the request's file.
-    pub(super) fn wrapper_demand_canonical(&self) -> Option<Arc<str>> {
+    pub(super) fn wrapper_demand_canonical(&self) -> Option<verter_type_expr::OwnedStr> {
         self.lexical_demand_scope
             .borrow()
             .last()
             .cloned()
-            .or_else(crate::request_context::current_request_canonical)
+            .or_else(|| crate::request_context::current_request_canonical().map(Into::into))
     }
 
     /// The global wrapper whose members `node`'s non-index keys read — its
@@ -375,7 +375,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     pub(super) fn apparent_member_name(&self, segment: &PathSegment) -> Option<Arc<str>> {
         let name = match segment {
             PathSegment::Member(PropertyKey::String(name))
-            | PathSegment::Index(IndexKey::String(name)) => Arc::clone(name),
+            | PathSegment::Index(IndexKey::String(name)) => name.clone(),
             PathSegment::Index(IndexKey::Computed(node)) => {
                 match self.normalized_index_key_node(*node) {
                     IndexKey::String(name) => name,
@@ -384,7 +384,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
             _ => return None,
         };
-        (!super::walk::is_canonical_index_digits(&name)).then_some(name)
+        (!super::walk::is_canonical_index_digits(&name))
+            .then_some(std::sync::Arc::<str>::from(name))
     }
 
     /// Whether reading `segment` off `node` reads `node`'s apparent wrapper:
@@ -478,9 +479,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // enclosing projection that read it) out of the shared memo.
         let (canonical, rootless): (Arc<str>, bool) = match self.callable_anchor(base) {
             CallableAnchor::NotCallable | CallableAnchor::Undecided => return miss(),
-            CallableAnchor::Authored(canonical) => (canonical, false),
+            CallableAnchor::Authored(canonical) => (std::sync::Arc::<str>::from(canonical), false),
             CallableAnchor::Rootless => match &context.demand_scope {
-                ApparentDemandScope::Rootless { canonical } => (Arc::clone(canonical), true),
+                ApparentDemandScope::Rootless { canonical } => {
+                    (std::sync::Arc::<str>::from(canonical.as_str()), true)
+                }
                 // No demand-scope witness — no project to scope the ambient
                 // lookup by. Fail closed.
                 ApparentDemandScope::Anchored => return miss(),
@@ -523,7 +526,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         };
 
         let slot = self.type_slot_for(
-            Arc::clone(&declaration.canonical_id),
+            declaration.canonical_id.clone(),
             declaration.owner,
             Arc::from(name),
         );
@@ -568,7 +571,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             CallableAnchor::Rootless => {
                 let canonical = self.lexical_demand_scope.borrow().last().cloned()?;
                 (
-                    Arc::clone(&canonical),
+                    canonical.clone(),
                     ApparentDemandScope::Rootless { canonical },
                 )
             }
@@ -631,14 +634,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 SemanticNodeData::Alias(target) => node = *target,
                 SemanticNodeData::Signature { occurrence, .. } => {
                     return match occurrence {
-                        Some(occurrence) => CallableAnchor::Authored(Arc::clone(
-                            &occurrence.function.anchor.canonical_id,
-                        )),
+                        Some(occurrence) => {
+                            CallableAnchor::Authored(verter_type_expr::OwnedStr::from(
+                                &occurrence.function.anchor.canonical_id,
+                            ))
+                        }
                         None => CallableAnchor::Rootless,
                     };
                 }
                 SemanticNodeData::DeferredCallable(callable) => {
-                    return CallableAnchor::Authored(Arc::clone(callable.declaring_canonical()));
+                    return CallableAnchor::Authored(verter_type_expr::OwnedStr::from(
+                        callable.declaring_canonical(),
+                    ));
                 }
                 // A surface with call or construct signatures has the
                 // `Function` apparent type too (the checker's

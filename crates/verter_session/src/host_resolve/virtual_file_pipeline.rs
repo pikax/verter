@@ -1709,7 +1709,7 @@ impl VerterHost {
                 // node's output + diagnostics, which are identical in shape
                 // across modes.
                 struct WarmHit {
-                    products: crate::types::CompileProducts,
+                    products: verter_retention::heap_size::OwnedTree<crate::types::CompileProducts>,
                     diagnostics: DiagnosticsSnapshot,
                 }
                 let warm_hit: Option<WarmHit> = match actual_mode {
@@ -1799,7 +1799,9 @@ impl VerterHost {
                     // falls through to a cold recompute that produces the
                     // missing surface.
                     let serve = CompileServe {
-                        products: served_products_from_cached(hit.products),
+                        products: served_products_from_cached(
+                            crate::types::CompileProducts::clone(&hit.products),
+                        ),
                         meta: hit_meta,
                         diagnostics: hit.diagnostics,
                         stale: false,
@@ -2428,43 +2430,40 @@ impl VerterHost {
         normalized
     }
 
-    /// Ensure the IDE (`CachedTsx`) projection exists for `(canonical, profile)`.
+    /// Compile the IDE (`CachedTsx`) projection for `(canonical, profile)` and
+    /// return it.
     ///
     /// Drives the shared compile under [`CompileDemand::Ide`] — it NEVER
     /// requests `VirtualNodeKind::Main`, so a carrier that projects only an IDE
     /// surface (Svelte today) succeeds without a runtime `Main`. The caller's
     /// profile is normalized to an IDE/TSX-bearing target INTERNALLY (see
     /// [`Self::ide_normalized_profile`]) so the compile produces the IDE surface
-    /// regardless of the caller's runtime target. Return contract:
+    /// regardless of the caller's runtime target, and never admits a
+    /// runtime-render capability. Return contract:
     ///
-    /// * `Ok(true)` — `(canonical, profile)` now has a cached `CachedTsx` (an
-    ///   immediate [`get_ide`](Self::get_ide) returns `Some`). This holds
-    ///   WHENEVER the carrier has an IDE surface — even when the caller passed a
-    ///   bundler / runtime profile with no `TSX` bit. Leftover runtime target
-    ///   bits are stripped by [`Self::ide_normalized_profile`], so this path
-    ///   never admits a runtime-render capability.
-    /// * `Ok(false)` — the loaded file has NO IDE projection surface (e.g. a
+    /// * `Ok(Some(ide))` — the IDE artifact this compile served. A warm call is
+    ///   a cache hit; when the retention account refuses to keep the entry (an
+    ///   artifact over the per-entry ceiling) the complete artifact is still
+    ///   returned, just uncached, so a later [`get_ide`](Self::get_ide) peek
+    ///   may find nothing. Callers that need the artifact consume this value
+    ///   rather than re-reading the cache.
+    /// * `Ok(None)` — the loaded file has NO IDE projection surface (e.g. a
     ///   non-carrier / a carrier that declined IDE): no error, simply nothing
-    ///   to project. `Ok(false)` means a genuine no-IDE-surface, never "the
-    ///   caller's profile happened to lack the TSX target", and never a
-    ///   refusal.
+    ///   to project, never a refusal.
     /// * `Err(_)` — a real failure (missing source, compile error, …); a real
-    ///   failure is NEVER collapsed into `Ok(false)`. Runtime-surface refusal
+    ///   failure is NEVER collapsed into `Ok(None)`. Runtime-surface refusal
     ///   belongs to a runtime-demanding identity (`get_virtual_file` Main,
     ///   host-backed compile with STYLE/SCRIPT/TEMPLATE), not this path.
-    ///
-    /// `get_ide` stays a PURE cached read — it never computes on read; this is
-    /// the explicit ensure path callers invoke first.
-    pub fn ensure_ide_compiled(
+    pub fn compile_ide(
         &self,
         canonical_id: &str,
         profile: &CompileProfile,
-    ) -> Result<bool, HostError> {
+    ) -> Result<Option<IdeResponse>, HostError> {
         use crate::host_executor::HostSourceData;
         let canonical = self.resolve_alias_or_canonical(canonical_id);
 
         // No IDE projection surface for a NON-carrier (a plain script): the
-        // contract's `Ok(false)`, never a compile attempt. The carrier gate
+        // contract's `Ok(None)`, never a compile attempt. The carrier gate
         // mirrors `ensure_compiled`'s — every framework carrier (Vue OR
         // Svelte) projects an IDE surface; everything else does not.
         {
@@ -2479,7 +2478,7 @@ impl VerterHost {
                         canonical_id: canonical.clone(),
                     })?;
             if !hd.file_language.is_framework_carrier() {
-                return Ok(false);
+                return Ok(None);
             }
         }
 
@@ -2500,7 +2499,20 @@ impl VerterHost {
                 message: message.to_string(),
             });
         }
-        Ok(served.products.tsx().is_some())
+        Ok(served.products.tsx().map(IdeResponse::from))
+    }
+
+    /// Whether `(canonical, profile)` has an IDE projection surface, compiling
+    /// it if needed: [`Self::compile_ide`] without the artifact. `Ok(true)`
+    /// does not promise a later [`get_ide`](Self::get_ide) hit — a refused
+    /// cache admission serves its artifact uncached.
+    pub fn ensure_ide_compiled(
+        &self,
+        canonical_id: &str,
+        profile: &CompileProfile,
+    ) -> Result<bool, HostError> {
+        self.compile_ide(canonical_id, profile)
+            .map(|ide| ide.is_some())
     }
 
     /// List all virtual node kinds for a file (Main, Script, Template, Style, Custom).
@@ -2531,12 +2543,7 @@ impl VerterHost {
             let session_node =
                 crate::compile_output_node::CompileOutputNodeFactValidatedSession::new();
             let tsx = session_node.peek_tsx(&cc, profile_hash)?;
-            Some(IdeResponse {
-                code: tsx.code.clone(),
-                source_map: tsx.source_map.clone(),
-                is_jsx: tsx.is_jsx,
-                destructured_block: tsx.destructured_block.clone(),
-            })
+            Some(IdeResponse::from(&tsx))
         }
     }
 

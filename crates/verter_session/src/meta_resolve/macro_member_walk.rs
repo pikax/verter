@@ -73,7 +73,7 @@ pub(crate) fn collect_define_props_root_names(
             continue;
         };
         if let Some((name, _)) = data.bare_ref_head() {
-            names.insert(name.as_ref().to_string());
+            names.insert(name.to_string());
         }
     }
     names
@@ -184,14 +184,13 @@ pub(crate) fn slot_binding_targets_define_props_root(
         // `Omit<Props, …>`): the root is the SOURCE argument's reference head.
         if let Some((name, _)) = data.bare_ref_head() {
             let args = data.carrier_type_args();
-            let is_utility = verter_session_query::type_solver::builtin::BuiltinUtility::from_name(
-                name.as_ref(),
-            )
-            .is_some();
+            let is_utility =
+                verter_session_query::type_solver::builtin::BuiltinUtility::from_name(name)
+                    .is_some();
             if is_utility && !args.is_empty() {
                 let source = dispatch.graph().read_in_scope(args[0])?;
                 let (source_name, _) = source.bare_ref_head()?;
-                return Some(source_name.as_ref().to_string());
+                return Some(source_name.to_string());
             }
             return None;
         }
@@ -214,7 +213,7 @@ pub(crate) fn slot_binding_targets_define_props_root(
                             return data
                                 .carrier_type_args()
                                 .is_empty()
-                                .then(|| name.as_ref().to_string());
+                                .then(|| name.to_string());
                         }
                         // A root the lowering already RESOLVED interns the
                         // `DeclRef` identity carrier — same root, same name.

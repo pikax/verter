@@ -13,6 +13,8 @@
 //! that differ ONLY on the metadata axis and asserts inequality, plus an
 //! identical pair asserting equality — never an always-true predicate.
 
+use crate::OwnedSlice;
+use crate::OwnedStr;
 use static_assertions::{assert_impl_all, assert_not_impl_any};
 
 use verter_no_storedspan::NoStoredSpan;
@@ -347,9 +349,9 @@ assert_impl_all!(ResolvedLocalTypeFact: NoStoredSpan);
 
 fn anchor() -> AuthoredAnchor {
     AuthoredAnchor {
-        canonical_id: std::sync::Arc::from("/ws/a.ts"),
+        canonical_id: OwnedStr::from(std::sync::Arc::from("/ws/a.ts")),
         owner: crate::TopLevelOwnerId::ordinary_file(),
-        symbol: std::sync::Arc::from("A"),
+        symbol: OwnedStr::from(std::sync::Arc::from("A")),
         space: LocatorSymbolSpace::Type,
     }
 }
@@ -357,7 +359,7 @@ fn anchor() -> AuthoredAnchor {
 fn slot() -> TypeBodySlot {
     TypeBodySlot {
         anchor: anchor(),
-        path: std::sync::Arc::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+        path: OwnedSlice::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
     }
 }
 
@@ -609,7 +611,7 @@ fn prepared_member_reference_head_participates_in_member_fact_identity() {
         method_kind: None,
         has_implementation_body: false,
         visibility: MemberVisibility::Public,
-        declaration_origin: DeclarationOrigin::Declared(std::sync::Arc::from("/ws/props.ts")),
+        declaration_origin: DeclarationOrigin::Declared(crate::OwnedStr::from("/ws/props.ts")),
         ty: slot(),
         span_origin: member_origin(0),
         reference_head: head,
@@ -682,12 +684,12 @@ fn authored_reference_head_absolutizes_producer_local_arg_anchors() {
     let arg = |canonical: &str| {
         AuthoredReferenceArgLocator::Value(TypeArgLocator {
             anchor: AuthoredAnchor {
-                canonical_id: std::sync::Arc::from(canonical),
+                canonical_id: OwnedStr::from(std::sync::Arc::from(canonical)),
                 owner: crate::TopLevelOwnerId::ordinary_file(),
-                symbol: std::sync::Arc::from("getRef"),
+                symbol: OwnedStr::from(std::sync::Arc::from("getRef")),
                 space: LocatorSymbolSpace::Value,
             },
-            path: std::sync::Arc::from(
+            path: OwnedSlice::from(
                 vec![
                     TypeBodyPathStep::ValueSignature { ordinal: 0 },
                     TypeBodyPathStep::FunctionReturn,
@@ -767,14 +769,12 @@ fn function_fact_scope_relative_sees_a_scope_relative_return_head() {
         args: std::sync::Arc::from(
             vec![AuthoredReferenceArgLocator::Value(TypeArgLocator {
                 anchor: AuthoredAnchor {
-                    canonical_id: std::sync::Arc::from(canonical),
+                    canonical_id: OwnedStr::from(std::sync::Arc::from(canonical)),
                     owner: crate::TopLevelOwnerId::ordinary_file(),
-                    symbol: std::sync::Arc::from("getRef"),
+                    symbol: OwnedStr::from(std::sync::Arc::from("getRef")),
                     space: LocatorSymbolSpace::Value,
                 },
-                path: std::sync::Arc::from(
-                    vec![TypeBodyPathStep::FunctionReturn].into_boxed_slice(),
-                ),
+                path: OwnedSlice::from(vec![TypeBodyPathStep::FunctionReturn].into_boxed_slice()),
                 arg_index: 0,
             })]
             .into_boxed_slice(),
@@ -916,7 +916,7 @@ fn type_param_bound_position_and_ordinal_participate_in_locator_identity() {
     // different parameter's bound).
     let bound = |ordinal: u32, position: TypeParamBoundPosition| TypeBodySlot {
         anchor: anchor(),
-        path: std::sync::Arc::from(
+        path: OwnedSlice::from(
             vec![TypeBodyPathStep::TypeParamBound { ordinal, position }].into_boxed_slice(),
         ),
     };
@@ -947,7 +947,7 @@ fn heritage_base_fact_name_and_arg_locators_participate_in_identity() {
     // through different authored heads stay distinct.
     let arg = |arm: u32, arg_index: u32| TypeArgLocator {
         anchor: anchor(),
-        path: std::sync::Arc::from(
+        path: OwnedSlice::from(
             vec![TypeBodyPathStep::IntersectionArm { ordinal: arm }].into_boxed_slice(),
         ),
         arg_index,
@@ -1205,7 +1205,7 @@ fn jsdoc_typedef_body_is_a_distinct_authored_source_from_the_tstype_decl_body() 
     // `DeclBody`.
     let jsdoc = AuthoredBodyLocator::JsdocTypedefBody(JsdocTypedefBodyLocator {
         anchor: anchor(),
-        path: std::sync::Arc::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+        path: OwnedSlice::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
     });
     let decl = AuthoredBodyLocator::DeclBody(slot());
     assert_ne!(
@@ -1272,10 +1272,10 @@ fn new_type_body_path_step_arms_construct_and_discriminate() {
 
     // The new arms compose inside a `TypeBodySlot` path: two slots differing
     // ONLY by a deep new-arm step are distinct identities (the arm carries
-    // through the `Arc<[TypeBodyPathStep]>`).
+    // through the `crate::OwnedSlice<TypeBodyPathStep>`).
     let path_slot = |last: TypeBodyPathStep| TypeBodySlot {
         anchor: anchor(),
-        path: std::sync::Arc::from(vec![MemberValue, last].into_boxed_slice()),
+        path: OwnedSlice::from(vec![MemberValue, last].into_boxed_slice()),
     };
     assert_ne!(
         path_slot(FunctionParam { ordinal: 0 }),
@@ -1536,15 +1536,15 @@ fn fact_carriers_round_trip_through_serde() {
         has_implementation_body: false,
         visibility: MemberVisibility::Public,
         declared_in_macro_type_arg: true,
-        declaration_origin: DeclarationOrigin::Declared(std::sync::Arc::from("/ws/types.ts")),
+        declaration_origin: DeclarationOrigin::Declared(crate::OwnedStr::from("/ws/types.ts")),
         ty: TypeBodySlot {
             anchor: AuthoredAnchor {
-                canonical_id: std::sync::Arc::from("/ws/types.ts"),
+                canonical_id: OwnedStr::from(std::sync::Arc::from("/ws/types.ts")),
                 owner: crate::TopLevelOwnerId::ordinary_file(),
-                symbol: std::sync::Arc::from("Props"),
+                symbol: OwnedStr::from(std::sync::Arc::from("Props")),
                 space: LocatorSymbolSpace::Type,
             },
-            path: std::sync::Arc::from(vec![
+            path: OwnedSlice::from(vec![
                 TypeBodyPathStep::Member { ordinal: 2 },
                 TypeBodyPathStep::MemberValue,
             ]),
@@ -1566,9 +1566,9 @@ fn fact_carriers_round_trip_through_serde() {
     let authored =
         SemanticTypeSource::Authored(AuthoredBodyLocator::MacroPayload(MacroPayloadLocator {
             anchor: AuthoredAnchor {
-                canonical_id: std::sync::Arc::from("/ws/App.vue"),
+                canonical_id: OwnedStr::from(std::sync::Arc::from("/ws/App.vue")),
                 owner: crate::TopLevelOwnerId::ordinary_file(),
-                symbol: std::sync::Arc::from("default"),
+                symbol: OwnedStr::from(std::sync::Arc::from("default")),
                 space: LocatorSymbolSpace::Value,
             },
             macro_index: 1,
@@ -1803,10 +1803,10 @@ fn value_type_annotation_fact_holds_a_closed_inferred_annotation() {
         is_unique_symbol: false,
         unique_symbol_members: std::sync::Arc::from([]),
         typeof_alias_target: Some(ValueDeclIdentityPart {
-            canonical_id: std::sync::Arc::from("/ws/a.ts"),
+            canonical_id: OwnedStr::from(std::sync::Arc::from("/ws/a.ts")),
             owner: crate::TopLevelOwnerId::ordinary_file(),
-            symbol: std::sync::Arc::from("x"),
-            member_path: std::sync::Arc::from(Vec::<String>::new().into_boxed_slice()),
+            symbol: OwnedStr::from(std::sync::Arc::from("x")),
+            member_path: OwnedSlice::from(Vec::<String>::new().into_boxed_slice()),
         }),
         classification: ValueAnnotationClass::TypeOfAlias,
         annotation: None,
@@ -1854,7 +1854,7 @@ fn authored_reference_head_fact_discriminates_exact_route_and_arguments() {
         member_path: std::sync::Arc::from([std::sync::Arc::from("Ref")]),
         args: std::sync::Arc::from([AuthoredReferenceArgLocator::Value(TypeArgLocator {
             anchor: anchor(),
-            path: std::sync::Arc::from([]),
+            path: OwnedSlice::from([]),
             arg_index: 0,
         })]),
     };
@@ -1863,7 +1863,7 @@ fn authored_reference_head_fact_discriminates_exact_route_and_arguments() {
         member_path: std::sync::Arc::from([std::sync::Arc::from("Ref")]),
         args: std::sync::Arc::from([AuthoredReferenceArgLocator::Value(TypeArgLocator {
             anchor: anchor(),
-            path: std::sync::Arc::from([]),
+            path: OwnedSlice::from([]),
             arg_index: 0,
         })]),
     };

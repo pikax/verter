@@ -16,9 +16,9 @@ fn arena_wait_counter_includes_hit_and_both_miss_acquisitions() {
         let provenance = Arc::new(crate::engine_provenance::EngineProvenance::default());
         arena.provenance = Some(Arc::clone(&provenance));
         let data = SemanticNodeData::Literal(LiteralValue::String("contended".into()));
-        if hit {
-            let _ = arena.push(data.clone());
-        }
+        // The hit case's seed stays owned across the worker's intern, so
+        // the worker finds it live rather than interning a fresh node.
+        let seeded = hit.then(|| arena.intern_owned(data.clone(), NodeScopeId::Global));
         let before = provenance
             .node_arena_inner_write_wait_ns
             .load(Ordering::Relaxed);
@@ -43,7 +43,10 @@ fn arena_wait_counter_includes_hit_and_both_miss_acquisitions() {
             resume.send(()).unwrap();
             std::thread::sleep(HOLD);
             drop(held);
-            worker.join().unwrap();
+            let interned = worker.join().unwrap();
+            if let Some(seeded) = &seeded {
+                assert_eq!(interned, seeded.id(), "the worker hit the live seed");
+            }
         });
         *arena.race_hook.lock() = None;
         let waited = provenance
@@ -58,7 +61,11 @@ fn arena_wait_counter_includes_hit_and_both_miss_acquisitions() {
 #[test]
 fn multiset_guard_distinguishes_planted_omission_and_duplicate() {
     let data = SemanticNodeData::TemplateLiteral {
-        quasis: Arc::from([Arc::from(""), Arc::from(""), Arc::from("")]),
+        quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from([
+            verter_type_expr::OwnedStr::from(""),
+            verter_type_expr::OwnedStr::from(""),
+            verter_type_expr::OwnedStr::from(""),
+        ]),
         expressions: crate::semantic_query::PayloadArray::from([
             SemanticNodeId(3),
             SemanticNodeId(3),
@@ -113,7 +120,11 @@ fn counted_last_root_releases_repeated_internal_edges() {
     );
     let parent = arena.intern_owned(
         SemanticNodeData::TemplateLiteral {
-            quasis: Arc::from([Arc::from(""), Arc::from(""), Arc::from("")]),
+            quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from([
+                verter_type_expr::OwnedStr::from(""),
+                verter_type_expr::OwnedStr::from(""),
+                verter_type_expr::OwnedStr::from(""),
+            ]),
             expressions: crate::semantic_query::PayloadArray::from([child.id(), child.id()]),
         },
         NodeScopeId::Global,
@@ -298,13 +309,16 @@ fn production_constructor_destroys_a_node_on_its_last_release() {
         "the parent's destruction releases its edge"
     );
     assert_eq!(arena.live_len(), 0);
-    assert!(Arc::ptr_eq(
+    assert!(NodeData::ptr_eq(
         &arena.get(child_id).unwrap(),
         &arena.released_placeholder
     ));
     assert_eq!(
-        super::super::node_roots::NodeRootSet::acquire(Arc::clone(&arena.core), vec![child_id])
-            .err(),
+        super::super::node_roots::NodeRootSet::acquire(
+            Arc::clone(&arena.core),
+            smallvec::smallvec![child_id]
+        )
+        .err(),
         Some(crate::semantic_query::QueryError::StaleSemanticOperand),
         "a destroyed ordinal can never be rooted again"
     );
