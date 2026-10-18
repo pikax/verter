@@ -9367,6 +9367,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if declaring.is_empty() {
             return None;
         }
+        // The scope-free nodes carry no declaring file, so a later array
+        // mapping reads the default nullability options; a file compiled
+        // under other options keeps the whole-file read, which lowers with
+        // the file's own scope.
+        let options = self.ctx.semantic_compiler_options_for(canonical);
+        if !options.strict_null_checks || options.exact_optional_property_types {
+            return None;
+        }
         let fact = self.ctx.parse_fact_for_observed_content(
             canonical,
             observed_hash,
