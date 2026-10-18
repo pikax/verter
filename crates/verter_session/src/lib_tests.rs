@@ -739,7 +739,7 @@ fn invalidate_nodes_removes_last_good() {
     outputs.insert(
         VirtualNodeKind::Main,
         CachedVirtualFile {
-            code: Arc::from("main code"),
+            code: verter_type_expr::OwnedStr::from("main code"),
             source_map: None,
             lang: Some("js".to_string()),
             meta: VirtualMeta::default(),
@@ -748,7 +748,7 @@ fn invalidate_nodes_removes_last_good() {
     outputs.insert(
         VirtualNodeKind::Template,
         CachedVirtualFile {
-            code: Arc::from("template code"),
+            code: verter_type_expr::OwnedStr::from("template code"),
             source_map: None,
             lang: Some("tsx".to_string()),
             meta: VirtualMeta::default(),

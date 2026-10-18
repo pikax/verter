@@ -1,6 +1,6 @@
 //! `ValidatedFactCache` admission-guard discrimination.
 //!
-//! `ValidatedFactCache::insert_arc_with_kind` enforces one pre-publish
+//! `ValidatedFactCache::insert_value_with_kind` enforces one pre-publish
 //! gate, and deliberately not a second:
 //!
 //! - **Empty signature on a source-dependent cache** → admission
@@ -48,9 +48,9 @@ fn fake_fact(name: &str) -> FactVersionRef {
 #[test]
 fn non_empty_signature_admits_normally_as_control() {
     let cache: ValidatedFactCache<&'static str, u32> = ValidatedFactCache::default();
-    cache.insert_arc_with_kind(
+    cache.insert_value_with_kind(
         "k",
-        std::sync::Arc::new(42u32),
+        verter_retention::heap_size::OwnedValue::new(42u32),
         vec![fake_fact("Foo")],
         "test_cache",
     );
@@ -66,10 +66,15 @@ fn empty_signature_refuses_admission_for_source_dependent_cache() {
     let cache: ValidatedFactCache<&'static str, u32> = ValidatedFactCache::default();
 
     // Strict-mode caller with an empty signature → admission
-    // refused. The non-strict `insert_arc` path keeps the legacy
+    // refused. The non-strict `insert_value` path keeps the legacy
     // empty-signature-admits-as-miss behaviour; this test
     // discriminates the strict path.
-    cache.insert_arc_with_kind("k", std::sync::Arc::new(42u32), Vec::new(), "test_cache");
+    cache.insert_value_with_kind(
+        "k",
+        verter_retention::heap_size::OwnedValue::new(42u32),
+        Vec::new(),
+        "test_cache",
+    );
 
     // Discrimination: a stub that ignored the guard would have a
     // cache entry; the guarded admission refuses outright.
@@ -83,10 +88,10 @@ fn empty_signature_refuses_admission_for_source_dependent_cache() {
 
 #[test]
 fn loose_insert_arc_admits_empty_signature_for_legacy_callers() {
-    // The non-strict `insert_arc` keeps the legacy "stable miss"
+    // The non-strict `insert_value` keeps the legacy "stable miss"
     // behaviour: an empty signature admits without firing the
     // refusal guard. Strict producers must opt in via
-    // `insert_arc_with_kind`. A strict-mode canary validates that
+    // `insert_value_with_kind`. A strict-mode canary validates that
     // `admission_refused_count == 0` over the
     // steady-state baseline; the loose-mode counter is not
     // observed as a discriminating signal.
@@ -103,9 +108,9 @@ fn wide_signature_admits_paged() {
     let at_width: Vec<FactVersionRef> = (0..FACT_PAGE_WIDTH)
         .map(|i| fake_fact(&format!("F{i}")))
         .collect();
-    cache.insert_arc_with_kind(
+    cache.insert_value_with_kind(
         "at_width",
-        std::sync::Arc::new(1u32),
+        verter_retention::heap_size::OwnedValue::new(1u32),
         at_width,
         "test_cache",
     );
@@ -114,9 +119,9 @@ fn wide_signature_admits_paged() {
     let over_width: Vec<FactVersionRef> = (0..=FACT_PAGE_WIDTH)
         .map(|i| fake_fact(&format!("G{i}")))
         .collect();
-    cache.insert_arc_with_kind(
+    cache.insert_value_with_kind(
         "over_width",
-        std::sync::Arc::new(2u32),
+        verter_retention::heap_size::OwnedValue::new(2u32),
         over_width,
         "test_cache",
     );
@@ -152,14 +157,24 @@ fn admission_guard_returns_correct_value_on_cold_recompute() {
     // Run 1: cold compute, attempt admission with EMPTY signature
     // (synthetic producer failing to observe).
     let v1 = cold_compute("/w/a.ts");
-    cache.insert_arc_with_kind("k", std::sync::Arc::new(v1), Vec::new(), "test_cache");
+    cache.insert_value_with_kind(
+        "k",
+        verter_retention::heap_size::OwnedValue::new(v1),
+        Vec::new(),
+        "test_cache",
+    );
     assert_eq!(cache.len(), 0, "first admission refused (empty signature)");
 
     // Run 2: cold compute again (no cache entry to consult). Must
     // return the same value — proves the fallback returns correct
     // results from a true cold path.
     let v2 = cold_compute("/w/a.ts");
-    cache.insert_arc_with_kind("k", std::sync::Arc::new(v2), Vec::new(), "test_cache");
+    cache.insert_value_with_kind(
+        "k",
+        verter_retention::heap_size::OwnedValue::new(v2),
+        Vec::new(),
+        "test_cache",
+    );
     assert_eq!(
         v1, v2,
         "cold recomputes after admission refusal MUST return the same correct value \

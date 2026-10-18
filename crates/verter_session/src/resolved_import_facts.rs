@@ -308,7 +308,7 @@ impl ResolvedImportFactsDb {
         &self,
         key: &ResolvedImportFactsKey,
         view: &TView,
-    ) -> Option<Arc<ResolvedImportFacts>>
+    ) -> Option<crate::resolver_core::CachedValue<ResolvedImportFacts>>
     where
         TView: StoreView + ?Sized,
     {
@@ -347,7 +347,7 @@ impl ResolvedImportFactsDb {
     pub(crate) fn retained_bundle_for_tests(
         &self,
         key: &ResolvedImportFactsKey,
-    ) -> Option<Arc<ResolvedImportFacts>> {
+    ) -> Option<crate::resolver_core::CachedValue<ResolvedImportFacts>> {
         self.entries.lookup_any_candidate(key)
     }
 
@@ -373,7 +373,7 @@ impl ResolvedImportFactsDb {
     pub fn insert_if_absent(
         &self,
         key: ResolvedImportFactsKey,
-        value: Arc<ResolvedImportFacts>,
+        value: crate::resolver_core::CachedValue<ResolvedImportFacts>,
         facts: Vec<FactVersionRef>,
     ) -> bool {
         if self.entries.holds_candidate_with_signature(&key, &facts) {
@@ -404,7 +404,7 @@ impl ResolvedImportFactsDb {
     pub(crate) fn admit(
         &self,
         key: ResolvedImportFactsKey,
-        value: Arc<ResolvedImportFacts>,
+        value: crate::resolver_core::CachedValue<ResolvedImportFacts>,
         facts: Vec<FactVersionRef>,
     ) -> bool {
         self.generation.mutate(|| {
@@ -433,7 +433,7 @@ impl ResolvedImportFactsDb {
             }
             let admitted = self
                 .entries
-                .insert_arc_with_kind(key, value, facts, RESOLVED_IMPORT_FACTS_CACHE_KIND)
+                .insert_value_with_kind(key, value, facts, RESOLVED_IMPORT_FACTS_CACHE_KIND)
                 .is_some();
             (admitted, admitted)
         })

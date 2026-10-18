@@ -209,8 +209,16 @@ and when a delivered carrier counts heap outside its handles
 (`OwnedHandles::of`). The arena pins the owned handles its payloads reach,
 so a name cloned out of a node payload stays charged after the arena lets
 go; a released slot whose payload a reader still holds keeps the payload's
-block and heap charged until the arena's next mutation after the reader
-lets go.
+block and heap charged until the last reader drops. `NodePayload::drop`
+releases that charge immediately; no arena mutation or reap is required.
+
+The cell's `Nested` box and child-registration slice are included in its
+charge. Cache holds additionally charge their backing slice for exactly
+the holds' lifetime (`HeldHandles`, also used by `RetentionCharge::holding`).
+Dropping the cache holds releases that bookkeeping while surviving cells
+return to `Pinned`. An interned dependency rail and its interner entry
+share a `BlockShare`: the cell block stays charged until both strong rail
+owners and the interner's weak entry let go, in either order.
 
 **Shared registered allocations** (`verter_retention/src/shared.rs`). An allocation
 cache owners alias without handing it out — a build's fact carrier shared
@@ -241,12 +249,36 @@ the family is keyed and released with it. The origin-edge store's tables,
 edge lists, source lists and pooled fence blocks are part of the memo's
 bookkeeping pin, settled on every mutation.
 
-**Not yet charged.** The content-addressed artifact caches driven by
+**Artifact and request caches.** The content-addressed artifact caches driven by
 `cache_runtime::lookup` (`ArtifactNode`: the component-meta shape,
 declaration-lookup, owner-collection and resolvability caches, the
-flow-slice stores, the compile-output caches) claim their entries'
-evidence pages, and their entries' owned identity strings charge
-themselves, but an entry's own allocations and value carry no charge yet.
+flow-slice stores, the compile-output caches) reserve entry metadata, key,
+facts, roots and measured payloads as well as their evidence pages.
+Direct compile publication uses the same reservation path. Independently
+delivered generated code and source maps are `OwnedStr` cells.
+Fresh delivery pins them through `pin_generated_texts`, including stateless,
+refused or fenced publication, runtime-render batches, and caller-supplied
+runtime/IDE product requests. Pinning a cell already retained by a cache
+shares its existing charge.
+Flow graph publication and peeks deliver `FlowGraphBundleRef` (`OwnedValue`):
+the bundle's payload pin follows readers past store teardown, while its
+map slot and separately allocated key backing release with the entry.
+Key measurement primes its alias set with the bundle's entire payload: shared backing
+counts once, while independently allocated equal strings and deep copies
+are charged separately.
+`ValidatedFactCache` delivers `OwnedValue` cells; its candidate reservation
+keeps cache bookkeeping separate from the reader-shared value charge.
+Stable component-meta requests measure their resolved state, and prepared
+bundles measure their tables and retain each lazily committed declaration
+and name-resolution table as a separate cell. Reverse-indexed candidates
+reserve their metadata and hold their owned values.
+
+`OwnedTree` measures the raw allocations reachable through a plain tree;
+it does not by itself seal independently clonable inner `Arc` fields.
+Such leaves need their own owned handles before their lifetime can be
+accounted independently. The allocation inventory records the remaining
+escape points and shared source owners; an outer entry reservation is
+not evidence that these inner lifetimes are covered.
 
 **Refusal routing.** `RetentionRefusal::{Oversized, Pressure,
 ActiveExhausted}` all map to `NonAdmissionReason::RetentionPressure`,

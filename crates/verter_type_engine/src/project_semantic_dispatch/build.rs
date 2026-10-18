@@ -70,7 +70,7 @@ pub(super) type EffectivePreparedValueDecl = (
     verter_type_expr::OwnedStr,
     verter_type_expr::TopLevelOwnerId,
     verter_type_expr::OwnedStr,
-    Arc<verter_session_query::type_solver::PreparedValueDecl>,
+    verter_retention::heap_size::OwnedValue<verter_session_query::type_solver::PreparedValueDecl>,
 );
 
 /// One folded cross-file augmentation contributor: its version self-root
@@ -152,7 +152,7 @@ pub(crate) struct PlannedContributorBody {
     owner_symbol: verter_type_expr::OwnedStr,
     kind: verter_session_query::declarations::TypeDeclKind,
     type_parameters: Arc<[verter_type_expr::facts::NarrowTypeParam]>,
-    name_resolution: Arc<FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>>,
+    name_resolution: verter_session_query::type_solver::prepared::NameResolutionTable,
     binding: PlannedBinding,
     scope: NodeScopeId,
     scope_payload: Option<crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
@@ -166,7 +166,7 @@ enum PlannedBinding {
     Bound(FxHashMap<String, SemanticNodeId>),
     /// A script declaration's: its arguments bind through its declared
     /// defaults under the projecting context.
-    Declared(Arc<PreparedTypeDecl>),
+    Declared(verter_retention::heap_size::OwnedValue<PreparedTypeDecl>),
 }
 
 /// A type-body augmentation fold before projection: the ordered planned
@@ -969,7 +969,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ));
         };
         let mut build = Box::new(TypeofBuild {
-            prepared: Arc::clone(prepared),
+            prepared: prepared.clone(),
             env,
             scope,
             scope_payload,
@@ -983,7 +983,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             context,
             observed_hash,
         });
-        self.begin_typeof_body(&mut build, Arc::clone(prepared), locator);
+        self.begin_typeof_body(&mut build, prepared.clone(), locator);
         *suspended = Some(build);
         None
     }
@@ -1057,7 +1057,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     fn begin_typeof_body(
         &self,
         build: &mut TypeofBuild,
-        prepared: Arc<verter_session_query::type_solver::PreparedValueDecl>,
+        prepared: verter_retention::heap_size::OwnedValue<
+            verter_session_query::type_solver::PreparedValueDecl,
+        >,
         locator: verter_type_expr::locators::AuthoredBodyLocator,
     ) {
         build.self_value = match &locator {
@@ -1145,7 +1147,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(Some(job)) => job,
         };
         let mut build = Box::new(TypeofBuild {
-            prepared: Arc::clone(prepared),
+            prepared: prepared.clone(),
             env,
             scope,
             scope_payload,
@@ -1833,7 +1835,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             effective_canonical.clone(),
             effective_owner,
             effective_symbol.clone(),
-            Arc::clone(&prepared),
+            prepared.clone(),
         );
         if let Some(nominal) =
             self.member_nominal_typeof(value_root, path, &effective_root, Some(scope.clone()))
@@ -1905,7 +1907,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         member_context,
                     ) {
                         let mut build = Box::new(TypeofBuild {
-                            prepared: Arc::clone(&prepared),
+                            prepared: prepared.clone(),
                             env: member_scope.env,
                             scope: member_scope.scope,
                             scope_payload: member_scope.scope_payload,
@@ -2041,7 +2043,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // the frame's build, waiting on each value it names.
                     Some(suspended) => {
                         *suspended = Some(Box::new(TypeofBuild {
-                            prepared: Arc::clone(&prepared),
+                            prepared: prepared.clone(),
                             env: empty_env,
                             scope,
                             scope_payload,
@@ -2334,7 +2336,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// block's before an earlier one's.
     fn value_signature_jobs(
         &self,
-        prepared: &Arc<verter_session_query::type_solver::PreparedValueDecl>,
+        prepared: &verter_retention::heap_size::OwnedValue<
+            verter_session_query::type_solver::PreparedValueDecl,
+        >,
     ) -> Vec<SignatureJob> {
         let identity = &prepared.root_identity;
         let by_block = identity.symbol_name.contains('.')
@@ -2390,7 +2394,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     },
                 );
                 SignatureJob {
-                    prepared: Arc::clone(prepared),
+                    prepared: prepared.clone(),
                     locator,
                     block,
                     opens_declaration: position == 0,
@@ -5998,7 +6002,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// bindings: an enum's member union at once, else the projection of its
     /// substituted locator shape.
     fn begin_instantiated_body(&self, build: &mut InstantiateBuild) -> BodyLowering {
-        let prepared = Arc::clone(&build.prepared);
+        let prepared = build.prepared.clone();
         // An enum's type is the union of its members' literal types, read
         // off the member inventory its value declaration carries.
         if let Some(enumeration) = self.enum_declared_at(
@@ -7596,7 +7600,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         owner_symbol: verter_type_expr::OwnedStr::from(decl_name),
                         kind: prepared.kind,
                         type_parameters: Arc::from(prepared.type_parameters.as_slice()),
-                        name_resolution: Arc::clone(&prepared.name_resolution),
+                        name_resolution: prepared.name_resolution.clone(),
                         binding: PlannedBinding::Declared(prepared),
                         scope: aug_scope,
                         scope_payload: aug_scope_payload,
@@ -8856,7 +8860,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     fn prepared_type_decl(
         &self,
         identity: &crate::semantic_query::DeclIdentity,
-    ) -> Option<Arc<PreparedTypeDecl>> {
+    ) -> Option<verter_retention::heap_size::OwnedValue<PreparedTypeDecl>> {
         let scope = NodeScopeId::File {
             canonical_id: identity.canonical_id.clone(),
             owner: identity.owner,
@@ -19925,7 +19929,7 @@ pub(super) struct InstantiateBuild {
     pub(super) args: Arc<[SemanticNodeId]>,
     effective_args: Arc<[SemanticNodeId]>,
     scope: NodeScopeId,
-    prepared: Arc<PreparedTypeDecl>,
+    prepared: verter_retention::heap_size::OwnedValue<PreparedTypeDecl>,
     scope_payload: Option<crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
     shadowing: crate::resolver_core::scope_shadowing::ScopeShadowing,
     authored_resolution_debt:
@@ -19977,7 +19981,9 @@ pub(super) enum TypeofStart {
 
 /// The declaration scope a `typeof`'s value-position lowering runs in.
 struct TypeofBodyScope<'p> {
-    prepared: &'p Arc<verter_session_query::type_solver::PreparedValueDecl>,
+    prepared: &'p verter_retention::heap_size::OwnedValue<
+        verter_session_query::type_solver::PreparedValueDecl,
+    >,
     env: FxHashMap<String, SemanticNodeId>,
     scope: NodeScopeId,
     scope_payload: Option<crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
@@ -20009,7 +20015,9 @@ fn value_position_locator(
 /// projection itself, what follows it, and what the build's output roots on.
 pub(super) struct TypeofBuild {
     /// The declaration the body lowering now belongs to.
-    prepared: Arc<verter_session_query::type_solver::PreparedValueDecl>,
+    prepared: verter_retention::heap_size::OwnedValue<
+        verter_session_query::type_solver::PreparedValueDecl,
+    >,
     env: FxHashMap<String, SemanticNodeId>,
     scope: NodeScopeId,
     scope_payload: Option<crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
@@ -20131,7 +20139,9 @@ pub(super) struct MemberLowering {
 /// function. Module augmentations join once in `finish_value_signatures`.
 pub(super) struct SignatureLowering {
     /// The function's own declaration.
-    own: Arc<verter_session_query::type_solver::PreparedValueDecl>,
+    own: verter_retention::heap_size::OwnedValue<
+        verter_session_query::type_solver::PreparedValueDecl,
+    >,
     is_class: bool,
     /// The signatures queued to lower.
     jobs: std::collections::VecDeque<SignatureJob>,
@@ -20149,7 +20159,9 @@ pub(super) struct SignatureLowering {
 /// One visible signature of a function value to lower.
 struct SignatureJob {
     /// The declaration that declares it.
-    prepared: Arc<verter_session_query::type_solver::PreparedValueDecl>,
+    prepared: verter_retention::heap_size::OwnedValue<
+        verter_session_query::type_solver::PreparedValueDecl,
+    >,
     locator: verter_type_expr::locators::AuthoredBodyLocator,
     /// The declaration block it groups by.
     block: Option<u32>,
@@ -20178,12 +20190,14 @@ impl SignatureLowering {
     /// The signatures of `own` and its merged global declarations.
     fn new<C: crate::resolver_core::ResolverCapabilities>(
         dispatch: &ProjectSemanticDispatch<'_, C>,
-        own: &Arc<verter_session_query::type_solver::PreparedValueDecl>,
+        own: &verter_retention::heap_size::OwnedValue<
+            verter_session_query::type_solver::PreparedValueDecl,
+        >,
         is_class: bool,
         global_peers: Vec<ResolvedRootIdentity>,
     ) -> Self {
         Self {
-            own: Arc::clone(own),
+            own: own.clone(),
             is_class,
             jobs: dispatch.value_signature_jobs(own).into(),
             peers: global_peers.into(),
