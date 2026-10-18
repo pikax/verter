@@ -3460,7 +3460,7 @@ impl verter_session_query::facts::store_view::StoreView for HostStoreView {
                                 declaration:
                                     verter_session_query::function_program::FunctionDeclarationRef {
                                         owner: function.owner,
-                                        name: Arc::from(function.merged_symbol_name.as_str()),
+                                        name: function.merged_symbol_name.as_str().into(),
                                         space: function.symbol_space,
                                     },
                                 part: function.function_part.clone(),

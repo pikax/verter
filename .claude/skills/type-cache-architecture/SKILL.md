@@ -268,14 +268,23 @@ Flow graph publication and peeks deliver `FlowGraphBundleRef` (`OwnedValue`):
 the bundle's payload pin follows readers past store teardown, while its
 map slot and separately allocated key backing release with the entry.
 The bundle's skeleton, binding map and graph are its own data, borrowed
-only; a holder keeping one past a borrow keeps the bundle's handle
-(`SkeletonRef` / `BindingsRef` / `GraphRef`), the skeleton observation port
-included.
+only and not `Clone`; a holder keeping one past a borrow keeps the bundle's
+handle (`SkeletonRef` / `BindingsRef` / `GraphRef`), the skeleton
+observation port included. Every table and name a borrow reaches — the
+skeleton's name, region, binding, site, return, write and closure tables
+and their nested rails, edge and read paths, binding identities, the
+function declaration name and the key's canonical — is an `OwnedSlice` /
+`OwnedStr` charged by its own cell, so a clone of one keeps exactly that
+allocation charged past the bundle. `OwnedSlice::make_mut` edits a fresh,
+uncharged list in place and copies a shared or charged one.
 Key measurement primes its alias set with the bundle's entire payload: shared backing
 counts once, while independently allocated equal strings and deep copies
 are charged separately.
-`ValidatedFactCache` delivers `OwnedValue` cells; its candidate reservation
-keeps cache bookkeeping separate from the reader-shared value charge.
+`ValidatedFactCache` delivers `OwnedValue` cells and its fact signatures as
+`OwnedFactSignature` (`OwnedSlice<FactVersionRef>`) cells; its candidate
+reservation holds both and keeps cache bookkeeping separate from the
+reader-shared charges. A value or signature the route and imported-root
+drivers deliver without admitting it is pinned to the caller.
 Stable component-meta requests measure their resolved state, and prepared
 bundles measure their tables and retain each lazily committed declaration
 and name-resolution table as a separate cell. Reverse-indexed candidates

@@ -7,7 +7,6 @@ use crate::flow::{
     skeleton::{FunctionBodySkeleton, PreparedFunctionBodySkeleton},
 };
 use crate::function_program::{FunctionProgramEntry, FunctionProgramKey};
-use std::sync::Arc;
 use verter_language::{FileLanguage, ParseKey};
 
 /// The content-pinned function identity every flow-slice artifact keys
@@ -28,7 +27,7 @@ use verter_language::{FileLanguage, ParseKey};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct FlowSliceFunctionKey {
     /// Canonical id of the file serving the function.
-    pub canonical_id: Arc<str>,
+    pub canonical_id: crate::retention::owned::OwnedStr,
     /// The five-axis function program identity.
     pub function: FunctionProgramKey,
     /// The whole-function body-sensitive / cosmetic-insensitive hash.
@@ -340,7 +339,7 @@ impl SkeletonRef {
         let (_, parse_key) = verter_language::default_parse_identity_for("", &file_language)
             .expect("a script language derives a parse identity");
         let key = FlowSliceFunctionKey {
-            canonical_id: Arc::from("/fixture.ts"),
+            canonical_id: "/fixture.ts".into(),
             function,
             flow_body_stable_hash: [0; 16],
             flow_body_exact_hash: [0; 16],

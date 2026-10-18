@@ -180,7 +180,7 @@ pub struct ResolveRequest {
 }
 
 pub use verter_session_query::facts::fact_cache::{
-    DerivedFactKind, FactVersionRef, ParseFactRef, ProgramAnalysisFactRef,
+    DerivedFactKind, FactVersionRef, OwnedFactSignature, ParseFactRef, ProgramAnalysisFactRef,
     ProgramAnalysisFunctionRef, ResolveImportsFactRef, RouteSurfaceFactRef,
 };
 
@@ -879,18 +879,18 @@ impl<V: CachedData> Default for CacheEntry<V> {
 ///   `fact_dep_signature`, used for quick discriminator comparison.
 /// - `value`: the actual cached value, a self-charged cell.
 /// - `fact_dep_signature`: the ordered list of `FactVersionRef`
-///   facts the candidate observed. Validation iterates this list
-///   and short-circuits on the first miss.
+///   facts the candidate observed, a self-charged list readers share.
+///   Validation iterates this list and short-circuits on the first miss.
 #[derive(Debug)]
 pub struct Candidate<V: CachedData> {
     pub signature_fingerprint: [u8; 16],
     pub value: CachedValue<V>,
-    pub fact_dep_signature: Arc<[FactVersionRef]>,
+    pub fact_dep_signature: OwnedFactSignature,
     /// This candidate's own allocations and its share of the evidence pages
-    /// its signature claimed, with the holds on its value's cell and the
-    /// other owned cells it reaches; released when the candidate's last
-    /// holder drops, the value's cell passing to the readers still keeping
-    /// it.
+    /// its signature claimed, with the holds on its value's and its
+    /// signature's cells and the other owned cells it reaches; released
+    /// when the candidate's last holder drops, each cell passing to the
+    /// readers still keeping it.
     _retention: verter_session_query::retention::RetentionCharge,
 }
 
@@ -934,11 +934,14 @@ pub use verter_session_query::facts::fact_cache::CANDIDATE_CAP;
 
 /// Seal an admitted candidate's facts: kept as recorded while they fit one
 /// evidence page, paged (never truncated, never refused) when wider.
-fn seal_admitted_signature(facts: Vec<FactVersionRef>) -> Arc<[FactVersionRef]> {
+fn seal_admitted_signature(facts: Vec<FactVersionRef>) -> OwnedFactSignature {
     if facts.len() > verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH {
         verter_session_query::facts::fact_read_set::seal_canonical_signature(facts)
+            .iter()
+            .cloned()
+            .collect()
     } else {
-        Arc::from(facts.into_boxed_slice())
+        OwnedFactSignature::from(facts)
     }
 }
 
@@ -1157,7 +1160,7 @@ where
         &self,
         key: &K,
         view: &TView,
-    ) -> Option<(CachedValue<V>, Arc<[FactVersionRef]>)>
+    ) -> Option<(CachedValue<V>, OwnedFactSignature)>
     where
         TView: StoreView + ?Sized,
     {
@@ -1171,7 +1174,7 @@ where
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return Some((
                     candidate.value.clone(),
-                    Arc::clone(&candidate.fact_dep_signature),
+                    candidate.fact_dep_signature.clone(),
                 ));
             }
         }
@@ -1293,22 +1296,33 @@ where
 
     /// A value no cache retains stays with its caller: charged to it,
     /// pinned, whatever the pressure.
-    fn charge_to_caller(&self, value: &CachedValue<V>) {
-        value.pin(verter_session_query::retention::owned::ChargeCtx::new(
-            self.retention_account.get(),
-        ));
+    pub(crate) fn charge_to_caller(&self, value: &CachedValue<V>) {
+        value.pin(self.charge_ctx());
+    }
+
+    /// A fact signature this cache hands a caller without retaining it,
+    /// charged to that caller, pinned, until its last clone drops.
+    pub(crate) fn deliver_signature(&self, facts: Vec<FactVersionRef>) -> OwnedFactSignature {
+        let signature = OwnedFactSignature::from(facts);
+        signature.pin(self.charge_ctx());
+        signature
+    }
+
+    fn charge_ctx(&self) -> verter_session_query::retention::owned::ChargeCtx<'_> {
+        verter_session_query::retention::owned::ChargeCtx::new(self.retention_account.get())
     }
 
     /// Reserve one candidate's charge, held by the candidate: its own
     /// allocations and the evidence pages its sealed signature reaches, in
-    /// one refusable reservation, holding its value's cell and the owned
-    /// cells its key and facts reach. The refusal when the account refuses
-    /// either; the value is then charged to the caller keeping it.
+    /// one refusable reservation, holding its value's and its signature's
+    /// cells and the owned cells its key reaches. The refusal when the
+    /// account refuses either; the value is then charged to the caller
+    /// keeping it.
     fn reserve_candidate(
         &self,
         key: &K,
         value: &CachedValue<V>,
-        signature: &Arc<[FactVersionRef]>,
+        signature: &OwnedFactSignature,
     ) -> Result<
         verter_session_query::retention::RetentionCharge,
         verter_session_query::retention::RetentionRefusal,
@@ -1316,20 +1330,18 @@ where
     where
         K: verter_retention::heap_size::HeapSize,
     {
-        use verter_session_query::retention::allocation::{
-            arc_block_bytes, fact_slice_bytes, AliasSet,
-        };
+        use verter_session_query::retention::allocation::arc_block_bytes;
         let account = self.retention_account.get();
         let ctx = verter_session_query::retention::owned::ChargeCtx::new(account);
         // The key's slot and its entry with its candidate list, the
-        // candidate's block, its fact slice and its key's heap. A key and
-        // entry the slot's candidates share are counted with each of them:
-        // an over-estimate, never a gap. The value is its own cell, held.
+        // candidate's block and its key's heap. A key and entry the slot's
+        // candidates share are counted with each of them: an over-estimate,
+        // never a gap. The value and the signature are their own cells,
+        // held.
         let footprint = verter_retention::heap_size::footprint(key);
-        let value_cell = verter_session_query::retention::owned::OwnedHandles::of(|aliases| {
-            value.offer(aliases)
+        let cells = verter_session_query::retention::owned::OwnedHandles::of(|aliases| {
+            value.offer(aliases) + signature.offer(aliases)
         });
-        let mut aliases = AliasSet::new();
         let own = verter_session_query::retention::ENTRY_OVERHEAD_BYTES
             + std::mem::size_of::<(K, Arc<CacheEntry<V>>)>()
             + arc_block_bytes(std::mem::size_of::<CacheEntry<V>>())
@@ -1337,17 +1349,12 @@ where
                 smallvec::SmallVec<[Arc<Candidate<V>>; CANDIDATE_CAP]>,
             >())
             + arc_block_bytes(std::mem::size_of::<Candidate<V>>())
-            + fact_slice_bytes(signature, &mut aliases)
             + footprint.bytes;
-        let holds = aliases
-            .take_handles()
-            .merge(footprint.handles)
-            .merge(value_cell)
-            .hold_or_pin(ctx)?;
+        let holds = footprint.handles.merge(cells).hold_or_pin(ctx)?;
         match verter_session_query::facts::receipt::reserve_retained_with_evidence(
             account,
             own,
-            &[signature],
+            &[&signature[..]],
         ) {
             verter_session_query::retention::RetentionAdmission::Admitted(charge) => {
                 Ok(charge.holding(holds))
@@ -1485,13 +1492,13 @@ where
     }
 
     #[cfg(test)]
-    pub fn candidate_signatures_for_key(&self, key: &K) -> Vec<Arc<[FactVersionRef]>> {
+    pub fn candidate_signatures_for_key(&self, key: &K) -> Vec<OwnedFactSignature> {
         match self.entries.get(key) {
             Some(entry) => entry
                 .candidates
                 .load()
                 .iter()
-                .map(|c| Arc::clone(&c.fact_dep_signature))
+                .map(|c| c.fact_dep_signature.clone())
                 .collect(),
             None => Vec::new(),
         }
@@ -5435,6 +5442,58 @@ mod receipt_validation_tests {
         );
         drop(value);
         assert_eq!(account.snapshot().pinned_bytes, 0);
+    }
+
+    /// A fact signature a reader keeps past its candidate stays charged:
+    /// the signature is a self-charged list whose charge passes, pinned, to
+    /// the reader when the cache lets go and is released by the reader's
+    /// last drop — in either release order, the value long gone.
+    #[test]
+    fn a_signature_a_reader_keeps_stays_charged_after_the_cache_lets_go() {
+        use verter_session_query::retention::{
+            ChargeClass, RetentionLimits, SemanticRetentionAccount, StoreAccount,
+        };
+        let canonical = format!("/{}.ts", "signature_canonical_".repeat(1024));
+        let admitted = || {
+            let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+            let cache: ValidatedFactCache<&'static str, u32> =
+                ValidatedFactCache::with_retention_account(StoreAccount::new(Arc::clone(&account)));
+            assert!(cache.insert("value", 7, vec![whole_hash(&canonical, 1)]));
+            let (value, signature) = cache
+                .get_if_valid_with_facts(&"value", &CountingView::default())
+                .expect("the admitted candidate validates");
+            drop(value);
+            (account, cache, signature)
+        };
+
+        // The cache lets go first.
+        let (account, cache, signature) = admitted();
+        assert_eq!(signature.charge_class(), Some(ChargeClass::Retained));
+        let signature_charge = signature
+            .charge_bytes()
+            .expect("an admitted signature is charged");
+        assert!(
+            signature_charge >= canonical.len(),
+            "the signature is charged its canonical: {signature_charge}"
+        );
+        cache.clear();
+        let kept = account.snapshot();
+        assert_eq!(kept.retained_bytes, 0, "the candidate's bookkeeping goes");
+        assert_eq!(
+            kept.pinned_bytes, signature_charge,
+            "the reader keeps exactly the signature's charge"
+        );
+        assert_eq!(signature.charge_class(), Some(ChargeClass::Pinned));
+        drop(signature);
+        assert_eq!(account.snapshot().total_bytes(), 0);
+
+        // The reader lets go first.
+        let (account, cache, signature) = admitted();
+        let retained = account.snapshot().retained_bytes;
+        drop(signature);
+        assert_eq!(account.snapshot().retained_bytes, retained);
+        cache.clear();
+        assert_eq!(account.snapshot().total_bytes(), 0);
     }
 
     /// A wide candidate's admission claims the pages its sealing minted into

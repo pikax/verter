@@ -73,9 +73,9 @@ fn fixture_with_resources(
         query: SemanticQueryKey::FlowReturn(Box::new(FlowReturnKey {
             function: FlowFunctionSlotIdentity {
                 declaration_slot: ResolvedDeclSlotIdentity::value_slot(
-                    Arc::clone(&bound.key().canonical_id),
+                    bound.key().canonical_id.clone(),
                     entry.key().declaration.owner,
-                    Arc::clone(&entry.key().declaration.name),
+                    entry.key().declaration.name.clone(),
                     0,
                     [0; 16],
                     [0; 16],
