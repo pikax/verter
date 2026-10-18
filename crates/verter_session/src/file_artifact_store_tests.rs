@@ -1276,6 +1276,18 @@ fn synth_augmenter_artifacts_for_specifier(
     specifier: &str,
     parse_stable_hash: Hash16,
 ) -> Arc<FileArtifacts> {
+    synth_augmenter_artifacts_declared_in(
+        specifier,
+        parse_stable_hash,
+        verter_session_query::inputs::contributors::FileModuleKind::Module,
+    )
+}
+
+fn synth_augmenter_artifacts_declared_in(
+    specifier: &str,
+    parse_stable_hash: Hash16,
+    declaring_file: verter_session_query::inputs::contributors::FileModuleKind,
+) -> Arc<FileArtifacts> {
     use super::FileFacts;
     use verter_session_query::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
     use verter_session_query::source::augmentation::ModuleAugmentationFact;
@@ -1290,6 +1302,7 @@ fn synth_augmenter_artifacts_for_specifier(
             augmented_name: InternedName::from("Augmented"),
             space: SymbolSpace::Type,
             augmented_member_shape_fingerprint: [0u8; 16],
+            declaring_file,
         }]),
     })
 }
@@ -1445,6 +1458,7 @@ fn package_augmentation_fact_augments_the_file_its_specifier_resolves_to() {
         augmented_name: verter_session_query::facts::registry::InternedName::from("Augmented"),
         space: verter_session_query::facts::registry::SymbolSpace::Type,
         augmented_member_shape_fingerprint: [0u8; 16],
+        declaring_file: verter_session_query::inputs::contributors::FileModuleKind::Module,
     };
     assert_eq!(
         store.invalidate_augmentation_index_for_augmenter(std::slice::from_ref(&fact)),
@@ -1452,6 +1466,96 @@ fn package_augmentation_fact_augments_the_file_its_specifier_resolves_to() {
         "a package augmentation's change retires every resolved-file entry"
     );
     assert!(store.get_augmenter_set(&resolved_key).is_none());
+}
+
+#[test]
+fn script_file_package_declaration_is_an_ambient_module_not_an_augmentation() {
+    // `declare module "@vue/reactivity"` in a script (no import or export)
+    // declares an ambient module of that name; only the same block in a
+    // module augments the package file the name resolves to. The script
+    // declaration stays an ambient-specifier contributor, is never merged
+    // into the resolved package file, and its change retires no
+    // resolved-file entry.
+    use super::augmentation_contribution_equivalent;
+    use verter_session_query::inputs::contributors::FileModuleKind;
+
+    let store = FileArtifactStore::new();
+    store.insert_artifacts(
+        FileArtifactKey::base_for_test(Arc::from("/nm/core/index.d.ts"), [9u8; 16]),
+        synth_augmenter_artifacts_declared_in(
+            "@vue/reactivity",
+            [0x55u8; 16],
+            FileModuleKind::Module,
+        ),
+    );
+    store.insert_artifacts(
+        FileArtifactKey::base_for_test(Arc::from("/src/shims.d.ts"), [8u8; 16]),
+        synth_augmenter_artifacts_declared_in(
+            "@vue/reactivity",
+            [0x66u8; 16],
+            FileModuleKind::Script,
+        ),
+    );
+    let resolve = |_: &str, specifier: &str| {
+        (specifier == "@vue/reactivity").then(|| Arc::<str>::from("/nm/reactivity/index.d.ts"))
+    };
+    let resolved_key = target_key_for(AugmentationTargetKind::ResolvedRelativeCanonical(
+        Arc::from("/nm/reactivity/index.d.ts"),
+    ));
+    let set = store.ensure_augmentation_index_populated(&resolved_key, resolve, None);
+    let augmenters: Vec<&str> = set
+        .entries
+        .iter()
+        .map(|entry| entry.canonical().as_ref())
+        .collect();
+    assert_eq!(
+        augmenters,
+        ["/nm/core/index.d.ts"],
+        "only the module-file declaration augments the resolved package file"
+    );
+    let ambient_key = target_key_for(AugmentationTargetKind::ExternalSpecifier(
+        "@vue/reactivity".into(),
+    ));
+    let set = store.ensure_augmentation_index_populated(&ambient_key, resolve, None);
+    assert_eq!(
+        set.entries.len(),
+        2,
+        "both declarations still contribute under the ambient specifier"
+    );
+
+    let script_fact = verter_session_query::source::augmentation::ModuleAugmentationFact {
+        specifier: super::InternedSpecifier::from("@vue/reactivity"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        augmented_name: verter_session_query::facts::registry::InternedName::from("Augmented"),
+        space: verter_session_query::facts::registry::SymbolSpace::Type,
+        augmented_member_shape_fingerprint: [0u8; 16],
+        declaring_file: FileModuleKind::Script,
+    };
+    let retired =
+        store.invalidate_augmentation_index_for_augmenter(std::slice::from_ref(&script_fact));
+    assert_eq!(
+        retired, 1,
+        "a script declaration retires its ambient-specifier entry only"
+    );
+    assert!(
+        store.get_augmenter_set(&resolved_key).is_some(),
+        "a script declaration never retires a resolved-file entry"
+    );
+
+    // Adding `export {}` turns the script declaration into an augmentation:
+    // the replacement changes which entries it contributes to.
+    assert!(!augmentation_contribution_equivalent(
+        &synth_augmenter_artifacts_declared_in(
+            "@vue/reactivity",
+            [0x66u8; 16],
+            FileModuleKind::Script
+        ),
+        &synth_augmenter_artifacts_declared_in(
+            "@vue/reactivity",
+            [0x66u8; 16],
+            FileModuleKind::Module
+        ),
+    ));
 }
 
 #[test]
@@ -1492,6 +1596,7 @@ fn bare_dot_dot_fact_conservatively_invalidates_relative_target_entries() {
         augmented_name: InternedName::from("Augmented"),
         space: SymbolSpace::Type,
         augmented_member_shape_fingerprint: [0u8; 16],
+        declaring_file: verter_session_query::inputs::contributors::FileModuleKind::Module,
     };
     let removed = store.invalidate_augmentation_index_for_augmenter(std::slice::from_ref(&fact));
     assert_eq!(
@@ -1723,6 +1828,7 @@ fn genuine_augmenter_change_via_insert_artifacts_still_invalidates_and_bumps() {
                 space: SymbolSpace::Type,
                 // CHANGED member-shape fingerprint → genuine contribution change.
                 augmented_member_shape_fingerprint: [0x77u8; 16],
+                declaring_file: verter_session_query::inputs::contributors::FileModuleKind::Module,
             }]),
         })
     };
@@ -1877,6 +1983,7 @@ fn augmentation_contribution_equivalence_tracks_fingerprint_inputs() {
                 augmented_name: InternedName::from("Augmented"),
                 space: SymbolSpace::Type,
                 augmented_member_shape_fingerprint: [0x77u8; 16],
+                declaring_file: verter_session_query::inputs::contributors::FileModuleKind::Module,
             }]),
         })
     };
@@ -1900,6 +2007,7 @@ fn augmentation_contribution_equivalence_tracks_fingerprint_inputs() {
                 augmented_name: InternedName::from("Augmented"),
                 space: SymbolSpace::Type,
                 augmented_member_shape_fingerprint: [0u8; 16],
+                declaring_file: verter_session_query::inputs::contributors::FileModuleKind::Module,
             }]),
         })
     };
@@ -2609,6 +2717,7 @@ fn captured_root_still_reaches_a_retired_augmenter_set() {
         augmented_name: InternedName::from("Augmented"),
         space: SymbolSpace::Type,
         augmented_member_shape_fingerprint: [0u8; 16],
+        declaring_file: verter_session_query::inputs::contributors::FileModuleKind::Module,
     }]);
     assert_eq!(retired, 1, "the matching index entry must retire");
     assert!(

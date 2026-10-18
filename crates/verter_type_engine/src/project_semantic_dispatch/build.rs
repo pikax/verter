@@ -7033,7 +7033,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         continue;
                     }
                     let relative = if matches!(key.target, verter_session_query::resolution::AugmentationTargetKind::ResolvedRelativeCanonical(_))
-                    && verter_session_query::source::augmentation::specifier_augments_resolved_module(fact.specifier.as_ref()) {
+                    && verter_session_query::source::augmentation::fact_augments_resolved_module(fact) {
                     resolve_rel(augmenter_canonical, fact.specifier.as_ref())
                 } else { None };
                     if !verter_session_query::source::augmentation::augmenter_matches_target(
