@@ -1194,12 +1194,14 @@ impl VerterMcpServer {
             ..Default::default()
         };
 
-        // Ensure compilation populates the TSX cache
-        let _ = self.host.ensure_compiled(&canonical, &profile);
-
         let ide = self
             .host
-            .get_ide(&canonical, &profile)
+            .compile_ide(&canonical, &profile)
+            .map_err(|error| {
+                mcp_err(format!(
+                    "Cannot compile IDE output for {canonical}: {error}"
+                ))
+            })?
             .ok_or_else(|| mcp_err(format!("Cannot generate IDE output for {}", canonical)))?;
 
         Ok(CallToolResult::success(vec![ContentBlock::text(

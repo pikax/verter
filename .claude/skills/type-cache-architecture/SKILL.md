@@ -2439,3 +2439,13 @@ keys and a membership index, distinguishes broad domains from finite empty
 ones, and never reads member values. Deferred evaluation separately keys shell
 and selected-value demands with the complete projection context and retains
 its ordinary dependency proof and cost receipt.
+
+### Interner block attribution and abort delivery
+
+Memo bookkeeping reporting includes the block shares held by weak dependency-rail
+interner entries, once per interned allocation. These are existing charges, not
+new reservations: a dead rail's block remains attributable until its weak entry
+is pruned; a delivery outliving the interner keeps the shared charge itself.
+An abandoned inline member completes with the payload-free typed superseded
+abort, wakes its subscribers and retires without publishing. Cleanup must not
+allocate an owned diagnostic string after the construction allowance is spent.

@@ -435,7 +435,7 @@ impl<'a> Matrix<'a> {
             .collect()
     }
 
-    fn module(&self, rows: &[(Read<'_>, Vec<&str>)]) -> String {
+    pub(super) fn module(&self, rows: &[(Read<'_>, Vec<&str>)]) -> String {
         let mut module = String::from(self.source);
         module.push('\n');
         // A global script's probes are not exported: an export would make it

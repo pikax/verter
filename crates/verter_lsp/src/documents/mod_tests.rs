@@ -246,7 +246,13 @@ mod source_identity_fence {
             let _ = registry.did_change(uri, 2, REVISION_B);
         }));
 
-        registry.install_missing_carrier_projection(&canonical);
+        let attempted = registry.snapshot_identity(&uri).expect("open revision");
+        let ide = registry
+            .host()
+            .compile_ide(&canonical, &registry.tsx_profile.read())
+            .expect("compile")
+            .expect("carrier IDE");
+        registry.install_missing_carrier_projection(&canonical, &attempted, &ide);
 
         assert!(
             registry
@@ -295,7 +301,7 @@ mod source_identity_fence {
             registry.account_carrier_ide_content_verdict(
                 CANONICAL,
                 SOURCE,
-                &compile_error(code),
+                &compile_error(code).as_ref().copied(),
                 false,
                 false,
             );
@@ -308,7 +314,7 @@ mod source_identity_fence {
         registry.account_carrier_ide_content_verdict(
             CANONICAL,
             SOURCE,
-            &compile_error("XInvalidExpression"),
+            &compile_error("XInvalidExpression").as_ref().copied(),
             false,
             false,
         );

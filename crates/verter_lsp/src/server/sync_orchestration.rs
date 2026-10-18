@@ -769,6 +769,7 @@ impl VerterLanguageServer {
                     &canonical_id,
                     &ide_path,
                     &ide.code,
+                    ide.source_map.as_deref(),
                     &committed_state.owner_binding,
                 ) {
                     return;
@@ -966,13 +967,11 @@ impl VerterLanguageServer {
             _ => None,
         };
         let profile = self.documents.tsx_profile.read().clone();
-        let _ = block_in_place_if_available(|| {
-            self.documents
-                .host()
-                .ensure_ide_compiled(canonical_id, &profile)
-        });
-        let ide =
-            block_in_place_if_available(|| self.documents.host().get_ide(canonical_id, &profile));
+        let ide = block_in_place_if_available(|| {
+            self.documents.host().compile_ide(canonical_id, &profile)
+        })
+        .ok()
+        .flatten();
         // The dialect comes from the compile, falling back to the parse-level
         // script language when the compile is unavailable — never a `.tsx` guess.
         let is_jsx = self.documents.is_jsx_for_canonical(canonical_id);
@@ -1810,6 +1809,7 @@ impl VerterLanguageServer {
                             &canonical_id,
                             is_jsx,
                             ide.as_ref().map(|output| &*output.code),
+                            ide.as_ref().and_then(|output| output.source_map.as_deref()),
                             compiled_revision.as_ref().map(|revision| (uri, revision)),
                         )
                         .await;
@@ -1912,6 +1912,7 @@ impl VerterLanguageServer {
                 current_state.as_ref(),
                 &ide_path,
                 &ide.code,
+                ide.source_map.as_deref(),
             )
         {
             tracing::debug!(
@@ -2824,6 +2825,7 @@ impl VerterLanguageServer {
         &self,
         canonical_id: &str,
         ide_code: &str,
+        source_map: Option<&str>,
         is_jsx: bool,
         // The open-document revision `ide_code` was compiled against, captured
         // by the CALLER before that compile ran — see
@@ -2853,6 +2855,7 @@ impl VerterLanguageServer {
                 canonical_id,
                 &ide_path,
                 ide_code,
+                source_map,
                 &state.owner_binding,
             )
         {
@@ -2889,16 +2892,15 @@ impl VerterLanguageServer {
                 };
                 // Record a fresh generation pinning the EXACT IDE bytes just
                 // synced (before `ide_path` is moved), fenced by the pin the
-                // caller captured before compiling `ide_code`. No source map
-                // in scope here → the choke attaches the live IDE artifact's
-                // map only if it still byte-matches `ide_code`.
+                // caller captured before compiling `ide_code`, carrying that
+                // same compile's map even when the output was not cached.
                 if !self.record_prepared_carrier_ide_snapshot(
                     open_pin,
                     canonical_id,
                     &ide_path,
                     ide_code,
                     prepared,
-                    None,
+                    source_map,
                 ) {
                     return false;
                 }
@@ -3266,25 +3268,11 @@ impl VerterLanguageServer {
                 _ => None,
             };
             let ide = if is_tsgo {
-                let cached = self.documents.host().get_ide(canonical_id, &profile);
-                if cached.is_some() {
-                    cached
-                } else {
-                    // The workspace scanner may have prepared only the public
-                    // API projection. That is sufficient for tsserver, whose
-                    // plugin resolves authored carrier imports through the
-                    // store, but tsgo has no host plugin and queries the IDE
-                    // companion directly. Materialize that missing companion
-                    // before reconciling; otherwise an API-only state is
-                    // committed and cross-file navigation resolves only to the
-                    // use-site's synthetic JSX property.
-                    let _ = block_in_place_if_available(|| {
-                        self.documents
-                            .host()
-                            .ensure_ide_compiled(canonical_id, &profile)
-                    });
-                    self.documents.host().get_ide(canonical_id, &profile)
-                }
+                block_in_place_if_available(|| {
+                    self.documents.host().compile_ide(canonical_id, &profile)
+                })
+                .ok()
+                .flatten()
             } else {
                 None
             };
@@ -3308,7 +3296,13 @@ impl VerterLanguageServer {
                 };
                 if let Some(ide) = ide.as_ref() {
                     let delivered = self
-                        .sync_carrier_ide_unresolved(canonical_id, &ide.code, ide.is_jsx, open_pin)
+                        .sync_carrier_ide_unresolved(
+                            canonical_id,
+                            &ide.code,
+                            ide.source_map.as_deref(),
+                            ide.is_jsx,
+                            open_pin,
+                        )
                         .await;
                     outcome = outcome.and(ImportSyncOutcome::from_ok(delivered));
                 }
@@ -3372,6 +3366,7 @@ impl VerterLanguageServer {
                                     canonical_id,
                                     &ide_path,
                                     &ide.code,
+                                    ide.source_map.as_deref(),
                                     &committed_state.owner_binding,
                                 ) {
                                     let still_current =
@@ -3492,6 +3487,7 @@ impl VerterLanguageServer {
                                     canonical_id,
                                     is_jsx,
                                     ide.as_ref().map(|output| &*output.code),
+                                    ide.as_ref().and_then(|output| output.source_map.as_deref()),
                                     open_pin,
                                 )
                                 .await;
@@ -3567,9 +3563,9 @@ impl VerterLanguageServer {
             });
             drop(document_commit_guard);
 
-            let compiled = block_in_place_if_available(|| {
+            let ide = block_in_place_if_available(|| {
                 if !self.documents.host().ensure_loaded(canonical_id) {
-                    return false;
+                    return None;
                 }
 
                 self.documents.host().ensure_loaded(canonical_id);
@@ -3580,24 +3576,24 @@ impl VerterLanguageServer {
                 let profile = self.documents.tsx_profile.read().clone();
                 self.documents
                     .host()
-                    .ensure_ide_compiled(canonical_id, &profile)
-                    .unwrap_or(false)
+                    .compile_ide(canonical_id, &profile)
+                    .ok()
+                    .flatten()
             });
 
             let mut outcome = ImportSyncOutcome::Complete;
-            if compiled {
+            if let Some(ide) = ide {
                 if is_tsgo {
-                    if let Some(ide) = self.documents.host().get_ide(canonical_id, &profile) {
-                        let delivered = self
-                            .sync_carrier_ide_unresolved(
-                                canonical_id,
-                                &ide.code,
-                                ide.is_jsx,
-                                bootstrap_open_pin,
-                            )
-                            .await;
-                        outcome = outcome.and(ImportSyncOutcome::from_ok(delivered));
-                    }
+                    let delivered = self
+                        .sync_carrier_ide_unresolved(
+                            canonical_id,
+                            &ide.code,
+                            ide.source_map.as_deref(),
+                            ide.is_jsx,
+                            bootstrap_open_pin,
+                        )
+                        .await;
+                    outcome = outcome.and(ImportSyncOutcome::from_ok(delivered));
                 }
                 let api = match self.documents.host().get_public_api(canonical_id) {
                     Ok(api) => api,
@@ -3734,26 +3730,20 @@ impl VerterLanguageServer {
             // `Main`) so a Main-less carrier (Svelte) is not stranded — its IDE
             // TSX feeds `sync_compiled_carrier_to_provider` below.
             let profile = self.documents.tsx_profile.read().clone();
-            if !self
-                .documents
+            self.documents
                 .host()
-                .ensure_ide_compiled(canonical_id, &profile)
-                .unwrap_or(false)
-            {
-                return None;
-            }
-            Some(profile)
+                .compile_ide(canonical_id, &profile)
+                .ok()
+                .flatten()
         });
         tracing::info!("resync_background: COMPILED {canonical_id}");
 
-        let Some(profile) = compile_result else {
+        let Some(ide) = compile_result else {
             return;
         };
-
         self.refresh_carrier_dependency_tracking(canonical_id);
 
-        let ide = self.documents.host().get_ide(canonical_id, &profile);
-        self.sync_compiled_carrier_to_provider(canonical_id, ide.as_ref(), open_pin)
+        self.sync_compiled_carrier_to_provider(canonical_id, Some(&ide), open_pin)
             .await;
     }
 
@@ -3866,6 +3856,7 @@ impl VerterLanguageServer {
                         canonical_id,
                         &tsx_path,
                         &ide.code,
+                        ide.source_map.as_deref(),
                         &committed_state.owner_binding,
                     ) {
                         let is_bg = self.is_background_loaded_for_source_kind(
@@ -3959,6 +3950,7 @@ impl VerterLanguageServer {
                             canonical_id,
                             is_jsx,
                             ide.map(|output| &*output.code),
+                            ide.and_then(|output| output.source_map.as_deref()),
                             open_pin,
                         )
                         .await;

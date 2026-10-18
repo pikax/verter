@@ -906,6 +906,10 @@ pub(crate) fn api_leg_is_current(
         })
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "validates the source, owner, code and mapping basis"
+)]
 pub(crate) fn open_ide_leg_is_current(
     sync: &crate::type_provider::project_sync::ProjectSync,
     documents: &crate::documents::DocumentRegistry,
@@ -913,6 +917,7 @@ pub(crate) fn open_ide_leg_is_current(
     canonical_id: &str,
     ide_path: &str,
     generated: &str,
+    source_map: Option<&str>,
     owner_binding: &ProviderOwnerBinding,
 ) -> bool {
     let Some(uri) = documents.canonical_id_to_uri(canonical_id) else {
@@ -928,15 +933,11 @@ pub(crate) fn open_ide_leg_is_current(
         }
         .is_current(sync, documents.provider_surfaces(), committed)
     }) && documents
-        .host()
-        .get_ide(canonical_id, &documents.tsx_profile.read())
-        .filter(|ide| ide.code.as_ref() == generated)
-        .zip(documents.provider_surfaces().current_snapshot(ide_path))
-        .is_some_and(|(ide, snapshot)| {
+        .provider_surfaces()
+        .current_snapshot(ide_path)
+        .is_some_and(|snapshot| {
             snapshot.stamp.map_hash
-                == ide
-                    .source_map
-                    .as_deref()
+                == source_map
                     .map(|map| ContentHash::of(map).to_hash16())
                     .unwrap_or([0; 16])
         })

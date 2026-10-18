@@ -3309,6 +3309,7 @@ fn dep_signature_interner_and_its_rails_share_each_rail_blocks_charge() {
             .collect();
         let blocks = RAILS * BlockShare::bytes_for::<crate::semantic_query::DepRail>();
         assert!(interner.storage_charge_bytes() > 0);
+        assert_eq!(interner.entry_block_charge_bytes(), blocks);
         assert_eq!(
             account.snapshot().pinned_bytes,
             interner.storage_charge_bytes() + blocks,
@@ -3339,7 +3340,9 @@ fn dep_signature_interner_and_its_rails_share_each_rail_blocks_charge() {
                 interner.storage_charge_bytes() + blocks,
                 "a dead rail's block stays allocated, and charged, until its entry is pruned"
             );
+            assert_eq!(interner.entry_block_charge_bytes(), blocks);
             interner.sweep();
+            assert_eq!(interner.entry_block_charge_bytes(), 0);
             assert_eq!(interner.storage_charge_bytes(), 0);
             drop(interner);
         } else {
@@ -3353,4 +3356,83 @@ fn dep_signature_interner_and_its_rails_share_each_rail_blocks_charge() {
         }
         assert_eq!(account.snapshot().total_bytes(), 0);
     }
+}
+
+/// Memo bookkeeping attributes the weak entries' block shares even after
+/// their last delivery drops; only pruning the weak entries releases them.
+#[test]
+fn memo_bookkeeping_reports_interned_rail_blocks_until_their_entries_drop() {
+    use verter_session_query::retention::{
+        RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+    let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+    let store = SemanticGraphStore::with_account(StoreAccount::new(Arc::clone(&account)));
+    let before = account.snapshot().pinned_bytes - store.bookkeeping_storage_charge_bytes();
+    let rails: Vec<_> = (0..64)
+        .map(|index| {
+            store.dep_signature_interner.intern_canonical(
+                &format!("/w/{index}.ts"),
+                DepVersion::ProjectGeneration(index),
+            )
+        })
+        .collect();
+    assert_eq!(
+        account.snapshot().pinned_bytes - store.bookkeeping_storage_charge_bytes(),
+        before,
+        "live rail block shares belong to memo bookkeeping"
+    );
+    drop(rails);
+    assert_eq!(
+        account.snapshot().pinned_bytes - store.bookkeeping_storage_charge_bytes(),
+        before,
+        "weak entries keep the same block charge after deliveries drop"
+    );
+    store.dep_signature_interner.sweep();
+    assert_eq!(
+        account.snapshot().pinned_bytes - store.bookkeeping_storage_charge_bytes(),
+        before
+    );
+    drop(store);
+    assert_eq!(account.snapshot().total_bytes(), 0);
+}
+
+/// A stopped inline member has no error payload to allocate, wakes every
+/// registered subscriber and retires its flight without a publishable value.
+#[test]
+fn aborting_inline_members_wakes_subscribers_with_a_payload_free_abort() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct WakeCount(AtomicUsize);
+    impl std::task::Wake for WakeCount {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let store = SemanticGraphStore::new();
+    let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: scope("/w/abort.ts"),
+        name: "T".into(),
+    });
+    let flight = store
+        .begin_inline_member_flight(key)
+        .expect("cold member owner");
+    let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let waker = std::task::Waker::from(Arc::clone(&wakes));
+    {
+        let mut state = flight.inflight.state.lock();
+        state.register_waker(waker.clone());
+        state.register_waker(waker);
+    }
+    store.abort_inline_member_flight(&flight);
+    let state = flight.inflight.state.lock();
+    assert!(state.aborted && state.cache_suppress);
+    assert!(matches!(
+        state.completed,
+        Some(QueryResult::Error(QueryError::ExecutionAborted(
+            crate::semantic_query::ExecutionAbort::Superseded
+        )))
+    ));
+    assert!(state.graph_carrier.is_none());
+    assert!(state.wakers.is_empty());
+    assert_eq!(wakes.0.load(Ordering::Relaxed), 2);
+    assert!(!store.inflight.lock().contains_key(&flight.prepared));
 }

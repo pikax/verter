@@ -34,7 +34,7 @@ use crate::semantic_query::{DepEntry, DepRail, DepSignature, DepVersion};
 /// [`DepSignatureInterner`].
 struct DepSignatureWeak {
     rail: WeakOwned<DepRail>,
-    _block: BlockShare,
+    block: BlockShare,
 }
 
 impl DepSignatureWeak {
@@ -210,7 +210,7 @@ impl DepSignatureInterner {
                     DepSignature::interned_rail(normalised, ChargeCtx::new(&storage.account));
                 bucket.push(DepSignatureWeak {
                     rail: Owned::downgrade(&fresh),
-                    _block: block,
+                    block,
                 });
                 DepSignature::from_owned(fresh)
             }
@@ -291,6 +291,23 @@ impl DepSignatureInterner {
                     .lock()
                     .values()
                     .map(|bucket| bucket.iter().filter(|w| w.strong_count() > 0).count())
+                    .sum::<usize>()
+            })
+            .sum()
+    }
+
+    /// Bytes the block shares its entries keep are charged: every interned
+    /// rail block an entry still keeps allocated, alive or not.
+    #[must_use]
+    pub fn entry_block_charge_bytes(&self) -> usize {
+        self.shards
+            .iter()
+            .map(|shard| {
+                shard
+                    .lock()
+                    .values()
+                    .flatten()
+                    .map(|entry| entry.block.bytes())
                     .sum::<usize>()
             })
             .sum()

@@ -3018,6 +3018,7 @@ impl DeclBodyMemo {
         let name = name.to_string();
         let svelte_component_runes_mode = self.svelte_component_runes_mode;
         let class_fields = Arc::clone(&self.header_index.class_field_values);
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         let counters = Arc::clone(&self.counters);
         let outcome = service.run_leased(&self.key, move |program| {
             let program = program?;
@@ -3026,6 +3027,7 @@ impl DeclBodyMemo {
             let Some(stmt) = program.body.get(statement as usize) else {
                 return Some(None);
             };
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
             counters
                 .decl_statements_lowered
                 .fetch_add(1, Ordering::Relaxed);
@@ -3099,6 +3101,7 @@ impl DeclBodyMemo {
         let aug_scope = aug_scope.cloned();
         let svelte_component_runes_mode = self.svelte_component_runes_mode;
         let class_fields = Arc::clone(&self.header_index.class_field_values);
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         let counters = Arc::clone(&self.counters);
         let outcome = service.run_leased(&self.key, move |program| {
             let program = program?;
@@ -3120,6 +3123,7 @@ impl DeclBodyMemo {
                 else {
                     continue;
                 };
+                #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
                 counters
                     .decl_statements_lowered
                     .fetch_add(1, Ordering::Relaxed);

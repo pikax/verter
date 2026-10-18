@@ -897,7 +897,7 @@ impl VerterLanguageServer {
     }
 
     /// Whether an open document's IDE leg is already current for `generated`
-    /// under its committed owner (see [`crate::provider_sync::IdeLegBasis`]).
+    /// and served mapping under its committed owner (see [`crate::provider_sync::IdeLegBasis`]).
     /// The caller has already established that `committed`'s binding is the
     /// live one.
     pub(super) fn ide_leg_is_current(
@@ -907,6 +907,7 @@ impl VerterLanguageServer {
         committed: Option<&ProviderSyncState>,
         ide_path: &str,
         generated: &str,
+        source_map: Option<&str>,
     ) -> bool {
         let (Some(sync), Some(state)) = (self.project_sync.as_ref(), committed) else {
             return false;
@@ -918,6 +919,7 @@ impl VerterLanguageServer {
             canonical_id,
             ide_path,
             generated,
+            source_map,
             &state.owner_binding,
         )
     }
@@ -1175,6 +1177,7 @@ impl VerterLanguageServer {
         canonical_id: &str,
         is_jsx: bool,
         ide_code: Option<&str>,
+        source_map: Option<&str>,
         retained: Option<(&Uri, &crate::documents::DocumentSnapshotIdentity)>,
     ) {
         let previous = self.provider_sync_state_for_source(canonical_id);
@@ -1205,7 +1208,14 @@ impl VerterLanguageServer {
                 && previous
                     .as_ref()
                     .is_some_and(|state| state.owner_binding == target.owner_binding)
-                && self.ide_leg_is_current(uri, canonical_id, previous.as_ref(), path, code)
+                && self.ide_leg_is_current(
+                    uri,
+                    canonical_id,
+                    previous.as_ref(),
+                    path,
+                    code,
+                    source_map,
+                )
             {
                 return;
             }
@@ -1247,9 +1257,8 @@ impl VerterLanguageServer {
                     };
                     ide_synced = true;
                     // Record a fresh generation pinning the EXACT IDE bytes just
-                    // synced (interactive queries capture this surface). No source
-                    // map in scope → the choke attaches the live IDE artifact's
-                    // map only if it still byte-matches `ide_code`.
+                    // synced (interactive queries capture this surface), carrying
+                    // the served map independently of compile-cache admission.
                     #[cfg(test)]
                     self.maybe_pause_ide_sync_before_surface_record(canonical_id)
                         .await;
@@ -1259,7 +1268,7 @@ impl VerterLanguageServer {
                         &ide_path,
                         ide_code,
                         prepared,
-                        None,
+                        source_map,
                     );
                     if !recorded {
                         self.needs_ide_sync.insert(canonical_id.to_string());

@@ -12,16 +12,46 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::semantic_query::{
-    note_key_scan_comparison, property_spelling, AuthoredPropertyKey, PropertyKey,
-};
+use crate::semantic_query::{property_spelling, AuthoredPropertyKey, PropertyKey};
+
+#[cfg(any(test, feature = "test-support"))]
+use crate::semantic_query::note_key_scan_comparison;
 
 /// The identity `key` aggregates under: a known key's canonical spelling, or
 /// the computed key itself.
-fn canonical_identity(key: &AuthoredPropertyKey) -> AuthoredPropertyKey {
+fn canonical_identity(key: &AuthoredPropertyKey) -> AggregationKey {
     match key.cloned_known() {
-        Some(known) => AuthoredPropertyKey::from_known(property_spelling(known)),
-        None => key.clone(),
+        Some(known) => AggregationKey::known(known),
+        None => AggregationKey(key.clone()),
+    }
+}
+
+/// Canonical identity with work counted at hashing and equality, so a
+/// scan behind the aggregation API pays for every comparison it makes.
+#[derive(Eq)]
+struct AggregationKey(AuthoredPropertyKey);
+
+impl AggregationKey {
+    fn known(key: PropertyKey) -> Self {
+        Self(AuthoredPropertyKey::from_known(property_spelling(key)))
+    }
+}
+
+impl PartialEq for AggregationKey {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        #[cfg(any(test, feature = "test-support"))]
+        note_key_scan_comparison();
+        self.0 == other.0
+    }
+}
+
+impl std::hash::Hash for AggregationKey {
+    #[inline]
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        #[cfg(any(test, feature = "test-support"))]
+        note_key_scan_comparison();
+        std::hash::Hash::hash(&self.0, state);
     }
 }
 
@@ -30,7 +60,7 @@ fn canonical_identity(key: &AuthoredPropertyKey) -> AuthoredPropertyKey {
 /// Member names are authored strings, so the index hashes with the default
 /// collision-resistant hasher.
 pub struct OrderedMemberAggregation<A> {
-    slots: HashMap<AuthoredPropertyKey, usize>,
+    slots: HashMap<AggregationKey, usize>,
     entries: Vec<(AuthoredPropertyKey, A)>,
 }
 
@@ -52,7 +82,6 @@ impl<A> OrderedMemberAggregation<A> {
     /// the property's first occurrence, which also fixes its authored key and
     /// its output position.
     pub fn entry(&mut self, key: &AuthoredPropertyKey, init: impl FnOnce() -> A) -> &mut A {
-        note_key_scan_comparison();
         let next = self.entries.len();
         let slot = *self.slots.entry(canonical_identity(key)).or_insert(next);
         if slot == next {
@@ -63,7 +92,6 @@ impl<A> OrderedMemberAggregation<A> {
 
     /// The output position of the property `key` addresses.
     pub fn position(&self, key: &AuthoredPropertyKey) -> Option<usize> {
-        note_key_scan_comparison();
         self.slots.get(&canonical_identity(key)).copied()
     }
 
@@ -119,22 +147,21 @@ impl<A> OrderedMemberAggregation<A> {
 /// A set of known keys answering membership under canonical property
 /// identity, one probe per question.
 pub struct PropertyKeySet {
-    spellings: HashSet<PropertyKey>,
+    spellings: HashSet<AggregationKey>,
 }
 
 impl PropertyKeySet {
     pub fn new(keys: &[PropertyKey]) -> Self {
         Self {
-            spellings: keys.iter().cloned().map(property_spelling).collect(),
+            spellings: keys.iter().cloned().map(AggregationKey::known).collect(),
         }
     }
 
     /// Whether `key` addresses a property of the set. A computed key
     /// addresses none.
     pub fn contains(&self, key: &AuthoredPropertyKey) -> bool {
-        note_key_scan_comparison();
         key.cloned_known()
-            .is_some_and(|known| self.spellings.contains(&property_spelling(known)))
+            .is_some_and(|known| self.spellings.contains(&AggregationKey::known(known)))
     }
 }
 

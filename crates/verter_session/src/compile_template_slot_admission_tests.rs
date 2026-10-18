@@ -297,3 +297,54 @@ fn page_retention_refusal_evicts_compile_companions_and_serves_uncached() {
         );
     }
 }
+
+#[test]
+fn refused_ide_admission_still_serves_complete_output_on_repeated_reads() {
+    use verter_session_query::facts::fact_cache::ReadSetSignature;
+    use verter_session_query::retention::{
+        RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+    let profile = CompileProfile {
+        source_map: true,
+        ..CompileProfile::default()
+    };
+    let mut expected = None;
+    for refused in [false, true] {
+        let host = make_host();
+        upsert(&host, INLINE_SOURCE);
+        let account = SemanticRetentionAccount::new(RetentionLimits {
+            max_entry_bytes: if refused { 1 } else { usize::MAX },
+            ..RetentionLimits::defaults()
+        });
+        for _ in 0..2 {
+            let ide =
+                crate::compile_output_node::with_session_publish_evidence_for_test(
+                    ReadSetSignature::new(
+                        verter_session_query::facts::fact_read_set::seal_canonical_signature(
+                            Vec::new(),
+                        ),
+                    ),
+                    StoreAccount::new(Arc::clone(&account)),
+                    || host.compile_ide(OWNER, &profile),
+                )
+                .expect("carrier compiles")
+                .expect("carrier IDE surface");
+            assert!(ide.code.contains("msg"));
+            assert!(ide.source_map.is_some(), "fixture has a source map");
+            assert_eq!(
+                host.get_ide(OWNER, &profile).is_some(),
+                !refused,
+                "only admitted artifacts are cached"
+            );
+            let output = (ide.code, ide.source_map, ide.is_jsx);
+            match &expected {
+                None => expected = Some(output),
+                Some(expected) => {
+                    assert_eq!(&output, expected, "retention preserves code and mapping")
+                }
+            }
+        }
+        drop(host);
+        assert_eq!(account.snapshot().retained_bytes, 0);
+    }
+}

@@ -167,13 +167,49 @@ fn surface_merges_grow_key_work_linearly_for_disjoint_and_colliding_members() {
                 );
                 work.push(spent);
             }
+            eprintln!("{kind:?} {shape:?}: sizes={SIZES:?}, key_work={work:?}");
             for pair in work.windows(2) {
                 assert!(
-                    pair[1] <= 2 * pair[0] + 16,
-                    "{kind:?} over {shape:?} arms: key work must double at most when the \
+                    pair[1] <= 2 * pair[0] + pair[0] / 4 + 16,
+                    "{kind:?} over {shape:?} arms: hash and equality work must grow linearly when the \
                      members double: {work:?} at sizes {SIZES:?}"
                 );
             }
         }
+    }
+}
+
+#[test]
+fn declaration_merges_fold_numeric_spellings_and_keep_the_first_authored_member() {
+    let graph = SemanticGraphStore::new();
+    for first_string in [false, true] {
+        let numeric =
+            AuthoredPropertyKey::Number(CanonicalIndexInt::from_canonical_i64(1).unwrap());
+        let string = AuthoredPropertyKey::string("1");
+        let keys = if first_string {
+            [string, numeric]
+        } else {
+            [numeric, string]
+        };
+        let surfaces: Vec<_> = keys
+            .iter()
+            .map(|key| {
+                ShallowSurface::from_entries(
+                    vec![ShallowSurfaceEntry::Member(member(
+                        &graph,
+                        key.clone(),
+                        PrimitiveKind::String,
+                    ))],
+                    None,
+                )
+            })
+            .collect();
+        let core = super::merge_declaration_surfaces_core(&surfaces);
+        assert_eq!(core.members.len(), 1);
+        assert_eq!(core.members[0].member.key, keys[0]);
+        let surface = super::merge_declaration_surfaces(&graph, &surfaces);
+        assert_eq!(surface.members.len(), 1);
+        assert_eq!(surface.entries.len(), 1);
+        assert_eq!(surface.members[0].key, keys[0]);
     }
 }

@@ -1603,7 +1603,7 @@ fn arm_open_importer_republish(
 /// provider sync either, which is why a style-only edit, whose whole point is
 /// that it needs no provider work, still reaches this.
 ///
-/// Carrier-agnostic: `ensure_ide_compiled` answers `Ok(false)` for anything
+/// Carrier-agnostic: `compile_ide` answers `Ok(None)` for anything
 /// with no IDE surface, so a self-file document (rune module, plain script)
 /// pays a source lookup and nothing else, while Vue and Svelte carriers refresh
 /// identically.
@@ -1620,7 +1620,7 @@ fn refresh_carrier_ide_surface(deps: &SyncCoordinatorDeps, canonical_id: &str) {
     // check the recovery helper this replaced performed first.
     //
     // `sync_file`'s provider arm is deliberately NOT gated on it, and keeps its
-    // own `ensure_ide_compiled`: retracting or clearing a closed carrier's
+    // own `compile_ide`: retracting or clearing a closed carrier's
     // provider state is work a close still owes, and that arm also syncs
     // carriers that were never open (a workspace file whose `.tsx` an importer
     // needs).
@@ -1632,23 +1632,26 @@ fn refresh_carrier_ide_surface(deps: &SyncCoordinatorDeps, canonical_id: &str) {
     // reaching this tick.
     deps.documents.host().ensure_loaded(canonical_id);
     let profile = deps.documents.tsx_profile.read().clone();
-    let compiled = crate::server::block_in_place_guarded(|| {
-        deps.documents
-            .host()
-            .ensure_ide_compiled(canonical_id, &profile)
-    });
-    if !compiled.unwrap_or(false) {
+    let (_, revision) = deps.documents.open_compile_pin(canonical_id);
+    let Some(attempted) = revision.as_ref() else {
         return;
-    }
+    };
+    let Some(ide) = crate::server::block_in_place_guarded(|| {
+        deps.documents.host().compile_ide(canonical_id, &profile)
+    })
+    .ok()
+    .flatten() else {
+        return;
+    };
     // A carrier whose open-time compile FAILED has no provider projection and
     // fails closed on every capture until a repair path compiles one. The
     // interactive repair heals it on the next provider-backed request, but only
     // attempt-bounded and only when a request arrives — this tick is the
-    // request-INDEPENDENT recovery. Cache read only — the compile just above
-    // already ran — and a no-op once a projection exists, so it never disturbs
+    // request-INDEPENDENT recovery. It uses the artifact just served and is
+    // a no-op once a projection exists, so it never disturbs
     // the steady-state carry.
     deps.documents
-        .install_missing_carrier_projection(canonical_id);
+        .install_missing_carrier_projection(canonical_id, attempted, &ide);
 }
 
 /// Perform the actual sync: sync TSX/DTS to the type provider.
@@ -1838,13 +1841,12 @@ async fn sync_file(
     // slot the refresh just filled — the same profile, so the same normalized
     // slot — and a warm hit starts no cold run.
     let profile = deps.documents.tsx_profile.read().clone();
-    let _ = tokio::task::block_in_place(|| {
+    let ide = tokio::task::block_in_place(|| {
         deps.documents
             .host()
-            .ensure_ide_compiled(canonical_id, &profile)
+            .compile_ide(canonical_id, &profile)
+            .unwrap_or_else(|_| deps.documents.host().get_ide(canonical_id, &profile))
     });
-    tracing::info!("sync_coordinator: HOST_GET_IDE_START {canonical_id}");
-    let ide = tokio::task::block_in_place(|| deps.documents.host().get_ide(canonical_id, &profile));
     let is_jsx = ide.as_ref().map(|ide| ide.is_jsx).unwrap_or(false);
 
     // TEST SEAM: a one-shot pause, keyed by canonical id, that fires HERE —
@@ -2007,6 +2009,7 @@ async fn sync_file(
                                 canonical_id,
                                 &ide_path,
                                 &ide.code,
+                                ide.source_map.as_deref(),
                                 &committed_state.owner_binding,
                             )
                     });
@@ -2298,6 +2301,7 @@ async fn preserve_open_unresolved_carrier(
                 canonical_id,
                 ide_path,
                 &ide.code,
+                ide.source_map.as_deref(),
                 &target.owner_binding,
             );
         if current {

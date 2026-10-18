@@ -26,6 +26,7 @@ mod base_signature_tests;
 mod broad_runtime_tests;
 mod call_resolve_tests;
 mod callee_signature_effect_tests;
+mod canonical_property_tests;
 mod captured_declared_type_tests;
 mod carrier_head_resolution_tests;
 mod carrier_materialize_tests;

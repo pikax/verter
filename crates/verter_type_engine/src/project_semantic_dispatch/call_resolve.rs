@@ -1578,7 +1578,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             });
         let mut resuming = resume_at.is_some();
         let mut only_candidate = None;
-        let mut raw_pairing = RawCandidatePairing::new(&raw);
+        let mut raw_pairing = RawCandidatePairing::new(raw);
         for &applicability in passes {
             for (position, candidate) in visible.iter().enumerate() {
                 if resuming {

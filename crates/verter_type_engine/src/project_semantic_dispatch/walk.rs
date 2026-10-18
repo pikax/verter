@@ -1676,41 +1676,31 @@ fn merge_declaration_surfaces_core(contributor_surfaces: &[ShallowSurface]) -> M
         seen_values: rustc_hash::FxHashSet<SemanticNodeId>,
     }
 
-    let mut by_key: indexmap::IndexMap<crate::semantic_query::AuthoredPropertyKey, Accum> =
-        indexmap::IndexMap::new();
+    let mut by_key = crate::projection::aggregation::OrderedMemberAggregation::new();
     for (declaration, surface) in contributor_surfaces.iter().enumerate() {
         for member in &surface.members {
-            match by_key.get_mut(&member.key) {
-                None => {
-                    by_key.insert(
-                        member.key.clone(),
-                        Accum {
-                            first: member.clone(),
-                            method_values: vec![member.value],
-                            method_declarations: vec![declaration],
-                            seen_values: std::iter::once(member.value).collect(),
-                        },
-                    );
-                }
-                Some(accum) => {
-                    if member.method_kind == Some(verter_type_expr::ObjectMethodKind::Method)
-                        && accum.first.method_kind
-                            == Some(verter_type_expr::ObjectMethodKind::Method)
-                    {
-                        accum.first.has_implementation_body |= member.has_implementation_body;
-                        if accum.seen_values.insert(member.value) {
-                            accum.method_values.push(member.value);
-                            accum.method_declarations.push(declaration);
-                        }
-                    }
+            let accum = by_key.entry(&member.key, || Accum {
+                first: member.clone(),
+                method_values: vec![member.value],
+                method_declarations: vec![declaration],
+                seen_values: std::iter::once(member.value).collect(),
+            });
+            if member.method_kind == Some(verter_type_expr::ObjectMethodKind::Method)
+                && accum.first.method_kind == Some(verter_type_expr::ObjectMethodKind::Method)
+            {
+                accum.first.has_implementation_body |= member.has_implementation_body;
+                if accum.seen_values.insert(member.value) {
+                    accum.method_values.push(member.value);
+                    accum.method_declarations.push(declaration);
                 }
             }
         }
     }
 
     let members = by_key
-        .into_values()
-        .map(|accum| {
+        .into_entries()
+        .into_iter()
+        .map(|(_, accum)| {
             let (values, declarations) =
                 if accum.first.method_kind == Some(verter_type_expr::ObjectMethodKind::Method) {
                     (accum.method_values, accum.method_declarations)
@@ -9760,28 +9750,21 @@ fn merge_declaration_surfaces(
     contributor_surfaces: &[ShallowSurface],
 ) -> ShallowSurface {
     let core = merge_declaration_surfaces_core(contributor_surfaces);
-    let members: indexmap::IndexMap<
-        crate::semantic_query::AuthoredPropertyKey,
-        ShallowSurfaceMember,
-    > = core
-        .members
-        .into_iter()
-        .map(|merged| {
-            let member = if merged.member.method_kind
-                == Some(verter_type_expr::ObjectMethodKind::Method)
-                && merged.values.len() > 1
-            {
-                ShallowSurfaceMember {
-                    value: intern_merged_overloads(graph, &merged.values, &merged.declarations),
-                    ..merged.member
-                }
-            } else {
-                merged.member
-            };
-            (member.key.clone(), member)
-        })
-        .collect();
-    let mut remaining_members = members;
+    let mut remaining_members = crate::projection::aggregation::OrderedMemberAggregation::new();
+    for merged in core.members {
+        let member = if merged.member.method_kind
+            == Some(verter_type_expr::ObjectMethodKind::Method)
+            && merged.values.len() > 1
+        {
+            ShallowSurfaceMember {
+                value: intern_merged_overloads(graph, &merged.values, &merged.declarations),
+                ..merged.member
+            }
+        } else {
+            merged.member
+        };
+        remaining_members.entry(&member.key.clone(), || Some(member));
+    }
     let core_calls: rustc_hash::FxHashSet<SemanticNodeId> =
         core.call_signatures.iter().copied().collect();
     let core_constructs: rustc_hash::FxHashSet<SemanticNodeId> =
@@ -9799,8 +9782,11 @@ fn merge_declaration_surfaces(
         match entry {
             ShallowSurfaceEntry::Member(member) => {
                 // The contributor streams give the order; the map's own order
-                // is never read, so an O(1) removal keeps the merge linear.
-                if let Some(member) = remaining_members.swap_remove(&member.key) {
+                // is never read; taking its accumulator keeps the merge linear.
+                if let Some(member) = remaining_members
+                    .get_mut(&member.key)
+                    .and_then(Option::take)
+                {
                     entries.push(ShallowSurfaceEntry::Member(member));
                 }
             }
@@ -9860,7 +9846,7 @@ fn merge_intersection_surfaces_with_graph(
     let mut entries = Vec::new();
     let mut seen_calls = rustc_hash::FxHashSet::default();
     let mut seen_constructs = rustc_hash::FxHashSet::default();
-    let mut seen_indexes = Vec::new();
+    let mut seen_indexes = rustc_hash::FxHashSet::default();
     let mut keyspace: Option<SemanticNodeId> = None;
     for surface in &live {
         for entry in &surface.entries {
@@ -9879,9 +9865,8 @@ fn merge_intersection_surfaces_with_graph(
                     entries.push(ShallowSurfaceEntry::ConstructSignature(*node));
                 }
                 ShallowSurfaceEntry::IndexSignature(signature)
-                    if !seen_indexes.contains(signature) =>
+                    if seen_indexes.insert(signature) =>
                 {
-                    seen_indexes.push(signature.clone());
                     entries.push(ShallowSurfaceEntry::IndexSignature(signature.clone()));
                 }
                 _ => {}
