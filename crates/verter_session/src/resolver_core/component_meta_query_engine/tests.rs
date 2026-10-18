@@ -2254,7 +2254,7 @@ fn resolve_imported_registry_symbol_surfaces_concurrently_published_value() {
             },
             merged_contributor_slots: Arc::from(Vec::new().into_boxed_slice()),
         },
-        canonical_dependencies: std::collections::BTreeSet::new(),
+        canonical_dependencies: Box::default(),
     };
     let _publish =
         super::inject_imported_registry_concurrent_publish_for_tests(concurrent_symbol.clone());

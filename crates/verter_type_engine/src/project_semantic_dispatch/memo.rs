@@ -90,6 +90,10 @@ impl<'a, K: Eq + std::hash::Hash + Clone, V> SingleEntryAttachment<'a, K, V> {
         }
     }
 }
+/// What a candidate keeping a value under a key pays for beyond their inline
+/// bytes (see [`crate::cache_runtime::Candidate::admit`]).
+pub(crate) type CandidateFootprint<K, V> = fn(&K, &V) -> verter_session_query::retention::Footprint;
+
 pub(crate) struct CandidateAttachment<
     'a,
     K: Eq + std::hash::Hash + Clone + Send + Sync + 'static,
@@ -97,6 +101,9 @@ pub(crate) struct CandidateAttachment<
 > {
     store: &'a crate::cache_runtime::ReverseIndexedCandidateStore<K, V>,
     inflight: &'a InflightTable<QueryFlightKey<K>>,
+    /// The account a published candidate is charged to.
+    account: &'a Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    footprint: CandidateFootprint<K, V>,
 }
 impl<
         'a,
@@ -107,8 +114,15 @@ impl<
     pub(crate) fn new(
         store: &'a crate::cache_runtime::ReverseIndexedCandidateStore<K, V>,
         inflight: &'a InflightTable<QueryFlightKey<K>>,
+        account: &'a Arc<verter_session_query::retention::SemanticRetentionAccount>,
+        footprint: CandidateFootprint<K, V>,
     ) -> Self {
-        Self { store, inflight }
+        Self {
+            store,
+            inflight,
+            account,
+            footprint,
+        }
     }
 }
 /// Read-only typed output operations; no source services or mutation escape.
@@ -334,6 +348,9 @@ where
     store: &'a crate::cache_runtime::ReverseIndexedCandidateStore<K, V>,
     inflight: &'a InflightTable<QueryFlightKey<K>>,
     ctx: &'a dyn FactValidation,
+    /// The account a published candidate is charged to.
+    account: &'a Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    footprint: CandidateFootprint<K, V>,
     /// `FnOnce` carried in a `RefCell<Option<_>>` so the `&self` `compute`
     /// method can `take()` it exactly once on the cold winner's call.
     compute: std::cell::RefCell<Option<F>>,
@@ -414,6 +431,18 @@ where
             validated_at_generation,
             facts: Arc::clone(&signature.facts),
         }
+    }
+
+    fn candidate_footprint(
+        &self,
+        key: &Self::Key,
+        value: &Self::Value,
+    ) -> verter_session_query::retention::Footprint {
+        (self.footprint)(key, value)
+    }
+
+    fn retention_account(&self) -> Arc<verter_session_query::retention::SemanticRetentionAccount> {
+        Arc::clone(self.account)
     }
 
     fn publish_fence(&self) -> Option<&parking_lot::RwLock<()>> {
@@ -800,6 +829,8 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
             store: storage.store,
             inflight: storage.inflight,
             ctx,
+            account: storage.account,
+            footprint: storage.footprint,
             compute: std::cell::RefCell::new(Some(node_compute)),
             unadmitted: None,
         };

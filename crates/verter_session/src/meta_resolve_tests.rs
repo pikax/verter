@@ -5302,7 +5302,10 @@ defineProps<Props>()
         "repeated DB-backed resolutions should preserve tracked dependencies"
     );
     assert!(
-        result1.canonical_dependencies.contains("/src/types.ts"),
+        result1
+            .canonical_dependencies
+            .iter()
+            .any(|dependency| dependency == "/src/types.ts"),
         "registry resolution should track the defining file as a dependency"
     );
     assert_eq!(

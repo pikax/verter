@@ -112,7 +112,9 @@ impl EngineStores {
                     .charged_to(caches.clone()),
             ),
             intrinsics: Arc::new(crate::intrinsic_registry::IntrinsicRegistry::with_defaults()),
-            imported_registry: Arc::new(ImportedRegistryDb::with_counter(Arc::clone(cache_live))),
+            imported_registry: Arc::new(
+                ImportedRegistryDb::with_counter(Arc::clone(cache_live)).charged_to(caches.clone()),
+            ),
             declarations: Arc::new(
                 DeclarationLookupDb::with_counter(Arc::clone(cache_live))
                     .charged_to(caches.clone()),
