@@ -12694,6 +12694,7 @@ struct LoopPassTail {
     break_exits: Vec<FlowBreakExit>,
     return_edges: Vec<FlowLayerState>,
     throw_points: Vec<FlowLayerState>,
+    checker_diagnostics: Vec<crate::semantic_query::CheckerDiagnosticOccurrence>,
 }
 
 /// One pass of a loop body ([`FlowEvaluator::begin_loop_pass`]).
@@ -12719,6 +12720,7 @@ struct LoopPassMark {
     break_exits: usize,
     return_edges: usize,
     throw_points: usize,
+    checker_diagnostics: usize,
 }
 
 /// One captured `break` or `continue` exit: the target the lowering
@@ -17784,6 +17786,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             break_exits: self.break_exits.len(),
             return_edges: self.return_edges.len(),
             throw_points: self.throw_points.len(),
+            checker_diagnostics: self.checker_diagnostics.len(),
         }
     }
 
@@ -17800,6 +17803,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             break_exits: self.break_exits.split_off(mark.break_exits),
             return_edges: self.return_edges.split_off(mark.return_edges),
             throw_points: self.throw_points.split_off(mark.throw_points),
+            checker_diagnostics: self.checker_diagnostics.split_off(mark.checker_diagnostics),
         }
     }
 
@@ -17813,6 +17817,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         self.break_exits.extend(tail.break_exits);
         self.return_edges.extend(tail.return_edges);
         self.throw_points.extend(tail.throw_points);
+        self.checker_diagnostics.extend(tail.checker_diagnostics);
     }
 
     /// Merge exactly the paths that continue past a conditional. A missing

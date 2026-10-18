@@ -1631,7 +1631,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 };
                 self.dispatch_txn.borrow_mut().call.applicability = applicability;
                 let prepared = if self.dispatch_txn.borrow().call.contextual.is_some() {
-                    self.prepare_contextual_candidate(key, candidate, arguments, &mut budget)
+                    self.prepare_contextual_candidate(
+                        key,
+                        candidate,
+                        arguments,
+                        &mut budget,
+                        position + 1 == visible.len(),
+                    )
                 } else {
                     Ok(arguments.clone())
                 };

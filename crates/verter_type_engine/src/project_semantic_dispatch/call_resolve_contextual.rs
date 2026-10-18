@@ -27,8 +27,15 @@ pub(in crate::project_semantic_dispatch) struct ContextualCallState {
     owner: Option<crate::semantic_query::ProgramPointId>,
     original: Option<Vec<CallArgument>>,
     /// As in the checker, a callback's parameter context is assigned once,
-    /// by the first candidate that reaches it. Inference journals are separate.
+    /// by the first candidate that types it; every later candidate relates
+    /// by that typing (`assignContextualParameters`). Inference journals
+    /// are separate.
     typed_arguments: FxHashMap<usize, CallArgument>,
+    /// A candidate's OWN contextual typing of a callback, keyed by the
+    /// candidate and the argument position: the recipe a rejected candidate
+    /// reports names the callback as ITS parameters typed it, not as the
+    /// once-assigned context did. Inference journals are separate.
+    candidate_typed_arguments: FxHashMap<(SemanticNodeId, usize), CallArgument>,
     arity_candidates: FxHashSet<SemanticNodeId>,
     active: Option<ContextualCandidate>,
     delivery: Option<CallArgument>,
@@ -123,6 +130,10 @@ struct ContextualCandidate {
     arguments: Vec<CallArgument>,
     deferred: Vec<(usize, SemanticNodeId)>,
     cursor: usize,
+    /// An eager argument already rejected this candidate while a deferred
+    /// callback before it is not typed yet: the candidate rejects whatever
+    /// its callbacks then relate, and the failure stands as its own.
+    eager_mismatch: bool,
     session: Option<InferenceSession>,
     parameters: Arc<[TypeParamDecl]>,
     positions: FxHashMap<SemanticNodeId, usize>,
@@ -471,6 +482,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             &candidate,
             &[],
             &mut CallResolutionBudget::new(&self.connected_demand),
+            false,
         );
         *state = self
             .dispatch_txn
@@ -499,12 +511,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     /// Type each deferred argument exactly once for this candidate and pass.
     /// The final applicability check still belongs to `check_call_candidate`.
+    /// `last_visible`: whether `candidate` is the last of the walk's visible
+    /// candidates — the one whose own error the checker reports when every
+    /// candidate rejects.
     pub(super) fn prepare_contextual_candidate(
         &self,
         key: &ResolveCallKey,
         candidate: &SignatureRef,
         arguments: &[CallArgument],
         budget: &mut CallResolutionBudget<'_>,
+        last_visible: bool,
     ) -> Result<Vec<CallArgument>, ContextualCandidateFailure> {
         let mut state = self
             .dispatch_txn
@@ -513,8 +529,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .contextual
             .take()
             .expect("contextual route");
-        let result =
-            self.prepare_contextual_candidate_inner(key, candidate, arguments, budget, &mut state);
+        let result = self.prepare_contextual_candidate_inner(
+            key,
+            candidate,
+            arguments,
+            budget,
+            last_visible,
+            &mut state,
+        );
         self.dispatch_txn.borrow_mut().call.contextual = Some(state);
         result
     }
@@ -525,6 +547,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         candidate: &SignatureRef,
         arguments: &[CallArgument],
         budget: &mut CallResolutionBudget<'_>,
+        last_visible: bool,
         state: &mut ContextualCallState,
     ) -> Result<Vec<CallArgument>, ContextualCandidateFailure> {
         if state
@@ -635,6 +658,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     },
                     deferred: Vec::new(),
                     cursor: 0,
+                    eager_mismatch: false,
                     session: Some(session),
                     positions: type_parameters
                         .iter()
@@ -672,19 +696,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     .ok_or(ContextualCandidateFailure::Degraded(
                         ResolveCallFailure::Undecidable,
                     ))?;
-                let target = progress.pending_target.take().expect("pending callback");
-                state.typed_arguments.insert(position, typed);
-                if !self.collect_contextual_argument(&typed, target, budget, &declared)? {
-                    state.diagnostic = Some(super::argument_not_assignable(
-                        typed.authored,
-                        typed.node,
-                        target,
-                    ));
-                    state.resume_at = None;
-                    return Err(ContextualCandidateFailure::Mismatch);
-                }
-                progress.arguments[position] = typed;
-                progress.cursor += 1;
+                let _target = progress.pending_target.take().expect("pending callback");
+                // The delivery is THIS candidate's own contextual typing of
+                // the argument; the first typing of a position is also its
+                // once-assigned context, which every later candidate relates
+                // by. The deferred loop below decides the relation.
+                state
+                    .candidate_typed_arguments
+                    .entry((candidate.node, position))
+                    .or_insert(typed);
+                state.typed_arguments.entry(position).or_insert(typed);
             } else {
                 // Eager arguments infer before a context-sensitive callback is
                 // visited. Annotated callbacks participate in this pass too.
@@ -805,51 +826,47 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         continue;
                     }
                     if !self.collect_contextual_argument(&argument, target, budget, &declared)? {
-                        // The checker reports the first argument, in authored
-                        // order, that fails: one after a callback not typed
-                        // yet is not known to be it.
-                        state.diagnostic = progress
-                            .deferred
-                            .iter()
-                            .all(|&(deferred, _)| deferred > argument.authored as usize)
-                            .then(|| {
-                                super::argument_not_assignable(
-                                    argument.authored,
-                                    argument.node,
-                                    target,
-                                )
-                            });
-                        return Err(ContextualCandidateFailure::Mismatch);
+                        if !self.hold_eager_failure(
+                            &mut state.diagnostic,
+                            &mut progress,
+                            argument.authored,
+                            argument.node,
+                            target,
+                            last_visible,
+                        ) {
+                            return Err(ContextualCandidateFailure::Mismatch);
+                        }
+                        break;
                     }
                 }
-                for (mut argument, signature, target) in generic_arguments {
-                    argument.node = self
-                        .generic_function_in_context(
-                            session_id,
-                            &progress.parameters,
-                            (signature, target),
-                            None,
-                            budget,
-                            None,
-                        )
-                        .map_err(ContextualCandidateFailure::Degraded)?
-                        .unwrap_or(argument.node);
-                    if !self.collect_contextual_argument(&argument, target, budget, &declared)? {
-                        // The checker reports the first argument, in authored
-                        // order, that fails: one after a callback not typed
-                        // yet is not known to be it.
-                        state.diagnostic = progress
-                            .deferred
-                            .iter()
-                            .all(|&(deferred, _)| deferred > argument.authored as usize)
-                            .then(|| {
-                                super::argument_not_assignable(
-                                    argument.authored,
-                                    argument.node,
-                                    target,
-                                )
-                            });
-                        return Err(ContextualCandidateFailure::Mismatch);
+                if !progress.eager_mismatch {
+                    for (mut argument, signature, target) in generic_arguments {
+                        argument.node = self
+                            .generic_function_in_context(
+                                session_id,
+                                &progress.parameters,
+                                (signature, target),
+                                None,
+                                budget,
+                                None,
+                            )
+                            .map_err(ContextualCandidateFailure::Degraded)?
+                            .unwrap_or(argument.node);
+                        if !self
+                            .collect_contextual_argument(&argument, target, budget, &declared)?
+                        {
+                            if !self.hold_eager_failure(
+                                &mut state.diagnostic,
+                                &mut progress,
+                                argument.authored,
+                                argument.node,
+                                target,
+                                last_visible,
+                            ) {
+                                return Err(ContextualCandidateFailure::Mismatch);
+                            }
+                            break;
+                        }
                     }
                 }
             }
@@ -857,24 +874,49 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 let (contextual, inference_target) = self
                     .contextual_candidate_mapper(&mut progress, target, session_id, budget)
                     .map_err(ContextualCandidateFailure::Degraded)?;
-                if let Some(typed) = state.typed_arguments.get(&position) {
-                    if !self.collect_contextual_argument(
-                        typed,
+                // The once-assigned context decides the candidate's
+                // applicability (`assignContextualParameters`: a callback's
+                // parameter context is assigned once, by the first candidate
+                // that types it, and later candidates relate by that typing).
+                if let Some(&assigned) = state.typed_arguments.get(&position) {
+                    if self.collect_contextual_argument(
+                        &assigned,
                         inference_target,
                         budget,
                         &declared,
                     )? {
-                        state.diagnostic = Some(super::argument_not_assignable(
-                            typed.authored,
-                            typed.node,
-                            inference_target,
-                        ));
+                        progress.arguments[position] = assigned;
+                        progress.cursor += 1;
+                        continue;
+                    }
+                    // Rejected through its once-assigned context. The
+                    // checker's reported failure is the candidate's OWN
+                    // typing of the callback — the last overload's error
+                    // elaborates the callback under its own parameters — so
+                    // the recipe names it where it fails, and nothing where
+                    // it relates (an unexplained rejection reports no
+                    // position).
+                    if let Some(&own) = state
+                        .candidate_typed_arguments
+                        .get(&(candidate.node, position))
+                    {
+                        let reportable = own.node == assigned.node
+                            || !self.collect_contextual_argument(
+                                &own,
+                                inference_target,
+                                budget,
+                                &declared,
+                            )?;
+                        if reportable {
+                            state.diagnostic = Some(super::argument_not_assignable(
+                                own.authored,
+                                own.node,
+                                inference_target,
+                            ));
+                        }
                         state.resume_at = None;
                         return Err(ContextualCandidateFailure::Mismatch);
                     }
-                    progress.arguments[position] = *typed;
-                    progress.cursor += 1;
-                    continue;
                 }
                 progress.pending_target = Some(inference_target);
                 state.resume_at = Some((
@@ -888,6 +930,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             .map(|position| (position, contextual)),
                     },
                 ));
+            }
+            if progress.eager_mismatch {
+                // Every deferred callback typed and held; the eager failure
+                // stands as the candidate's own.
+                return Err(ContextualCandidateFailure::Mismatch);
             }
             state.resume_at = None;
             Ok(std::mem::take(&mut progress.arguments))
@@ -914,6 +961,46 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             self.abandon_session(session_id);
         }
         result
+    }
+
+    /// Record an eager argument's rejection of `candidate`: `false` when
+    /// the candidate rejects on it now, `true` when the rejection is held
+    /// for the deferred loop to complete. The LAST candidate's reported
+    /// failure types a callback that precedes the eager argument under its
+    /// own parameters first, so the recipe the checker reports may be that
+    /// callback's, not this argument's. An eager failure against a target
+    /// still reading the candidate's own type parameters is an
+    /// inference-order reading, not the checker's verdict — the checker
+    /// fixes its parameters before applicability — so a candidate so
+    /// rejects with no recipe and the recovery reading answers; so does
+    /// any candidate but the last, whose own error the checker never
+    /// reports.
+    fn hold_eager_failure(
+        &self,
+        diagnostic: &mut Option<crate::semantic_query::CheckerDiagnosticRecipe>,
+        progress: &mut ContextualCandidate,
+        authored: u32,
+        node: SemanticNodeId,
+        target: SemanticNodeId,
+        last_visible: bool,
+    ) -> bool {
+        let deferred_before = progress
+            .deferred
+            .iter()
+            .any(|&(deferred, _)| deferred <= authored as usize);
+        let inference_order = progress
+            .parameters
+            .iter()
+            .any(|decl| self.mentions_node(target, decl.param));
+        if deferred_before && (inference_order || !last_visible) {
+            return false;
+        }
+        *diagnostic = Some(super::argument_not_assignable(authored, node, target));
+        if !deferred_before {
+            return false;
+        }
+        progress.eager_mismatch = true;
+        true
     }
 
     fn collect_contextual_argument(

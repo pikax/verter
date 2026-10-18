@@ -1110,6 +1110,18 @@ declare enum E { A, B }
 declare function sb(x: string | boolean): void;
 export function en() { return one(E.A); }
 export function bu() { return sb(1); }
+declare function fe(x: E): void;
+type AB = "a" | "b";
+declare function fab(x: AB): void;
+export function fe_s() { return fe("s"); }
+export function fab_s() { return fab("c"); }
+export function fab_n() { return fab(1); }
+export function wobj() { return one({ a: 1 }); }
+export function wobj2() { return one({ a: 1, b: { c: true } }); }
+export function warr() { return one([1]); }
+export function wl() { return lit({ a: 1 }); }
+declare function rnd(): boolean;
+export function lp1() { let x: string | number = 1; for (let i = 0; i < 3; i++) { if (rnd()) { return one(x); } x = "a"; } return 0; }
 "#;
 
 /// A call its only candidate does not accept continues with that
@@ -1169,10 +1181,20 @@ fn a_call_its_only_candidate_rejects_answers_the_checkers_recovery() {
 /// authored argument the failure is elaborated into: an arrow callback's
 /// returned expression, an object literal's property name, an array
 /// literal's element. TS2769 is reported where its last overload's error
-/// is, with that error below it. A literal argument prints as its base
-/// primitive, and an enum member as its enum, unless the parameter could
-/// hold a literal (`"b"` against `"a"`, `1` against `string | boolean`,
-/// whose `boolean` the checker holds as `true | false`).
+/// is, with that error below it — the last overload's error names a
+/// context-sensitive callback as that overload's own parameters typed it
+/// (`lo2`, whose later `true` the same overloads also reject). A literal
+/// argument prints as its base primitive, and an enum member as its enum,
+/// unless the parameter could hold a literal (`"b"` against `"a"`, `1`
+/// against `string | boolean`, whose `boolean` the checker holds as
+/// `true | false`; an enum or aliased literal-union parameter reads
+/// through what it settles to, keeping `"s"` against `E` and `"c"` against
+/// `AB`). A fresh object or array literal argument prints as its widened
+/// literal tree (`{ a: number; }`, `number[]`, and the missing-property
+/// message's source likewise), and a union prints its members in the
+/// checker's order (`string | number`, the loop read `lp1` narrows to, is
+/// reported once — a provisional loop-head pass's occurrences are set
+/// aside with its other side outputs).
 ///
 /// Two calls of one callee with equal arguments (`con(1)` in `c1` and
 /// `c3`) each report at their own call, and two failing calls of one body
@@ -1203,6 +1225,7 @@ fn call_diagnostics_carry_the_checkers_code_message_position_and_order() {
         ("om", &["(35,33): error TS2554: Expected 1 arguments, but got 0."]),
         ("gap", &["(47,32): error TS2575: No overload expects 2 arguments, but overloads do exist that expect either 1 or 3 arguments."]),
         ("lo", &["(48,42): error TS2769: No overload matches this call.\n  The last overload gave the following error.\n    Type 'string' is not assignable to type 'boolean'."]),
+        ("lo2", &["(49,43): error TS2769: No overload matches this call.\n  The last overload gave the following error.\n    Type 'number' is not assignable to type 'boolean'."]),
         (
             "el",
             &[
@@ -1221,6 +1244,14 @@ fn call_diagnostics_carry_the_checkers_code_message_position_and_order() {
         ("ts3", &["(59,36): error TS2554: Expected 1 arguments, but got 2."]),
         ("en", &["(63,35): error TS2345: Argument of type 'E' is not assignable to parameter of type 'string'."]),
         ("bu", &["(64,34): error TS2345: Argument of type '1' is not assignable to parameter of type 'string | boolean'."]),
+        ("fe_s", &["(68,36): error TS2345: Argument of type '\"s\"' is not assignable to parameter of type 'E'."]),
+        ("fab_s", &["(69,38): error TS2345: Argument of type '\"c\"' is not assignable to parameter of type 'AB'."]),
+        ("fab_n", &["(70,38): error TS2345: Argument of type '1' is not assignable to parameter of type 'AB'."]),
+        ("wobj", &["(71,37): error TS2345: Argument of type '{ a: number; }' is not assignable to parameter of type 'string'."]),
+        ("wobj2", &["(72,38): error TS2345: Argument of type '{ a: number; b: { c: boolean; }; }' is not assignable to parameter of type 'string'."]),
+        ("warr", &["(73,37): error TS2345: Argument of type 'number[]' is not assignable to parameter of type 'string'."]),
+        ("wl", &["(74,35): error TS2741: Property 'b' is missing in type '{ a: number; }' but required in type '{ a: number; b: string; }'."]),
+        ("lp1", &["(76,107): error TS2345: Argument of type 'string | number' is not assignable to parameter of type 'string'.\n  Type 'number' is not assignable to type 'string'."]),
     ];
     let host = host_with(CALL_RECOVERY);
     let mut mismatches = Vec::new();
@@ -1247,28 +1278,23 @@ fn call_diagnostics_carry_the_checkers_code_message_position_and_order() {
 
 /// A diagnostic whose position the call's route cannot establish is not
 /// reported, never moved to another position. TypeScript 7.0.2 reports
-/// TS2769 for `lo2` at the callback's returned `x` — its last overload's
-/// FIRST failing argument — where this route rejects that overload at the
-/// later `true` before typing the callback; and TS2345 for `un1`'s
-/// argument, which the route cannot type, while the call still answers its
-/// lone signature's declared `number`.
+/// TS2345 for `un1`'s argument, which the route cannot type, while the
+/// call still answers its lone signature's declared `number`.
 #[test]
 fn a_diagnostic_the_route_cannot_place_is_not_reported() {
     let host = host_with(CALL_RECOVERY);
     for root in [STRICT_ROOT, LOOSE_ROOT] {
         assert_prints(&host, root, "un1", "number");
-        for function in ["lo2", "un1"] {
-            assert_eq!(
-                super::signature_predicate_inference_tests::checker_report(
-                    &host,
-                    root,
-                    function,
-                    CALL_RECOVERY,
-                ),
-                Vec::<String>::new(),
-                "`{function}` in {root}"
-            );
-        }
+        assert_eq!(
+            super::signature_predicate_inference_tests::checker_report(
+                &host,
+                root,
+                "un1",
+                CALL_RECOVERY,
+            ),
+            Vec::<String>::new(),
+            "`un1` in {root}"
+        );
     }
 }
 

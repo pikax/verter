@@ -1182,7 +1182,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// `boolean` is no such type, but inside a union the checker holds it as
     /// `true | false`, whose members are.
     fn could_hold_top_level_singleton(&self, target: SemanticNodeId, depth: u32) -> bool {
-        let Some(data) = self.graph().node_data(target) else {
+        // A carrier — an alias or declaration reference to an enum or a
+        // named literal union — classifies as what it settles to, exactly as
+        // the checker reads the type the declaration names.
+        let Some(settled) = self.settle_through_carriers(target) else {
+            return true;
+        };
+        let Some(data) = self.graph().node_data(settled) else {
             return true;
         };
         let Some(depth) = depth.checked_sub(1) else {

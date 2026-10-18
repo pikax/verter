@@ -12,6 +12,8 @@
 //! nothing, and a diagnostic it would explain is not reported rather than
 //! reported with a message the checker's is not.
 
+use std::sync::Arc;
+
 use crate::semantic_query::{
     AuthoredPropertyKey, CheckerDiagnostic, CheckerDiagnosticChainLine, CheckerDiagnosticCode,
     CheckerDiagnosticOccurrence, CheckerDiagnosticOperation, PrimitiveKind, SemanticNodeData,
@@ -108,9 +110,115 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 return Some(vec![excess]);
             }
         }
+        // A message that names the whole expression names the checker's
+        // REPORTED type for it: a fresh object or array literal's widened
+        // literal tree, not the literal one it checked.
+        let source = self.widened_fresh_literal(site.form.as_ref(), source);
         Some(vec![
             self.report_relation_failure(source, target, site.point, head)?
         ])
+    }
+
+    /// The type the checker REPORTS a fresh object or array literal
+    /// expression by (`getWidenedLiteralLikeTypeForContextualType` under a
+    /// contextual type that keeps no literal): its literal tree widened —
+    /// every literal leaf to its base type, an authored array literal to
+    /// the array of its widened elements' union. `source` unchanged for
+    /// every other form, and for every part of the tree the authored form
+    /// does not carry (a value a fresh literal merely references keeps its
+    /// own type).
+    fn widened_fresh_literal(
+        &self,
+        form: Option<&IndexedElaborationForm>,
+        source: SemanticNodeId,
+    ) -> SemanticNodeId {
+        match form {
+            Some(IndexedElaborationForm::Object(_)) | Some(IndexedElaborationForm::Array(_)) => {
+                self.widen_fresh_literal_value(form, source)
+            }
+            _ => source,
+        }
+    }
+
+    /// One value of a fresh literal tree, widened through the authored form
+    /// that produced it: a literal leaf to its base type, an object literal
+    /// member-by-member, an array literal to the array of its widened
+    /// elements' union.
+    fn widen_fresh_literal_value(
+        &self,
+        form: Option<&IndexedElaborationForm>,
+        source: SemanticNodeId,
+    ) -> SemanticNodeId {
+        let graph = self.graph();
+        let Some(data) = graph.node_data(source) else {
+            return source;
+        };
+        match (data.as_ref(), form) {
+            (SemanticNodeData::Literal(_) | SemanticNodeData::EnumLiteral(_), _) => {
+                self.widened_literal(source)
+            }
+            (
+                SemanticNodeData::Object(surface),
+                Some(IndexedElaborationForm::Object(properties)),
+            ) => {
+                let surface = surface.clone();
+                let property_form = |member: &crate::semantic_query::SurfaceMember| {
+                    let AuthoredPropertyKey::String(name) = &member.key else {
+                        return None;
+                    };
+                    properties
+                        .iter()
+                        .find(|property| property.name.as_ref() == &**name)
+                        .and_then(|property| property.value.as_ref())
+                        .and_then(|value| value.form.as_ref())
+                };
+                let mut members: Vec<crate::semantic_query::SurfaceMember> = surface
+                    .positive_members()
+                    .iter()
+                    .map(crate::semantic_query::SurfaceMember::clone)
+                    .collect();
+                let mut changed = false;
+                for member in &mut members {
+                    let value = match property_form(member) {
+                        Some(form) => self.widen_fresh_literal_value(Some(form), member.value),
+                        None => match self.graph().node_data(member.value).as_deref() {
+                            Some(
+                                SemanticNodeData::Literal(_) | SemanticNodeData::EnumLiteral(_),
+                            ) => self.widened_literal(member.value),
+                            _ => member.value,
+                        },
+                    };
+                    if value != member.value {
+                        member.value = value;
+                        changed = true;
+                    }
+                }
+                if !changed {
+                    return source;
+                }
+                graph.intern_node(SemanticNodeData::Object(
+                    surface.with_positive_members(Arc::from(members.into_boxed_slice())),
+                ))
+            }
+            (
+                SemanticNodeData::Tuple { elements, .. },
+                Some(IndexedElaborationForm::Array(sites)),
+            ) if elements.len() == sites.len() => {
+                let widened: Vec<SemanticNodeId> = elements
+                    .iter()
+                    .zip(sites.iter())
+                    .map(|(element, site)| {
+                        self.widen_fresh_literal_value(site.form.as_ref(), element.value)
+                    })
+                    .collect();
+                let element = self.intern_normalized_union_or_intersection(&widened, true);
+                graph.intern_node(SemanticNodeData::Array {
+                    element,
+                    readonly: false,
+                })
+            }
+            _ => source,
+        }
     }
 
     /// `elaborateError`: the failure of `source` against `target` reported

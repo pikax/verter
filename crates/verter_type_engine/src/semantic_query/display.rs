@@ -407,6 +407,43 @@ pub(crate) fn display_type_node(
     })
 }
 
+/// Where a checker-spelled union print places one constituent: the
+/// intrinsic primitives in their creation order — `any`-class first, then
+/// `string`, `number`, `bigint`, `boolean`, `symbol`, `null`, `undefined` —
+/// before the types a program declares, with the literals a check interned
+/// last. Measured on TypeScript 7.0.2, whose unions sort by type id
+/// (`sortAndDeduplicateTypes`) and intern those classes in this order.
+fn checker_union_constituent_rank(
+    store: &SemanticGraphStore,
+    arm: &crate::semantic_query::PrintedUnionArm,
+) -> u8 {
+    use crate::semantic_query::PrintedUnionArm;
+    let PrintedUnionArm::Node(node) = arm else {
+        return 8;
+    };
+    match store.node_data(*node).as_deref() {
+        Some(SemanticNodeData::Primitive(
+            PrimitiveKind::Any
+            | PrimitiveKind::Unknown
+            | PrimitiveKind::Void
+            | PrimitiveKind::Never,
+        )) => 0,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::String)) => 1,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Number)) => 2,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::BigInt)) => 3,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => 4,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Symbol)) => 5,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Null)) => 6,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined)) => 7,
+        Some(
+            SemanticNodeData::Literal(_)
+            | SemanticNodeData::EnumLiteral(_)
+            | SemanticNodeData::TemplateLiteral { .. },
+        ) => 9,
+        _ => 8,
+    }
+}
+
 fn display_resolved_type_node(
     store: &SemanticGraphStore,
     id: SemanticNodeId,
@@ -586,7 +623,19 @@ fn display_resolved_type_node(
             // A union arm only parenthesises a LOOSER binder (Conditional /
             // Function). A same-kind nested union arm (`A | (B | C)`) and a
             // tighter intersection arm (`A | B & C`) both render bare.
-            let rendered: Vec<String> = crate::semantic_query::printed_union_arms(store, arms)
+            let mut printed = crate::semantic_query::printed_union_arms(store, arms);
+            // A checker-spelled union prints its constituents in the
+            // checker's own id order (`sortAndDeduplicateTypes`), not the
+            // stored one: the intrinsics by their creation — `string`,
+            // `number`, `bigint`, `boolean`, `symbol`, then `null` and
+            // `undefined` — before the types a program declares, with the
+            // literals a check interned last. The sort is stable, so
+            // constituents that timeline leaves unranked keep the stored
+            // order.
+            if needs.contains(DisplayFacet::CheckerSpelling) {
+                printed.sort_by_key(|arm| checker_union_constituent_rank(store, arm));
+            }
+            let rendered: Vec<String> = printed
                 .into_iter()
                 .map(|arm| match arm {
                     crate::semantic_query::PrintedUnionArm::Node(a) => {
