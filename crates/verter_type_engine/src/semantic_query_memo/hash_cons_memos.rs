@@ -115,6 +115,10 @@ impl SemanticGraphStore {
         /// `Entry::Occupied` collision (a concurrent publisher already
         /// landed an identical-result write) does NOT push into the
         /// FIFO since the key is already tracked.
+        #[cfg_attr(
+            not(any(test, feature = "test-support")),
+            expect(dead_code, reason = "Fixture and compile-fail privacy seam; production substitution publishes priced receipts.")
+        )]
         fn substitute_memo_publish(
             &self,
             value_expr: SemanticNodeId,

@@ -315,6 +315,10 @@ impl SemanticGraphStore {
         /// however long the chain is; `visit` sees each node on it, the end
         /// included. A node that is not an alias costs one read and no
         /// allocation.
+        #[cfg_attr(
+            not(any(test, feature = "test-support")),
+            expect(dead_code, reason = "Fixture and compile-fail privacy seam; production alias traversal consumes bounded work credit.")
+        )]
         fn alias_chain_end(
             &self,
             start: SemanticNodeId,
