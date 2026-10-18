@@ -110,12 +110,12 @@ pub struct CompileBatchEntry {
 pub enum CompileBatchOutcome {
     /// Compiled. Carries the product, plus any NON-error diagnostics.
     Produced {
-        code: Arc<str>,
+        code: verter_type_expr::OwnedStr,
         /// The compiled `Main` module language (`"ts"` / `"js"` / `"jsx"`),
         /// derived identically across both lanes. Bundler consumers (vite
         /// sub-request routing) read it.
         lang: Option<String>,
-        source_map: Option<Arc<str>>,
+        source_map: Option<verter_type_expr::OwnedStr>,
         /// Non-fatal WARNING-severity diagnostics of a SUCCESSFUL compile.
         /// The Vue render-only path uses this for closed row-local degradation (for
         /// example, an unavailable member type rendered as `null`). An
@@ -202,7 +202,7 @@ impl CompileBatchEntry {
 
     /// The compiled `Main` source map; `None` on a failure.
     #[must_use]
-    pub fn source_map(&self) -> Option<&Arc<str>> {
+    pub fn source_map(&self) -> Option<&verter_type_expr::OwnedStr> {
         match &self.outcome {
             CompileBatchOutcome::Produced { source_map, .. } => source_map.as_ref(),
             CompileBatchOutcome::Failed { .. } => None,
@@ -979,9 +979,9 @@ impl VerterHost {
             Ok(render) => CompileBatchEntry {
                 canonical_id: input.canonical_id.clone(),
                 outcome: CompileBatchOutcome::Produced {
-                    code: render.code,
+                    code: verter_type_expr::OwnedStr::from(render.code),
                     lang: render.lang,
-                    source_map: render.source_map,
+                    source_map: render.source_map.map(verter_type_expr::OwnedStr::from),
                     diagnostics: render.diagnostics,
                 },
                 duration_ms: start.elapsed().as_secs_f64() * 1000.0,

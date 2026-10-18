@@ -903,9 +903,17 @@ fn growing_merged_contributors_between_answers_retains_only_the_answers() {
             "superseded versions must not stay retained: {label}"
         );
         assert!(
-            grown.snapshot_leases <= baseline.snapshot_leases
-                && grown.pinned_bytes <= baseline.pinned_bytes,
+            grown.snapshot_leases <= baseline.snapshot_leases,
             "superseded parse snapshots must not stay pinned: {label}"
+        );
+        // A cell the first step's surviving answers still reach — a name a
+        // superseded declaration charged — passes from that declaration's
+        // bundle to the answers keeping it, pinned, when the bundle is
+        // superseded; nothing else may stay.
+        assert!(
+            grown.pinned_bytes <= baseline.pinned_bytes + (first.pinned_bytes - setup.pinned_bytes),
+            "pinned bytes may exceed a fresh engine's only by what the first step handed out: \
+             first={first:?}, {label}"
         );
         let first_answers = first
             .memo_candidates

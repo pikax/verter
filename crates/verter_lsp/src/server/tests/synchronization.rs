@@ -2446,7 +2446,7 @@ async fn open_unresolved_carrier_closes_dropped_owner_api_path_keeps_ide_tsx() {
     // Fresh IDE output this pass → the TSX is re-synced and the conversion
     // commits the forced-Unresolved state.
     let ide = verter_session::IdeResponse {
-        code: std::sync::Arc::from("export default {}"),
+        code: verter_type_expr::OwnedStr::from("export default {}"),
         source_map: None,
         is_jsx: false,
         destructured_block: None,

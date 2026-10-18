@@ -603,7 +603,10 @@ fn existing_resolution_fact_rail_is_fact_version_ref_resolve_imports() {
             _ => panic!("resolution facts must use FactVersionRef::ResolveImports"),
         }
     }
-    fn require_validated_fact_cache<K: Eq + std::hash::Hash, V>(
+    fn require_validated_fact_cache<
+        K: Eq + std::hash::Hash,
+        V: crate::resolver_core::CachedData,
+    >(
         cache: &ValidatedFactCache<K, V>,
     ) -> &ValidatedFactCache<K, V> {
         cache

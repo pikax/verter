@@ -7,7 +7,7 @@
 //! `resolve_component_meta` publishes its result into TWO warm caches:
 //!
 //! 1. the validated `resolver_runtime().component_meta` cache, admitted
-//!    via `insert_arc_with_kind` inside
+//!    via `insert_value_with_kind` inside
 //!    `store_cached_resolved_meta_for_view_fingerprint`, and
 //! 2. the legacy `cached_resolved_meta` mirror, stored as a
 //!    `ResolvedComponentMetaCacheEntry` by `mirror_cached_resolved_meta_arc`.

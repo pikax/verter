@@ -418,7 +418,10 @@ fn export_tables_under_retention_pressure_answer_without_admission() {
         let second = host
             .module_export_table("/wb/index.ts")
             .expect("second complete table");
-        assert_eq!(Arc::ptr_eq(&first, &second), cacheable);
+        assert_eq!(
+            crate::resolver_core::CachedValue::ptr_eq(&first, &second),
+            cacheable
+        );
         assert_eq!(first.retention.is_some(), cacheable);
         if cacheable {
             assert!(
@@ -835,7 +838,10 @@ fn a_growing_namespace_shares_unchanged_tables_and_retains_linear_nodes() {
             .module_export_table("/wb/group-0.ts")
             .expect("shared group");
         if let Some(first) = &first_group {
-            assert!(Arc::ptr_eq(first, &group), "unchanged groups remain shared");
+            assert!(
+                crate::resolver_core::CachedValue::ptr_eq(first, &group),
+                "unchanged groups remain shared"
+            );
         } else {
             first_group = Some(group);
         }

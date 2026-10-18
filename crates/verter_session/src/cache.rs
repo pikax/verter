@@ -220,7 +220,6 @@ mod tests {
     // ═══════════════════════════════════════════════════════════
 
     use rustc_hash::FxHashMap;
-    use std::sync::Arc;
 
     use crate::types::{CachedVirtualFile, DiagnosticsSnapshot, VirtualMeta};
 
@@ -255,7 +254,7 @@ mod tests {
         outputs.insert(
             VirtualNodeKind::Main,
             CachedVirtualFile {
-                code: Arc::from("main"),
+                code: verter_type_expr::OwnedStr::from("main"),
                 source_map: None,
                 lang: None,
                 meta: VirtualMeta::default(),
@@ -264,7 +263,7 @@ mod tests {
         outputs.insert(
             VirtualNodeKind::Style { index: 0 },
             CachedVirtualFile {
-                code: Arc::from("style"),
+                code: verter_type_expr::OwnedStr::from("style"),
                 source_map: None,
                 lang: None,
                 meta: VirtualMeta::default(),

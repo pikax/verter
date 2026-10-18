@@ -103,7 +103,7 @@ fn advance_semantic_imports(host: &VerterHost) {
     assert!(
         host.project_type_store().resolved_import_facts().admit(
             key,
-            Arc::new(ResolvedImportFacts::new()),
+            crate::resolver_core::CachedValue::new(ResolvedImportFacts::new()),
             witness
         ),
         "fixture invariant: the admission must succeed, or no domain moved"

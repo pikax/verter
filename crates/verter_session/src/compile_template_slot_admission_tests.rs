@@ -297,3 +297,103 @@ fn page_retention_refusal_evicts_compile_companions_and_serves_uncached() {
         );
     }
 }
+
+/// An IDE output the account refuses to retain is still delivered: its
+/// compile hands it to the document as the surface the pure IDE read serves
+/// — complete, byte-equal to the retained output — charged to its readers,
+/// pinned, and never reused as a cache hit. The next compile the account
+/// retains supersedes it and gives the surface's charge back. Without this an
+/// oversized IDE surface was compiled and then lost, and the editor saw no
+/// provider surface at all.
+#[test]
+fn a_refused_ide_output_is_still_delivered_complete_to_the_reader() {
+    use crate::types::CompileTarget;
+    use verter_session_query::facts::fact_cache::ReadSetSignature;
+    use verter_session_query::retention::{
+        ChargeClass, RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+    let host = make_host();
+    upsert(&host, INLINE_SOURCE);
+    let profile = CompileProfile {
+        source_map: true,
+        target: CompileTarget::IDE,
+        ..CompileProfile::default()
+    };
+    let remove_slot = || {
+        let mut state = host.compile_cache().get_mut(OWNER).unwrap();
+        crate::compile_output_node::CompileOutputNodeFactValidatedSession::new()
+            .remove(&mut state, compile_profile_hash(&ide_profile(&profile)));
+    };
+    assert!(host.ensure_ide_compiled(OWNER, &profile).unwrap());
+    let retained = host
+        .get_ide(OWNER, &profile)
+        .expect("a retained IDE output is read");
+    remove_slot();
+
+    let account = SemanticRetentionAccount::new(RetentionLimits {
+        max_entry_bytes: 1,
+        ..RetentionLimits::defaults()
+    });
+    let delivered = crate::compile_output_node::with_session_publish_evidence_for_test(
+        ReadSetSignature::new(
+            verter_session_query::facts::fact_read_set::seal_canonical_signature(Vec::new()),
+        ),
+        StoreAccount::new(Arc::clone(&account)),
+        || {
+            assert!(host.ensure_ide_compiled(OWNER, &profile).unwrap());
+            host.get_ide(OWNER, &profile)
+        },
+    )
+    .expect("a refused IDE output is still delivered");
+    assert!(
+        !session_slot_present(&host, &ide_profile(&profile)),
+        "nothing is retained"
+    );
+    assert_eq!(&*delivered.code, &*retained.code, "the output is complete");
+    assert_eq!(
+        delivered.source_map.as_deref(),
+        retained.source_map.as_deref()
+    );
+    assert_eq!(delivered.code.charge_class(), Some(ChargeClass::Pinned));
+    let again = host
+        .get_ide(OWNER, &profile)
+        .expect("the surface is the document's");
+    assert!(
+        verter_type_expr::OwnedStr::ptr_eq(&again.code, &delivered.code),
+        "every read serves the one delivered surface"
+    );
+    let texts = delivered.code.charge_bytes().unwrap()
+        + delivered
+            .source_map
+            .as_ref()
+            .and_then(|map| map.charge_bytes())
+            .unwrap_or(0);
+    let snapshot = account.snapshot();
+    assert_eq!(snapshot.retained_bytes, 0, "no cache retains it");
+    assert_eq!(
+        snapshot.pinned_bytes, texts,
+        "its texts are charged to the readers"
+    );
+    drop((delivered, again));
+    assert_eq!(
+        account.snapshot().pinned_bytes,
+        texts,
+        "the document keeps its surface after the readers let go"
+    );
+
+    assert!(host.ensure_ide_compiled(OWNER, &profile).unwrap());
+    assert!(
+        session_slot_present(&host, &ide_profile(&profile)),
+        "an unrestricted compile is retained"
+    );
+    assert_eq!(
+        account.snapshot().pinned_bytes,
+        0,
+        "a retained slot supersedes the delivered surface and its charge goes"
+    );
+}
+
+/// The IDE-normalized profile `ensure_ide_compiled` / `get_ide` address.
+fn ide_profile(profile: &CompileProfile) -> CompileProfile {
+    VerterHost::ide_normalized_profile(profile)
+}

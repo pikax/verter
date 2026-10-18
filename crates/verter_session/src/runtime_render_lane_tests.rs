@@ -178,7 +178,11 @@ fn host_backed_main_via_get_virtual_file(
     canonical_id: &str,
     source: &str,
     profile: &CompileProfile,
-) -> (Arc<str>, Option<Arc<str>>, Option<String>) {
+) -> (
+    verter_type_expr::OwnedStr,
+    Option<verter_type_expr::OwnedStr>,
+    Option<String>,
+) {
     let lang = host.language_classifier().classify(canonical_id);
     let _ = host
         .upsert(UpsertRequest {
