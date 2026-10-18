@@ -21,7 +21,7 @@ fn budget_failure() -> BudgetExceededFailure {
         domain: BudgetDomain::SolverResolveSteps,
         limit: 10,
         actual: 11,
-        context: "disposition fixture".to_string(),
+        context: "disposition fixture".into(),
     }
 }
 

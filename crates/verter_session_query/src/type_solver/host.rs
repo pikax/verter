@@ -14,10 +14,11 @@
 /// `canonical_id` always names the defining file, never a barrel hop.
 /// This is the cache key for prepared declarations.
 ///
-/// Fields are shared `Arc<str>` allocations so the session layer's
+/// Fields are owned, self-charged string handles so the session layer's
 /// intern pool can hand every identity for the same `(path, name)` one
-/// allocation instead of a fresh `String` pair per mint. Equality and
-/// hashing remain CONTENT-based (`Arc<str>` derives delegate to `str`) —
+/// allocation instead of a fresh `String` pair per mint, and every clone a
+/// caller keeps carries that allocation's charge. Equality and hashing
+/// remain CONTENT-based (the handles delegate to `str`) —
 /// allocation sharing is never an identity semantic, and pointer
 /// identity never enters a cache key.
 #[derive(
@@ -31,15 +32,15 @@
     verter_no_typeexpr::NoTypeExpr,
 )]
 pub struct ResolvedRootIdentity {
-    pub canonical_id: std::sync::Arc<str>,
+    pub canonical_id: verter_type_expr::OwnedStr,
     pub owner: verter_type_expr::TopLevelOwnerId,
-    pub symbol_name: std::sync::Arc<str>,
+    pub symbol_name: verter_type_expr::OwnedStr,
 }
 
 impl ResolvedRootIdentity {
     pub fn new(
-        canonical_id: impl Into<std::sync::Arc<str>>,
-        symbol_name: impl Into<std::sync::Arc<str>>,
+        canonical_id: impl Into<verter_type_expr::OwnedStr>,
+        symbol_name: impl Into<verter_type_expr::OwnedStr>,
     ) -> Self {
         Self::new_in_owner(
             canonical_id,
@@ -49,9 +50,9 @@ impl ResolvedRootIdentity {
     }
 
     pub fn new_in_owner(
-        canonical_id: impl Into<std::sync::Arc<str>>,
+        canonical_id: impl Into<verter_type_expr::OwnedStr>,
         owner: verter_type_expr::TopLevelOwnerId,
-        symbol_name: impl Into<std::sync::Arc<str>>,
+        symbol_name: impl Into<verter_type_expr::OwnedStr>,
     ) -> Self {
         Self {
             canonical_id: canonical_id.into(),
@@ -167,18 +168,18 @@ mod tests {
     }
 
     #[test]
-    fn root_identity_shares_provided_arc_allocations() {
-        // Interned identity flow: a caller holding `Arc<str>` identity parts
+    fn root_identity_shares_provided_owned_allocations() {
+        // Interned identity flow: a caller holding owned identity parts
         // (the session intern pool) must be able to construct the identity
         // WITHOUT copying — the fields hold the same allocations.
-        let canonical: std::sync::Arc<str> = std::sync::Arc::from("/src/types.ts");
-        let symbol: std::sync::Arc<str> = std::sync::Arc::from("MyProps");
-        let id = ResolvedRootIdentity::new(
-            std::sync::Arc::clone(&canonical),
-            std::sync::Arc::clone(&symbol),
-        );
-        assert!(std::sync::Arc::ptr_eq(&id.canonical_id, &canonical));
-        assert!(std::sync::Arc::ptr_eq(&id.symbol_name, &symbol));
+        let canonical = verter_type_expr::OwnedStr::from("/src/types.ts");
+        let symbol = verter_type_expr::OwnedStr::from("MyProps");
+        let id = ResolvedRootIdentity::new(canonical.clone(), symbol.clone());
+        assert!(verter_type_expr::OwnedStr::ptr_eq(
+            &id.canonical_id,
+            &canonical
+        ));
+        assert!(verter_type_expr::OwnedStr::ptr_eq(&id.symbol_name, &symbol));
     }
 
     #[test]

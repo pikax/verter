@@ -19,6 +19,7 @@ use verter_retention::owned::OwnedStr;
     serde::Serialize,
     verter_no_typeexpr::NoTypeExpr,
     verter_no_storedspan::NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct CanonicalIndexInt(i64);
 
@@ -83,6 +84,7 @@ impl fmt::Display for CanonicalIndexInt {
     serde::Deserialize,
     verter_no_typeexpr::NoTypeExpr,
     verter_no_storedspan::NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum PropertyKey<I> {
     /// An ordinary string key. Its text is an owned, self-charged
@@ -211,6 +213,7 @@ impl<I> From<OwnedStr> for PropertyKey<I> {
     serde::Deserialize,
     verter_no_typeexpr::NoTypeExpr,
     verter_no_storedspan::NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum AuthoredPropertyKey<C, I> {
     String(OwnedStr),

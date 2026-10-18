@@ -1077,7 +1077,7 @@ fn generic_signature(
         )]),
         return_type: binder,
         type_parameters: crate::semantic_query::PayloadArray::from([TypeParamDecl {
-            name: Arc::from("T"),
+            name: verter_type_expr::OwnedStr::from("T"),
             param: binder,
             constraint,
             default,
@@ -1099,7 +1099,7 @@ fn bound_free_binder(graph: &SemanticGraphStore) -> SemanticNodeId {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     })
 }
 
@@ -1174,7 +1174,7 @@ fn deferred_callable_keys_carry_binder_bounds_and_constness() {
                 SignatureKind::Call,
                 Arc::from([FunctionParam::synthetic(None, binder, false, false)]),
                 Arc::from([TypeParamDecl {
-                    name: Arc::from("T"),
+                    name: verter_type_expr::OwnedStr::from("T"),
                     param: binder,
                     constraint,
                     default,
@@ -1408,7 +1408,7 @@ fn union_reducer_keeps_homomorphic_and_concrete_mappings_apart() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
     let value = prim(&graph, PrimitiveKind::Number);
     let mapped = |over_type_variable| {
@@ -1945,7 +1945,7 @@ fn the_retention_walk_visits_every_retained_id() {
         true_branch_ref: argument,
         false_branch_ref: argument,
         distributive: false,
-        pending: Some(Arc::new(pending)),
+        pending: Some(verter_session_query::retention::owned::Owned::new(pending)),
     };
     let mut retained = Vec::new();
     conditional.for_each_retained_child(|child| retained.push(child));

@@ -12,6 +12,18 @@ fn account(ceiling: usize) -> Arc<SemanticRetentionAccount> {
     })
 }
 
+/// Bytes a registered carrier's slice of holds on `leaves` leaf names
+/// keeps while it is registered: one pointer per hold.
+fn leaf_slice(leaves: usize) -> usize {
+    heap_block_bytes(leaves * std::mem::size_of::<usize>())
+}
+
+/// Bytes a slice of `cells` type-erased owned-cell pointers takes: a
+/// carrier's record of its owned children, or a cache's holds on them.
+fn cell_slice(cells: usize) -> usize {
+    heap_block_bytes(cells * 2 * std::mem::size_of::<usize>())
+}
+
 fn occupancy(account: &SemanticRetentionAccount) -> (usize, usize) {
     let snapshot = account.snapshot();
     (snapshot.retained_bytes, snapshot.pinned_bytes)
@@ -345,7 +357,9 @@ fn a_leaf_two_carriers_share_is_charged_once_through_either_release_order() {
             Arc::from(vec![Arc::clone(&leaf), Arc::clone(&small)]),
         ];
         let block = |carrier: &Arc<[Arc<str>]>| {
-            arc_block_bytes(std::mem::size_of_val::<[Arc<str>]>(carrier)) + registration_bytes()
+            arc_block_bytes(std::mem::size_of_val::<[Arc<str>]>(carrier))
+                + registration_bytes()
+                + leaf_slice(carrier.len())
         };
         let leaf_charge = arc_block_bytes(LEAF) + registration_bytes();
         let small_charge = arc_block_bytes(small.len()) + registration_bytes();
@@ -396,7 +410,8 @@ fn a_carriers_leaves_move_with_its_class_and_adopt_all_or_nothing() {
     let carrier: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from("l".repeat(LEAF))]);
     let total = arc_block_bytes(std::mem::size_of_val::<[Arc<str>]>(&carrier))
         + arc_block_bytes(LEAF)
-        + 2 * registration_bytes();
+        + 2 * registration_bytes()
+        + leaf_slice(1);
     let cache = registry
         .hold(&account, &carrier, |aliases| {
             arc_str_list_bytes(&carrier, aliases)
@@ -449,7 +464,8 @@ fn a_carrier_revived_while_its_last_holder_releases_keeps_its_sole_leaf_charged_
         let carrier: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from("r".repeat(LEAF))]);
         let total = arc_block_bytes(std::mem::size_of_val::<[Arc<str>]>(&carrier))
             + arc_block_bytes(LEAF)
-            + 2 * registration_bytes();
+            + 2 * registration_bytes()
+            + leaf_slice(1);
         let last = registry
             .hold(&account, &carrier, |aliases| {
                 arc_str_list_bytes(&carrier, aliases)
@@ -538,9 +554,15 @@ fn a_registered_carriers_owned_name_is_charged_by_its_cell_in_the_carriers_class
     assert_eq!(name.charge_class(), Some(ChargeClass::Retained));
     let own = cache.bytes();
     assert_eq!(
+        own,
+        registration_bytes() + cell_slice(1),
+        "the carrier's registration and its record of the name; its measure counts nothing else"
+    );
+    assert_eq!(
         occupancy(&account).0,
-        own + name_charge,
-        "the carrier's own charge excludes the name, which its cell charges once"
+        own + name_charge + cell_slice(1),
+        "the carrier's own charge excludes the name, which its cell charges once; \
+         the cache's hold on the name is kept in a charged slice"
     );
     let caller = registry.pin_caller(&account, &carrier, measure);
     drop(cache);

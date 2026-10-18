@@ -351,7 +351,7 @@ pub(crate) fn node_matches(
             SemanticNodeData::InstantiationRef { base, .. },
         ) => &*base.decl_name == *name,
         (ExpectedNode::BareRef { name }, SemanticNodeData::BareRef(_)) => {
-            data.bare_ref_head().is_some_and(|(got, _)| &**got == *name)
+            data.bare_ref_head().is_some_and(|(got, _)| got == *name)
         }
         (
             ExpectedNode::OpaqueUnmodeledPosition,

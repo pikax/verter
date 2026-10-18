@@ -4,14 +4,13 @@
 
 use super::node_roots::{NodeRef, NodeRoot};
 use crate::semantic_query::{QueryError, SemanticNodeData, SemanticNodeId};
-use std::sync::Arc;
 
 /// Clones share the immutable payload and its owning root. There is no
-/// conversion to an unleased `Arc<SemanticNodeData>` or an owned payload
+/// conversion to an unleased `crate::semantic_query_memo::NodeData` or an owned payload
 /// copy: a consumer borrows the payload through `Deref`.
 #[derive(Clone, Debug)]
 pub struct NodeDataLease {
-    pub(super) data: Arc<SemanticNodeData>,
+    pub(super) data: crate::semantic_query_memo::NodeData,
     pub(super) root: NodeRoot,
 }
 
@@ -55,7 +54,7 @@ impl NodeDataLease {
     /// Whether both reads share the same immutable payload allocation.
     #[must_use]
     pub fn ptr_eq(left: &Self, right: &Self) -> bool {
-        Arc::ptr_eq(&left.data, &right.data)
+        super::NodeData::ptr_eq(&left.data, &right.data)
     }
 }
 

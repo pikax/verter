@@ -10,7 +10,7 @@ use crate::OwnedStr;
 /// is NEVER part of equality, hashing, the JSON wire shape, or any control
 /// decision — two `UnknownValue`s with the same raw text are identical
 /// regardless of provenance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum UnknownProvenance {
     /// Authored syntax the lowering does not represent (unsupported / invalid
     /// TypeScript type syntax preserved as its source text).
@@ -40,7 +40,7 @@ pub enum UnknownProvenance {
 /// without declaring what it is. Equality and hashing are RAW-ONLY
 /// (provenance is diagnostic, never identity, never a control discriminator),
 /// preserving the legacy `Unknown { raw: String }` cache/hash behaviour.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub struct UnknownValue {
     raw: OwnedStr,
     provenance: UnknownProvenance,

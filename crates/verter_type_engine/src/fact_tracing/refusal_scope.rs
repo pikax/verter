@@ -79,6 +79,67 @@ impl Drop for RefusalObservationScope {
     }
 }
 
+/// The refusals a semantic task observes, which may be polled on a thread
+/// other than the one that lent it its request: one scope standing for
+/// every scope active where it was lent (none when none was). Each poll
+/// installs it as the polling thread's only scope, and the task's return
+/// records what it observed into the scopes it was lent under.
+#[derive(Default)]
+pub(crate) struct TaskRefusalCarry {
+    open: bool,
+    observed: Option<NonCacheableReadReason>,
+}
+
+impl TaskRefusalCarry {
+    /// The carry of a task lent here: open exactly when a scope is.
+    pub(crate) fn lend() -> Self {
+        Self {
+            open: ACTIVE_REFUSAL_SCOPES.with(|scopes| !scopes.borrow().is_empty()),
+            observed: None,
+        }
+    }
+
+    /// Install the task's scope on this thread for one poll; the returned
+    /// guard restores the thread's own scopes and takes the task's back.
+    pub(crate) fn install(&mut self) -> TaskRefusalInstall<'_> {
+        let task = if self.open {
+            vec![Rc::new(Cell::new(self.observed))]
+        } else {
+            Vec::new()
+        };
+        let thread = ACTIVE_REFUSAL_SCOPES.with(|scopes| scopes.replace(task));
+        TaskRefusalInstall {
+            carry: self,
+            thread,
+        }
+    }
+
+    /// Record what the task observed into every scope active on this
+    /// thread, the one that lent it.
+    pub(crate) fn return_to_lender(self) {
+        if let Some(reason) = self.observed {
+            record_refusal(reason);
+        }
+    }
+}
+
+/// A task's refusal scope installed for one poll
+/// ([`TaskRefusalCarry::install`]).
+pub(crate) struct TaskRefusalInstall<'c> {
+    carry: &'c mut TaskRefusalCarry,
+    thread: Vec<Rc<Cell<Option<NonCacheableReadReason>>>>,
+}
+
+impl Drop for TaskRefusalInstall<'_> {
+    fn drop(&mut self) {
+        let task =
+            ACTIVE_REFUSAL_SCOPES.with(|scopes| scopes.replace(std::mem::take(&mut self.thread)));
+        if let Some(cell) = task.first() {
+            self.carry.observed = cell.get();
+        }
+    }
+}
+
 /// Record a typed non-cacheable reason into every active scope. Called
 /// only from the marking chokepoint so no producer can taint a value
 /// without the reason being observable.

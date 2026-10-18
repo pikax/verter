@@ -561,6 +561,17 @@ fn flow_slice_identity_uses_only_the_shared_build_fingerprint() {
     );
 }
 
+/// The plan the hash node published for `lowered`'s slice.
+fn plan_of(
+    stores: &FlowSliceStores,
+    lowered: &FlowSliceLoweredKey,
+) -> verter_retention::heap_size::OwnedTree<PlannedFlowSlice> {
+    stores
+        .hash_node()
+        .retained_plan_for_test(&lowered.hash_key, lowered.slice_hash)
+        .expect("the hash node published the plan")
+}
+
 fn hash_key(function: FlowSliceFunctionKey, path: &[&str]) -> FlowSliceHashKey {
     FlowSliceHashKey {
         function,
@@ -821,9 +832,10 @@ pub(crate) fn hash_then_lower_round_trip_serves_lowered_slice_ir() {
     };
     let invocations_before_lowered = compute_flow_slice_hash_thread_invocations();
     let plans_before_lowered = return_path_peeker_plan_thread_invocations();
+    let plan = plan_of(&rig.stores, &lowered_key);
     let ir = rig
         .driver(ctx)
-        .lookup_lowered(lowered_key)
+        .lookup_lowered(lowered_key, &plan)
         .expect("lowered lookup");
     assert_eq!(
         compute_flow_slice_hash_thread_invocations(),
@@ -904,19 +916,23 @@ pub(crate) fn two_demands_one_function_flow_graph_build() {
         "distinct demands select distinct slices"
     );
 
+    let lowered_a = FlowSliceLoweredKey {
+        hash_key: key_a,
+        slice_hash: planned_a,
+    };
+    let plan_a = plan_of(&rig.stores, &lowered_a);
     let _ir_a = rig
         .driver(ctx)
-        .lookup_lowered(FlowSliceLoweredKey {
-            hash_key: key_a,
-            slice_hash: planned_a,
-        })
+        .lookup_lowered(lowered_a, &plan_a)
         .expect("lowered a");
+    let lowered_b = FlowSliceLoweredKey {
+        hash_key: key_b,
+        slice_hash: planned_b,
+    };
+    let plan_b = plan_of(&rig.stores, &lowered_b);
     let _ir_b = rig
         .driver(ctx)
-        .lookup_lowered(FlowSliceLoweredKey {
-            hash_key: key_b,
-            slice_hash: planned_b,
-        })
+        .lookup_lowered(lowered_b, &plan_b)
         .expect("lowered b");
 
     assert_eq!(
@@ -1048,8 +1064,16 @@ pub(crate) fn distinct_content_versions_key_distinct_artifacts() {
         slice_hash: planned_v2,
     };
     assert_ne!(lowered_v1, lowered_v2, "content versions never collide");
-    let _ = rig.driver(ctx).lookup_lowered(lowered_v1).expect("v1 IR");
-    let _ = rig.driver(ctx).lookup_lowered(lowered_v2).expect("v2 IR");
+    let plan_v1 = plan_of(&rig.stores, &lowered_v1);
+    let plan_v2 = plan_of(&rig.stores, &lowered_v2);
+    let _ = rig
+        .driver(ctx)
+        .lookup_lowered(lowered_v1, &plan_v1)
+        .expect("v1 IR");
+    let _ = rig
+        .driver(ctx)
+        .lookup_lowered(lowered_v2, &plan_v2)
+        .expect("v2 IR");
     assert_eq!(
         rig.stores.graphs.build_count(),
         2,
@@ -1187,11 +1211,13 @@ fn mytype_member_slice_via_production_store_materializes_no_sibling_and_no_mytyp
                 .lookup_hash(key.clone())
                 .expect("hash lookup");
             let slice_hash = planned(outcome);
+            let lowered = FlowSliceLoweredKey {
+                hash_key: key.clone(),
+                slice_hash,
+            };
+            let plan = plan_of(stores, &lowered);
             FlowSliceDriver::new(stores, ctx, ctx.request_flags())
-                .lookup_lowered(FlowSliceLoweredKey {
-                    hash_key: key.clone(),
-                    slice_hash,
-                })
+                .lookup_lowered(lowered, &plan)
                 .expect("lowered lookup")
         },
     );
@@ -1489,12 +1515,14 @@ pub(crate) fn flow_slice_ir_detaches_from_oxc_arena() {
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &rig.host;
     let key = hash_key(function, &["b"]);
     let slice_hash = planned(rig.driver(ctx).lookup_hash(key.clone()).expect("hash"));
+    let lowered = FlowSliceLoweredKey {
+        hash_key: key,
+        slice_hash,
+    };
+    let plan = plan_of(&rig.stores, &lowered);
     let ir = rig
         .driver(ctx)
-        .lookup_lowered(FlowSliceLoweredKey {
-            hash_key: key,
-            slice_hash,
-        })
+        .lookup_lowered(lowered, &plan)
         .expect("lowered IR");
     // The parse arena that produced this IR dropped inside `skeleton_of`;
     // reading the IR here is the runtime detach witness.
@@ -1747,5 +1775,51 @@ fn the_two_shift_edits_are_invisible_to_flow_body_stable_hash() {
         hash_of(&alpha_renamed_source()),
         "an alpha-rename must not change the structural body hash — this is what \
          makes relative positions insufficient on their own"
+    );
+}
+
+/// A retained graph bundle charges its whole structure — the skeleton and
+/// graph of a large body cost their size, not a per-entry figure — pinned
+/// like the graph arena (plans and their proofs address the memoized
+/// bundle), even with no headroom, and gives it back when its function's
+/// file is evicted.
+#[test]
+fn a_retained_graph_bundle_charges_its_structure_until_its_eviction() {
+    use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
+    let small_source = "function myType() { return 1 }";
+    let large_source = format!(
+        "function myType() {{ {} return 1 }}",
+        (0..400)
+            .map(|index| format!("const v{index} = {index};"))
+            .collect::<String>()
+    );
+    let mut charged = Vec::new();
+    for source in [small_source, large_source.as_str()] {
+        let account = SemanticRetentionAccount::new(RetentionLimits {
+            aggregate_ceiling_bytes: 0,
+            active_ceiling_bytes: 0,
+            max_entry_bytes: 0,
+            pin_threshold_bytes: 0,
+        });
+        let store = FunctionFlowGraphStore::charged_to_for_test(Arc::clone(&account));
+        let key = function_key("/graph.ts", "myType", 4, source);
+        let GraphClaim::Produce(lease) = store.claim(&key) else {
+            panic!("an empty store hands out the publication claim");
+        };
+        let bundle = FlowGraphBundle::build(KeyedFunctionStructure::bind_fixture(
+            key.clone(),
+            prepared_of(source),
+        ));
+        drop(lease.publish(bundle).expect("published"));
+        assert!(store.peek(&key).is_some());
+        let snapshot = account.snapshot();
+        assert_eq!(snapshot.retained_bytes, 0, "a bundle is never refusable");
+        charged.push(snapshot.pinned_bytes);
+        store.remove_canonical("/graph.ts");
+        assert_eq!(account.snapshot().total_bytes(), 0, "eviction releases it");
+    }
+    assert!(
+        charged[1] > charged[0] + 400 * std::mem::size_of::<u64>(),
+        "a larger structure costs more: {charged:?}"
     );
 }

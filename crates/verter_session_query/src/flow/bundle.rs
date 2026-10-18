@@ -25,7 +25,7 @@ use verter_language::{FileLanguage, ParseKey};
 /// is bound to a key only through [`KeyedFunctionStructure::bind`], which
 /// admits every axis against the acquired source identity; a bundle then
 /// carries that key, and publication under any other key is refused.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct FlowSliceFunctionKey {
     /// Canonical id of the file serving the function.
     pub canonical_id: Arc<str>,
@@ -55,10 +55,12 @@ pub struct FlowSliceFunctionKey {
     /// The exact parse identity (source bytes, language, compatibility
     /// domain/epoch, syntax profile) of the serving file — taken from the
     /// request-bound artifact identity, never reclassified from the path.
+    #[heap_size(with = "crate::retention::heap_size_foreign::parse_key")]
     pub parse_key: ParseKey,
     /// The runtime-authoritative [`FileLanguage`] row the serving file was
     /// parsed under — taken from the request-bound `IndexedReady`, never
     /// reclassified from the path.
+    #[heap_size(with = "crate::retention::heap_size_foreign::file_language")]
     pub file_language: FileLanguage,
     /// Parser version.
     pub build_toolchain_fingerprint: crate::source::toolchain::BuildToolchainFingerprint,
@@ -189,6 +191,7 @@ impl KeyedFunctionStructure {
 /// constructor: it takes a [`KeyedFunctionStructure`] and derives the graph
 /// and the binding map from that one prepared structure, so a bundle's key,
 /// graph and binding map always describe the same structure.
+#[derive(verter_retention::heap_size::HeapSize)]
 pub struct FlowGraphBundle {
     key: FlowSliceFunctionKey,
     skeleton: Arc<FunctionBodySkeleton>,

@@ -636,7 +636,7 @@ pub type ResolvedJsdocTag = crate::resolver_core::ResolvedJsdocTag;
 /// Raw snapshot remains raw — resolved imported metadata lives in this sidecar.
 /// `Expanded` mode carries materialized surfaces; `Type` mode carries
 /// identity/location only.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub struct ResolvedComponentMetaComputeAudit {
     pub timings: crate::component_meta_audit::RequestTimingAudit,
     pub solver: crate::component_meta_audit::ComponentMetaPayload,
