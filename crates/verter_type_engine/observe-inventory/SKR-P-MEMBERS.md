@@ -26,3 +26,9 @@ Classification follows [the observation policy](../../../docs/arch/semantic-obse
 | item (field, store, hook, counter, trace) | production consumer | classification | lifetime | owner module | gate |
 | --- | --- | --- | --- | --- | --- |
 | `compile_ide` served artifact and `IdeResponse` conversion | IDE consumers receive code and mapping even when retention refuses cache admission; cache peeking remains separate | REQUIRED | One compilation delivery, held by its consumer | `src/host_resolve/virtual_file_pipeline.rs`, `src/types.rs` | always |
+
+## verter_lsp
+
+| item (field, store, hook, counter, trace) | production consumer | classification | lifetime | owner module | gate |
+| --- | --- | --- | --- | --- | --- |
+| Coordinator diagnostic provider selection (`diagnostics_provider`) | None mode publishes complete native diagnostics without waiting for undelivered provider companions; other modes retain their provider requirements | REQUIRED | One publication/readiness check | `src/sync_coordinator.rs` | always |

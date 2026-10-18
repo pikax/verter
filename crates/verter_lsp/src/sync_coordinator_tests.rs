@@ -307,6 +307,75 @@ async fn preserve_open_unresolved_carrier_no_ide_no_prior_commits_empty_unresolv
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn native_diagnostics_complete_for_none_kind_with_an_injected_provider() {
+    use crate::TypeProviderKind::{EditorTsserver, None as NoProvider, Tsgo, Tsserver};
+    for (kind, injected, expected_complete) in [
+        (NoProvider, true, true),
+        (NoProvider, false, true),
+        (Tsgo, true, false),
+        (Tsserver, true, false),
+        (EditorTsserver, true, false),
+        (EditorTsserver, false, true),
+    ] {
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+        let uri: Uri = "file:///workspace/src/App.vue".parse().expect("test uri");
+        let _ = documents.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".to_string(),
+            version: 1,
+            text: "<script setup lang=\"ts\">const msg = 'hello'</script><template><div>{{ msg }}</div></template>".to_string(),
+        });
+
+        let provider = Arc::new(MockTypeProvider::new());
+        let deps = SyncCoordinatorDeps {
+            documents: Arc::clone(&documents),
+            dependency_receipts: Default::default(),
+            project_sync: Some(ProjectSync::new(
+                provider.clone(),
+                ProjectSyncMode::FullProject,
+            )),
+            needs_provider_sync: Arc::new(DashSet::new()),
+            pending_snapshot_provider_sync: Arc::new(DashSet::new()),
+            client: make_test_client(&documents),
+            type_provider: injected.then(|| provider.clone() as Arc<dyn TypeProvider>),
+            cached_verter_diags: Arc::new(DashMap::new()),
+            position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+            provider_sync_states: Arc::new(DashMap::new()),
+            vfs_workspace: Arc::new(parking_lot::RwLock::new(None)),
+            type_provider_kind: kind,
+            carrier_publish_coordinator: None,
+            carrier_transaction_coordinator: std::sync::Arc::new(
+                crate::external_ts::CarrierTransactionCoordinator::new(),
+            ),
+        };
+
+        assert_eq!(
+            dependencies_current(&deps, "/workspace/src/App.vue"),
+            expected_complete,
+            "native-only publications require no provider import receipt"
+        );
+        let complete =
+            publish_merged_diagnostics(&deps, "/workspace/src/App.vue", uri.as_str()).await;
+        assert_eq!(
+            complete, expected_complete,
+            "kind={kind:?}, injected={injected}"
+        );
+        assert_eq!(
+            documents.diagnostics_ready(&uri),
+            expected_complete,
+            "the publication receipt must describe the serving kind: {kind:?}, injected={injected}"
+        );
+        assert!(
+            provider.calls().is_empty(),
+            "no committed provider surface is available"
+        );
+        assert!(provider.file_sync_calls().is_empty());
+        assert!(deps.provider_sync_states.is_empty());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn publish_merged_diagnostics_skips_type_provider_without_committed_state() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));

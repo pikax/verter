@@ -1319,3 +1319,9 @@ return value: retention may refuse admission even though compilation succeeds.
 without promising a later cache hit. Projection recovery passes the served
 artifact together with the document revision captured before compilation and
 compares that revision under the install guard.
+
+Coordinator diagnostics use the serving provider kind as well as object presence.
+`TypeProviderKind::None` completes the native diagnostic batch and does not wait
+for provider import receipts or query an injected provider object. Such an object
+may still serve explicit feature queries; provider-present modes keep their
+committed-surface and completeness requirements.

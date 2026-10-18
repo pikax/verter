@@ -810,11 +810,22 @@ fn absorb_inbox(
     }
 }
 
+/// The provider serving coordinator diagnostics. An injected object remains
+/// available to feature queries in None mode, but that mode delivers no
+/// provider companions and completes diagnostics from the native batch alone.
+fn diagnostics_provider(deps: &SyncCoordinatorDeps) -> Option<&dyn TypeProvider> {
+    if matches!(deps.type_provider_kind, crate::TypeProviderKind::None) {
+        None
+    } else {
+        deps.type_provider.as_deref()
+    }
+}
+
 /// Whether `canonical_id`'s import closure is current enough to publish while a
 /// workspace scan runs. A route with no type provider publishes only Verter's
 /// own diagnostics, which read no provider state.
 fn dependencies_current(deps: &SyncCoordinatorDeps, canonical_id: &str) -> bool {
-    deps.type_provider.is_none()
+    diagnostics_provider(deps).is_none()
         || deps
             .dependency_receipts
             .is_current(canonical_id, &deps.documents, &deps.vfs_workspace)
@@ -2600,11 +2611,11 @@ async fn publish_merged_diagnostics(
             &uri,
             &publication,
             verter_diagnostics.clone(),
-            deps.type_provider.is_none(),
+            diagnostics_provider(deps).is_none(),
             None,
         )
         .await;
-    if deps.type_provider.is_none() {
+    if diagnostics_provider(deps).is_none() {
         return true;
     }
     let batch = merge_provider_diagnostics(deps, canonical_id, verter_diagnostics).await;
@@ -2687,14 +2698,14 @@ async fn merge_provider_diagnostics(
     canonical_id: &str,
     verter_diags: Vec<Diagnostic>,
 ) -> ProviderDiagnosticBatch {
-    let Some(tp) = &deps.type_provider else {
+    let Some(tp) = diagnostics_provider(deps) else {
         return ProviderDiagnosticBatch::complete(verter_diags);
     };
     let encoding = deps.position_encoding.read().clone();
     provider_diagnostics_batch(
         &deps.documents,
         &deps.provider_sync_states,
-        tp.as_ref(),
+        tp,
         encoding,
         canonical_id,
         verter_diags,
