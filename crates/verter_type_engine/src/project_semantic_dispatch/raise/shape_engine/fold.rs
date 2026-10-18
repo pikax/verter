@@ -133,9 +133,10 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
                         crate::semantic_query::PrintedUnionArm::Node(member) => {
                             fold_node(alg, dispatch, member, active)
                         }
-                        crate::semantic_query::PrintedUnionArm::Enum(decl) => {
-                            Some(alg.reference(Arc::clone(&decl.decl_name), Vec::new()))
-                        }
+                        crate::semantic_query::PrintedUnionArm::Enum(decl) => Some(alg.reference(
+                            std::sync::Arc::<str>::from(decl.decl_name.as_str()),
+                            Vec::new(),
+                        )),
                     })
                     .collect::<Option<_>>()?;
             alg.union(folded)
@@ -207,7 +208,7 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
             return fold_node(alg, dispatch, merged, active);
         }
         SemanticNodeData::Opaque(QueryError::DeclPlaceholder { name, .. }) => {
-            alg.reference(Arc::clone(name), Vec::new())
+            alg.reference(std::sync::Arc::<str>::from(name.as_str()), Vec::new())
         }
         SemanticNodeData::Conditional {
             check,
@@ -324,7 +325,7 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
             active.remove(&node);
             let constraint_out = constraint_out?;
             let default_out = default_out?;
-            alg.type_parameter(Arc::clone(display_name), constraint_out, default_out)
+            alg.type_parameter(Arc::<str>::from(display_name), constraint_out, default_out)
         }
         // A declaration raises with its constraint (a present but
         // unraisable one fails the node); a reference names the declaration.
@@ -332,9 +333,9 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
             name, constraint, ..
         } => {
             let constraint_out = fold_optional_slot(alg, dispatch, *constraint, active)?;
-            alg.infer(Arc::clone(name), constraint_out)
+            alg.infer(Arc::<str>::from(name), constraint_out)
         }
-        SemanticNodeData::InferRef { name, .. } => alg.infer(Arc::clone(name), None),
+        SemanticNodeData::InferRef { name, .. } => alg.infer(Arc::<str>::from(name), None),
         SemanticNodeData::Opaque(err) => match err {
             QueryError::RecursiveRef { name, args } => {
                 let raised_args: Vec<A::Out> = args
@@ -346,7 +347,7 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
                         })
                     })
                     .collect();
-                alg.recursive_ref(Arc::clone(name), raised_args)
+                alg.recursive_ref(std::sync::Arc::<str>::from(name.as_str()), raised_args)
             }
             // The checker's recovered error type raises as the recovery the
             // diagnostic defines.
@@ -394,9 +395,10 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
                 crate::semantic_query::SignatureKind::Construct => alg.constructor_to_out(function),
             }
         }
-        SemanticNodeData::DeclRef { identity } => {
-            alg.reference(Arc::clone(&identity.decl_name), Vec::new())
-        }
+        SemanticNodeData::DeclRef { identity } => alg.reference(
+            std::sync::Arc::<str>::from(identity.decl_name.as_str()),
+            Vec::new(),
+        ),
         // Raised as a FIRST-CLASS operation over its raised operands. NOT
         // `alg.reference(...)`: an intrinsic names no declaration, and
         // raising it as one would conflate it with a userland type spelled
@@ -421,7 +423,10 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
                     })
                 })
                 .collect();
-            alg.reference(Arc::clone(&base.decl_name), raised_args)
+            alg.reference(
+                std::sync::Arc::<str>::from(base.decl_name.as_str()),
+                raised_args,
+            )
         }
         SemanticNodeData::BareRef(_) => {
             let (name, _scope) = data.bare_ref_head().expect("BareRef carrier head");
@@ -434,7 +439,7 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
                     })
                 })
                 .collect();
-            alg.reference(Arc::clone(name), raised_args)
+            alg.reference(Arc::<str>::from(name), raised_args)
         }
         SemanticNodeData::ImportType(_) => {
             let (specifier, qualifier, typeof_query) =
@@ -449,8 +454,8 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
                 })
                 .collect();
             alg.import_type(
-                Arc::clone(specifier),
-                Arc::clone(qualifier),
+                Arc::<str>::from(specifier),
+                std::sync::Arc::<[std::sync::Arc<str>]>::from(qualifier.clone()),
                 typeof_query,
                 raised_args,
             )
@@ -513,7 +518,7 @@ fn fold_function<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
         .iter()
         .map(|p| {
             Some(FoldedFunctionParam {
-                name: p.name.clone(),
+                name: p.name.as_deref().map(Arc::<str>::from),
                 ty: fold_node(alg, dispatch, p.ty, active)?,
                 optional: p.optional,
                 rest: p.rest,
@@ -528,7 +533,7 @@ fn fold_function<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
     let mut type_params: Vec<FoldedTypeParam<A::Out>> = Vec::new();
     for tp in type_parameters {
         type_params.push(FoldedTypeParam {
-            name: Arc::clone(&tp.name),
+            name: Arc::<str>::from(&tp.name),
             constraint: fold_optional_slot(alg, dispatch, tp.constraint, active)?,
             default: fold_optional_slot(alg, dispatch, tp.default, active)?,
             is_const: tp.is_const,
@@ -544,7 +549,7 @@ fn fold_function<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
                 }
                 crate::semantic_query::PredicateSubject::Parameter(_) => predicate
                     .subject_parameter(params)
-                    .and_then(|param| param.name.clone())
+                    .and_then(|param| param.name.as_deref().map(Arc::<str>::from))
                     .map(verter_type_expr::TypePredicateSubject::Parameter),
             };
             match subject {
@@ -679,7 +684,7 @@ fn fold_object_spread_program<
             fold_open_object_spread_program(alg, dispatch, program)
         }
         QueryResult::Recursive(_) => alg.opaque_sentinel(&QueryError::RecursiveRef {
-            name: Arc::from("object-spread-projection"),
+            name: verter_type_expr::OwnedStr::from("object-spread-projection"),
             args: Default::default(),
         }),
         QueryResult::Error(error) => alg.opaque_sentinel(&error),

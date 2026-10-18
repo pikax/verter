@@ -700,9 +700,9 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
                 .global_named_type(self.canonical, self.owner, "SymbolConstructor")?;
         let (scope, owner) = match self.dispatch.graph().node_data(constructor).as_deref() {
             Some(SemanticNodeData::DeclRef { identity }) => {
-                (Arc::clone(&identity.canonical_id), identity.owner)
+                (identity.canonical_id.clone(), identity.owner)
             }
-            _ => (Arc::from(self.canonical), self.owner),
+            _ => (verter_type_expr::OwnedStr::from(self.canonical), self.owner),
         };
         let key = self.dispatch.lower_type_expr_in_owner_scope_with_context(
             scope.as_ref(),
@@ -719,7 +719,12 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             crate::semantic_query::PropertyKey::UniqueSymbol(identity),
         )?;
         let iterator = self.lone_call_return(method)?;
-        let next = self.present_member(iterator, &[Arc::from("next")])?;
+        let next = self.present_member(
+            iterator,
+            &[std::sync::Arc::<str>::from(
+                verter_type_expr::OwnedStr::from("next"),
+            )],
+        )?;
         let result = self.lone_call_return(next)?;
         let result = self.dispatch.resolved_reduction_view(result);
         let arms = self
@@ -733,7 +738,12 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             let arm = self.dispatch.resolved_reduction_view(arm);
             // A constituent with no `done` is a yield result (`done`
             // defaults to `false`).
-            let yields = match self.present_member(arm, &[Arc::from("done")]) {
+            let yields = match self.present_member(
+                arm,
+                &[std::sync::Arc::<str>::from(
+                    verter_type_expr::OwnedStr::from("done"),
+                )],
+            ) {
                 Some(done) => match self.dispatch.execute_relate_pair(false_node, done) {
                     super::super::dispatch_txn::RelationStep::Assignable { .. } => true,
                     super::super::dispatch_txn::RelationStep::NotAssignable => false,
@@ -742,7 +752,12 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
                 None => true,
             };
             if yields {
-                values.push(self.present_member(arm, &[Arc::from("value")])?);
+                values.push(self.present_member(
+                    arm,
+                    &[std::sync::Arc::<str>::from(
+                        verter_type_expr::OwnedStr::from("value"),
+                    )],
+                )?);
             }
         }
         Some(match values.as_slice() {
@@ -793,7 +808,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         let node = match self.dispatch.demand_type_node(
             crate::semantic_query::SemanticQueryKey::ProjectPath {
                 base,
-                path: Arc::from(
+                path: verter_type_expr::OwnedSlice::from(
                     vec![crate::semantic_query::PathSegment::Member(key)].into_boxed_slice(),
                 ),
                 context: crate::semantic_query::ProjectionReductionContext::published(

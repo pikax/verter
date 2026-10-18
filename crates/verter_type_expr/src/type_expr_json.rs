@@ -366,7 +366,7 @@ fn excess_origin_from_json(v: &serde_json::Value) -> ExcessPropertyOrigin {
 
 fn authored_property_key_from_json(v: &serde_json::Value) -> Option<TypeAuthoredPropertyKey> {
     match v.get("kind")?.as_str()? {
-        "string" => Some(AuthoredPropertyKey::String(Arc::from(
+        "string" => Some(AuthoredPropertyKey::String(OwnedStr::from(
             v.get("value")?.as_str()?,
         ))),
         "number" => Some(AuthoredPropertyKey::Number(

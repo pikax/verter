@@ -52,12 +52,12 @@ fn type_body_locator_on(
 ) -> AuthoredBodyLocator {
     AuthoredBodyLocator::DeclBody(TypeBodySlot {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(symbol),
+            symbol: verter_type_expr::OwnedStr::from(symbol),
             space: LocatorSymbolSpace::Type,
         },
-        path: Arc::from(path.into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::from(path.into_boxed_slice()),
     })
 }
 
@@ -65,12 +65,12 @@ fn type_body_locator_on(
 fn value_body_locator(symbol: &str, path: Vec<TypeBodyPathStep>) -> AuthoredBodyLocator {
     AuthoredBodyLocator::DeclBody(TypeBodySlot {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(FIXTURE_CANONICAL),
+            canonical_id: verter_type_expr::OwnedStr::from(FIXTURE_CANONICAL),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(symbol),
+            symbol: verter_type_expr::OwnedStr::from(symbol),
             space: LocatorSymbolSpace::Value,
         },
-        path: Arc::from(path.into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::from(path.into_boxed_slice()),
     })
 }
 
@@ -78,12 +78,12 @@ fn value_body_locator(symbol: &str, path: Vec<TypeBodyPathStep>) -> AuthoredBody
 fn namespace_body_locator(symbol: &str, path: Vec<TypeBodyPathStep>) -> AuthoredBodyLocator {
     AuthoredBodyLocator::DeclBody(TypeBodySlot {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(FIXTURE_CANONICAL),
+            canonical_id: verter_type_expr::OwnedStr::from(FIXTURE_CANONICAL),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(symbol),
+            symbol: verter_type_expr::OwnedStr::from(symbol),
             space: LocatorSymbolSpace::Namespace,
         },
-        path: Arc::from(path.into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::from(path.into_boxed_slice()),
     })
 }
 
@@ -96,13 +96,13 @@ fn aug_type_locator(
 ) -> AuthoredBodyLocator {
     AuthoredBodyLocator::AugmentationBody(AugmentationBodyLocator {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(FIXTURE_CANONICAL),
+            canonical_id: verter_type_expr::OwnedStr::from(FIXTURE_CANONICAL),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(symbol),
+            symbol: verter_type_expr::OwnedStr::from(symbol),
             space: LocatorSymbolSpace::Type,
         },
         scope,
-        path: Arc::from(path.into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::from(path.into_boxed_slice()),
     })
 }
 
@@ -1854,7 +1854,7 @@ fn wrong_memo_deref_returns_canonical_mismatch() {
 
 fn module_scope(specifier: &str) -> AuthoredAugmentationScope {
     AuthoredAugmentationScope::Module {
-        specifier: Arc::from(specifier),
+        specifier: verter_type_expr::OwnedStr::from(specifier),
     }
 }
 
@@ -2134,13 +2134,13 @@ fn aug_locator_in(
 ) -> AuthoredBodyLocator {
     AuthoredBodyLocator::AugmentationBody(AugmentationBodyLocator {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(FIXTURE_CANONICAL),
+            canonical_id: verter_type_expr::OwnedStr::from(FIXTURE_CANONICAL),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(symbol),
+            symbol: verter_type_expr::OwnedStr::from(symbol),
             space,
         },
         scope,
-        path: Arc::from(path.into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::from(path.into_boxed_slice()),
     })
 }
 

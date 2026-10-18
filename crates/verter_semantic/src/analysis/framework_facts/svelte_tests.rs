@@ -75,9 +75,9 @@ fn macro_payload_locator(
 ) -> AuthoredBodyLocator {
     AuthoredBodyLocator::MacroPayload(MacroPayloadLocator {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(""),
+            canonical_id: verter_type_expr::OwnedStr::from(""),
             owner,
-            symbol: Arc::from("default"),
+            symbol: verter_type_expr::OwnedStr::from("default"),
             space: LocatorSymbolSpace::Value,
         },
         macro_index,

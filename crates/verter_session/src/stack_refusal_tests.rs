@@ -184,9 +184,9 @@ fn flow_return_of_pf(
 > {
     let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: Arc::from(id),
+            canonical_id: verter_type_expr::OwnedStr::from(id),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("pf"),
+            symbol: verter_type_expr::OwnedStr::from("pf"),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
         function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,

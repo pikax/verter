@@ -511,7 +511,7 @@ fn finite_batch_reads_match_single_keys_across_projection_modes() {
             .map(|key| {
                 read(SemanticQueryKey::IndexedAccess {
                     base,
-                    index: IndexKey::String(Arc::from(*key)),
+                    index: IndexKey::String(verter_type_expr::OwnedStr::from(*key)),
                     mode,
                 })
             })
@@ -718,9 +718,9 @@ fn merged_global_instantiation_preserves_approximation_from_every_declaration() 
         for file in ["/a.ts", "/b.ts", "/a.ts"] {
             let key = SemanticQueryKey::Instantiate(InstantiateKey::new(
                 dispatch.type_slot_for(
-                    Arc::from(file),
+                    verter_type_expr::OwnedStr::from(file),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    Arc::from("Shared"),
+                    verter_type_expr::OwnedStr::from("Shared"),
                 ),
                 Arc::from([]),
                 dispatch.instantiate_context_for(file, context),

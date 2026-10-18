@@ -71,14 +71,14 @@ fn type_resolution_audit_shared_graph_reused_across_entry_points() {
     // hit that entry without allocating another.
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::from("/Probe.vue"),
+            canonical_id: verter_type_expr::OwnedStr::from("/Probe.vue"),
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::instance(0),
             ),
         },
-        name: Arc::from("Outer"),
+        name: verter_type_expr::OwnedStr::from("Outer"),
     });
     let (resolved, record) = host.resolve_type_with_audit(key, "/Probe.vue").into_parts();
     let resolved = resolved

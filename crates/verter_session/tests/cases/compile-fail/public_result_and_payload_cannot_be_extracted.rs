@@ -18,7 +18,7 @@ fn extract_diagnostics(read: &CacheRead<()>) -> Arc<[ShallowDiagnostic]> {
     Arc::clone(&read.walker_diagnostics)
 }
 
-fn extract_payload(lease: NodeDataLease) -> Arc<SemanticNodeData> {
+fn extract_payload(lease: NodeDataLease) -> verter_type_engine::semantic_query_memo::NodeData {
     lease
 }
 

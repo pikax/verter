@@ -75,6 +75,7 @@ mod carrier_publication_store_tests;
 mod cold_artifact_dedup_tests;
 mod compile;
 mod component_meta_delivery;
+mod heap_size_foreign;
 #[cfg(test)]
 mod request_view_reuse_tests;
 #[cfg(test)]

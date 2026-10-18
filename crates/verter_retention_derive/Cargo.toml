@@ -1,0 +1,21 @@
+[package]
+name = "verter_retention_derive"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Proc-macro deriving the exhaustive HeapSize measurement of a retained data tree"
+publish = false
+
+# A proc-macro crate cannot also export non-proc-macro items, so the trait
+# lives in `verter_retention`, which re-exports this derive beside it.
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { workspace = true }
+quote = { workspace = true }
+proc-macro2 = { workspace = true }

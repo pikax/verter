@@ -565,7 +565,7 @@ defineSlots<OpenMappedSlots<T>>()
             param_index: 0,
             constraint: None,
             default: None,
-            display_name: Arc::from("T"),
+            display_name: verter_type_expr::OwnedStr::from("T"),
         },
     );
     let carrier = match dispatch

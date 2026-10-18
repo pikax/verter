@@ -29,9 +29,9 @@ use verter_type_engine::semantic_query::{InstantiateContext, InstantiateKey, Pro
 fn main() {
     let prc = ProjectionReductionContext::published(ProjectionMode::Expanded);
     let base = ResolvedDeclSlotIdentity::type_slot_unscoped(
-        Arc::from("/x.ts"),
+        verter_type_expr::OwnedStr::from("/x.ts"),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::from("Foo"),
+        verter_type_expr::OwnedStr::from("Foo"),
     );
     let args: Arc<[SemanticNodeId]> = Arc::from(Vec::new().into_boxed_slice());
 

@@ -145,9 +145,9 @@ enum Outcome {
 fn request(host: &VerterHost, token: CancellationToken) -> Outcome {
     let identity = FlowFunctionReturnIdentity {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(ROOT),
+            canonical_id: verter_type_expr::OwnedStr::from(ROOT),
             owner: TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("all"),
+            symbol: verter_type_expr::OwnedStr::from("all"),
             space: LocatorSymbolSpace::Value,
         },
         function_part: FunctionPartIdentity::DeclarationBody,

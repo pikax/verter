@@ -47,9 +47,9 @@ pub(super) fn occurrence(name: &str, ordinal: u32) -> SignatureNodeOccurrence {
     SignatureNodeOccurrence {
         function: FlowFunctionReturnIdentity {
             anchor: AuthoredAnchor {
-                canonical_id: Arc::from(CANONICAL),
+                canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from(name),
+                symbol: verter_type_expr::OwnedStr::from(name),
                 space: LocatorSymbolSpace::Value,
             },
             function_part: FunctionPartIdentity::DeclarationBody,
@@ -350,7 +350,7 @@ pub(super) fn call_key_at(
     } = dispatch.resolve_call_context_for(canonical);
     ResolveCallKey {
         point: ProgramPointId {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             offset: 41,
         },
         callee,
@@ -778,14 +778,14 @@ fn mixed_const_policy_is_applied_per_parameter() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let u = graph.intern_node(SemanticNodeData::TypeParam {
         decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("U"),
         param_index: 1,
         constraint: None,
         default: None,
-        display_name: Arc::from("U"),
+        display_name: verter_type_expr::OwnedStr::from("U"),
     });
     let string_a = graph.intern_node(SemanticNodeData::Literal(
         verter_type_expr::LiteralValue::String("a".into()),
@@ -833,14 +833,14 @@ fn mixed_const_policy_is_applied_per_parameter() {
         ],
         vec![
             TypeParamDecl {
-                name: Arc::from("T"),
+                name: verter_type_expr::OwnedStr::from("T"),
                 param: t,
                 constraint: None,
                 default: None,
                 is_const: true,
             },
             TypeParamDecl {
-                name: Arc::from("U"),
+                name: verter_type_expr::OwnedStr::from("U"),
                 param: u,
                 constraint: None,
                 default: None,
@@ -901,7 +901,7 @@ fn constraint_rejection_rolls_back_and_commits_only_the_winner() {
         param_index: 0,
         constraint: Some(string),
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let bad = signature(
         &dispatch,
@@ -910,7 +910,7 @@ fn constraint_rejection_rolls_back_and_commits_only_the_winner() {
         SignatureKind::Call,
         vec![FunctionParam::synthetic(None, t, false, false)],
         vec![TypeParamDecl {
-            name: Arc::from("T"),
+            name: verter_type_expr::OwnedStr::from("T"),
             param: t,
             constraint: Some(string),
             default: None,
@@ -990,7 +990,7 @@ fn declared_return_uses_the_final_substitution() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let ret = graph.intern_node(SemanticNodeData::Array {
         element: t,
@@ -1003,7 +1003,7 @@ fn declared_return_uses_the_final_substitution() {
         SignatureKind::Call,
         vec![FunctionParam::synthetic(None, t, false, false)],
         vec![TypeParamDecl {
-            name: Arc::from("T"),
+            name: verter_type_expr::OwnedStr::from("T"),
             param: t,
             constraint: None,
             default: None,
@@ -1054,7 +1054,7 @@ fn body_derived_return_uses_the_final_substitution() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let identity = occurrence("body", 0).function;
     let sig = signature_with_carrier(
@@ -1064,7 +1064,7 @@ fn body_derived_return_uses_the_final_substitution() {
         SignatureKind::Call,
         vec![FunctionParam::synthetic(None, t, false, false)],
         vec![TypeParamDecl {
-            name: Arc::from("T"),
+            name: verter_type_expr::OwnedStr::from("T"),
             param: t,
             constraint: None,
             default: None,
@@ -1246,7 +1246,7 @@ fn contextual_receiver_budget_exhaustion_admits_nothing() {
             param_index: 0,
             constraint: None,
             default: None,
-            display_name: Arc::from("T"),
+            display_name: verter_type_expr::OwnedStr::from("T"),
         });
         let receiver = graph.intern_node(SemanticNodeData::Tuple {
             elements: (0..128)
@@ -1282,7 +1282,7 @@ fn contextual_receiver_budget_exhaustion_admits_nothing() {
                 FunctionParam::synthetic(None, callback, false, false),
             ],
             vec![TypeParamDecl {
-                name: Arc::from("T"),
+                name: verter_type_expr::OwnedStr::from("T"),
                 param: t,
                 constraint: None,
                 default: None,
@@ -1390,13 +1390,13 @@ fn anonymous_candidate_pairs_with_its_own_instantiation() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let sig = anonymous_signature(
         &dispatch,
         vec![FunctionParam::synthetic(None, t, false, false)],
         vec![TypeParamDecl {
-            name: Arc::from("T"),
+            name: verter_type_expr::OwnedStr::from("T"),
             param: t,
             constraint: None,
             default: None,
@@ -1525,7 +1525,7 @@ fn unrootable_call_is_served_but_never_admitted() {
     // (1) The call site is not a servable file.
     let mut unservable = call_key(&dispatch, callee, CallKind::Call, None, vec![eager(string)]);
     unservable.point = ProgramPointId {
-        canonical_id: Arc::from("/ws/never-upserted.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/ws/never-upserted.ts"),
         offset: 0,
     };
     let result = selected_query(&dispatch, unservable.clone());
@@ -1736,7 +1736,7 @@ fn context_sensitive_argument_is_withheld_from_the_first_inference_pass() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     // `cb: (item: T) => T`
     let callback_param = signature(
@@ -1770,7 +1770,7 @@ fn context_sensitive_argument_is_withheld_from_the_first_inference_pass() {
             FunctionParam::synthetic(None, t, false, false),
         ],
         vec![TypeParamDecl {
-            name: Arc::from("T"),
+            name: verter_type_expr::OwnedStr::from("T"),
             param: t,
             constraint: None,
             default: None,
@@ -2014,7 +2014,7 @@ fn generic_rest_infers_a_tuple_candidate_and_never_caps_arity() {
             param_index: 0,
             constraint: Some(constraint),
             default: None,
-            display_name: Arc::from("A"),
+            display_name: verter_type_expr::OwnedStr::from("A"),
         });
         let return_type = if return_type == unknown {
             param
@@ -2033,7 +2033,7 @@ fn generic_rest_infers_a_tuple_candidate_and_never_caps_arity() {
                 true,
             )],
             vec![TypeParamDecl {
-                name: Arc::from("A"),
+                name: verter_type_expr::OwnedStr::from("A"),
                 param,
                 constraint: Some(constraint),
                 default: None,
@@ -2379,7 +2379,7 @@ fn overload_call_key(
     } = dispatch.resolve_call_context_for(OVERLOAD_CANONICAL);
     ResolveCallKey {
         point: ProgramPointId {
-            canonical_id: Arc::from(OVERLOAD_CANONICAL),
+            canonical_id: verter_type_expr::OwnedStr::from(OVERLOAD_CANONICAL),
             offset: 0,
         },
         callee,
@@ -2388,7 +2388,7 @@ fn overload_call_key(
         args: Arc::from(
             vec![CallArgKey::ProgramExpression {
                 point: ProgramPointId {
-                    canonical_id: Arc::from(OVERLOAD_CANONICAL),
+                    canonical_id: verter_type_expr::OwnedStr::from(OVERLOAD_CANONICAL),
                     offset,
                 },
                 spread: false,
@@ -2537,13 +2537,13 @@ fn source_flow_type(
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let key = verter_type_engine::semantic_query::FlowReturnKey {
         function: dispatch.flow_function_slot_for(
-            Arc::from(canonical),
+            verter_type_expr::OwnedStr::from(canonical),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(name),
+            verter_type_expr::OwnedStr::from(name),
             FunctionPartIdentity::DeclarationBody,
             0,
         ),
-        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(canonical),
         demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
         input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -2552,7 +2552,7 @@ fn source_flow_type(
     let QueryResult::Value(SemanticQueryOutput {
         value: SemanticQueryValue::FlowReturn(result),
         ..
-    }) = SemanticQueryApi::execute(&dispatch, SemanticQueryKey::FlowReturn(Box::new(key)))
+    }) = SemanticQueryApi::execute(&*dispatch, SemanticQueryKey::FlowReturn(Box::new(key)))
     else {
         panic!("{name} must produce a complete flow return");
     };
@@ -2903,13 +2903,13 @@ fn type_param(
         param_index: index,
         constraint: None,
         default: None,
-        display_name: Arc::from(name),
+        display_name: verter_type_expr::OwnedStr::from(name),
     })
 }
 
 fn plain_decl(param: SemanticNodeId, name: &str) -> TypeParamDecl {
     TypeParamDecl {
-        name: Arc::from(name),
+        name: verter_type_expr::OwnedStr::from(name),
         param,
         constraint: None,
         default: None,
@@ -3636,7 +3636,7 @@ fn unresolved_argument_mapping_degrades_and_admits_nothing() {
     let callee = callable(&dispatch, vec![first, second], Vec::new());
     let unresolved = CallArgKey::ProgramExpression {
         point: ProgramPointId {
-            canonical_id: Arc::from("/ws/definitely-not-indexed.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/ws/definitely-not-indexed.ts"),
             offset: 999,
         },
         spread: false,
@@ -3995,7 +3995,9 @@ fn incomplete_opaque_callee_is_not_classified_not_callable() {
     );
     for incomplete in [
         verter_type_engine::semantic_query::QueryError::Cancelled,
-        verter_type_engine::semantic_query::QueryError::Other(Arc::from("unsettled")),
+        verter_type_engine::semantic_query::QueryError::Other(verter_type_expr::OwnedStr::from(
+            "unsettled",
+        )),
     ] {
         let callee = graph.intern_node(SemanticNodeData::Opaque(incomplete.clone()));
         let step = dispatch.execute_resolve_call(call_key(
@@ -4322,7 +4324,7 @@ fn typeof_value_node(
                 Arc::from(canonical),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
-            name: Arc::from(name),
+            name: verter_type_expr::OwnedStr::from(name),
         },
         verter_type_engine::semantic_query::ProjectionReductionContext::published(
             verter_type_engine::semantic_query::ProjectionMode::Expanded,
@@ -4342,7 +4344,7 @@ fn declaring_file(
 ) -> Option<Arc<str>> {
     match dispatch.graph().node_scope(node) {
         Some(verter_type_engine::semantic_query::NodeScopeId::File { canonical_id, .. }) => {
-            Some(canonical_id)
+            Some(std::sync::Arc::<str>::from(canonical_id))
         }
         _ => None,
     }
@@ -4794,7 +4796,7 @@ fn a_partial_closed_operator_leaves_the_enclosing_call_partial_and_cold() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let keys_of_t = graph.intern_node(SemanticNodeData::KeyOf { base: t });
     let ret = graph.intern_node(SemanticNodeData::Array {
@@ -4809,7 +4811,7 @@ fn a_partial_closed_operator_leaves_the_enclosing_call_partial_and_cold() {
             SignatureKind::Call,
             vec![FunctionParam::synthetic(None, t, false, false)],
             vec![TypeParamDecl {
-                name: Arc::from("T"),
+                name: verter_type_expr::OwnedStr::from("T"),
                 param: t,
                 constraint: None,
                 default: None,
@@ -4891,14 +4893,14 @@ fn binder_reach_through_an_alias_chain(query_depth: u16) -> super::call_resolve:
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let chain = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: verter_type_engine::semantic_query::DeclIdentity {
-            canonical_id: Arc::from(CANONICAL),
+            canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: verter_type_engine::semantic_query::HashValue::default(),
-            decl_name: Arc::from("A2"),
+            decl_name: verter_type_expr::OwnedStr::from("A2"),
         },
         args: verter_type_engine::semantic_query::PayloadArray::from(vec![t].into_boxed_slice()),
     });

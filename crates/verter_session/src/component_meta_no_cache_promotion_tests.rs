@@ -442,13 +442,13 @@ fn post_trip_typeof_early_exit_attributes_to_typeof_cold_counter() {
                     Arc::from("/post-trip-typeof.ts"),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
-                name: Arc::from("sample"),
+                name: verter_type_expr::OwnedStr::from("sample"),
             },
             0,
             Default::default(),
             Default::default(),
         ),
-        path: Arc::from([]),
+        path: verter_type_expr::OwnedSlice::from([]),
         context: TypeOfContext::new(context, Default::default()),
     };
     let result = dispatch.execute_read(typeof_key);
@@ -597,7 +597,7 @@ fn no_cache_promotion_for_budget_exceeded_resolve_macro_payload() {
     let base = intern_three_member_object(&host);
     let key = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![
                 PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     "deep_0",
@@ -660,7 +660,7 @@ fn no_cache_promotion_for_budget_exceeded_route_target_pick_omit() {
     // host instance — paranoia for thread-local sharing).
     let key = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![
                 PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     "deep_0",
@@ -717,7 +717,7 @@ fn no_cache_promotion_for_budget_exceeded_fallthrough_inheritance() {
     let base = intern_three_member_object(&host);
     let key = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![
                 PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     "deep_0",
@@ -783,7 +783,7 @@ fn no_cache_promotion_for_budget_exceeded_userland_shadowing_pick() {
     let base = intern_three_member_object(&host);
     let key = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![
                 PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     "deep_0",
@@ -853,7 +853,7 @@ fn no_cache_promotion_for_budget_exceeded_exclude_extract_reduction() {
     let base = intern_three_member_object(&host);
     let key = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![
                 PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     "deep_0",
@@ -923,7 +923,7 @@ fn no_cache_promotion_for_budget_exceeded_slot_binding_lowering() {
     let base = intern_three_member_object(&host);
     let key = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![
                 PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     "deep_0",
@@ -993,7 +993,7 @@ fn no_cache_promotion_for_budget_exceeded_typeof_substitution() {
     let base = intern_three_member_object(&host);
     let key = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![
                 PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     "deep_0",
@@ -1068,7 +1068,7 @@ fn no_cache_promotion_for_budget_exceeded_engine_state_promotion() {
     let base = intern_three_member_object(&host);
     let key = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![
                 PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     "deep_0",
@@ -1672,10 +1672,10 @@ fn projectpath_over_instantiationref_budget_trip_withholds_value_and_does_not_wa
     // unwraps in the walker (even at the terminal hop), so the ProjectPath
     // walk dispatches the nested `Instantiate`.
     let partial_builtin = verter_type_engine::semantic_query::DeclIdentity {
-        canonical_id: Arc::from("__builtin__"),
+        canonical_id: verter_type_expr::OwnedStr::from("__builtin__"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: verter_type_engine::semantic_query::HashValue::default(),
-        decl_name: Arc::from("Partial"),
+        decl_name: verter_type_expr::OwnedStr::from("Partial"),
     };
     let instref = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: partial_builtin,
@@ -1701,7 +1701,7 @@ fn projectpath_over_instantiationref_budget_trip_withholds_value_and_does_not_wa
     // output by `build_project_path`.
     let projectpath_key = SemanticQueryKey::ProjectPath {
         base: instref,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![PathSegment::Member(
                 verter_type_engine::semantic_query::PropertyKey::identifier("x"),
             )]
@@ -1811,9 +1811,9 @@ fn lower_indexed_access_chain_budget_trip_folds_partial_through_chokepoint_and_r
 
     let dispatch = host.semantic_dispatch();
     let deep_slot = dispatch.type_slot_for(
-        Arc::from("/w/lower_chain.ts"),
+        verter_type_expr::OwnedStr::from("/w/lower_chain.ts"),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::from("Deep"),
+        verter_type_expr::OwnedStr::from("Deep"),
     );
     let instantiate_key =
         SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
@@ -1901,10 +1901,10 @@ fn conditional_relation_budget_trip_folds_partial_and_refuses_relation_memo() {
     let mk_partial_instref = |member: &'static str| -> SemanticNodeId {
         let arg = intern_single_member_object(&host, member);
         let partial_builtin = verter_type_engine::semantic_query::DeclIdentity {
-            canonical_id: Arc::from("__builtin__"),
+            canonical_id: verter_type_expr::OwnedStr::from("__builtin__"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: verter_type_engine::semantic_query::HashValue::default(),
-            decl_name: Arc::from("Partial"),
+            decl_name: verter_type_expr::OwnedStr::from("Partial"),
         };
         graph.intern_node(SemanticNodeData::InstantiationRef {
             base: partial_builtin,

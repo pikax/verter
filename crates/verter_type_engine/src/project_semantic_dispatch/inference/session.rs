@@ -337,6 +337,12 @@ impl InferenceSession {
             .map(|reverse| &reverse.spec)
     }
 
+    /// The candidates the session's parameters collected so far.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn collected_candidates_for_tests(&self) -> usize {
+        self.infos.iter().map(|info| info.candidates.len()).sum()
+    }
+
     /// A rollback point over the session's per-parameter candidate lists.
     /// Deposits strictly APPEND onto `InferenceInfo::candidates` (the info
     /// set itself is fixed at session open), so a checkpoint is the ordered
@@ -702,7 +708,7 @@ impl InferenceSession {
             let bound = combine(candidates, variance);
             bindings.push(InferBinding {
                 param: info.param_node,
-                name: Arc::clone(&info.param_name),
+                name: verter_type_expr::OwnedStr::from(info.param_name.clone()),
                 bound,
             });
         }

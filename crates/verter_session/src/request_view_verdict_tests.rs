@@ -313,9 +313,9 @@ fn a_refused_index_walk_settles_nothing_and_its_retry_validates() {
             .expect("upsert must succeed");
     };
     let function = ProgramAnalysisFunctionRef {
-        canonical_id: Arc::from(ID),
+        canonical_id: verter_type_expr::OwnedStr::from(ID),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        merged_symbol_name: Arc::from("alpha"),
+        merged_symbol_name: verter_type_expr::OwnedStr::from("alpha"),
         symbol_space: verter_session_query::facts::SymbolSpace::Value,
         function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
         overload_ordinal: 0,

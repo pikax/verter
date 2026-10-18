@@ -368,9 +368,9 @@ pub(super) fn flow_return_audited_on_host(
     );
     let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: Arc::from(PROBE_FILE),
+            canonical_id: verter_type_expr::OwnedStr::from(PROBE_FILE),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(function),
+            symbol: verter_type_expr::OwnedStr::from(function),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
         function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
@@ -389,9 +389,9 @@ fn flow_return_of(
 ) -> Option<Arc<verter_type_engine::semantic_query::FlowReturnResult>> {
     let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: Arc::from(PROBE_FILE),
+            canonical_id: verter_type_expr::OwnedStr::from(PROBE_FILE),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(function),
+            symbol: verter_type_expr::OwnedStr::from(function),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
         function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
