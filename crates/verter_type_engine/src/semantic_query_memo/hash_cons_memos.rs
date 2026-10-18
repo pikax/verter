@@ -1,7 +1,9 @@
 //! Bounded memos for structural substitution and deferred evaluation.
 //!
-//! Substitution is a pure function of immutable interned nodes. Deferred
-//! evaluation can read declarations and export routes, so each retained
+//! Complete substitution results depend on immutable interned nodes and
+//! carry construction receipts. Refused or unpaid substitutions never
+//! publish. Deferred evaluation can read declarations and export routes,
+//! so each retained
 //! answer carries its observed fact signature and strict self roots.
 //! Production evaluation reads validate and replay that proof against the
 //! caller's view. A changed dependency replaces the stale evaluated answer;
@@ -28,6 +30,7 @@ pub(super) const HASH_CONS_MEMO_RETENTION_CAP: usize = 100_000;
 /// result's nodes, and the reservation of the entry's storage.
 pub(crate) struct SubstituteMemoEntry {
     result: SemanticNodeId,
+    receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
     roots: super::node_roots::NodeRootSet,
     _retention: verter_session_query::retention::RetentionCharge,
 }
@@ -91,6 +94,20 @@ impl SemanticGraphStore {
         }
     }
 
+    /// The receipt of the same immutable first-writer-wins result. A
+    /// concurrent eviction makes the caller recompute rather than serve an
+    /// unpriced node.
+    pub(crate) fn substitute_memo_receipt(
+        &self,
+        node: SemanticNodeId,
+        parameter: SemanticNodeId,
+        arg: SemanticNodeId,
+    ) -> Option<Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>> {
+        self.substitute_memo
+            .get(&(node, parameter, arg))
+            .map(|entry| Arc::clone(&entry.receipt))
+    }
+
     construction_ordinal_seam! {
         /// First-writer-wins publish for `substitute_memo`. Tracks the
         /// inserted key in the FIFO sidecar so the deque can evict the
@@ -105,68 +122,85 @@ impl SemanticGraphStore {
             arg: SemanticNodeId,
             result: SemanticNodeId,
         ) {
-            let key = (value_expr, parameter_node, arg);
-            match self.substitute_memo.entry(key) {
-                Entry::Occupied(_) => {
-                    // First-writer-wins: another thread already
-                    // published. No FIFO bookkeeping required.
-                }
-                Entry::Vacant(slot) => {
-                    let Ok(roots) =
-                        self.root_nodes([value_expr, parameter_node, arg, result])
-                    else {
-                        return;
-                    };
-                    // Charged like every retained answer; one the account
-                    // refuses is computed again on demand.
-                    let mut aliases =
-                        verter_session_query::retention::allocation::AliasSet::new();
-                    let bytes = hash_cons_entry_bytes::<(
-                        (SemanticNodeId, SemanticNodeId, SemanticNodeId),
-                        SubstituteMemoEntry,
-                    )>(&roots, &mut aliases);
-                    // The root owner is an owned allocation, charged by its
-                    // own cell and held by the entry.
-                    let handles = aliases.take_handles();
-                    let verter_session_query::retention::RetentionAdmission::Admitted(retention) =
-                        self.retention_account().reserve(
-                            verter_session_query::retention::ChargeClass::Retained,
-                            bytes,
-                        )
-                    else {
-                        return;
-                    };
-                    let Ok(retention) = handles.retained_with(retention, self.charge_ctx())
-                    else {
-                        return;
-                    };
-                    slot.insert(SubstituteMemoEntry {
-                        result,
-                        roots,
-                        _retention: retention,
-                    });
-                    let mut fifo = self.substitute_memo_fifo.lock();
-                    fifo.push_back(key);
-                    while fifo.len() > HASH_CONS_MEMO_RETENTION_CAP {
-                        if let Some(victim) = fifo.pop_front() {
-                            // Drop the FIFO lock BEFORE touching
-                            // `substitute_memo` to avoid blocking
-                            // concurrent publishers while DashMap's
-                            // shard lock is taken; re-acquire on the
-                            // next loop iteration if we still need
-                            // to evict.
-                            drop(fifo);
-                            self.substitute_memo.remove(&victim);
-                            fifo = self.substitute_memo_fifo.lock();
-                        } else {
-                            break;
-                        }
+            use crate::project_semantic_dispatch::cost_receipt::{CostIdentity, DemandCostReceipt, LogicalUsage};
+            let receipt = DemandCostReceipt::new(
+                CostIdentity::of_key((value_expr, parameter_node, arg)),
+                LogicalUsage::default(), Vec::new());
+            self.substitute_memo_publish_priced(value_expr, parameter_node, arg, result, receipt);
+        }
+    }
+
+    /// Publish only a complete substitution with the cost of constructing
+    /// it. The receipt's reservation follows the same retention account as
+    /// the entry and its counted roots.
+    pub(crate) fn substitute_memo_publish_priced(
+        &self,
+        value_expr: SemanticNodeId,
+        parameter_node: SemanticNodeId,
+        arg: SemanticNodeId,
+        result: SemanticNodeId,
+        receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
+    ) {
+        if receipt.reserve_retention(self.retention_account()).is_err() {
+            return;
+        }
+        let key = (value_expr, parameter_node, arg);
+        match self.substitute_memo.entry(key) {
+            Entry::Occupied(_) => {
+                // First-writer-wins: another thread already
+                // published. No FIFO bookkeeping required.
+            }
+            Entry::Vacant(slot) => {
+                let Ok(roots) = self.root_nodes([value_expr, parameter_node, arg, result]) else {
+                    return;
+                };
+                // Charged like every retained answer; one the account
+                // refuses is computed again on demand.
+                let mut aliases = verter_session_query::retention::allocation::AliasSet::new();
+                let bytes = hash_cons_entry_bytes::<(
+                    (SemanticNodeId, SemanticNodeId, SemanticNodeId),
+                    SubstituteMemoEntry,
+                )>(&roots, &mut aliases);
+                // The root owner is an owned allocation, charged by its
+                // own cell and held by the entry.
+                let handles = aliases.take_handles();
+                let verter_session_query::retention::RetentionAdmission::Admitted(retention) =
+                    self.retention_account().reserve(
+                        verter_session_query::retention::ChargeClass::Retained,
+                        bytes,
+                    )
+                else {
+                    return;
+                };
+                let Ok(retention) = handles.retained_with(retention, self.charge_ctx()) else {
+                    return;
+                };
+                slot.insert(SubstituteMemoEntry {
+                    result,
+                    receipt,
+                    roots,
+                    _retention: retention,
+                });
+                let mut fifo = self.substitute_memo_fifo.lock();
+                fifo.push_back(key);
+                while fifo.len() > HASH_CONS_MEMO_RETENTION_CAP {
+                    if let Some(victim) = fifo.pop_front() {
+                        // Drop the FIFO lock BEFORE touching
+                        // `substitute_memo` to avoid blocking
+                        // concurrent publishers while DashMap's
+                        // shard lock is taken; re-acquire on the
+                        // next loop iteration if we still need
+                        // to evict.
+                        drop(fifo);
+                        self.substitute_memo.remove(&victim);
+                        fifo = self.substitute_memo_fifo.lock();
+                    } else {
+                        break;
                     }
                 }
             }
         }
     }
-
     /// A deferred operator can read declarations and export routes. Its
     /// interned input is immutable, but its evaluated answer needs the
     /// complete read proof to validate against this request's view.

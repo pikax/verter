@@ -6,7 +6,8 @@
 //! under the limit
 //! the splice keeps every position, label and marker an authored tuple of
 //! the same elements has. A product the connected demand cannot pay for
-//! keeps its spreads in place as a typed partial — never a truncated tuple.
+//! returns a typed incomplete node — never an unadmitted authored copy or
+//! a truncated tuple.
 //!
 //! Every limit row is TypeScript 7.0.2's, measured with `tsc --strict` on
 //! the same shapes: `[...Z9999]`, `[1, ...Z9998]` and `[...Z5000,
@@ -468,16 +469,11 @@ fn splice_in_demand(
     (shape, work, bytes, ledger.charge().err())
 }
 
-/// The splice is weighed before it is built: a product of 9,999 elements is
-/// charged the 10,001 elements read to size it plus the 9,999 it holds, and
-/// their bytes; the refused product of two spreads of one 5,000-element
-/// tuple is charged the 5,002 elements read to decide it — the tuple sized
-/// once — and copies nothing; sizing stops reading once a refusal is
-/// certain. A demand that cannot pay
-/// for the product keeps both spreads in place under the trip that refused
-/// it — the work rail, or the soft construction-byte rail — never a
-/// truncated tuple and never the size refusal; one that cannot pay for
-/// sizing it stops reading as it runs out, keeping what it paid for.
+/// Planning and copying have distinct costs: the constructor charges every
+/// inspected element, resolved spread and executed copy step. A size
+/// refusal builds no expanded product; an admitted authored diagnostic
+/// origin is charged separately. Work and construction-byte refusal return
+/// typed incomplete nodes, and every consumed sizing prefix is recorded.
 #[test]
 fn a_splice_is_weighed_and_paid_for_before_it_is_built() {
     let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
@@ -490,20 +486,25 @@ fn a_splice_is_weighed_and_paid_for_before_it_is_built() {
         "9,999 elements splice: {:?}",
         abbreviated(&format!("{shape:?}"))
     );
-    assert_eq!(
-        (work, bytes, trip),
-        (10_001 + 9_999, 9_999 * element_bytes, None)
+    assert_eq!((work, trip), (20_006, None));
+    assert!(
+        bytes > 9_999 * element_bytes,
+        "planning storage is reserved too"
     );
 
     let (shape, work, bytes, trip) = splice_in_demand(&host, [5_000, 5_000], full, None);
+    assert!(
+        bytes < 100 * element_bytes,
+        "a size refusal reserves planning and its origin, never an expanded tuple"
+    );
     assert!(matches!(
         shape,
         super::build::NormalizedTupleShape::Array(_)
     ));
     assert_eq!(
-        (work, bytes, trip),
-        (5_002, 0, None),
-        "the sizing that decided the refusal is charged; nothing is copied"
+        (work, trip),
+        (5_005, None),
+        "sizing and the admitted two-element diagnostic origin are charged"
     );
     let (shape, work, _, trip) = splice_in_demand(&host, [9_999, 20_000], full, None);
     assert!(matches!(
@@ -512,29 +513,36 @@ fn a_splice_is_weighed_and_paid_for_before_it_is_built() {
     ));
     assert_eq!(
         (work, trip),
-        (10_002, None),
-        "sizing stops at the first element of the second spread, where the \
-         refusal is certain, not at the end of its 20,000"
+        (30_005, None),
+        "the child must be planned before joining: a later child splice may recover as one rest element"
     );
 
     let unspliced = |shape: &super::build::NormalizedTupleShape| {
-        matches!(shape, super::build::NormalizedTupleShape::Tuple(elements)
-            if elements.len() == 2 && elements.iter().all(|element| element.rest))
+        matches!(shape, super::build::NormalizedTupleShape::Array(_))
     };
     let (shape, _, _, trip) = splice_in_demand(&host, [5_000, 4_999], 20_000 - 1, None);
-    assert!(unspliced(&shape), "the spreads stay in place");
+    assert!(
+        unspliced(&shape),
+        "an unpaid constructor returns a typed incomplete node"
+    );
     assert_eq!(trip, Some(PartialReasonSet::PROJECTION_WORK_LIMIT));
 
     let (shape, _, _, trip) =
         splice_in_demand(&host, [5_000, 4_999], full, Some(9_999 * element_bytes - 1));
-    assert!(unspliced(&shape), "the spreads stay in place");
+    assert!(
+        unspliced(&shape),
+        "an unpaid constructor returns a typed incomplete node"
+    );
     assert_eq!(trip, Some(PartialReasonSet::CONNECTED_MEMORY_LIMIT));
 
     let (shape, work, _, trip) = splice_in_demand(&host, [5_000, 4_999], 300, None);
-    assert!(unspliced(&shape), "the spreads stay in place");
+    assert!(
+        unspliced(&shape),
+        "an unpaid constructor returns a typed incomplete node"
+    );
     assert_eq!(trip, Some(PartialReasonSet::PROJECTION_WORK_LIMIT));
     assert!(
-        work > 0 && work <= 300,
+        work == 300,
         "sizing pays as it reads and stops when the demand runs out, \
          long before the 10,001 elements sizing the product reads: charged {work}"
     );
@@ -822,4 +830,371 @@ fn soft_byte_and_retention_refusals_stay_distinct() {
     let before = semantic_misses(&host);
     assert_eq!(root_read(&host, &key, full, None, 0), kept);
     assert!(semantic_misses(&host) > before, "so its repeat evaluates");
+}
+
+/// Top-level indexed calls suspend outside the flow evaluator. Their
+/// declared tuple return is still constructed while checking an expression.
+#[test]
+fn indexed_calls_preserve_expression_tuple_recovery() {
+    let host = default_probe_host();
+    let source = format!(
+        "declare const z: {};\n\
+         declare function twice<T extends unknown[]>(a: T): [...T, ...T];\n\
+         {CONCAT}declare function concat<T extends unknown[]>(a: T): Concat<T, T>;\n\
+         export const direct = twice(z);\n\
+         export const aliased = concat(z);\n\
+         declare const typed: Concat<typeof z, typeof z>;\n",
+        zeros(5_000)
+    );
+    for (probe, expected) in [
+        ("typeof typed", TS2799),
+        ("typeof direct", TS2800),
+        ("typeof aliased", TS2800),
+        ("typeof typed", TS2799),
+        ("typeof aliased", TS2800),
+    ] {
+        with_probe_outcome_on_host(
+            &host,
+            ProbeProject::default(),
+            &source,
+            probe,
+            |dispatch, outcome| {
+                let super::evaluate::StructuralFactDemandOutcome::Recovered { node, reasons } =
+                    outcome
+                else {
+                    panic!("{probe}: expected typed recovery, got {outcome:?}");
+                };
+                assert_eq!(reasons, PartialReasonSet::OPERATION_BUDGET);
+                assert_eq!(
+                    recovery(dispatch, node).map(|(diagnostic, basis, _)| (diagnostic, basis)),
+                    Some((expected, RecoveryBasis::Budget)),
+                    "{probe}"
+                );
+            },
+        );
+    }
+}
+
+/// A traversal commits exactly the admitted prefix, even when its last
+/// window is smaller than a batch; an unpaid product constructs no list.
+#[test]
+fn tuple_planning_stops_at_each_admitted_work_prefix() {
+    let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+    for allowance in [0, 1, 255, 256, 257, 300] {
+        let (shape, work, _, trip) = splice_in_demand(&host, [1_000, 1], allowance, None);
+        assert_eq!(work, allowance, "allowance {allowance}");
+        assert_eq!(trip, Some(PartialReasonSet::PROJECTION_WORK_LIMIT));
+        assert!(
+            matches!(shape, super::build::NormalizedTupleShape::Array(_)),
+            "a refused traversal must not copy the authored list: {allowance}"
+        );
+    }
+}
+
+/// A complete substitution pays its tuple construction cost on a warm
+/// demand. Low allowances never become complete through prior warmth.
+#[test]
+fn substitution_reuse_pays_for_tuple_construction() {
+    let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+    let owner = ProjectSemanticDispatch::new(&host);
+    let graph = owner.graph();
+    let parameter = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: verter_type_engine::semantic_query::DeclIdentity {
+            canonical_id: verter_type_expr::OwnedStr::from(PROBE_FILE),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: Default::default(),
+            decl_name: verter_type_expr::OwnedStr::from("T"),
+        },
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: verter_type_expr::OwnedStr::from("T"),
+    });
+    let zero = graph.intern_node(SemanticNodeData::Literal(
+        verter_type_expr::LiteralValue::Number(0.0),
+    ));
+    let element = |value, rest| TupleElement {
+        label: None,
+        value,
+        optional: false,
+        rest,
+    };
+    let tuple = |elements: Vec<TupleElement>| {
+        graph.intern_node(SemanticNodeData::Tuple {
+            elements: verter_type_engine::semantic_query::PayloadArray::from(
+                elements.into_boxed_slice(),
+            ),
+            readonly: false,
+        })
+    };
+    let source = tuple(vec![element(parameter, true)]);
+    let arg = tuple((0..64).map(|_| element(zero, false)).collect());
+    let run = |allowance| {
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        dispatch.set_connected_limits_for_tests(allowance, 24);
+        let _demand = dispatch.enter_connected_demand(false).0;
+        let result = dispatch.substitute_semantic_type_param(source, parameter, arg);
+        let len = tuple_shape(&dispatch, result).map(|(_, elements)| elements.len());
+        (
+            len,
+            dispatch.connected_demand().work_used_for_tests(),
+            dispatch.connected_demand_tripped(),
+        )
+    };
+    let low = run(1);
+    assert_ne!(low.0, Some(64));
+    assert!(low.2);
+    assert_eq!(
+        graph.substitute_memo_get(source, parameter, arg),
+        None,
+        "an unpaid substitution is never an ordinary memo result"
+    );
+    let cold = run(10_000);
+    assert_eq!(cold.0, Some(64));
+    assert!(!cold.2);
+    assert!(cold.1 > 64);
+    assert!(
+        graph.substitute_memo_get(source, parameter, arg).is_some(),
+        "a complete tuple substitution has a priced memo entry"
+    );
+    let warm = run(10_000);
+    assert_eq!(warm, cold, "the warm demand pays the construction receipt");
+    assert_eq!(run(1), low, "prior warmth cannot heal a low allowance");
+    assert_eq!(
+        run(10_000),
+        cold,
+        "the lower demand cannot poison the complete entry"
+    );
+}
+
+/// Stored tuples need not have been normalized bottom-up by lowering. An
+/// inner refusal occupies its own rest position, preserving the outer prefix.
+#[test]
+fn a_stored_inner_overflow_preserves_the_outer_tuple() {
+    let host = default_probe_host();
+    let dispatch = ProjectSemanticDispatch::new(&*host);
+    let graph = dispatch.graph();
+    let zero = graph.intern_node(SemanticNodeData::Literal(
+        verter_type_expr::LiteralValue::Number(0.0),
+    ));
+    let element = |value, rest| TupleElement {
+        label: None,
+        value,
+        optional: false,
+        rest,
+    };
+    let tuple = |elements: Vec<TupleElement>| {
+        graph.intern_node(SemanticNodeData::Tuple {
+            elements: verter_type_engine::semantic_query::PayloadArray::from(
+                elements.into_boxed_slice(),
+            ),
+            readonly: false,
+        })
+    };
+    let large = tuple((0..9_999).map(|_| element(zero, false)).collect());
+    let inner = tuple(vec![element(zero, false), element(large, true)]);
+    let outer = [element(zero, false), element(inner, true)];
+    let super::build::NormalizedTupleShape::Tuple(elements) =
+        dispatch.normalize_tuple_spread(&outer, true)
+    else {
+        panic!("only the inner tuple refuses");
+    };
+    assert_eq!(elements.len(), 2);
+    assert_eq!(elements[0].value, zero);
+    assert!(!elements[0].rest);
+    assert!(elements[1].rest);
+    assert_eq!(
+        recovery(&dispatch, elements[1].value),
+        Some((TS2799, RecoveryBasis::Budget, Some(inner)))
+    );
+}
+
+/// An empty tuple repeatedly shared on both sides of a spread is planned
+/// once per node. Its compact copy plan skips every empty expansion.
+#[test]
+fn shared_empty_spreads_have_bounded_construction_work() {
+    let host = default_probe_host();
+    let dispatch = ProjectSemanticDispatch::new(&*host);
+    let graph = dispatch.graph();
+    let mut node = graph.intern_node(SemanticNodeData::Tuple {
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::new().into_boxed_slice(),
+        ),
+        readonly: false,
+    });
+    for _ in 0..30 {
+        node = graph.intern_node(SemanticNodeData::Tuple {
+            elements: verter_type_engine::semantic_query::PayloadArray::from(
+                (0..2)
+                    .map(|_| TupleElement {
+                        label: None,
+                        value: node,
+                        optional: false,
+                        rest: true,
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            ),
+            readonly: false,
+        });
+    }
+    dispatch.set_connected_limits_for_tests(256, 24);
+    let _demand = dispatch.enter_connected_demand(false).0;
+    let shape = dispatch.normalize_tuple_spread(
+        &[TupleElement {
+            label: None,
+            value: node,
+            optional: false,
+            rest: true,
+        }],
+        false,
+    );
+    assert!(
+        matches!(shape, super::build::NormalizedTupleShape::Tuple(elements) if elements.is_empty())
+    );
+    assert!(dispatch.connected_demand().work_used_for_tests() <= 100);
+    assert!(!dispatch.connected_demand_tripped());
+}
+
+/// Recovery context survives a Pending boundary and thread migration.
+/// The held type flight cannot answer the expression demand's subscription.
+#[test]
+fn a_suspended_indexed_call_keeps_its_recovery_site_on_another_thread() {
+    use verter_type_engine::resolver_core::fact_validation_port::FactValidation as _;
+    use verter_type_engine::semantic_query::{
+        ProjectionMode, ProjectionReductionContext, QueryResult, ScopeId, SemanticQueryValue,
+        ValueRootKey,
+    };
+    use verter_type_engine::semantic_query_memo::{Claim, ReadCapture};
+    let host = default_probe_host();
+    let source = format!("declare const z: {};\ndeclare function twice<T extends unknown[]>(a: T): [...T, ...T];\nexport const result = twice(z);", zeros(5_000));
+    with_probe_on_host(&host, ProbeProject::default(), &source, "1", |_, _| ());
+    let dispatch = ProjectSemanticDispatch::new(&*host);
+    let graph = dispatch.graph();
+    let key = |name: &str| {
+        dispatch.typeof_key_for(
+            ValueRootKey {
+                scope: ScopeId::file(
+                    PROBE_FILE,
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
+                name: verter_type_expr::OwnedStr::from(name),
+            },
+            ProjectionReductionContext::published(ProjectionMode::Navigate),
+        )
+    };
+    let type_task = graph.task_registry_for_tests().register_task();
+    let expression_task = graph.task_registry_for_tests().register_task();
+    let mut type_capture = ReadCapture::default();
+    let mut type_attempt = graph
+        .begin_query_claim(&*host, host.request_flags(), key("z"), &mut type_capture)
+        .unwrap_or_else(|_| panic!("the type demand is cold"));
+    let Claim::Produce(type_lease) = graph.claim_query(
+        &*host,
+        host.request_flags(),
+        &mut type_attempt,
+        &type_task,
+        &mut type_capture,
+    ) else {
+        panic!("the type demand produces");
+    };
+    let mut expression_capture = ReadCapture::expression_for_tests();
+    let mut expression_attempt = graph
+        .begin_query_claim(
+            &*host,
+            host.request_flags(),
+            key("z"),
+            &mut expression_capture,
+        )
+        .unwrap_or_else(|_| panic!("the expression demand is cold"));
+    let Claim::Produce(expression_lease) = graph.claim_query(
+        &*host,
+        host.request_flags(),
+        &mut expression_attempt,
+        &expression_task,
+        &mut expression_capture,
+    ) else {
+        panic!("different recovery contexts have separate flights");
+    };
+    let answer = dispatch.with_semantic_task_for_tests(key("result"), |slot| {
+        let task = slot.as_mut().expect("the task is lent");
+        let waker = std::task::Waker::noop();
+        assert!(task.poll_for_tests(waker).is_pending());
+        std::thread::scope(|scope| scope.spawn(|| assert!(task.poll_for_tests(waker).is_pending())).join().unwrap());
+        drop(expression_lease);
+        std::thread::scope(|scope| scope.spawn(|| {
+            match task.poll_for_tests(waker) {
+                std::task::Poll::Ready(verter_type_engine::project_semantic_dispatch::TaskOutcomeForTests::Answered(answer)) => answer,
+                other => panic!("the expression resumes independently: {other:?}"),
+            }
+        }).join().unwrap())
+    }).expect("the root is cold");
+    let QueryResult::Value(SemanticQueryValue::TypeNode(node)) = answer else {
+        panic!("a type is returned");
+    };
+    assert_eq!(
+        recovery(&dispatch, node).map(|(diagnostic, basis, _)| (diagnostic, basis)),
+        Some((TS2800, RecoveryBasis::Budget))
+    );
+    drop(type_lease);
+    assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+    assert_eq!(dispatch.open_request_state_for_tests().open_cost_scopes, 0);
+}
+
+/// Rest discovery and transparent aliases use the same metered traversal
+/// as nested tuples; sufficient credit preserves each unaffected position.
+#[test]
+fn long_aliases_and_authored_prefixes_obey_the_work_allowance() {
+    let host = default_probe_host();
+    let owner = ProjectSemanticDispatch::new(&*host);
+    let graph = owner.graph();
+    let zero = graph.intern_node(SemanticNodeData::Literal(
+        verter_type_expr::LiteralValue::Number(0.0),
+    ));
+    let element = |value, rest| TupleElement {
+        label: None,
+        value,
+        optional: false,
+        rest,
+    };
+    let tuple = graph.intern_node(SemanticNodeData::Tuple {
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![element(zero, false)].into_boxed_slice(),
+        ),
+        readonly: false,
+    });
+    let mut alias = tuple;
+    for _ in 0..400 {
+        alias = graph.intern_node(SemanticNodeData::Alias(alias));
+    }
+    let authored = (0..600)
+        .map(|_| element(zero, false))
+        .chain(std::iter::once(element(tuple, true)))
+        .collect::<Vec<_>>();
+    for (elements, expected_len) in [(vec![element(alias, true)], 1), (authored, 601)] {
+        for allowance in [300, 2_000] {
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            dispatch.set_connected_limits_for_tests(allowance, 24);
+            let _demand = dispatch.enter_connected_demand(false).0;
+            let shape = dispatch.normalize_tuple_spread(&elements, true);
+            if allowance == 300 {
+                assert_eq!(dispatch.connected_demand().work_used_for_tests(), allowance);
+                assert_eq!(
+                    dispatch.connected_demand().charge(),
+                    Err(PartialReasonSet::PROJECTION_WORK_LIMIT)
+                );
+                let super::build::NormalizedTupleShape::Array(node) = shape else {
+                    panic!("unpaid traversal must not reconstruct the authored list");
+                };
+                assert!(
+                    matches!(graph.node_data(node).as_deref(), Some(SemanticNodeData::Opaque(QueryError::IncompleteSemanticOperand { reasons })) if *reasons == PartialReasonSet::PROJECTION_WORK_LIMIT)
+                );
+            } else {
+                assert!(
+                    matches!(shape, super::build::NormalizedTupleShape::Tuple(elements) if elements.len() == expected_len && elements.iter().all(|e| e.value == zero && !e.rest))
+                );
+                assert!(!dispatch.connected_demand_tripped());
+            }
+        }
+    }
 }

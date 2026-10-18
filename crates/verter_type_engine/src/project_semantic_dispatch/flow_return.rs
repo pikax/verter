@@ -1714,6 +1714,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         match self.execute_resolve_call(key.clone()) {
             super::call_resolve::ResolveCallStep::Complete(result) => {
                 let return_type = super::return_equation::resolved_call_return_type(&result);
+                // A lazy alias return is demanded while checking this call,
+                // before an enclosing type query can choose its recovery site.
+                let return_type = self.check_indexed_call_return(return_type);
                 let fresh = self.call_result_is_fresh_literal(&result, return_type);
                 let held_by_flow = hold_flow_result
                     && self
@@ -1863,6 +1866,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         suspend: bool,
         delivery: Option<super::query_frames::FrameDelivery>,
     ) -> IndexedValuePoll {
+        let _site = self.checking_site_scope(
+            crate::semantic_query::checker_policy::TupleSplicePosition::Expression,
+        );
         use verter_type_expr::IndexedValueExpression;
         enum Phase {
             Enter,
@@ -2071,6 +2077,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// Check a lazy declared return while its call is still the expression
+    /// demand. Complete products retain their named carrier for display;
+    /// a checker recovery replaces it, and an unavailable structural check
+    /// keeps the original carrier under the partiality the demand folded.
+    fn check_indexed_call_return(&self, node: SemanticNodeId) -> SemanticNodeId {
+        let _site = self.checking_site_scope(
+            crate::semantic_query::checker_policy::TupleSplicePosition::Expression,
+        );
+        match self.normalize_node_for_structural_fact_demand(
+            node,
+            crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Expanded,
+            ),
+        ) {
+            super::evaluate::StructuralFactDemandOutcome::Recovered { node, .. } => node,
+            super::evaluate::StructuralFactDemandOutcome::Complete(_)
+            | super::evaluate::StructuralFactDemandOutcome::Partial(_) => node,
+        }
+    }
+
     /// The value a call's resolution, resolved by a frame of its own,
     /// delivers to the indexed run waiting on it: exactly what
     /// [`Self::resolve_indexed_call`] reads from the executor.
@@ -2081,6 +2107,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let value = match self.read_frame_delivery(delivery).value {
             QueryResult::Value(crate::semantic_query::SemanticQueryValue::ResolveCall(result)) => {
                 let return_type = super::return_equation::resolved_call_return_type(&result);
+                // A lazy alias return is demanded while checking this call,
+                // before an enclosing type query can choose its recovery site.
+                let return_type = self.check_indexed_call_return(return_type);
                 Some(IndexedValue {
                     node: return_type,
                     fresh: self.call_result_is_fresh_literal(&result, return_type),
@@ -6884,7 +6913,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // What the evaluator demands is demanded while an expression is
         // checked — save the type nodes it lowers: a tuple splice it
         // refuses is the checker's TS2800.
-        let _expression_site = super::build::CheckingSite::expression();
+        let _expression_site = self.checking_site_scope(
+            crate::semantic_query::checker_policy::TupleSplicePosition::Expression,
+        );
         let value_observations = crate::request_context::ColdComputeCompletenessScope::enter();
         let mut evaluator = FlowEvaluator {
             dispatch: &flow_cx,
@@ -10998,7 +11029,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         expr: &verter_type_expr::TypeExpr,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<SemanticNodeId> {
-        let _type_node = super::build::CheckingSite::type_node();
+        let _type_node = self
+            .checking_site_scope(crate::semantic_query::checker_policy::TupleSplicePosition::Type);
         ProjectSemanticDispatch::lower_type_expr_in_owner_scope_with_context(
             self,
             scope_canonical_id,
@@ -11134,7 +11166,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         reduction_context: ProjectionReductionContext,
     ) -> SemanticNodeId {
-        let _type_node = super::build::CheckingSite::type_node();
+        let _type_node = self
+            .checking_site_scope(crate::semantic_query::checker_policy::TupleSplicePosition::Type);
         ProjectSemanticDispatch::shallow_lower_type_expr_with_context(
             self,
             expr,

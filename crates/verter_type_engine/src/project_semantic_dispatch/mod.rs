@@ -529,6 +529,10 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// across a walk suppresses the publish (and every enclosing
     /// publish, since ancestors observe the same advance).
     pub canonical_evidence_epoch: std::cell::Cell<u64>,
+    /// The current semantic demand's checking site, exchanged with a lent
+    /// task and explicitly installed by each resumed frame.
+    pub(super) checking_site:
+        std::cell::Cell<crate::semantic_query::checker_policy::TupleSplicePosition>,
     /// Monotonic count of operation-budget recoveries this dispatcher
     /// folded ([`PartialReasonSet::OPERATION_BUDGET`](crate::semantic_query::PartialReasonSet::OPERATION_BUDGET)).
     /// A structural-fact demand snapshots it and compares at its settle, so
@@ -983,6 +987,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             #[cfg(feature = "semantic-observe")]
             relation_explanations: std::cell::RefCell::new(Vec::new()),
             canonical_evidence_epoch: std::cell::Cell::new(0),
+            checking_site: std::cell::Cell::new(Default::default()),
             operation_budget_epoch: std::cell::Cell::new(0),
             connected_demand: connected_demand::ConnectedDemandLedger::new(
                 connected_demand::DemandCancellation::from_flags(snapshot.flags()),
@@ -1045,6 +1050,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             #[cfg(feature = "semantic-observe")]
             relation_explanations,
             canonical_evidence_epoch,
+            checking_site,
             operation_budget_epoch,
             connected_demand,
             published_results,
@@ -1084,6 +1090,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         #[cfg(feature = "semantic-observe")]
         relation_explanations.swap(&other.relation_explanations);
         canonical_evidence_epoch.swap(&other.canonical_evidence_epoch);
+        checking_site.swap(&other.checking_site);
         operation_budget_epoch.swap(&other.operation_budget_epoch);
         connected_demand.exchange_state(&other.connected_demand);
         published_results.swap(&other.published_results);
@@ -1601,7 +1608,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         carrier: verter_session_query::facts::fact_cache::ReadSetSignature,
         computed_at: WorkspaceEdit,
     ) {
-        if read.receipt.priced().is_none() {
+        if read.result_is_partial() || read.receipt.priced().is_none() {
             return;
         }
         let published_at = computed_at;
@@ -1648,6 +1655,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let request = crate::request_context::current_request_budget();
         Some(IsolatedRoot {
             key: key.clone(),
+            site: self.checking_site.get(),
             profile: self.connected_demand.profile_spec(request.as_deref()),
             request_entry: request.as_deref().map(|request| request.entry_state()),
             entered: self.graph().refusal_entry(self.ctx),
@@ -1673,9 +1681,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return None;
         }
         let request = crate::request_context::current_request_budget();
-        let summary =
-            self.graph()
-                .sealed_refusal(self.ctx, &root.key, &root.profile, request.as_deref())?;
+        let summary = self.graph().sealed_refusal(
+            self.ctx,
+            &root.key,
+            &root.profile,
+            request.as_deref(),
+            root.site,
+        )?;
         let prefix = &summary.prefix;
         match (request.as_deref(), prefix.request.as_ref()) {
             (Some(request), Some(spent)) => {
@@ -1782,6 +1794,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             root.key,
             cost_receipt::BudgetProfile::intern(root.profile),
             root.entered,
+            root.site,
             crate::semantic_query_memo::refusal_summary::RefusalSummary::new(
                 stored,
                 traced.carrier,
@@ -4734,6 +4747,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             (None, None) => ReadCapture::default(),
             (Some(_), Some(_)) => unreachable!("capture modes are mutually exclusive"),
         };
+        capture.set_checking_site(self.checking_site.get());
         // The memo protocol: a warm lookup, then a claim for this
         // execution's task — the recursion carrier, another task's result
         // (waited out here, at the synchronous entry), or this key's
@@ -5016,6 +5030,7 @@ pub fn finalised_build_certifies_refusal_for_tests<
 /// ([`ProjectSemanticDispatch::isolated_root_identity`]).
 pub(super) struct IsolatedRoot {
     key: SemanticQueryKey,
+    site: crate::semantic_query::checker_policy::TupleSplicePosition,
     profile: cost_receipt::BudgetProfileSpec,
     request_entry: Option<crate::request_budget::RequestEntryState>,
     entered: crate::semantic_query_memo::refusal_summary::RefusalEntryState,

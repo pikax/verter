@@ -49,6 +49,7 @@ use super::{
     cancelled_cache_read, empty_signature, record_inflight_aborted_retry,
     semantic_operand_evidence, PublishedMemoCandidate, SemanticGraphStore, WarmPublishOutcome,
 };
+use crate::semantic_query::checker_policy::TupleSplicePosition;
 
 type ValueRead = CacheRead<QueryResult<SemanticQueryValue>>;
 type BuildOutput = crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>;
@@ -68,15 +69,31 @@ pub enum Recursion {
 /// itself ([`CacheRead::receipt`]).
 #[derive(Default)]
 pub struct ReadCapture<'a> {
+    site: TupleSplicePosition,
     publication: Option<&'a mut Option<PublishedMemoCandidate>>,
     evidence: Option<&'a mut Option<crate::semantic_query::operand::SemanticOperandEvidence>>,
     carrier: Option<&'a mut Option<verter_session_query::facts::fact_cache::ReadSetSignature>>,
 }
 
 impl<'a> ReadCapture<'a> {
+    /// Fixture claim for an expression demand, including a producer held
+    /// while a semantic task migrates to another polling thread.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn expression_for_tests() -> Self {
+        Self {
+            site: TupleSplicePosition::Expression,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn set_checking_site(&mut self, site: TupleSplicePosition) {
+        self.site = site;
+    }
+
     /// Capture the candidate this read's cold build admits, if any.
     pub(crate) fn publication(slot: &'a mut Option<PublishedMemoCandidate>) -> Self {
         Self {
+            site: TupleSplicePosition::Type,
             publication: Some(slot),
             evidence: None,
             carrier: None,
@@ -90,6 +107,7 @@ impl<'a> ReadCapture<'a> {
         _authority: &crate::project_semantic_dispatch::SemanticOperandAuthority,
     ) -> Self {
         Self {
+            site: TupleSplicePosition::Type,
             publication: None,
             evidence: Some(slot),
             carrier: None,
@@ -110,6 +128,7 @@ impl<'a> ReadCapture<'a> {
         slot: &'a mut Option<verter_session_query::facts::fact_cache::ReadSetSignature>,
     ) -> Self {
         Self {
+            site: TupleSplicePosition::Type,
             publication: None,
             evidence: None,
             carrier: Some(slot),
@@ -155,6 +174,7 @@ pub(super) struct CaptureParts<'c> {
 /// One logical claim of one key: the prepared key and what earlier attempts
 /// of the same claim already counted.
 pub struct ClaimAttempt {
+    site: TupleSplicePosition,
     prepared: PreparedKeyHandle,
     /// Binding relations carry transaction-local inference candidates, so
     /// their producers never serve another claimant.
@@ -172,6 +192,13 @@ pub struct ClaimAttempt {
 }
 
 impl ClaimAttempt {
+    pub(crate) fn checking_site(&self) -> TupleSplicePosition {
+        self.site
+    }
+    pub(crate) fn set_checking_site(&mut self, site: TupleSplicePosition) {
+        self.site = site;
+    }
+
     /// The identity of the computation this claim names, for its cost
     /// recording: the identity its producer records under
     /// ([`ProducerLease::cost_identity`]).
@@ -399,6 +426,7 @@ impl SemanticGraphStore {
                 Ok(attempt) => attempt,
                 Err(read) => return Acquired::Read(read),
             };
+            attempt.site = capture.site;
             if let Some(read) = unclaimed() {
                 return Acquired::Served(read);
             }
@@ -489,6 +517,7 @@ impl SemanticGraphStore {
             // hit there; that race is benign.
             self.note_lookup_miss(prepared.key());
             Ok(ClaimAttempt {
+                site: capture.site,
                 prepared,
                 independent,
                 miss_recorded: false,
@@ -513,6 +542,7 @@ impl SemanticGraphStore {
                 return Err(cancelled_cache_read());
             }
             Ok(ClaimAttempt {
+                site: TupleSplicePosition::Type,
                 prepared: self.prepare_rooted_key(key),
                 independent: true,
                 miss_recorded: false,
@@ -581,7 +611,9 @@ impl SemanticGraphStore {
 
             // 3. Become the producer, or subscribe to the one another task owns.
             if attempt.independent {
-                let inflight = Arc::new(FlightCell::charged(self.retention_account()));
+                let mut cell = FlightCell::charged(self.retention_account());
+                cell.site = attempt.site;
+                let inflight = Arc::new(cell);
                 {
                     let mut state = inflight.state.lock();
                     state.claimed = true;
@@ -595,10 +627,14 @@ impl SemanticGraphStore {
                 return Claim::Produce(self.open_producer(prepared.clone(), inflight, true, task));
             }
             let inflight = {
-                let mut table = self.inflight.lock();
+                let mut table = self.site_inflight(attempt.site).lock();
                 table
                     .entry(prepared.clone())
-                    .or_insert_with(|| Arc::new(FlightCell::charged(self.retention_account())))
+                    .or_insert_with(|| {
+                        let mut cell = FlightCell::charged(self.retention_account());
+                        cell.site = attempt.site;
+                        Arc::new(cell)
+                    })
                     .clone()
             };
             {
@@ -646,7 +682,11 @@ impl SemanticGraphStore {
                 prepared.clone(),
             )
         } else {
-            InflightPanicGuard::new(Arc::clone(&inflight), &self.inflight, prepared.clone())
+            InflightPanicGuard::new(
+                Arc::clone(&inflight),
+                self.site_inflight(inflight.site),
+                prepared.clone(),
+            )
         };
         ProducerLease {
             store: self,
@@ -925,7 +965,7 @@ impl Subscription<'_> {
                         .stats
                         .joiner_view_mismatch_forks
                         .fetch_add(1, Ordering::Relaxed);
-                    let mut table = store.inflight.lock();
+                    let mut table = store.site_inflight(inflight.site).lock();
                     if table
                         .get(prepared)
                         .is_some_and(|entry| Arc::ptr_eq(entry, &inflight))

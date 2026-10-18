@@ -25,6 +25,7 @@ use super::prepared::PreparedKeyHandle;
 /// do not busy-retry. Ownership is released when the cell is retired from
 /// the store's flight table after completion, abort, or panic.
 pub struct FlightCell {
+    pub(super) site: crate::semantic_query::checker_policy::TupleSplicePosition,
     pub(super) state: Mutex<InflightState>,
     pub(super) ready: Condvar,
     /// The cell's block and its slot in the flight table, pinned for as
@@ -178,6 +179,7 @@ impl FlightCell {
         account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) -> Self {
         Self {
+            site: Default::default(),
             state: Mutex::new(InflightState::default()),
             ready: Condvar::new(),
             _storage: Some(account.pin(flight_storage_bytes())),
@@ -190,6 +192,7 @@ impl FlightCell {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
+            site: Default::default(),
             state: Mutex::new(InflightState::default()),
             ready: Condvar::new(),
             _storage: None,

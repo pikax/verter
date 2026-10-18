@@ -28,7 +28,7 @@ use verter_session_query::inputs::prepared::PreparedTypeDeclResolution;
 
 #[path = "tuple_product.rs"]
 mod tuple_product;
-pub(super) use tuple_product::{CheckingSite, ExpressionSplice};
+pub(super) use tuple_product::ExpressionSplice;
 
 /// The node budget of one transitive self-root walk
 /// ([`ProjectSemanticDispatch::transitive_self_roots_from_nodes`]). A walk
@@ -906,6 +906,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         path: &[verter_type_expr::OwnedStr],
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        let _site = self
+            .checking_site_scope(crate::semantic_query::checker_policy::TupleSplicePosition::Type);
         self.build_typeof_suspending(value_root, path, context, None)
     }
 
@@ -924,6 +926,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         path: &[verter_type_expr::OwnedStr],
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> TypeofStart {
+        let _site = self
+            .checking_site_scope(crate::semantic_query::checker_policy::TupleSplicePosition::Type);
         let mut suspended = None;
         let output = self.build_typeof_suspending(value_root, path, context, Some(&mut suspended));
         match suspended {
@@ -1178,6 +1182,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         build: &mut TypeofBuild,
         delivery: Option<super::query_frames::FrameDelivery>,
     ) -> InstantiatePoll {
+        let _site = self.checking_site_scope(build.checking_site());
         let mut delivery = match &mut build.body {
             TypeofBody::Unstarted => unreachable!("a build begins its first body before it drains"),
             TypeofBody::Lowering(_) => {
@@ -12413,26 +12418,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         found
     }
 
-    /// Follow `node`'s transparent `Alias` redirects, however long the
-    /// chain, and return the settled node iff its data matches `predicate`.
-    /// `None` for open / unresolved carriers and for an alias cycle —
-    /// callers preserve those verbatim.
-    fn settled_node_through_aliases(
-        &self,
-        node: SemanticNodeId,
-        predicate: impl Fn(&SemanticNodeData) -> bool,
-    ) -> Option<SemanticNodeId> {
-        let graph = self.graph();
-        match graph.alias_chain_end(node, |_| {}) {
-            crate::semantic_query_memo::AliasChainEnd::Node(settled) => graph
-                .node_data(settled)
-                .is_some_and(|data| predicate(&data))
-                .then_some(settled),
-            crate::semantic_query_memo::AliasChainEnd::Dangling(_)
-            | crate::semantic_query_memo::AliasChainEnd::Cycle => None,
-        }
-    }
-
     /// Build a tuple node whose elements are the function's parameter
     /// types — the surface shape of `Parameters<F>` /
     /// `ConstructorParameters<F>`. Labels carry over from the parameter
@@ -19928,6 +19913,18 @@ pub(super) struct TypeofBuild {
     path: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
     context: crate::semantic_query::ProjectionReductionContext,
     observed_hash: verter_session_query::analysis::types::Hash16,
+}
+
+impl TypeofBuild {
+    pub(super) fn checking_site(
+        &self,
+    ) -> crate::semantic_query::checker_policy::TupleSplicePosition {
+        use crate::semantic_query::checker_policy::TupleSplicePosition;
+        match self.body {
+            TypeofBody::Expression(_) => TupleSplicePosition::Expression,
+            _ => TupleSplicePosition::Type,
+        }
+    }
 }
 
 /// What a `typeof` build evaluates between its frame's steps.

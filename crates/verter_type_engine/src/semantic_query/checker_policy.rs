@@ -358,9 +358,10 @@ impl RelationComplexity {
 /// The checking site a refused tuple splice is reported at: the node the
 /// checker is checking when it builds the tuple (`isPartOfTypeNode` of its
 /// current node), never the place the tuple is written.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub(crate) enum TupleSplicePosition {
     /// A type node: TS2799.
+    #[default]
     Type,
     /// An expression: TS2800.
     Expression,
