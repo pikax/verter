@@ -197,6 +197,7 @@ fn nested_splices_build_the_authored_tuple() {
 fn an_open_variadic_stays_between_the_spliced_elements() {
     let host = default_probe_host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let literal = |n: f64| {
         graph.intern_node(SemanticNodeData::Literal(
@@ -499,6 +500,7 @@ fn splice_in_demand(
     Option<PartialReasonSet>,
 ) {
     let dispatch = ProjectSemanticDispatch::new(host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let zero = graph.intern_node(SemanticNodeData::Literal(
         verter_type_expr::LiteralValue::Number(0.0),
@@ -898,7 +900,8 @@ fn soft_byte_and_retention_refusals_stay_distinct() {
 }
 
 /// Top-level indexed calls suspend outside the flow evaluator. Their
-/// declared tuple return is still constructed while checking an expression.
+/// declared tuple return is still constructed while checking an expression,
+/// while an explicit type argument is a type node: its splice is TS2799.
 #[test]
 fn indexed_calls_preserve_expression_tuple_recovery() {
     let host = default_probe_host();
@@ -906,15 +909,20 @@ fn indexed_calls_preserve_expression_tuple_recovery() {
         "declare const z: {};\n\
          declare function twice<T extends unknown[]>(a: T): [...T, ...T];\n\
          {CONCAT}declare function concat<T extends unknown[]>(a: T): Concat<T, T>;\n\
+         declare function make<T>(): T;\n\
          export const direct = twice(z);\n\
          export const aliased = concat(z);\n\
+         export const explicit = make<[...{}, ...{}]>();\n\
          declare const typed: Concat<typeof z, typeof z>;\n",
+        zeros(5_000),
+        zeros(5_000),
         zeros(5_000)
     );
     for (probe, expected) in [
         ("typeof typed", TS2799),
         ("typeof direct", TS2800),
         ("typeof aliased", TS2800),
+        ("typeof explicit", TS2799),
         ("typeof typed", TS2799),
         ("typeof aliased", TS2800),
     ] {
@@ -1008,6 +1016,7 @@ fn tuple_planning_stops_at_each_admitted_work_prefix() {
 fn substitution_reuse_pays_for_tuple_construction() {
     let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
     let owner = ProjectSemanticDispatch::new(&host);
+    let _builder = owner.enter_construction_scope();
     let graph = owner.graph();
     let parameter = graph.intern_node(SemanticNodeData::TypeParam {
         decl: verter_type_engine::semantic_query::DeclIdentity {
@@ -1117,6 +1126,7 @@ fn an_unrootable_substitution_operand_is_an_unpriced_miss() {
 fn a_stored_inner_overflow_preserves_the_outer_tuple() {
     let host = default_probe_host();
     let dispatch = ProjectSemanticDispatch::new(&*host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let zero = graph.intern_node(SemanticNodeData::Literal(
         verter_type_expr::LiteralValue::Number(0.0),
@@ -1159,6 +1169,7 @@ fn a_stored_inner_overflow_preserves_the_outer_tuple() {
 fn shared_empty_spreads_have_bounded_construction_work() {
     let host = default_probe_host();
     let dispatch = ProjectSemanticDispatch::new(&*host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let mut node = graph.intern_node(SemanticNodeData::Tuple {
         elements: verter_type_engine::semantic_query::PayloadArray::from(
@@ -1214,6 +1225,7 @@ fn a_suspended_indexed_call_keeps_its_recovery_site_on_another_thread() {
     let source = format!("declare const z: {};\n{CONCAT}declare function twice<T extends unknown[]>(a: T): Concat<T, T>;\nexport const result = twice(z);", zeros(5_000));
     with_probe_on_host(&host, ProbeProject::default(), &source, "1", |_, _| ());
     let dispatch = ProjectSemanticDispatch::new(&*host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let key = |name: &str| {
         dispatch.typeof_key_for(
@@ -1291,6 +1303,7 @@ fn a_suspended_indexed_call_keeps_its_recovery_site_on_another_thread() {
 fn long_aliases_and_authored_prefixes_obey_the_work_allowance() {
     let host = default_probe_host();
     let owner = ProjectSemanticDispatch::new(&*host);
+    let _builder = owner.enter_construction_scope();
     let graph = owner.graph();
     let zero = graph.intern_node(SemanticNodeData::Literal(
         verter_type_expr::LiteralValue::Number(0.0),

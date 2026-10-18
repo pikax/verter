@@ -553,7 +553,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // A structural source may be complete when an ordinary eager probe
         // is declined. A pending continuation operand must instead prevent
         // that tentative source shape from warming before its retry.
-        if self.return_demand_waits() {
+        if self.decision_waits() {
             self.fold_local_partial_completeness(
                 crate::semantic_query::PartialReasonSet::PROPAGATED,
             );

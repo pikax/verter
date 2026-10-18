@@ -836,6 +836,7 @@
           "project_semantic_dispatch",
           "request_context",
           "resolver_core",
+          "semantic_execution",
           "semantic_query",
           "semantic_query_memo"
         ],

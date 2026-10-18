@@ -2375,18 +2375,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         args: Vec<crate::semantic_query::CallArgKey>,
     ) -> Option<crate::semantic_query::ResolveCallKey> {
         use verter_type_expr::IndexedValueCallKind;
-        let explicit_type_args = call
-            .explicit_type_args
-            .iter()
-            .map(|argument| {
-                self.lower_type_expr_in_owner_scope_with_mode(
-                    canonical,
-                    owner,
-                    argument,
-                    crate::semantic_query::ProjectionMode::Navigate,
-                )
-            })
-            .collect::<Option<Vec<_>>>()?;
+        // Explicit type arguments are type nodes inside the checked
+        // expression: a splice they refuse is the type site's TS2799.
+        let explicit_type_args = {
+            let _type_node = self.checking_site_scope(
+                crate::semantic_query::checker_policy::TupleSplicePosition::Type,
+            );
+            call.explicit_type_args
+                .iter()
+                .map(|argument| {
+                    self.lower_type_expr_in_owner_scope_with_mode(
+                        canonical,
+                        owner,
+                        argument,
+                        crate::semantic_query::ProjectionMode::Navigate,
+                    )
+                })
+                .collect::<Option<Vec<_>>>()?
+        };
         // The callee's polymorphic `this` is the receiver it is read
         // through.
         let callee = receiver.map_or(callee, |receiver| {

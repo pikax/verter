@@ -1651,14 +1651,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         })
     }
 
-    /// Whether the running decision waits on a need its run reached.
-    pub(super) fn return_demand_waits(&self) -> bool {
-        self.decision_seam
-            .borrow()
-            .as_ref()
-            .is_some_and(|seam| !seam.needs.is_empty())
-    }
-
     fn with_decision_seam(&self, update: impl FnOnce(&mut DecisionSeam)) {
         update(
             self.decision_seam
