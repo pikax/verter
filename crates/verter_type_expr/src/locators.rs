@@ -31,6 +31,7 @@ use crate::TopLevelOwnerId;
     NoTypeExpr,
     NoStoredSpan,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 pub enum LocatorSymbolSpace {
     /// Type-space declaration (interface, type alias, enum/class type half).
@@ -55,6 +56,7 @@ pub enum LocatorSymbolSpace {
     NoTypeExpr,
     NoStoredSpan,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 pub struct AuthoredAnchor {
     /// Canonical id of the file whose parse produced the authored body.

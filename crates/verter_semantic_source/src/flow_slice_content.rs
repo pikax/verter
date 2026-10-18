@@ -923,8 +923,8 @@ pub(crate) fn build_flow_slice_content(
     index: &verter_session_query::function_program::FunctionProgramIndex,
     entry: &FunctionProgramEntry,
     selection: Option<&FlowSliceSelection>,
-    skeleton: &Arc<FunctionBodySkeleton>,
-    bindings: Arc<verter_session_query::flow::binding::FlowBindingMap>,
+    skeleton: &verter_session_query::flow::bundle::SkeletonRef,
+    bindings: verter_session_query::flow::bundle::BindingsRef,
     carrier_module: bool,
     snapshot: &verter_session_query::source::snapshot::SnapshotKey,
     context: Option<&NestedFlowContext>,
@@ -1060,8 +1060,8 @@ pub(crate) fn build_flow_slice_content(
     // environment only.
     let frame_gate = DefiningFrameGate::seal(
         DefiningFrameDiscovery {
-            skeleton: Arc::clone(skeleton),
-            bindings: Arc::clone(&bindings),
+            skeleton: skeleton.clone(),
+            bindings: bindings.clone(),
             type_parameters: Arc::from(type_param_names.clone()),
             enclosing_type_parameters: enclosing_type_parameters
                 .iter()

@@ -3485,11 +3485,17 @@ mod phase1_structural_tests {
         // Verify Arc sharing: clone and check pointer equality
         let arcs_clone = hd.arcs.clone();
         assert!(
-            Arc::ptr_eq(&hd.arcs.module_references, &arcs_clone.module_references),
+            verter_session_query::retention::heap_size::OwnedValue::ptr_eq(
+                &hd.arcs.module_references,
+                &arcs_clone.module_references
+            ),
             "Arc::clone should be pointer-eq (no deep copy)"
         );
         assert!(
-            Arc::ptr_eq(&hd.arcs.macros, &arcs_clone.macros),
+            verter_session_query::retention::heap_size::OwnedValue::ptr_eq(
+                &hd.arcs.macros,
+                &arcs_clone.macros
+            ),
             "macros Arc should be pointer-eq"
         );
     }

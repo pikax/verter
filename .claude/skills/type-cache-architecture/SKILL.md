@@ -216,9 +216,13 @@ The cell's `Nested` box and child-registration slice are included in its
 charge. Cache holds additionally charge their backing slice for exactly
 the holds' lifetime (`HeldHandles`, also used by `RetentionCharge::holding`).
 Dropping the cache holds releases that bookkeeping while surviving cells
-return to `Pinned`. An interned dependency rail and its interner entry
-share a `BlockShare`: the cell block stays charged until both strong rail
-owners and the interner's weak entry let go, in either order.
+return to `Pinned`. A weak view (`WeakOwned`) exists only for a cell built
+for one (`Owned::new_with_shared_block`, e.g. an interned dependency rail):
+the cell and every view share a `BlockShare`, so the block stays charged
+until both its strong owners and every view let go, in either order;
+`Owned::downgrade` of any other cell is `None`. Owned strings are named
+without a view by `OwnedStr::identity`, a never-reused stamp that keeps
+nothing allocated (the arena's thread-local scope digest uses it).
 
 **Shared registered allocations** (`verter_retention/src/shared.rs`). An allocation
 cache owners alias without handing it out — a build's fact carrier shared
@@ -263,6 +267,10 @@ shares its existing charge.
 Flow graph publication and peeks deliver `FlowGraphBundleRef` (`OwnedValue`):
 the bundle's payload pin follows readers past store teardown, while its
 map slot and separately allocated key backing release with the entry.
+The bundle's skeleton, binding map and graph are its own data, borrowed
+only; a holder keeping one past a borrow keeps the bundle's handle
+(`SkeletonRef` / `BindingsRef` / `GraphRef`), the skeleton observation port
+included.
 Key measurement primes its alias set with the bundle's entire payload: shared backing
 counts once, while independently allocated equal strings and deep copies
 are charged separately.
@@ -274,11 +282,24 @@ and name-resolution table as a separate cell. Reverse-indexed candidates
 reserve their metadata and hold their owned values.
 
 `OwnedTree` measures the raw allocations reachable through a plain tree;
-it does not by itself seal independently clonable inner `Arc` fields.
-Such leaves need their own owned handles before their lifetime can be
-accounted independently. The allocation inventory records the remaining
-escape points and shared source owners; an outer entry reservation is
-not evidence that these inner lifetimes are covered.
+it does not by itself seal independently clonable inner `Arc` fields, so
+an allocation several owners share, or a caller can keep, is its own
+owned cell: a file analysis snapshot's lists (`SharedList`, shared with the
+host analysis lists and the artifact's export signatures), template
+analyses (the raw template slot holds the one it serves, refusably with
+its evidence), module-export names, namespace targets and proofs (a
+table's retention record holds the strings its own bindings introduce
+before it claims its record and evidence; the HAMT backing keeps a
+declared per-written-slot convention), and the import-type carrier's
+specifier. A terminal output unwrap (`OutputPayload::into_type_expr`)
+moves the tree out of its cell when the carrier is the cell's last holder
+(`Owned::try_unwrap`, releasing the charge as the tree leaves) and
+otherwise hands the caller an unshared deep copy
+(`verter_retention::unshared::Unshared`, `#[derive(Unshared)]`), never an
+alias of a retained payload. The parse-artifact layer (`FileArtifactStore`
+entries, `DeclBodyMemo`, scheduler snapshots) stays outside the account;
+a prepared-declaration bundle counts what it reaches of it while it lives
+and charges none of the layer's own storage.
 
 **Refusal routing.** `RetentionRefusal::{Oversized, Pressure,
 ActiveExhausted}` all map to `NonAdmissionReason::RetentionPressure`,

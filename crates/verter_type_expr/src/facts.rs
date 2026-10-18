@@ -56,6 +56,7 @@ pub type FactAuthoredPropertyKey = AuthoredPropertyKey<TypeBodySlot, ValueDeclId
     NoTypeExpr,
     NoStoredSpan,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 pub enum TopLevelOwnerKind {
     Module,
@@ -85,6 +86,7 @@ pub enum TopLevelOwnerKind {
     NoTypeExpr,
     NoStoredSpan,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 pub struct TopLevelOwnerId {
     kind: TopLevelOwnerKind,
@@ -807,6 +809,7 @@ pub enum DeclarationOrigin {
     NoTypeExpr,
     NoStoredSpan,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 pub struct ValueDeclIdentityPart {
     /// Canonical id of the file declaring the value symbol.
@@ -2325,6 +2328,7 @@ pub struct FunctionParamFact {
     NoTypeExpr,
     NoStoredSpan,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 pub enum FunctionPartIdentity {
     /// The declaration's own callable body (`function f` declarations and
@@ -2367,6 +2371,7 @@ pub enum FunctionPartIdentity {
     NoTypeExpr,
     NoStoredSpan,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 pub struct FlowFunctionReturnIdentity {
     /// The owning declaration's content-free anchor.

@@ -354,7 +354,7 @@ impl DocumentRegistry {
                             &mut template.prop_definitions,
                             semantic_props,
                         );
-                        analysis.template = Some(Arc::new(template));
+                        analysis.template = Some(verter_session_query::retention::heap_size::OwnedValue::new(template));
                     }
                 }
                 let semantic_structure = is_framework_carrier
@@ -820,7 +820,9 @@ impl DocumentRegistry {
                     template.prop_definitions.push(prop);
                 }
             }
-            result.template = Some(Arc::new(template));
+            result.template = Some(verter_session_query::retention::heap_size::OwnedValue::new(
+                template,
+            ));
         }
 
         (!result.imports.is_empty()

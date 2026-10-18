@@ -331,13 +331,13 @@ mod tests {
         let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
         let (scs, sce) = style_block.content_range();
         let analysis = FileAnalysisSnapshot {
-            markup_class_tokens: std::sync::Arc::new(vec![
-                verter_session_query::analysis::template::MarkupClassToken {
+            markup_class_tokens: verter_session_query::analysis::file_analysis::SharedList::new(
+                vec![verter_session_query::analysis::template::MarkupClassToken {
                     name: "btn".to_string(),
                     span: verter_span::Span::new(23, 26),
                     from_directive: false,
-                },
-            ]),
+                }],
+            ),
             styles: (vec![build_css_style_analysis(
                 &src[scs as usize..sce as usize],
                 VueStyleInput::default(),
