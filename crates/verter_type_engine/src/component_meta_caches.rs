@@ -1669,6 +1669,13 @@ mod retention_tests {
             "the entry and its type tree are charged: {retained}"
         );
         db.invalidate_all();
+        let kept = account.snapshot().total_bytes();
+        assert!(
+            kept < TEXT,
+            "the entry's type tree is released with it; only the carrier \
+             names this caller still holds stay charged: {kept}"
+        );
+        drop(carrier);
         assert_eq!(account.snapshot().total_bytes(), 0);
     }
 
