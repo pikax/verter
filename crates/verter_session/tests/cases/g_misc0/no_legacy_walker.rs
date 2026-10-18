@@ -25,6 +25,16 @@
 use std::path::{Path, PathBuf};
 
 const RETIRED_SYMBOLS: &[&str] = &[
+    // Counted owners are the sole semantic payload lifetime authority.
+    "GraphOwnership",
+    "CountedOwnershipHarness",
+    "counted_for_tests",
+    "release_canonical_payloads_below",
+    "SemanticActivityGate",
+    "SemanticActivityGuard",
+    "SemanticReclaimStats",
+    "SemanticReleaseReceipt",
+    "SemanticReleaseReport",
     // The inner walker helpers are DELETED. Re-introduction at any
     // site is forbidden.
     "walker_cycle_key_node",
@@ -1110,6 +1120,34 @@ fn candidate_retired_symbol_lines_is_a_superset_finder() {
         "the authoritative matcher must NOT flag the suffixed identifier \
          `..._node` — boundary discipline must survive the fast path"
     );
+}
+
+#[test]
+fn counted_lifetime_rejects_competing_reclamation_routes() {
+    let rejected = |source: &str| {
+        let processed = preprocess(source);
+        let lines: Vec<_> = processed.lines().collect();
+        candidate_retired_symbol_lines(&processed)
+            .iter()
+            .any(|&line| {
+                RETIRED_SYMBOLS
+                    .iter()
+                    .any(|symbol| line_contains_identifier(lines[line], symbol))
+            })
+    };
+    for source in [
+        "struct SemanticActivityGate;",
+        "enum GraphOwnership { Counted, Permanent }",
+        "fn release_canonical_payloads_below(watermark: u64) {}",
+    ] {
+        assert!(
+            rejected(source),
+            "a competing reclamation route must be rejected: {source}"
+        );
+    }
+    assert!(!rejected(
+        "fn close_canonical(&self) { evict_cached_owners(); }"
+    ));
 }
 
 /// Targeted call-site guard: `compare_type_expr_improvement` survives

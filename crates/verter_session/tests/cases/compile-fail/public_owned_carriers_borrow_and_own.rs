@@ -120,4 +120,11 @@ fn keep_error(error: &QueryError) -> QueryError {
     error.clone()
 }
 
+fn read_import_head(data: &SemanticNodeData) -> Option<(&str, usize, bool)> {
+    let (specifier, qualifier, typeof_query) = data.import_type_head()?;
+    let specifier: &verter_type_expr::OwnedStr = specifier;
+    let qualifier: &verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr> = qualifier;
+    Some((specifier, qualifier.len(), typeof_query))
+}
+
 fn main() {}

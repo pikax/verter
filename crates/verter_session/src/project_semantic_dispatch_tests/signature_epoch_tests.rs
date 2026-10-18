@@ -983,3 +983,111 @@ fn a_cloned_signature_set_keeps_its_candidate_table_charged_through_its_final_ho
         "the final clone's drop releases the table's charge"
     );
 }
+
+/// Public delivery, followed by repeated discovery of the same closed
+/// callable, must not accumulate token roots or their charged backing.
+#[test]
+fn repeated_close_and_re_intern_of_a_delivered_callable_keeps_ownership_flat() {
+    use verter_type_engine::semantic_query::ProjectionMode;
+
+    for caller_first in [false, true] {
+        let host = host();
+        for (path, source) in [
+            ("/ws/keeper.ts", "export type Keeper = { (x: { a: string; deep: { token: string } }): { kept: number }; (x: { b: number }): { extra: boolean }; (x: { c: boolean }): { more: string }; };"),
+            ("/ws/closed.ts", "export type Closed = (x: { payload: string }) => { answer: number };")
+        ] {
+            let _ = host.upsert(UpsertRequest {
+                canonical_id: Some(path.into()),
+                input_id: path.into(),
+                source: Arc::from(source),
+                file_language: crate::LanguageRegistry::global().classify_static(path).static_resolution(),
+                aliases: Vec::new(),
+            }).unwrap();
+        }
+        let graph = host.project_type_store().semantic_graph();
+        let empty_kernel = (
+            graph.signature_store().interned_len(),
+            graph.signature_store().current_epoch_storage_charge(),
+        );
+        let keeper = host
+            .resolve_named_symbol("/ws/keeper.ts", "Keeper", Some(ProjectionMode::Expanded))
+            .unwrap();
+        let held = host
+            .semantic_dispatch()
+            .signature_set_value(keeper.id(), SignatureKind::Call)
+            .unwrap()
+            .clone();
+        assert!(!held.candidate_nodes().is_empty());
+        let callable = host
+            .resolve_named_symbol("/ws/closed.ts", "Closed", Some(ProjectionMode::Expanded))
+            .unwrap();
+        let kernel = graph.signature_store();
+        let epoch = kernel.epoch();
+        let mut plateau = None;
+        for cycle in 0..128 {
+            let value = host
+                .semantic_dispatch()
+                .signature_set_value(callable.id(), SignatureKind::Call)
+                .unwrap()
+                .clone();
+            let report = host.project_type_store().close_canonical("/ws/closed.ts");
+            assert!(
+                report.signature_tokens_released > 0,
+                "the public close releases the callable's token roots"
+            );
+            assert!(
+                !report.signature_epoch_replaced,
+                "the unrelated delivery keeps enough live tokens: {report:?}"
+            );
+            assert_eq!(kernel.epoch(), epoch);
+            for candidate in value.candidate_nodes() {
+                let node = candidate.authored().expect("authored callable");
+                assert!(matches!(
+                    &*value.node(node).unwrap().read().unwrap(),
+                    SemanticNodeData::Signature { .. }
+                ));
+            }
+            drop(value);
+            let current = (
+                graph.node_ownership_counts(),
+                kernel.interned_len(),
+                kernel.current_epoch_storage_charge(),
+            );
+            if cycle == 1 {
+                plateau = Some(current);
+            } else if cycle > 1 {
+                assert_eq!(
+                    Some(current),
+                    plateau,
+                    "cycle {cycle}: delivery ownership and backing plateau after warm-up"
+                );
+            }
+        }
+        let version = held.version().clone();
+        drop(held);
+        if caller_first {
+            drop(version);
+            drop(callable);
+            drop(keeper);
+            host.project_type_store().close_canonical("/ws/keeper.ts");
+        } else {
+            host.project_type_store().close_canonical("/ws/keeper.ts");
+            drop(callable);
+            drop(keeper);
+            // The delivered version alone still owns the epoch's token DAG.
+            assert!(graph.node_count() > graph.node_ownership_counts().permanent_nodes);
+            drop(version);
+        }
+        assert_eq!(
+            graph.node_count(),
+            graph.node_ownership_counts().permanent_nodes,
+            "all cache and caller owners drained"
+        );
+        assert_eq!(graph.node_ownership_counts().roots, 0);
+        assert_eq!(
+            (kernel.interned_len(), kernel.current_epoch_storage_charge()),
+            empty_kernel,
+            "retired signature records and backing return to baseline"
+        );
+    }
+}

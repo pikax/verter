@@ -85,7 +85,7 @@ mirrors own their carriers with their artifact, so an unchanged reload is
 served the same live handle.
 
 Per-node sidecars (structure bits, member-ordinal indexes, origin edges,
-stable-key classes) own nothing. Each marks the slot it describes
+stable-key classes) own no semantic nodes. Each marks the slot it describes
 (`track_sidecar`); destroying a marked slot appends its id to the arena's
 pending log, which a close, any sidecar write past
 `DESTROYED_DRAIN_THRESHOLD`, or the release that grows the log past that
@@ -98,10 +98,22 @@ lost between a failed try-lock and the holder's unlock). The member-index
 `DashMap` shards are leaf-held, so the drain waits for them. The log never
 outgrows the stale entries it removes and stays within the threshold at rest
 even when a holder's final drop follows the last close under sidecar-lock
-contention; `pending_destroyed_nodes` is its current count.
+contention; `pending_destroyed_nodes` is its current count. A single drainer
+owns the attempt; an overlapping unlock requests a rerun after its partial
+locks are released, so cleanup cannot be stranded between two failed attempts.
 
-**Known retention bound (open).** The deferral above is per EPOCH, not per
-token: every live `SignatureEpochLease` counts as a holder, including the
+Close and final release share `retire_sidecars`. The structure-bit table owns
+its pinned backing charge, retains its allocated capacity across tombstone
+removals, frees empty backing and shrinks sparse backing geometrically. The
+member-index tables and FIFO free empty backing and shrink sparse backing;
+origin retirement settles its own backing and clears empty pools and ledgers.
+The destroyed batch carries the log's charge until its buffer is dropped after
+cleanup. Pending batches below the drain threshold remain bounded and charged;
+none of these operations walks or destroys live semantic payloads.
+
+**Epoch-granularity ownership.** A live `SignatureEpochLease` can reopen a read
+view of any token in its epoch, so it owns that entire readable epoch. Every
+lease counts as a holder, including the
 leases warm memo candidates, delivered signature values and prepared
 `ReadSignatureResult` keys keep. While any such holder is alive — usually a
 cached signature result of some still-open file — a close's released token
@@ -111,9 +123,18 @@ stranded-majority epoch replacement (`replace_epoch_if_mostly_stranded`) or
 the eviction of the last holder, and never exceeds one deferred root per
 stranded token, since a re-interned token reclaims its deferred root
 (`repeated_close_and_re_intern_under_a_held_epoch_keeps_one_root_per_token`); `SemanticCloseReport::signature_tokens_released`
-counts roots taken from the store, not nodes freed. The exact fix roots, per
-delivered value or prepared key, the token nodes its records can read back, so
-only real readers keep them.
+counts roots taken from the store, not nodes freed. This is an accepted
+ownership bound: after the epoch's cache and caller holders drain, its deferred
+roots and their backing drain too. Epoch table storage stays charged until
+that epoch's final owner drops. Finer per-result reclamation is a storage
+optimization. The public delivery regression
+`repeated_close_and_re_intern_of_a_delivered_callable_keeps_ownership_flat`
+checks that repeated discovery does not accumulate roots, records or charged
+backing, and that both release orders restore the declared baseline.
+
+The retired-symbol guard rejects activity barriers, ordinal-watermark sweeps
+and inactive ownership modes. Public compile contracts hold the capability
+boundary; a canonical close remains available solely to evict cache owners.
 
 ## Internal delivery and retained holders
 

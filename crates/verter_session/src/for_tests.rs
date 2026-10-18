@@ -257,6 +257,30 @@ fn hand_to_caller_scope<'h>(
     roots.retain_for_construction();
 }
 
+#[cfg(test)]
+mod handoff_tests {
+    #[test]
+    fn a_dispatch_handoff_rejects_a_destroyed_result() {
+        use verter_type_engine::semantic_query::{QueryError, SemanticNodeData};
+        let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+        let graph = host.project_type_store().semantic_graph();
+        let node = {
+            let _scope = graph.enter_node_root_scope();
+            graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss))
+        };
+        assert!(!graph.node_is_live(node));
+        let dispatch = host.semantic_dispatch();
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::hand_to_caller_scope(&host, dispatch, [node]);
+        }))
+        .expect_err("a failed handoff must fail visibly");
+        let message = failure
+            .downcast_ref::<String>()
+            .expect("formatted invariant failure");
+        assert!(message.contains("must root for its caller"), "{message}");
+    }
+}
+
 /// Test-visibility shim exposing the canonical
 /// [`execute_type_node`](verter_type_engine::semantic_query::SemanticQueryApi::execute_type_node)
 /// to integration-test crates (dispatch is `pub(crate)`); it returns the typed
