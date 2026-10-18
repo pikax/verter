@@ -420,7 +420,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             anchor: verter_type_expr::locators::AuthoredAnchor {
                 canonical_id: verter_type_expr::OwnedStr::from(self.canonical),
                 owner: function.declaration.owner,
-                symbol: verter_type_expr::OwnedStr::from(function.declaration.name.clone()),
+                symbol: function.declaration.name.clone(),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
             },
             function_part: function.part.clone(),

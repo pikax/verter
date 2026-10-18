@@ -296,7 +296,7 @@ fn materialized_publication(r#type: TypeExpr) -> host::meta_resolve::Materialize
     };
     host::meta_resolve::MaterializedTypePublication::for_test(
         verter_type_expr::PublicationResult::Published {
-            selected_source: std::sync::Arc::new(selected_source),
+            selected_source: verter_type_expr::SharedTypeSource::new(selected_source),
             semantic_authority: verter_type_expr::SemanticAuthority::Resolved,
             exactness: verter_type_expr::ResolutionExactness::ExactConcrete,
             reason: Box::new(verter_type_expr::PublicationReason::ResolvedExactConcrete),
@@ -313,7 +313,7 @@ fn materialized_publication(r#type: TypeExpr) -> host::meta_resolve::Materialize
 fn type_publication_wire_keeps_outcome_and_terminal_display_separate() {
     let published = host::meta_resolve::MaterializedTypePublication::for_test(
         verter_type_expr::PublicationResult::Published {
-            selected_source: std::sync::Arc::new(
+            selected_source: verter_type_expr::SharedTypeSource::new(
                 verter_type_expr::facts::SemanticTypeSource::Closed(
                     verter_type_expr::facts::ClosedTypeFact::Leaf(
                         verter_type_expr::facts::LeafTypeFact::Primitive(PrimitiveName::String),

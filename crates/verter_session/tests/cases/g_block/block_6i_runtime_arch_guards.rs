@@ -85,7 +85,8 @@ fn meta_for(
         .get_component_meta(path)
         .unwrap_or_else(|e| panic!("get_component_meta({path}): {e:?}"))
         .unwrap_or_else(|| panic!("get_component_meta({path}) returned None"))
-        .into_analysis()
+        .analysis()
+        .clone()
 }
 
 /// Walk a `TypeExpr` and collect every nominal `Ref { name }` that

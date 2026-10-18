@@ -152,7 +152,10 @@ where
     /// Test-only pass-through to
     /// [`ValidatedFactCache::candidate_signatures_for_key`].
     #[cfg(test)]
-    pub fn candidate_signatures_for_key(&self, key: &K) -> Vec<Arc<[FactVersionRef]>> {
+    pub fn candidate_signatures_for_key(
+        &self,
+        key: &K,
+    ) -> Vec<crate::resolver_core::OwnedFactSignature> {
         self.cache.candidate_signatures_for_key(key)
     }
 

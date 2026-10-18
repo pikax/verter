@@ -587,7 +587,7 @@ fn flow_function_key(byte: u8) -> FlowFunctionObservationKey {
         function: FunctionProgramKey {
             declaration: FunctionDeclarationRef {
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                name: Arc::from("f"),
+                name: "f".into(),
                 space: verter_session_query::facts::SymbolSpace::Value,
             },
             part: FunctionPartIdentity::DeclarationBody,
@@ -602,14 +602,14 @@ fn flow_function_key(byte: u8) -> FlowFunctionObservationKey {
 fn empty_skeleton() -> FunctionBodySkeleton {
     FunctionBodySkeleton {
         kind: FunctionBodyKind::Plain,
-        names: Arc::from([]),
-        regions: Arc::from([]),
-        bindings: Arc::from([]),
-        expr_sites: Arc::from([]),
-        return_sites: Arc::from([]),
-        yield_sites: Arc::from([]),
-        writes: Arc::from([]),
-        closure_assignments: Arc::from([]),
+        names: Default::default(),
+        regions: Default::default(),
+        bindings: Default::default(),
+        expr_sites: Default::default(),
+        return_sites: Default::default(),
+        yield_sites: Default::default(),
+        writes: Default::default(),
+        closure_assignments: Default::default(),
         span_index: Default::default(),
         name_index: Default::default(),
     }

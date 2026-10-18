@@ -4837,15 +4837,21 @@ fn staged_flow_proof(
     let basis = FlowDemandBasis {
         ancestry: Default::default(),
         graph_body: verter_session_query::flow::bundle::FlowSliceFunctionKey {
-            canonical_id: std::sync::Arc::<str>::from(
-                key.function.declaration_slot.defining_canonical.as_str(),
-            ),
+            canonical_id: key
+                .function
+                .declaration_slot
+                .defining_canonical
+                .as_str()
+                .into(),
             function: verter_session_query::function_program::FunctionProgramKey {
                 declaration: verter_session_query::function_program::FunctionDeclarationRef {
                     owner: key.function.declaration_slot.owner,
-                    name: std::sync::Arc::<str>::from(
-                        key.function.declaration_slot.merged_symbol_name.as_str(),
-                    ),
+                    name: key
+                        .function
+                        .declaration_slot
+                        .merged_symbol_name
+                        .as_str()
+                        .into(),
                     space: verter_session_query::facts::SymbolSpace::Value,
                 },
                 part: key.function.function_part.clone(),
@@ -9078,7 +9084,7 @@ interface PlainSurface { extra: number }
                     CANONICAL,
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     &verter_type_expr::TypeExpr::Ref {
-                        name: Arc::from(name),
+                        name: name.into(),
                         type_arguments: Arc::from(Vec::new().into_boxed_slice()),
                     },
                     verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit(),

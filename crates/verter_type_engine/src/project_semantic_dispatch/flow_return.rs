@@ -2650,7 +2650,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let key = verter_session_query::function_program::FunctionProgramKey {
             declaration: verter_session_query::function_program::FunctionDeclarationRef {
                 owner: identity.anchor.owner,
-                name: std::sync::Arc::<str>::from(identity.anchor.symbol.as_str()),
+                name: identity.anchor.symbol.as_str().into(),
                 space: verter_session_query::facts::SymbolSpace::Value,
             },
             part: identity.function_part.clone(),
@@ -6041,7 +6041,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             });
         };
         let slice_key_function = verter_session_query::flow::bundle::FlowSliceFunctionKey {
-            canonical_id: Arc::from(canonical),
+            canonical_id: canonical.into(),
             function: entry.key().clone(),
             flow_body_stable_hash: entry.flow_body_stable_hash(),
             flow_body_exact_hash,
@@ -27685,7 +27685,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         if let FlowIndexedArgumentBinding::ValueRead(binding)
         | FlowIndexedArgumentBinding::SourceTypeQuery(binding) = binding
         {
-            let name = self.products.identity(binding)?.name;
+            let name = Arc::<str>::from(self.products.identity(binding)?.name);
             let subject = verter_session_query::flow::slice::SliceNarrowSubject {
                 root: verter_session_query::flow::slice::SliceNarrowRoot::Local {
                     name,
@@ -28372,9 +28372,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             anchor: verter_type_expr::locators::AuthoredAnchor {
                                 canonical_id: verter_type_expr::OwnedStr::from(self.canonical),
                                 owner: target.declaration.owner,
-                                symbol: verter_type_expr::OwnedStr::from(
-                                    target.declaration.name.clone(),
-                                ),
+                                symbol: target.declaration.name.clone(),
                                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                             },
                             function_part: target.part.clone(),

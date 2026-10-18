@@ -451,7 +451,7 @@ impl RouteDb {
         view: &V,
     ) -> Option<(
         crate::resolver_core::CachedValue<RouteResult>,
-        Arc<[FactVersionRef]>,
+        crate::resolver_core::OwnedFactSignature,
     )> {
         self.routes.get_if_valid_with_facts(key, view)
     }
@@ -861,6 +861,48 @@ mod tests {
     /// Build a zero-env barrel-surface key (see [`rk`]).
     fn bk(barrel: &str) -> BarrelSurfaceKey {
         BarrelSurfaceKey::new(barrel, ProjectIdentity([0u8; 16]), [0u8; 16], [0u8; 16])
+    }
+
+    /// A resolved route the cache does not admit — its signature is empty
+    /// — still reaches its caller charged, pinned, past the database's
+    /// teardown, and its final drop restores the baseline.
+    #[test]
+    fn an_unadmitted_route_is_charged_to_the_caller_keeping_it() {
+        use verter_session_query::retention::{
+            ChargeClass, RetentionLimits, SemanticRetentionAccount, StoreAccount,
+        };
+        let canonical = format!("/{}.ts", "delivered_route_".repeat(1024));
+        let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+        let db = RouteDb {
+            routes: ValidatedFactCache::with_retention_account(StoreAccount::new(Arc::clone(
+                &account,
+            ))),
+            ..RouteDb::new()
+        };
+        let route = db
+            .get_or_resolve_route_with_facts_probe_for_test(
+                rk("/index.ts", "Route"),
+                &TestView::accepting_all(1),
+                || {
+                    Some((
+                        RouteResult::Resolved {
+                            defining_canonical: canonical.clone(),
+                            defining_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                            defining_symbol: "Route".to_owned(),
+                        },
+                        Vec::new(),
+                    ))
+                },
+            )
+            .expect("the resolved route is delivered");
+        assert_eq!(route.charge_class(), Some(ChargeClass::Pinned));
+        let charge = route.charge_bytes().expect("a delivered route is charged");
+        assert!(charge >= canonical.len());
+        drop(db);
+        let kept = account.snapshot();
+        assert_eq!((kept.retained_bytes, kept.pinned_bytes), (0, charge));
+        drop(route);
+        assert_eq!(account.snapshot().total_bytes(), 0);
     }
 
     #[test]

@@ -1150,7 +1150,8 @@ defineEmits<{ change: [value: number]; close: [] }>()
     let analysis = host
         .get_component_meta("/App.vue")
         .expect("component must resolve")
-        .into_analysis();
+        .analysis()
+        .clone();
     assert_eq!(
         analysis.events.len(),
         2,
@@ -1247,7 +1248,8 @@ defineEmits<{ (event: 'change', value: number): boolean }>()
     let mut analysis = host
         .get_component_meta("/App.vue")
         .expect("component must resolve")
-        .into_analysis();
+        .analysis()
+        .clone();
     assert_eq!(
         analysis.events.len(),
         1,
@@ -2208,7 +2210,8 @@ defineEmits<{ save: [id: number] }>()
     let analysis = host
         .get_component_meta("/App.vue")
         .expect("component must resolve")
-        .into_analysis();
+        .analysis()
+        .clone();
     assert_eq!(analysis.events.len(), 1, "fixture declares exactly 1 event");
 
     // PRESENT arm: the untampered analysis materializes the real source.

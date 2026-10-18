@@ -137,15 +137,21 @@ fn flow_demand_basis_for_member(
     FlowDemandBasis {
         ancestry: Default::default(),
         graph_body: verter_session_query::flow::bundle::FlowSliceFunctionKey {
-            canonical_id: std::sync::Arc::<str>::from(
-                key.function.declaration_slot.defining_canonical.as_str(),
-            ),
+            canonical_id: key
+                .function
+                .declaration_slot
+                .defining_canonical
+                .as_str()
+                .into(),
             function: verter_session_query::function_program::FunctionProgramKey {
                 declaration: verter_session_query::function_program::FunctionDeclarationRef {
                     owner: key.function.declaration_slot.owner,
-                    name: std::sync::Arc::<str>::from(
-                        key.function.declaration_slot.merged_symbol_name.as_str(),
-                    ),
+                    name: key
+                        .function
+                        .declaration_slot
+                        .merged_symbol_name
+                        .as_str()
+                        .into(),
                     space: verter_session_query::facts::SymbolSpace::Value,
                 },
                 part: key.function.function_part.clone(),

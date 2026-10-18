@@ -353,7 +353,7 @@ pub trait RouteLookup {
         imported_name: &str,
     ) -> (
         Option<verter_session_query::type_solver::ResolvedRootIdentity>,
-        Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
+        verter_session_query::facts::fact_cache::OwnedFactSignature,
     );
 
     fn resolve_named_type_export_target_shallow(

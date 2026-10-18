@@ -31,7 +31,7 @@ pub struct IndexedRead {
     /// The span of the site the read is attributed to.
     pub site_span: FrameSpan,
     /// The read's projection path.
-    pub path: Arc<[SkeletonPathSegment]>,
+    pub path: crate::retention::owned::OwnedSlice<SkeletonPathSegment>,
 }
 
 /// The containment and read index of one prepared skeleton.
@@ -44,9 +44,7 @@ pub struct IndexedRead {
 /// An unprepared skeleton carries the empty index; only
 /// [`prepare_function_body_skeleton`](super::skeleton::prepare_function_body_skeleton)
 /// fills it.
-#[derive(
-    Debug, Clone, Default, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize,
-)]
+#[derive(Debug, Default, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct SkeletonSpanIndex {
     sites: Arc<[(FrameSpan, SkeletonExprSiteId)]>,
     writes: Arc<[(FrameSpan, u32)]>,
@@ -101,7 +99,7 @@ impl SkeletonSpanIndex {
                     group,
                     IndexedRead {
                         site_span: site.span,
-                        path: Arc::clone(&read.path),
+                        path: read.path.clone(),
                     },
                 ));
             }

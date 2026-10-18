@@ -117,7 +117,7 @@ impl FlowBodySkeletonSource for FixtureSkeletonSource {
             &parsed.program,
             source,
             &owners,
-            Arc::clone(&key.canonical_id),
+            Arc::<str>::from(&key.canonical_id),
         );
         let indexed = index
             .get(&key.function)
@@ -176,11 +176,11 @@ fn function_key(
     let (_, parse_key) = verter_language::default_parse_identity_for(source, &file_language)
         .expect("a script fixture derives a real parse identity");
     FlowSliceFunctionKey {
-        canonical_id: Arc::from(canonical),
+        canonical_id: canonical.into(),
         function: FunctionProgramKey {
             declaration: FunctionDeclarationRef {
                 owner: TopLevelOwnerId::ordinary_file(),
-                name: Arc::from(name),
+                name: name.into(),
                 space: SymbolSpace::Value,
             },
             part: FunctionPartIdentity::DeclarationBody,
@@ -347,7 +347,7 @@ fn skeleton_source_verifies_parse_key_and_language() {
         );
     let env = host.host_view_env_hashes_for(canonical);
     let key = FlowSliceFunctionKey {
-        canonical_id: Arc::from(canonical),
+        canonical_id: canonical.into(),
         function: entry.key().clone(),
         flow_body_stable_hash: entry.flow_body_stable_hash(),
         flow_body_exact_hash: entry
@@ -469,7 +469,7 @@ fn skeleton_source_verifies_parse_env_and_toolchain() {
             serve.indexed.parse_env_hash,
         );
     let key = FlowSliceFunctionKey {
-        canonical_id: Arc::from(canonical),
+        canonical_id: canonical.into(),
         function: entry.key().clone(),
         flow_body_stable_hash: entry.flow_body_stable_hash(),
         flow_body_exact_hash: entry
@@ -1184,7 +1184,7 @@ fn mytype_member_slice_via_production_store_materializes_no_sibling_and_no_mytyp
         );
     let key = FlowSliceHashKey {
         function: FlowSliceFunctionKey {
-            canonical_id: Arc::from(canonical),
+            canonical_id: canonical.into(),
             function: entry.key().clone(),
             flow_body_stable_hash: entry.flow_body_stable_hash(),
             flow_body_exact_hash: entry
@@ -1817,6 +1817,9 @@ fn a_retained_graph_bundle_charges_its_structure_until_its_eviction() {
         let snapshot = account.snapshot();
         assert_eq!(snapshot.retained_bytes, 0, "a bundle is never refusable");
         charged.push(snapshot.pinned_bytes);
+        // The key's names are shared with the bundle, charged by their own
+        // cells: the test's copy keeps them alive until it drops too.
+        drop(key);
         store.remove_canonical("/graph.ts");
         assert_eq!(account.snapshot().total_bytes(), 0, "eviction releases it");
     }
@@ -1875,6 +1878,7 @@ fn a_graph_reader_keeps_its_payload_charge_after_store_teardown() {
             );
             drop(reader);
         }
+        drop(key);
         assert_eq!(
             account.snapshot().total_bytes(),
             0,
@@ -1939,6 +1943,7 @@ fn a_kept_bundle_part_stays_charged_after_store_teardown() {
                 );
                 drop(kept);
             }
+            drop(key);
             assert_eq!(
                 account.snapshot().total_bytes(),
                 0,
@@ -1948,9 +1953,91 @@ fn a_kept_bundle_part_stays_charged_after_store_teardown() {
     }
 }
 
+/// A holder that clones a nested table, one name or the key's canonical
+/// out of a published bundle keeps an owned handle on that allocation: it
+/// stays charged by its own cell after the store and the bundle's last
+/// handle let go, at zero headroom, and its final drop restores the
+/// baseline at once. Dropping the leaf first leaves the bundle's charge
+/// whole.
+#[test]
+fn a_kept_nested_bundle_leaf_stays_charged_after_store_teardown() {
+    use verter_session_query::retention::owned::OwnedStr;
+    use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
+    let name = "kept_leaf_binding_name_".repeat(256);
+    let canonical = format!("/{}.ts", "kept_leaf_canonical_".repeat(256));
+    let source = format!("function myType() {{ const {name} = 1; return {name} }}");
+    for leaf in ["names", "name", "bindings", "canonical"] {
+        for leaf_first in [false, true] {
+            let account = SemanticRetentionAccount::new(RetentionLimits {
+                aggregate_ceiling_bytes: 0,
+                active_ceiling_bytes: 0,
+                max_entry_bytes: 0,
+                pin_threshold_bytes: 0,
+            });
+            let store = FunctionFlowGraphStore::charged_to_for_test(Arc::clone(&account));
+            let key = function_key(&canonical, "myType", 4, &source);
+            let GraphClaim::Produce(lease) = store.claim(&key) else {
+                panic!("empty store must grant a producer");
+            };
+            let reader = lease
+                .publish(FlowGraphBundle::build(
+                    KeyedFunctionStructure::bind_fixture(key, prepared_of(&source)),
+                ))
+                .expect("complete bundle is delivered even at zero headroom");
+            let published = account.snapshot().pinned_bytes;
+            let skeleton = reader.skeleton();
+            let (kept, kept_len): (Box<dyn std::any::Any>, usize) = match leaf {
+                "names" => (Box::new(skeleton.names.clone()), name.len()),
+                "name" => {
+                    let kept = skeleton
+                        .names
+                        .iter()
+                        .find(|text| text.len() == name.len())
+                        .expect("the long binding name is interned")
+                        .clone();
+                    (Box::new(kept), name.len())
+                }
+                "bindings" => {
+                    assert!(!skeleton.bindings.is_empty());
+                    (Box::new(skeleton.bindings.clone()), 1)
+                }
+                _ => (Box::new(reader.key().canonical_id.clone()), canonical.len()),
+            };
+            assert_eq!(
+                account.snapshot().pinned_bytes,
+                published,
+                "({leaf}) a kept leaf shares the bundle's charge"
+            );
+            drop(reader);
+            if leaf_first {
+                drop(kept);
+                assert_eq!(account.snapshot().pinned_bytes, published);
+                drop(store);
+            } else {
+                drop(store);
+                let surviving = account.snapshot().pinned_bytes;
+                assert!(
+                    surviving >= kept_len && surviving < published,
+                    "({leaf}) the kept leaf owns its allocation, not the bundle: \
+                     {surviving} of {published}"
+                );
+                if leaf == "name" {
+                    assert_eq!(surviving, OwnedStr::charge_for_len(name.len()));
+                }
+                drop(kept);
+            }
+            assert_eq!(
+                account.snapshot().total_bytes(),
+                0,
+                "({leaf}, leaf first {leaf_first}) final release is immediate"
+            );
+        }
+    }
+}
+
 #[test]
 fn graph_publication_charges_independently_allocated_equal_key_backing() {
-    use verter_session_query::retention::allocation::arc_block_bytes;
+    use verter_session_query::retention::owned::OwnedStr;
     use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
     let canonical = format!("/{}.ts", "module_name".repeat(256));
     let source = "function myType() { return 1 }";
@@ -1980,11 +2067,15 @@ fn graph_publication_charges_independently_allocated_equal_key_backing() {
         );
         charges.push(account.snapshot().pinned_bytes);
         drop(store);
+        drop(key);
         assert_eq!(account.snapshot().total_bytes(), 0);
     }
     assert_eq!(
         charges[1] - charges[0],
-        arc_block_bytes(canonical.len()) + arc_block_bytes("myType".len())
+        OwnedStr::charge_for_len(canonical.len()) + OwnedStr::charge_for_len("myType".len())
     );
-    assert_eq!(charges[2] - charges[0], arc_block_bytes(canonical.len()));
+    assert_eq!(
+        charges[2] - charges[0],
+        OwnedStr::charge_for_len(canonical.len())
+    );
 }
