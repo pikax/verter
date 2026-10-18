@@ -26,7 +26,7 @@ fn host() -> VerterHost {
         .upsert(UpsertRequest {
             canonical_id: Some(FILE.to_string()),
             input_id: FILE.to_string(),
-            source: Arc::from("export interface Target { base: number; }\n"),
+            source: Arc::from("export interface Target { base: number; }\nexport type Callback = (value: { arg: string }) => { returned: number };\n"),
             file_language: crate::LanguageRegistry::global()
                 .classify_static(FILE)
                 .static_resolution(),
@@ -369,7 +369,7 @@ fn counted_host() -> VerterHost {
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some(FILE.to_string()),
         input_id: FILE.to_string(),
-        source: Arc::from("export interface Target { base: number; }\n"),
+        source: Arc::from("export interface Target { base: number; }\nexport type Callback = (value: { arg: string }) => { returned: number };\n"),
         file_language: crate::LanguageRegistry::global()
             .classify_static(FILE)
             .static_resolution(),
@@ -570,6 +570,112 @@ fn construction_labels_are_owned_by_the_callers_builder_never_by_a_dispatcher() 
     );
 }
 
+/// Completed evaluation receipts belong to the operation, even when its
+/// caller keeps a builder open. Closing that builder must release the last
+/// operand while the dispatcher remains usable.
+#[test]
+fn completed_receipts_release_when_the_callers_builder_closes() {
+    let host = host();
+    let harness = zero_headroom_harness();
+    let d = verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::with_ownership_harness(&host, harness);
+    let graph = Arc::clone(d.graph());
+    let baseline = graph.node_ownership_counts().permanent_nodes;
+    let builder = d.enter_construction_scope();
+    let operand = d.opaque(QueryError::Other(Arc::from("builder receipt")));
+    assert_eq!(
+        d.evaluate_deferred_semantic_node_for_tests(operand),
+        operand
+    );
+    assert!(graph.node_is_live(operand));
+    drop(builder);
+    graph.invalidate_all();
+    assert_eq!(
+        graph.node_count(),
+        baseline,
+        "no receipt outlives the closed builder"
+    );
+    let next = d.owning().lower_type_expr_in_scope_with_mode(
+        FILE,
+        &verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String("next".into())),
+        ProjectionMode::Navigate,
+    );
+    assert!(next.value.is_some(), "the dispatcher remains usable");
+    drop(next);
+    assert_eq!(graph.node_count(), baseline);
+}
+
+fn zero_headroom_harness() -> CountedOwnershipHarness {
+    CountedOwnershipHarness::with_account(StoreAccount::new(SemanticRetentionAccount::new(
+        RetentionLimits {
+            aggregate_ceiling_bytes: 0,
+            ..RetentionLimits::defaults()
+        },
+    )))
+}
+
+/// Public construction adapters own both new nodes and operands reused
+/// without interning. A builder may close before the result or its clone.
+#[test]
+fn construction_carriers_own_new_and_reused_results_past_every_builder() {
+    let host = host();
+    let d = verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::with_ownership_harness(&host, zero_headroom_harness());
+    let graph = Arc::clone(d.graph());
+    let baseline = graph.node_ownership_counts().permanent_nodes;
+    let context = verter_type_engine::semantic_query::ProjectionReductionContext::published(
+        ProjectionMode::Navigate,
+    );
+    for text in ["first construction", "second construction"] {
+        let result = d.owning().opaque(QueryError::Other(Arc::from(text)));
+        assert!(result.node(result.value).unwrap().read().is_ok());
+        drop(result);
+        assert_eq!(
+            graph.node_count(),
+            baseline,
+            "discarded construction releases while the dispatcher lives"
+        );
+    }
+    // A projected child does not retain its unused parent through the
+    // construction operation's nested query delivery.
+    let builder = d.enter_construction_scope();
+    let parent = object(&graph, "kept");
+    let result = d
+        .owning()
+        .indexed_member_value(FILE, parent, &Arc::from("member"))
+        .map(|value| value.expect("the member projects"));
+    drop(builder);
+    graph.invalidate_all();
+    assert!(matches!(
+        &*result.node(result.value).unwrap().read().unwrap(),
+        SemanticNodeData::Literal(_)
+    ));
+    let counts = graph.node_ownership_counts();
+    assert_eq!(
+        counts.live_nodes - counts.permanent_nodes,
+        1,
+        "only the represented literal remains while its result and dispatcher live"
+    );
+    drop(result);
+    assert_eq!(graph.node_count(), baseline);
+    let builder = d.enter_construction_scope();
+    let source = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "reused".into(),
+    )));
+    let reused = d.owning().resolve_carrier_subject_node(source, context);
+    assert_eq!(reused.value, source);
+    let clone = reused.clone();
+    drop(builder);
+    drop(reused);
+    assert!(matches!(
+        &*clone.node(source).unwrap().read().unwrap(),
+        SemanticNodeData::Literal(_)
+    ));
+    drop(d);
+    graph.invalidate_all();
+    assert!(clone.node(source).unwrap().read().is_ok());
+    drop(clone);
+    assert_eq!(graph.node_count(), baseline);
+}
+
 const DELIVERY_FILE: &str = "/public/deliveries.ts";
 
 fn delivery_decl_key(name: &str) -> ResolveDeclKey {
@@ -702,6 +808,13 @@ fn a_live_dispatchers_discarded_results_release_while_retained_ones_outlive_it()
         "derived"
     );
     drop(discarded);
+    let cached = graph.hash_cons_retained_nodes_for_tests();
+    assert!(cached.iter().all(|node| graph.node_is_live(*node)));
+    assert_eq!(
+        graph.node_count(),
+        baseline + cached.len(),
+        "only the hash-cons caches retain nodes after the evaluation ends"
+    );
     graph.invalidate_all();
     assert_eq!(
         graph.node_count(),
@@ -751,6 +864,42 @@ fn a_live_dispatchers_discarded_results_release_while_retained_ones_outlive_it()
         baseline,
         "the final holders drain every retained result"
     );
+}
+
+/// Hot-handle adapters return owners even with no ambient builder. Both
+/// lowering a declaration and resolving the returned hot handle survive
+/// every producing owner and drain independently of the live dispatcher.
+#[test]
+fn public_hot_handle_adapters_deliver_owners_without_an_ambient_builder() {
+    let host = host();
+    let d = verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::with_ownership_harness(&host, zero_headroom_harness());
+    let graph = Arc::clone(d.graph());
+    let baseline = graph.node_ownership_counts().permanent_nodes;
+    let context = verter_type_engine::semantic_query::ProjectionReductionContext::published(
+        ProjectionMode::Expanded,
+    );
+    let declared = d.owning().decl_body_hot_ref(
+        FILE,
+        TopLevelOwnerId::ordinary_file(),
+        "Target",
+        Arc::from([]),
+        context,
+    );
+    let hot = declared.value.expect("the declaration has a body");
+    assert_eq!(delivered_shape(declared.node(hot.node()).unwrap()), "base");
+    let resolved = d.owning().resolve_hot_handle_with_context(hot, context);
+    drop(declared);
+    assert_eq!(
+        delivered_shape(resolved.node(resolved.value).unwrap()),
+        "base"
+    );
+    let clone = resolved.clone();
+    drop(d);
+    graph.invalidate_all();
+    drop(resolved);
+    assert_eq!(delivered_shape(clone.node(clone.value).unwrap()), "base");
+    drop(clone);
+    assert_eq!(graph.node_count(), baseline);
 }
 
 /// A one-level surface the shared projection hands out is an owning
@@ -811,4 +960,40 @@ fn a_resolved_node_that_cannot_be_rooted_is_a_typed_fault() {
         crate::typeinfo::resolve_named_symbol::deliver_resolved_root(&graph, unowned).is_err(),
         "an ordinal the graph never allocated does not root"
     );
+}
+
+/// A signature adapter and its parameter demands own their roots even when
+/// no builder encloses the callable view.
+#[test]
+fn public_callable_adapters_own_their_parameters_past_dispatcher_teardown() {
+    use verter_type_engine::project_semantic_dispatch::callable_view::CallableNodeView;
+    let host = host();
+    let d = verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::with_ownership_harness(&host, zero_headroom_harness());
+    let graph = Arc::clone(d.graph());
+    let baseline = graph.node_ownership_counts().permanent_nodes;
+    let context = verter_type_engine::semantic_query::ProjectionReductionContext::published(
+        ProjectionMode::Expanded,
+    );
+    let declared = d.owning().decl_body_hot_ref(
+        FILE,
+        TopLevelOwnerId::ordinary_file(),
+        "Callback",
+        Arc::from([]),
+        context,
+    );
+    let callable = CallableNodeView::new(&d, declared.value.expect("callback body").node());
+    let signature = callable.owning().signature(context).expect("a signature");
+    drop(declared);
+    let parameters = signature.raw_params();
+    let parameter = parameters.value[0].ty;
+    let first = signature.first_param();
+    assert_eq!(first.value, Some(parameter));
+    drop(signature);
+    drop(d);
+    graph.invalidate_all();
+    assert_eq!(delivered_shape(parameters.node(parameter).unwrap()), "arg");
+    drop(parameters);
+    assert_eq!(delivered_shape(first.node(parameter).unwrap()), "arg");
+    drop(first);
+    assert_eq!(graph.node_count(), baseline);
 }

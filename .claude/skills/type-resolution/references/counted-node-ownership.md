@@ -189,14 +189,26 @@ returned carrier owns: a query output (`SemanticQueryOutput`) carries the
 delivery lease that roots its value, a `CacheRead` its lease. A discarded
 result therefore releases its roots while the dispatcher stays alive, and a
 retained result and every clone of it outlive every dispatcher and drain on
-the final holder's drop. Construction labels the dispatcher's other methods
-return (lowered, substituted or united nodes, hot handles, step values) are
-owned by the construction owner the caller holds: an explicit builder scope from
-`enter_construction_scope()` / `grant.enter_scope()`, which outlives the
-dispatcher if the builder keeps it open, or the enclosing operation; with no
-owner open they are released at once and read as stale. A host request that
-composes ordinals across operations before rooting its delivery (the typeinfo
-entry points) holds such a builder for the request. A lexical `NodeRootScope`
+the final holder's drop. Public construction adapters are reached through `ProjectSemanticDispatch::owning()`
+and return `Constructed<T>`. Their raw ordinal implementations are crate-private
+in production and public only as test fixture seams. The carrier seals the build's
+construction attachments and explicit roots for every represented result operand,
+including a reused node that the build did not intern. Only the engine mints it;
+`node` borrows a capability and `map` preserves the owner. Its clones share that
+owner, independently of the dispatcher and every builder scope. If a caller has
+an explicit builder open, sealing also gives that builder its own share, so host
+construction code may compose labels while keeping that builder open.
+`CallableNodeView::owning()` similarly delivers node-bearing callable demands;
+its signature adapter owns its function root while borrowing dispatch services,
+and its parameter/return demands produce independent carriers. Event names,
+spans and passive identity metadata remain graph-free results.
+
+Paid and self-evaluation receipts are operation bookkeeping: the outermost
+operation releases them even when a caller's builder remains open. Closing that
+builder therefore leaves no dispatcher-local receipt retaining its operands.
+A host request that composes ordinals across operations before rooting its
+delivery holds an explicit builder for the request.
+A lexical `NodeRootScope`
 releases its roots when it closes and hands its delivery attachments to the
 nearest remaining owner of its graph — never a lane. An owner keeps each
 delivery once: every clone of a delivery shares one owner, so repeated reads

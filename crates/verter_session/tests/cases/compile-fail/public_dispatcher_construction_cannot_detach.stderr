@@ -1,0 +1,41 @@
+error[E0624]: method `resolve_hot_handle_with_context` is private
+  --> tests/cases/compile-fail/public_dispatcher_construction_cannot_detach.rs:17:14
+   |
+17 |     dispatch.resolve_hot_handle_with_context(hot, context)
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private method
+   |
+  ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
+   |
+   |         pub(crate) fn $($item)*
+   |         --- private method defined here
+
+error[E0624]: method `decl_body_hot_ref` is private
+  --> tests/cases/compile-fail/public_dispatcher_construction_cannot_detach.rs:24:14
+   |
+24 |     dispatch.decl_body_hot_ref(
+   |              ^^^^^^^^^^^^^^^^^ private method
+   |
+  ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
+   |
+   |         pub(crate) fn $($item)*
+   |         --- private method defined here
+
+error[E0624]: method `single_callable_arm` is private
+  --> tests/cases/compile-fail/public_dispatcher_construction_cannot_detach.rs:43:14
+   |
+43 |     callable.single_callable_arm(context)
+   |              ^^^^^^^^^^^^^^^^^^^ private method
+   |
+  ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
+   |
+   |         pub(crate) fn $($item)*
+   |         --- private method defined here
+
+error[E0515]: cannot return value referencing function parameter `result`
+ --> tests/cases/compile-fail/public_dispatcher_construction_cannot_detach.rs:9:5
+  |
+9 |     result.node(result.value).unwrap()
+  |     ------^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |     |
+  |     returns a value referencing data owned by the current function
+  |     `result` is borrowed here

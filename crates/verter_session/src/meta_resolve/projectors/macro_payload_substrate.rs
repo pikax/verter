@@ -191,7 +191,7 @@ pub(crate) fn resolve_emit_payload_to_conditional_root(
             &identity.decl_name,
         )
         .and_then(|resolved| {
-            resolve_emit_payload_to_conditional_root(dispatch, resolved, depth + 1, visited)
+            resolve_emit_payload_to_conditional_root(dispatch, resolved.value, depth + 1, visited)
         }),
         // A `DeclPlaceholder` deferral (e.g. surfaced by an upstream
         // `ResolveDecl`). Reach its body through the same shared
@@ -204,7 +204,7 @@ pub(crate) fn resolve_emit_payload_to_conditional_root(
                 ..
             },
         )) => lower_decl_body_to_node(dispatch, canonical_id, *owner, name).and_then(|resolved| {
-            resolve_emit_payload_to_conditional_root(dispatch, resolved, depth + 1, visited)
+            resolve_emit_payload_to_conditional_root(dispatch, resolved.value, depth + 1, visited)
         }),
         _ => None,
     }
@@ -227,15 +227,16 @@ pub(crate) const EMIT_CARRIER_WALK_FUSE: usize = 1024;
 /// shared `Instantiate` query (the single resolution engine), so the node
 /// stays graph-native and is never materialised back to a `TypeExpr`.
 /// `args` is empty — a bare named-decl demand carries no explicit type
-/// arguments.
+/// arguments. The body node arrives in the carrier that owns it, which the
+/// walk holds while it descends from it.
 fn lower_decl_body_to_node(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     canonical_id: &str,
     owner: verter_type_expr::TopLevelOwnerId,
     name: &str,
-) -> Option<SemanticNodeId> {
+) -> Option<verter_type_engine::semantic_query_memo::node_roots::Constructed<SemanticNodeId>> {
     verter_audit::attribute!(DeclBodyLower);
-    let handle = dispatch.decl_body_hot_ref(
+    let handle = dispatch.owning().decl_body_hot_ref(
         canonical_id,
         owner,
         name,
@@ -243,8 +244,9 @@ fn lower_decl_body_to_node(
         verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Navigate,
         ),
-    )?;
-    Some(handle.node())
+    );
+    let node = handle.value?.node();
+    Some(handle.map(|_| node))
 }
 
 #[allow(dead_code)]
@@ -317,35 +319,38 @@ pub(crate) fn resolve_payload_surface_with_scope(
     // Conditional payload under emit-class scope. Project both
     // branches under `Published(Shallow)` and merge their top-level
     // Object members.
-    let (true_branch, false_branch) = match dispatch
-        .graph()
-        .read_in_scope(conditional_node)
-        .as_deref()
-    {
-        Some(SemanticNodeData::Conditional {
-            true_branch_ref,
-            false_branch_ref,
-            pending,
-            ..
-        }) => (
-            dispatch.apply_conditional_branch_pending(*true_branch_ref, pending.as_deref(), true),
-            dispatch.apply_conditional_branch_pending(*false_branch_ref, pending.as_deref(), false),
-        ),
-        _ => {
-            // Unreachable per the resolution above, but fall through
-            // safely.
-            return super::resolve_payload_surface(
-                dispatch,
-                payload_node,
-                macro_index,
-                expansion_kind,
-                // Emit-class payloads are structural (props-axis bit is
-                // always false for emits).
-                verter_type_engine::semantic_query::SurfaceProvenanceContext::Structural,
-                diag_sink,
-            );
-        }
-    };
+    let (true_branch, false_branch) =
+        match dispatch.graph().read_in_scope(conditional_node).as_deref() {
+            Some(SemanticNodeData::Conditional {
+                true_branch_ref,
+                false_branch_ref,
+                pending,
+                ..
+            }) => (
+                dispatch
+                    .owning()
+                    .apply_conditional_branch_pending(*true_branch_ref, pending.as_deref(), true)
+                    .value,
+                dispatch
+                    .owning()
+                    .apply_conditional_branch_pending(*false_branch_ref, pending.as_deref(), false)
+                    .value,
+            ),
+            _ => {
+                // Unreachable per the resolution above, but fall through
+                // safely.
+                return super::resolve_payload_surface(
+                    dispatch,
+                    payload_node,
+                    macro_index,
+                    expansion_kind,
+                    // Emit-class payloads are structural (props-axis bit is
+                    // always false for emits).
+                    verter_type_engine::semantic_query::SurfaceProvenanceContext::Structural,
+                    diag_sink,
+                );
+            }
+        };
 
     // A failed branch carries its typed reason to the merge below — the
     // one-branch surface it forces is a USABLE SUBSET, never spelled as the
@@ -422,13 +427,13 @@ pub(crate) fn resolve_payload_surface_with_scope(
                 // `OpenSpreadProgram` diagnostic into the macro expansion
                 // envelope (see `project_branch` above).
                 Some(SemanticNodeData::ObjectSpreadProgram(_)) => {
-                    let formula = match dispatch.project_object_spread_for_consumer(
+                    let formula = match dispatch.owning().project_object_spread_for_consumer(
                         surface,
                         verter_type_engine::semantic_query::ObjectProjectionSelector::Surface,
                         verter_type_engine::semantic_query::ProjectionReductionContext::published(
                             ProjectionMode::Shallow,
                         ),
-                    ) {
+                    ).value {
                         QueryResult::Value(formula) => formula,
                         QueryResult::Recursive(_) => {
                             return Err(NonEmptyReasons::of(
@@ -439,7 +444,7 @@ pub(crate) fn resolve_payload_surface_with_scope(
                             return Err(NonEmptyReasons::from_query_error(&error));
                         }
                     };
-                    let members = dispatch.spread_formula_positive_members_for_macro(&formula);
+                    let members = dispatch.owning().spread_formula_positive_members_for_macro(&formula).value;
                     Ok(Some(members))
                 }
                 other => {

@@ -116,7 +116,11 @@ fn spread_through_a_dispatcher<C: ResolverCapabilities>(
     dispatch: &ProjectSemanticDispatch<'_, C>,
     formula: &ObjectProjectionFormula,
 ) -> usize {
-    dispatch.spread_formula_positive_members_for_macro(formula).len()
+    dispatch
+        .owning()
+        .spread_formula_positive_members_for_macro(formula)
+        .value
+        .len()
 }
 
 fn keep_error(error: &QueryError) -> QueryError {
@@ -142,8 +146,52 @@ fn build_under_an_explicit_owner<C: ResolverCapabilities>(
     error: QueryError,
 ) -> Result<(NodeRootScope, NodeRoot), QueryError> {
     let builder = dispatch.enter_construction_scope();
-    let root = dispatch.graph().root_in_scope(dispatch.opaque(error))?;
+    let constructed = dispatch.owning().opaque(error);
+    let root = constructed.node(constructed.value)?.to_root()?;
     Ok((builder, root))
 }
 
 fn main() {}
+
+fn keep_construction_past_dispatcher<C: ResolverCapabilities>(
+    dispatch: ProjectSemanticDispatch<'_, C>,
+) -> Result<
+    Option<verter_type_engine::semantic_query_memo::node_roots::Constructed<SemanticNodeId>>,
+    QueryError,
+> {
+    let result = dispatch.owning().decl_body_hot_ref(
+        "/public.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "Target",
+        std::sync::Arc::from([]),
+        verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
+        ),
+    );
+    let Some(hot) = result.value else {
+        return Ok(None);
+    };
+    let result = result.map(|_| hot.node());
+    drop(dispatch);
+    let clone = result.clone();
+    drop(result);
+    let _ = clone.node(clone.value)?.read()?;
+    Ok(Some(clone))
+}
+
+fn keep_callable_param<C: ResolverCapabilities>(
+    dispatch: ProjectSemanticDispatch<'_, C>,
+    node: SemanticNodeId,
+    context: verter_type_engine::semantic_query::ProjectionReductionContext,
+) -> Option<verter_type_engine::semantic_query_memo::node_roots::Constructed<Option<SemanticNodeId>>>
+{
+    let callable =
+        verter_type_engine::project_semantic_dispatch::callable_view::CallableNodeView::new(
+            &dispatch, node,
+        );
+    let signature = callable.owning().signature(context)?;
+    let first = signature.first_param();
+    drop(signature);
+    drop(dispatch);
+    Some(first)
+}

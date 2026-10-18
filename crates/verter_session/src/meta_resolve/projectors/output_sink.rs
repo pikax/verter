@@ -972,12 +972,15 @@ fn resolve_member_value_for_classification(
     // the alias unwrap below then proceeds on the resolved `DeclRef`.
     let value = match dispatch.graph().read_in_scope(value).as_deref() {
         Some(data) if data.bare_ref_head().is_some() || data.import_type_head().is_some() => {
-            dispatch.resolve_carrier_subject_node(
-                value,
-                verter_type_engine::semantic_query::ProjectionReductionContext::published(
-                    ProjectionMode::Navigate,
-                ),
-            )
+            dispatch
+                .owning()
+                .resolve_carrier_subject_node(
+                    value,
+                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                        ProjectionMode::Navigate,
+                    ),
+                )
+                .value
         }
         _ => value,
     };
@@ -1240,12 +1243,12 @@ fn materialize_output_source(
                     ProjectionMode::Navigate,
                 );
             let hot = dispatch
-                .raise_semantic_type_source_to_hot_strict(
+                .owning().raise_semantic_type_source_to_hot_strict(
                     other,
                     scope_canonical_id,
                     scope_owner,
                     transit_ctx,
-                )
+                ).value
                 .map_err(|failure| match failure {
                     verter_type_engine::project_semantic_dispatch::semantic_source::StrictSourceRaiseFailure::InteriorMiss(path) => {
                         crate::meta_resolve::ComponentMetaOutputFailure::InteriorSourceMiss { path }

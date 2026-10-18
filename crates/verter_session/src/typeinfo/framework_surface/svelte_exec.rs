@@ -1111,12 +1111,11 @@ fn svelte_snippet_slots_from_typeinfo_surface(
             // to its ordered elements).
             // A fail-closed `None` (an unresolved `Params` carrier) drops the slot.
             let view = CallableNodeView::new(dispatch, member.value);
-            let params = view.validated_snippet_positional_params(context)?;
+            let params = view.owning().validated_snippet_positional_params(context).value?;
             // An UNRESOLVED snippet root records its typed reason; the
             // return display then stays absent honestly (the validated
             // snippet member itself already resolved above).
-            let return_node = view
-                .realized_callable_root(context)
+            let return_node = view.owning().realized_callable_root(context).value
                 .recorded()
                 .and_then(|realized_root| {
                     let combine = match dispatch.graph().read_in_scope(realized_root)
@@ -1127,7 +1126,7 @@ fn svelte_snippet_slots_from_typeinfo_surface(
                         }
                         _ => verter_type_engine::project_semantic_dispatch::callable_view::ArmCombineNode::Intersection,
                     };
-                    view.slot_param_and_return_by_arm(combine, context)
+                    view.owning().slot_param_and_return_by_arm(combine, context).value
                 })
                 .and_then(|parts| parts.return_type);
             // The slot member's scope (the shared member-value-scope rule) —
@@ -1698,7 +1697,7 @@ fn callback_events_from_props_surface(
         // prop (`onclick: string` / `label?: string`), or a union with no single
         // callable arm — is NOT an event.
         let view = CallableNodeView::new(dispatch, member.value);
-        let Some(signature) = view.signature(context) else {
+        let Some(signature) = view.owning().signature(context) else {
             continue;
         };
         // Payload = the callback's PARAMETERS as a labelled tuple (ALL of them — a
@@ -1710,7 +1709,7 @@ fn callback_events_from_props_surface(
         // authored macro-payload position, so `payload` stays the honest `None`
         // (paired with a `None` scope); typed payload demand is host-raised
         // through the graph surface.
-        let raw_params = signature.raw_params();
+        let raw_params = signature.raw_params().value;
         let payload_tuple = materialize_payload_tuple(dispatch, &raw_params);
         let payload_type =
             crate::resolver_core::surface_projector::render_type_expr_display(&payload_tuple);
@@ -1992,7 +1991,7 @@ pub(crate) fn resolve_svelte_value_export_member(
                 verter_type_engine::project_semantic_dispatch::raise::node_shallow_member_output_with_dispatch(
                     dispatch,
                     dispatch
-                        .widened_nominal_typeof(reduced.node_id())
+                        .owning().widened_nominal_typeof(reduced.node_id()).value
                         .unwrap_or_else(|| reduced.node_id()),
                 )
                 .map(NamedTypeMemberOutput::from_raised_shallow)
@@ -2000,7 +1999,7 @@ pub(crate) fn resolve_svelte_value_export_member(
             return (Some(shallow), Some("unique symbol".to_string()), Vec::new());
         }
         let member_node = dispatch
-            .widened_nominal_typeof(reduced.node_id())
+            .owning().widened_nominal_typeof(reduced.node_id()).value
             .unwrap_or_else(|| reduced.node_id());
         let shallow =
             verter_type_engine::project_semantic_dispatch::raise::node_shallow_member_output_with_dispatch(

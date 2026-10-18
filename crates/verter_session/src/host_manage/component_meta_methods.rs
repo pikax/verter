@@ -1354,12 +1354,12 @@ impl VerterHost {
             let locator =
                 verter_type_expr::locators::AuthoredBodyLocator::DeclBody(body.body_slot.clone());
             match dispatch
-                .raise_authored_locator_to_hot(
+                .owning().raise_authored_locator_to_hot(
                     &locator,
                     verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                         verter_type_engine::semantic_query::ProjectionMode::Navigate,
                     ),
-                )
+                ).value
                 .at_optional_boundary()
             {
                 Some(hot) => crate::meta_resolve::exactness::node_root_should_stay_symbolic(
@@ -1757,7 +1757,7 @@ impl VerterHost {
             >,
              producer_scope: &RegistryProducerScope,
              source: &verter_type_expr::facts::SemanticTypeSource| {
-                dispatch.raise_semantic_type_source_to_hot(
+                dispatch.owning().raise_semantic_type_source_to_hot(
                     source,
                     verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                         scope_canonical_id: producer_scope.canonical_id.as_ref(),
@@ -1765,7 +1765,7 @@ impl VerterHost {
                         context: seed_transit_ctx,
                         interior_failures: None,
                     },
-                )
+                ).value
             };
         for (index, entry) in resolved_type_registry.iter().enumerate() {
             let Some(meta) = resolved_type_registry_meta.get(index) else {
@@ -1854,7 +1854,9 @@ impl VerterHost {
                     .or(source_locator.as_ref())
                 {
                     Some(locator) => seed_dispatch
+                        .owning()
                         .raise_authored_locator_to_hot(locator, seed_transit_ctx)
+                        .value
                         .at_optional_boundary()
                         .map(|hot| hot.node()),
                     None => entry
@@ -2283,7 +2285,7 @@ impl VerterHost {
             // materialised `TypeExpr` in the BFS.
             let owner_collection_ref_head = owner_collection_locator.as_ref().and_then(|locator| {
                 seed_dispatch
-                    .raise_authored_locator_to_hot(locator, seed_transit_ctx)
+                    .owning().raise_authored_locator_to_hot(locator, seed_transit_ctx).value
                     .at_optional_boundary()
                     .and_then(|hot| {
                         verter_type_engine::project_semantic_dispatch::reference_carriers::reference_carrier_head(dispatch,

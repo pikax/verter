@@ -590,6 +590,7 @@ pub(crate) fn navigate_param_to_object_surface<
     // resolution with a named reason — never a fabricated stand-in node and
     // never a silent "no surface".
     let Some(base) = dispatch
+        .owning()
         .raise_semantic_type_source_to_hot(
             &verter_type_expr::facts::SemanticTypeSource::Authored(payload.locator.clone()),
             verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
@@ -601,6 +602,7 @@ pub(crate) fn navigate_param_to_object_surface<
                 interior_failures: None,
             },
         )
+        .value
         .at_optional_boundary()
         .map(|raised| raised.node())
     else {

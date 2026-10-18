@@ -269,6 +269,36 @@ impl SemanticGraphStore {
             .then_some(())
     }
 
+    /// Exact nonpermanent topology retained by the hash-cons caches. This
+    /// fixture probe distinguishes cache residue from a live dispatcher's
+    /// operation attachments without clearing either owner first.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn hash_cons_retained_nodes_for_tests(&self) -> rustc_hash::FxHashSet<SemanticNodeId> {
+        let mut pending = Vec::new();
+        for entry in &self.substitute_memo {
+            pending.extend_from_slice(entry.value().1.operands());
+        }
+        for entry in &self.evaluate_deferred_memo {
+            pending.extend_from_slice(entry.value().lease.roots());
+        }
+        let mut retained = rustc_hash::FxHashSet::default();
+        while let Some(node) = pending.pop() {
+            let Some(data) = self.node_data(node) else {
+                continue;
+            };
+            let permanent = matches!(
+                &*data,
+                crate::semantic_query::SemanticNodeData::Primitive(_)
+            ) && self.node_scope(node)
+                == Some(crate::semantic_query::NodeScopeId::Global);
+            if permanent || !retained.insert(node) {
+                continue;
+            }
+            data.for_each_retained_child(|child| pending.push(child));
+        }
+        retained
+    }
+
     /// Release both stores during explicit graph invalidation. Ordinary
     /// evaluation reads establish freshness through their retained facts;
     /// correctness does not depend on this cleanup running after an edit.

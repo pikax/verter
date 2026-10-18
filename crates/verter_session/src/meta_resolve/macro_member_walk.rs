@@ -131,12 +131,12 @@ pub(crate) fn slot_binding_targets_define_props_root(
         .as_ref()
         .and_then(|evidence| {
             dispatch
-                .raise_authored_locator_to_hot(evidence.source().locator(), transit_ctx)
+                .owning().raise_authored_locator_to_hot(evidence.source().locator(), transit_ctx).value
                 .at_optional_boundary()
         })
         .or_else(|| {
             dispatch
-                .raise_semantic_type_source_to_hot(
+                .owning().raise_semantic_type_source_to_hot(
                     field.authority.source()?,
                     verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                         scope_canonical_id: owner_canonical,
@@ -144,7 +144,7 @@ pub(crate) fn slot_binding_targets_define_props_root(
                         context: transit_ctx,
                         interior_failures: None,
                     },
-                )
+                ).value
                 .at_optional_boundary()
         });
     let Some(raised) = raised else {

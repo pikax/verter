@@ -206,31 +206,35 @@ impl<'a, 'ctx, C: crate::resolver_core::ResolverCapabilities> CallableNodeView<'
             .into_complete_node()
     }
 
-    /// Normalize the root to its underlying callable node through the shared
-    /// carrier-shell normalizer. `Resolved` carries a `Function` node or a
-    /// `Union` / `Intersection` of realized `Function` arms; `NoSurface` is
-    /// the complete "does not realize to a callable" answer; `Incomplete`
-    /// names why the realization could not resolve.
-    pub fn realized_callable_root(
-        &self,
-        context: ProjectionReductionContext,
-    ) -> crate::semantic_query::surface_resolution::SurfaceResolution<SemanticNodeId> {
-        realize_callable_member(self.dispatch, self.root, context)
+    construction_ordinal_seam! {
+        /// Normalize the root to its underlying callable node through the shared
+        /// carrier-shell normalizer. `Resolved` carries a `Function` node or a
+        /// `Union` / `Intersection` of realized `Function` arms; `NoSurface` is
+        /// the complete "does not realize to a callable" answer; `Incomplete`
+        /// names why the realization could not resolve.
+        fn realized_callable_root(
+            &self,
+            context: ProjectionReductionContext,
+        ) -> crate::semantic_query::surface_resolution::SurfaceResolution<SemanticNodeId> {
+            realize_callable_member(self.dispatch, self.root, context)
+        }
     }
 
-    /// The single callable `Function` node the root denotes after stripping the
-    /// nullish (`undefined` / `null`) arms an EXPLICIT nullish union/
-    /// intersection VALUE carries.
-    ///
-    /// It layers a stricter "exactly one callable after nullish stripping"
-    /// classifier ON TOP of [`realize_callable_member`] (it does not subsume
-    /// it): a non-callable non-nullish arm, or two distinct callable arms, both
-    /// refuse (`None`).
-    pub fn single_callable_arm(
-        &self,
-        context: ProjectionReductionContext,
-    ) -> Option<SemanticNodeId> {
-        self.classify_single_callable(self.root, context, 0)
+    construction_ordinal_seam! {
+        /// The single callable `Function` node the root denotes after stripping the
+        /// nullish (`undefined` / `null`) arms an EXPLICIT nullish union/
+        /// intersection VALUE carries.
+        ///
+        /// It layers a stricter "exactly one callable after nullish stripping"
+        /// classifier ON TOP of [`realize_callable_member`] (it does not subsume
+        /// it): a non-callable non-nullish arm, or two distinct callable arms, both
+        /// refuse (`None`).
+        fn single_callable_arm(
+            &self,
+            context: ProjectionReductionContext,
+        ) -> Option<SemanticNodeId> {
+            self.classify_single_callable(self.root, context, 0)
+        }
     }
 
     fn classify_single_callable(
@@ -373,35 +377,37 @@ impl<'a, 'ctx, C: crate::resolver_core::ResolverCapabilities> CallableNodeView<'
         )
     }
 
-    /// The realized callable as a [`SignatureNodeView`]. `None` when the root
-    /// does not realize to a single `Function` node (e.g. a multi-arm
-    /// composite, or a non-callable).
-    ///
-    /// Routes through [`Self::single_callable_arm`] (NOT a direct
-    /// `realize_callable_member`) so a single-signature projection respects the
-    /// view's nullish-stripping policy — an optional callback root
-    /// (`((r) => void) | undefined`, including one behind a carrier) projects to
-    /// the surviving callable signature.
-    pub fn signature(
-        &self,
-        context: ProjectionReductionContext,
-    ) -> Option<SignatureNodeView<'a, 'ctx, C>> {
-        let realized = self.single_callable_arm(context)?;
-        match self.data(realized).as_deref() {
-            // Call-kind by construction (`single_callable_arm` only realizes
-            // call signatures); matched explicitly so the view's invariant is
-            // the pattern, not a comment.
-            Some(data)
-                if data
-                    .callable_header(&crate::semantic_query::ResolveOverloadSetConsumer::witness())
-                    .is_some_and(|header| header.kind == SignatureKind::Call) =>
-            {
-                Some(SignatureNodeView {
-                    dispatch: self.dispatch,
-                    function: realized,
-                })
+    construction_ordinal_seam! {
+        /// The realized callable as a [`SignatureNodeView`]. `None` when the root
+        /// does not realize to a single `Function` node (e.g. a multi-arm
+        /// composite, or a non-callable).
+        ///
+        /// Routes through [`Self::single_callable_arm`] (NOT a direct
+        /// `realize_callable_member`) so a single-signature projection respects the
+        /// view's nullish-stripping policy — an optional callback root
+        /// (`((r) => void) | undefined`, including one behind a carrier) projects to
+        /// the surviving callable signature.
+        fn signature(
+            &self,
+            context: ProjectionReductionContext,
+        ) -> Option<SignatureNodeView<'a, 'ctx, C>> {
+            let realized = self.single_callable_arm(context)?;
+            match self.data(realized).as_deref() {
+                // Call-kind by construction (`single_callable_arm` only realizes
+                // call signatures); matched explicitly so the view's invariant is
+                // the pattern, not a comment.
+                Some(data)
+                    if data
+                        .callable_header(&crate::semantic_query::ResolveOverloadSetConsumer::witness())
+                        .is_some_and(|header| header.kind == SignatureKind::Call) =>
+                {
+                    Some(SignatureNodeView {
+                        dispatch: self.dispatch,
+                        function: realized,
+                    })
+                }
+                _ => None,
             }
-            _ => None,
         }
     }
 
@@ -639,69 +645,73 @@ impl<'a, 'ctx, C: crate::resolver_core::ResolverCapabilities> CallableNodeView<'
         complete
     }
 
-    /// All positional params of the realized callable — leading `this` skipped,
-    /// a rest-tuple param expanded into one entry per tuple element. `None` when
-    /// the root does not realize to a single `Function`, or when a rest param's
-    /// structural-fact demand is PARTIAL (the whole positional read fails —
-    /// never a silent short vector).
-    pub fn positional_params(
-        &self,
-        context: ProjectionReductionContext,
-    ) -> Option<Vec<PositionalParamNode>> {
-        self.signature(context)?.positional_params_expanded(context)
+    construction_ordinal_seam! {
+        /// All positional params of the realized callable — leading `this` skipped,
+        /// a rest-tuple param expanded into one entry per tuple element. `None` when
+        /// the root does not realize to a single `Function`, or when a rest param's
+        /// structural-fact demand is PARTIAL (the whole positional read fails —
+        /// never a silent short vector).
+        fn positional_params(
+            &self,
+            context: ProjectionReductionContext,
+        ) -> Option<Vec<PositionalParamNode>> {
+            self.signature(context)?.positional_params_expanded(context)
+        }
     }
 
-    /// The validated Svelte-snippet positional params — the node-domain reader
-    /// the Svelte snippet-slot normalizer consumes. The caller has ALREADY
-    /// proven the member is a validated Svelte `Snippet` member; this is NOT a
-    /// generic "any callable carrier positional args" API (reading an
-    /// `InstantiationRef.args` tuple as positional params is a positional
-    /// generic-contract assumption legitimate ONLY under the validated snippet
-    /// boundary).
-    ///
-    /// It resolves the snippet's positional binding NODES WITHOUT the
-    /// "instantiate-then-fail" gap: the primary `Snippet<Params>` shape lowers
-    /// to an `InstantiationRef(Snippet, [Params])` whose `Instantiate` yields the
-    /// Snippet interface `Object` (a call signature on the surface, NOT a
-    /// `Function` node), so [`Self::positional_params`] (which needs a
-    /// `Function`) DROPS it. This reader therefore PEELS the root through the
-    /// carrier-PRESERVING
-    /// [`ProjectSemanticDispatch::peel_node_for_uninstantiated_carrier_fact_demand`]
-    /// (unwrap `Alias` / resolve `DeclRef`, STOP at `InstantiationRef`) and reads
-    /// the un-instantiated `Params` `args` directly. Order + contract:
-    ///
-    /// - `InstantiationRef` with `args.len() == 0` → `Some(vec![])` (a default
-    ///   `Snippet` — a present, binding-less slot).
-    /// - `InstantiationRef` with `args.len() == 1` → normalize the single
-    ///   `Params` arg through the shared structural-fact demand primitive, then
-    ///   classify it EXHAUSTIVELY ([`SnippetParamsArg`], no `_` wildcard):
-    ///     - a `Tuple` → one param per element (a `DeclRef`-to-tuple `Params`
-    ///       RESOLVES here — the tuple need not be written literally);
-    ///     - ANY OTHER resolved non-tuple shape (`Union` / `Intersection` /
-    ///       `Conditional` / `Object` / `Array` / `Primitive` / `Literal` /
-    ///       `TypeParam` / `Function` / …) → `Some(vec![])` (a validated snippet
-    ///       with a resolved non-tuple `Params` is a PRESENT, binding-less slot —
-    ///       e.g. `Snippet<[a] | [b]>`, an open-generic `Snippet<Params>`);
-    ///     - an UNRESOLVED residual carrier / non-type artifact (`Alias` /
-    ///       `DeclRef` / `InstantiationRef` / `Opaque` / …) → `None` (FAIL-CLOSED:
-    ///       the `Params` could still be a tuple we could not reach; never a
-    ///       present slot presented as binding-complete).
-    /// - `InstantiationRef` with `args.len() > 1` → `Some(vec![])` (a validated
-    ///   snippet is always a present slot; a non-single-`Params` shape carries no
-    ///   enumerable bindings).
-    /// - a realized `Function` (a snippet whose call signature reduced, or a
-    ///   `(this, ...args: Params)` callback) → [`Self::positional_params`]
-    ///   (this-skip + rest-tuple expansion).
-    /// - a `Union` / `Intersection` of snippet carriers / functions → the view
-    ///   OWNS the arm recursion (the normalizer never iterates `Union`): recurse
-    ///   per arm (fail-closed on ANY non-snippet arm) and combine by index.
-    /// - anything else (incl. a directly-written `Tuple` ROOT) is NOT a snippet →
-    ///   `None`.
-    pub fn validated_snippet_positional_params(
-        &self,
-        context: ProjectionReductionContext,
-    ) -> Option<Vec<PositionalParamNode>> {
-        self.snippet_positional_params_at(self.root, context, 0)
+    construction_ordinal_seam! {
+        /// The validated Svelte-snippet positional params — the node-domain reader
+        /// the Svelte snippet-slot normalizer consumes. The caller has ALREADY
+        /// proven the member is a validated Svelte `Snippet` member; this is NOT a
+        /// generic "any callable carrier positional args" API (reading an
+        /// `InstantiationRef.args` tuple as positional params is a positional
+        /// generic-contract assumption legitimate ONLY under the validated snippet
+        /// boundary).
+        ///
+        /// It resolves the snippet's positional binding NODES WITHOUT the
+        /// "instantiate-then-fail" gap: the primary `Snippet<Params>` shape lowers
+        /// to an `InstantiationRef(Snippet, [Params])` whose `Instantiate` yields the
+        /// Snippet interface `Object` (a call signature on the surface, NOT a
+        /// `Function` node), so [`Self::positional_params`] (which needs a
+        /// `Function`) DROPS it. This reader therefore PEELS the root through the
+        /// carrier-PRESERVING
+        /// [`ProjectSemanticDispatch::peel_node_for_uninstantiated_carrier_fact_demand`]
+        /// (unwrap `Alias` / resolve `DeclRef`, STOP at `InstantiationRef`) and reads
+        /// the un-instantiated `Params` `args` directly. Order + contract:
+        ///
+        /// - `InstantiationRef` with `args.len() == 0` → `Some(vec![])` (a default
+        ///   `Snippet` — a present, binding-less slot).
+        /// - `InstantiationRef` with `args.len() == 1` → normalize the single
+        ///   `Params` arg through the shared structural-fact demand primitive, then
+        ///   classify it EXHAUSTIVELY ([`SnippetParamsArg`], no `_` wildcard):
+        ///     - a `Tuple` → one param per element (a `DeclRef`-to-tuple `Params`
+        ///       RESOLVES here — the tuple need not be written literally);
+        ///     - ANY OTHER resolved non-tuple shape (`Union` / `Intersection` /
+        ///       `Conditional` / `Object` / `Array` / `Primitive` / `Literal` /
+        ///       `TypeParam` / `Function` / …) → `Some(vec![])` (a validated snippet
+        ///       with a resolved non-tuple `Params` is a PRESENT, binding-less slot —
+        ///       e.g. `Snippet<[a] | [b]>`, an open-generic `Snippet<Params>`);
+        ///     - an UNRESOLVED residual carrier / non-type artifact (`Alias` /
+        ///       `DeclRef` / `InstantiationRef` / `Opaque` / …) → `None` (FAIL-CLOSED:
+        ///       the `Params` could still be a tuple we could not reach; never a
+        ///       present slot presented as binding-complete).
+        /// - `InstantiationRef` with `args.len() > 1` → `Some(vec![])` (a validated
+        ///   snippet is always a present slot; a non-single-`Params` shape carries no
+        ///   enumerable bindings).
+        /// - a realized `Function` (a snippet whose call signature reduced, or a
+        ///   `(this, ...args: Params)` callback) → [`Self::positional_params`]
+        ///   (this-skip + rest-tuple expansion).
+        /// - a `Union` / `Intersection` of snippet carriers / functions → the view
+        ///   OWNS the arm recursion (the normalizer never iterates `Union`): recurse
+        ///   per arm (fail-closed on ANY non-snippet arm) and combine by index.
+        /// - anything else (incl. a directly-written `Tuple` ROOT) is NOT a snippet →
+        ///   `None`.
+        fn validated_snippet_positional_params(
+            &self,
+            context: ProjectionReductionContext,
+        ) -> Option<Vec<PositionalParamNode>> {
+            self.snippet_positional_params_at(self.root, context, 0)
+        }
     }
 
     /// Recursive worker for [`Self::validated_snippet_positional_params`],
@@ -843,33 +853,35 @@ impl<'a, 'ctx, C: crate::resolver_core::ResolverCapabilities> CallableNodeView<'
             .collect()
     }
 
-    /// The Vue multi-arm slot first-param + return facts. The root is realized
-    /// to a callable (a `Function`, or a `Union` / `Intersection` of realized
-    /// `Function` arms); the first-param binding exists ONLY when EVERY callable
-    /// arm supplies a first param (else `first_param = None` — a no-param arm
-    /// guarantees no binding); the return combines by `combine`.
-    ///
-    /// FAILS CLOSED (`None`) when the root does not realize to a callable, when
-    /// any arm is non-callable after realization (which
-    /// [`realize_callable_member`] already rejects for a composite), or when any
-    /// required node data is missing.
-    pub fn slot_param_and_return_by_arm(
-        &self,
-        combine: ArmCombineNode,
-        context: ProjectionReductionContext,
-    ) -> Option<SlotCallableNodeParts> {
-        // Collect EVERY non-nullish callable arm as a realized `Function` node —
-        // the view owns the composite/nullish policy and normalizes carriers at
-        // this genuine slot-callable fact demand, so an aliased slot
-        // (`SlotAlias | GenSlot<Props>`) or a carrier-wrapped composite resolves
-        // here rather than failing the strict whole-root `realize_callable_member`
-        // composite rule. Fails closed on a non-callable non-nullish arm.
-        let mut functions: Vec<SemanticNodeId> = Vec::new();
-        self.collect_callable_arms(self.root, context, 0, &mut functions)?;
-        if functions.is_empty() {
-            return None;
+    construction_ordinal_seam! {
+        /// The Vue multi-arm slot first-param + return facts. The root is realized
+        /// to a callable (a `Function`, or a `Union` / `Intersection` of realized
+        /// `Function` arms); the first-param binding exists ONLY when EVERY callable
+        /// arm supplies a first param (else `first_param = None` — a no-param arm
+        /// guarantees no binding); the return combines by `combine`.
+        ///
+        /// FAILS CLOSED (`None`) when the root does not realize to a callable, when
+        /// any arm is non-callable after realization (which
+        /// [`realize_callable_member`] already rejects for a composite), or when any
+        /// required node data is missing.
+        fn slot_param_and_return_by_arm(
+            &self,
+            combine: ArmCombineNode,
+            context: ProjectionReductionContext,
+        ) -> Option<SlotCallableNodeParts> {
+            // Collect EVERY non-nullish callable arm as a realized `Function` node —
+            // the view owns the composite/nullish policy and normalizes carriers at
+            // this genuine slot-callable fact demand, so an aliased slot
+            // (`SlotAlias | GenSlot<Props>`) or a carrier-wrapped composite resolves
+            // here rather than failing the strict whole-root `realize_callable_member`
+            // composite rule. Fails closed on a non-callable non-nullish arm.
+            let mut functions: Vec<SemanticNodeId> = Vec::new();
+            self.collect_callable_arms(self.root, context, 0, &mut functions)?;
+            if functions.is_empty() {
+                return None;
+            }
+            self.combine_slot_arms(&functions, combine)
         }
-        self.combine_slot_arms(&functions, combine)
     }
 
     /// Recursively collect every non-nullish callable arm of `node` as a
@@ -1042,36 +1054,40 @@ impl<C: crate::resolver_core::ResolverCapabilities> SignatureNodeView<'_, '_, C>
         node_data_for(self.dispatch.graph(), node)
     }
 
-    /// The signature's first-parameter node, if any.
-    pub fn first_param(&self) -> Option<SemanticNodeId> {
-        let data = self.data(self.function)?;
-        data.callable_header(&crate::semantic_query::ResolveOverloadSetConsumer::witness())?
-            .params
-            .first()
-            .map(|p| p.ty)
+    construction_ordinal_seam! {
+        /// The signature's first-parameter node, if any.
+        fn first_param(&self) -> Option<SemanticNodeId> {
+            let data = self.data(self.function)?;
+            data.callable_header(&crate::semantic_query::ResolveOverloadSetConsumer::witness())?
+                .params
+                .first()
+                .map(|p| p.ty)
+        }
     }
 
-    /// The signature's return-type node. `Some` only when `function` is a
-    /// `Function` node (which it is by construction); FAILS CLOSED with `None`
-    /// on the unreachable non-`Function` case rather than fabricating a
-    /// valid-looking node fact by returning `self.function`.
-    // Verified-unconsumed completeness method — no normalizer currently demands
-    // it; pending a delete-or-wire decision.
-    #[allow(dead_code)]
-    pub fn return_type(&self) -> Option<SemanticNodeId> {
-        let read = self
-            .dispatch
-            .observe_read(|| self.dispatch.materialize_returned_callable(self.function));
-        let complete = read.observations_are_complete();
-        let materialized = read.adopt(self.dispatch).ok()?;
-        if !complete {
-            return None;
-        }
-        match self.data(materialized).as_deref() {
-            Some(SemanticNodeData::Signature { return_type, .. }) => Some(*return_type),
-            _ => {
-                verter_debug_assert!(false, "SignatureNodeView function is not a Function node");
-                None
+    construction_ordinal_seam! {
+        /// The signature's return-type node. `Some` only when `function` is a
+        /// `Function` node (which it is by construction); FAILS CLOSED with `None`
+        /// on the unreachable non-`Function` case rather than fabricating a
+        /// valid-looking node fact by returning `self.function`.
+        // Verified-unconsumed completeness method — no normalizer currently demands
+        // it; pending a delete-or-wire decision.
+        #[allow(dead_code)]
+        fn return_type(&self) -> Option<SemanticNodeId> {
+            let read = self
+                .dispatch
+                .observe_read(|| self.dispatch.materialize_returned_callable(self.function));
+            let complete = read.observations_are_complete();
+            let materialized = read.adopt(self.dispatch).ok()?;
+            if !complete {
+                return None;
+            }
+            match self.data(materialized).as_deref() {
+                Some(SemanticNodeData::Signature { return_type, .. }) => Some(*return_type),
+                _ => {
+                    verter_debug_assert!(false, "SignatureNodeView function is not a Function node");
+                    None
+                }
             }
         }
     }
@@ -1089,107 +1105,111 @@ impl<C: crate::resolver_core::ResolverCapabilities> SignatureNodeView<'_, '_, C>
         }
     }
 
-    /// The realized signature's parameters VERBATIM (node-domain). Preserves each
-    /// param's name / `ty` node / `optional` / `rest` — unlike
-    /// [`Self::positional_params_expanded`], which skips a leading `this`,
-    /// element-expands a rest tuple, and drops the `optional` / `rest` flags into
-    /// a bare [`PositionalParamNode`]. The Vue emit payload takes these AFTER the
-    /// leading event-name param (`[1..]`); the Svelte callback payload takes ALL
-    /// of them. The consumer materializes each `param.ty` ONCE at a terminal sink;
-    /// the view never materializes.
-    ///
-    /// `function` is a `Function` node by construction; the non-`Function` arm is
-    /// unreachable and fails closed to an empty slice (never a fabricated param).
-    pub fn raw_params(&self) -> Arc<[FunctionParam]> {
-        match self.data(self.function).as_deref() {
-            Some(data)
-                if data
-                    .callable_header(&crate::semantic_query::ResolveOverloadSetConsumer::witness())
-                    .is_some() =>
-            {
-                Arc::clone(
-                    data.callable_header(
-                        &crate::semantic_query::ResolveOverloadSetConsumer::witness(),
+    construction_ordinal_seam! {
+        /// The realized signature's parameters VERBATIM (node-domain). Preserves each
+        /// param's name / `ty` node / `optional` / `rest` — unlike
+        /// [`Self::positional_params_expanded`], which skips a leading `this`,
+        /// element-expands a rest tuple, and drops the `optional` / `rest` flags into
+        /// a bare [`PositionalParamNode`]. The Vue emit payload takes these AFTER the
+        /// leading event-name param (`[1..]`); the Svelte callback payload takes ALL
+        /// of them. The consumer materializes each `param.ty` ONCE at a terminal sink;
+        /// the view never materializes.
+        ///
+        /// `function` is a `Function` node by construction; the non-`Function` arm is
+        /// unreachable and fails closed to an empty slice (never a fabricated param).
+        fn raw_params(&self) -> Arc<[FunctionParam]> {
+            match self.data(self.function).as_deref() {
+                Some(data)
+                    if data
+                        .callable_header(&crate::semantic_query::ResolveOverloadSetConsumer::witness())
+                        .is_some() =>
+                {
+                    Arc::clone(
+                        data.callable_header(
+                            &crate::semantic_query::ResolveOverloadSetConsumer::witness(),
+                        )
+                        .unwrap()
+                        .params,
                     )
-                    .unwrap()
-                    .params,
-                )
+                }
+                _ => Arc::from(Vec::new().into_boxed_slice()),
             }
-            _ => Arc::from(Vec::new().into_boxed_slice()),
         }
     }
 
-    /// All positional params — the LEADING `this` param skipped and a rest-tuple
-    /// param expanded into one [`PositionalParamNode`] per tuple element. A rest
-    /// param whose type COMPLETELY resolves to a non-tuple (an open generic /
-    /// `unknown[]`) carries no enumerable positional bindings.
-    ///
-    /// `context` is the demand identity used to carrier-resolve a rest param's
-    /// type before checking for `Tuple`: rest expansion is a genuine structural
-    /// fact (`type Args = [item: Item, index: number]` — a `DeclRef` — must
-    /// resolve to its `Tuple` to enumerate), so it routes through the shared
-    /// structural-fact demand primitive.
-    ///
-    /// `None` when a rest param's demand outcome is PARTIAL: a truncated rest
-    /// resolution fails the WHOLE positional read — a silent short vector
-    /// (the other params without the rest expansion) would present an
-    /// incomplete positional contract as complete.
-    pub fn positional_params_expanded(
-        &self,
-        context: ProjectionReductionContext,
-    ) -> Option<Vec<PositionalParamNode>> {
-        let params = match self.data(self.function).as_deref() {
-            Some(data)
-                if data
-                    .callable_header(&crate::semantic_query::ResolveOverloadSetConsumer::witness())
-                    .is_some() =>
-            {
-                Arc::clone(
-                    data.callable_header(
-                        &crate::semantic_query::ResolveOverloadSetConsumer::witness(),
-                    )
-                    .unwrap()
-                    .params,
-                )
-            }
-            _ => return Some(Vec::new()),
-        };
-        let mut out = Vec::new();
-        for (idx, param) in params.iter().enumerate() {
-            // Skip ONLY the LEADING `this` parameter (a snippet's vendored call
-            // signature is `(this: void, ...args: Params)`); only the first param
-            // can be named `this` in valid TypeScript, so a later same-named
-            // param is a real positional binding.
-            if idx == 0 && param.name.as_deref() == Some("this") {
-                continue;
-            }
-            if param.rest {
-                // A rest-tuple param spreads its tuple element-wise — resolve the
-                // carrier to its concrete `Tuple` body at this genuine demand. A
-                // PARTIAL demand fails the WHOLE read (no silent short vector);
-                // a COMPLETE non-tuple contributes no entries (fail-closed skip).
-                let resolved = self
-                    .dispatch
-                    .normalize_node_for_structural_fact_demand(param.ty, context)
-                    .into_complete_node()?;
-                if let Some(SemanticNodeData::Tuple { elements, .. }) =
-                    self.data(resolved).as_deref()
+    construction_ordinal_seam! {
+        /// All positional params — the LEADING `this` param skipped and a rest-tuple
+        /// param expanded into one [`PositionalParamNode`] per tuple element. A rest
+        /// param whose type COMPLETELY resolves to a non-tuple (an open generic /
+        /// `unknown[]`) carries no enumerable positional bindings.
+        ///
+        /// `context` is the demand identity used to carrier-resolve a rest param's
+        /// type before checking for `Tuple`: rest expansion is a genuine structural
+        /// fact (`type Args = [item: Item, index: number]` — a `DeclRef` — must
+        /// resolve to its `Tuple` to enumerate), so it routes through the shared
+        /// structural-fact demand primitive.
+        ///
+        /// `None` when a rest param's demand outcome is PARTIAL: a truncated rest
+        /// resolution fails the WHOLE positional read — a silent short vector
+        /// (the other params without the rest expansion) would present an
+        /// incomplete positional contract as complete.
+        fn positional_params_expanded(
+            &self,
+            context: ProjectionReductionContext,
+        ) -> Option<Vec<PositionalParamNode>> {
+            let params = match self.data(self.function).as_deref() {
+                Some(data)
+                    if data
+                        .callable_header(&crate::semantic_query::ResolveOverloadSetConsumer::witness())
+                        .is_some() =>
                 {
-                    for element in elements.iter() {
-                        out.push(PositionalParamNode {
-                            label: element.label.clone(),
-                            ty: element.value,
-                        });
-                    }
+                    Arc::clone(
+                        data.callable_header(
+                            &crate::semantic_query::ResolveOverloadSetConsumer::witness(),
+                        )
+                        .unwrap()
+                        .params,
+                    )
                 }
-                continue;
+                _ => return Some(Vec::new()),
+            };
+            let mut out = Vec::new();
+            for (idx, param) in params.iter().enumerate() {
+                // Skip ONLY the LEADING `this` parameter (a snippet's vendored call
+                // signature is `(this: void, ...args: Params)`); only the first param
+                // can be named `this` in valid TypeScript, so a later same-named
+                // param is a real positional binding.
+                if idx == 0 && param.name.as_deref() == Some("this") {
+                    continue;
+                }
+                if param.rest {
+                    // A rest-tuple param spreads its tuple element-wise — resolve the
+                    // carrier to its concrete `Tuple` body at this genuine demand. A
+                    // PARTIAL demand fails the WHOLE read (no silent short vector);
+                    // a COMPLETE non-tuple contributes no entries (fail-closed skip).
+                    let resolved = self
+                        .dispatch
+                        .normalize_node_for_structural_fact_demand(param.ty, context)
+                        .into_complete_node()?;
+                    if let Some(SemanticNodeData::Tuple { elements, .. }) =
+                        self.data(resolved).as_deref()
+                    {
+                        for element in elements.iter() {
+                            out.push(PositionalParamNode {
+                                label: element.label.clone(),
+                                ty: element.value,
+                            });
+                        }
+                    }
+                    continue;
+                }
+                out.push(PositionalParamNode {
+                    label: param.name.clone(),
+                    ty: param.ty,
+                });
             }
-            out.push(PositionalParamNode {
-                label: param.name.clone(),
-                ty: param.ty,
-            });
+            Some(out)
         }
-        Some(out)
     }
 }
 
@@ -1248,77 +1268,79 @@ fn unenumerable_event_name_reasons<C: crate::resolver_core::ResolverCapabilities
 // Realize-callable-member primitive — Transit-Shallow Publication.
 // ─────────────────────────────────────────────────────────────────────
 
-/// Realize a slot/macro member value to its underlying callable
-/// [`crate::semantic_query::SemanticNodeData::Signature`] node, if one
-/// exists.
-///
-/// Under the Transit-Shallow Publication contract a macro publication
-/// helper lowers its payload at `structural_transit_with_mode(Navigate)`,
-/// so a published slot member's value is NOT a fully-reduced `Function`:
-/// it may be an `Alias`, a decidable-but-unreduced `Conditional`, an
-/// `InstantiationRef` / `DeclRef` carrier, a declaration placeholder, or
-/// a `Union` / `Intersection` of such carriers. Consumers (the
-/// graph-native slot binding extractor's `Function` match arm,
-/// `surface_member_to_expanded_field`'s classification, the slot
-/// projector) MUST normalize their input through this primitive BEFORE
-/// deciding "not a callable".
-///
-/// This primitive owns NO evaluation of its own. The carrier shells are
-/// normalized by the one dispatch-owned structural-fact demand
-/// ([`ProjectSemanticDispatch::normalize_node_for_structural_fact_demand`]),
-/// which evaluates deferred shells and resolves residual `DeclRef` /
-/// `InstantiationRef` carriers through the shared `ResolveDecl` /
-/// `Instantiate` queries under the CALLER'S complete
-/// `ProjectionReductionContext` — the request owns the context; nothing
-/// here rebuilds, defaults, or narrows it. What remains is a pure
-/// classification of the normalized node:
-///
-/// - a CALL `Signature` → `Resolved(node)` (a construct signature is not
-///   invocable as a callback and is "not a callable");
-/// - a `Union` / `Intersection` → every arm is classified through this
-///   same primitive and the composite of realized arms is rebuilt (a
-///   non-callable arm is the complete negative answer; an unresolved arm
-///   makes the whole composite incomplete);
-/// - an unresolved `import("pkg").Name<…>` shell AT THE ROOT → classified
-///   AS-IS without being forced: the shared stable-carrier rule answers
-///   `Incomplete(MissingDependency)` for every import-type shell (a
-///   carrier-semantics stop, not an evaluation). The stop is root-only by
-///   design: the macro-surface replay identifies a callable occurrence by
-///   the member node the publication surface carried, and a ROOT shell
-///   resolved only on demand would replay as its resolved carrier. A shell
-///   reached THROUGH a local alias publishes the alias node as its subject,
-///   replays identically, and therefore normalizes through the shared
-///   demand like any other carrier (pinned at the public boundary by
-///   `svelte_alias_wrapped_import_type_snippet_prop_publishes_return`);
-/// - a residual `DeclRef` / `InstantiationRef` the demand stopped on
-///   (a no-progress fix-point) → `Incomplete(MissingDependency)`;
-/// - a demand that was operationally truncated or faulted → `Incomplete`
-///   with the demand's own typed reasons;
-/// - every other shape classifies through the shared
-///   [`stable_member_carrier_partiality`] rule: a genuinely non-callable
-///   resolved shape (Object, Primitive, Mapped, KeyOf, an undecidable
-///   `Conditional` shell, …) and a STABLE authored miss keep the complete
-///   `NoSurface` answer, while an OPERATIONAL failure (an import-backed
-///   unresolvable, a budget / cancellation / torn-state fault) is an
-///   `Incomplete` realization with its typed reason.
-///
-/// **Diagnostic propagation**: the shared demand fans every sub-query's
-/// `dep_signature` into the active fact tracer and folds its partial /
-/// suppress signals, so the caller's cache-validity signature observes the
-/// same facts the realization depended on.
-///
-/// [`ProjectSemanticDispatch::normalize_node_for_structural_fact_demand`]:
-/// crate::project_semantic_dispatch::ProjectSemanticDispatch::normalize_node_for_structural_fact_demand
-/// [`stable_member_carrier_partiality`]:
-/// crate::semantic_query::surface_resolution::stable_member_carrier_partiality
-pub fn realize_callable_member<C: crate::resolver_core::ResolverCapabilities>(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
-    node: crate::semantic_query::SemanticNodeId,
-    context: crate::semantic_query::ProjectionReductionContext,
-) -> crate::semantic_query::surface_resolution::SurfaceResolution<
-    crate::semantic_query::SemanticNodeId,
-> {
-    realize_callable_member_at(dispatch, node, context, 0)
+construction_ordinal_seam! {
+    /// Realize a slot/macro member value to its underlying callable
+    /// [`crate::semantic_query::SemanticNodeData::Signature`] node, if one
+    /// exists.
+    ///
+    /// Under the Transit-Shallow Publication contract a macro publication
+    /// helper lowers its payload at `structural_transit_with_mode(Navigate)`,
+    /// so a published slot member's value is NOT a fully-reduced `Function`:
+    /// it may be an `Alias`, a decidable-but-unreduced `Conditional`, an
+    /// `InstantiationRef` / `DeclRef` carrier, a declaration placeholder, or
+    /// a `Union` / `Intersection` of such carriers. Consumers (the
+    /// graph-native slot binding extractor's `Function` match arm,
+    /// `surface_member_to_expanded_field`'s classification, the slot
+    /// projector) MUST normalize their input through this primitive BEFORE
+    /// deciding "not a callable".
+    ///
+    /// This primitive owns NO evaluation of its own. The carrier shells are
+    /// normalized by the one dispatch-owned structural-fact demand
+    /// ([`ProjectSemanticDispatch::normalize_node_for_structural_fact_demand`]),
+    /// which evaluates deferred shells and resolves residual `DeclRef` /
+    /// `InstantiationRef` carriers through the shared `ResolveDecl` /
+    /// `Instantiate` queries under the CALLER'S complete
+    /// `ProjectionReductionContext` — the request owns the context; nothing
+    /// here rebuilds, defaults, or narrows it. What remains is a pure
+    /// classification of the normalized node:
+    ///
+    /// - a CALL `Signature` → `Resolved(node)` (a construct signature is not
+    ///   invocable as a callback and is "not a callable");
+    /// - a `Union` / `Intersection` → every arm is classified through this
+    ///   same primitive and the composite of realized arms is rebuilt (a
+    ///   non-callable arm is the complete negative answer; an unresolved arm
+    ///   makes the whole composite incomplete);
+    /// - an unresolved `import("pkg").Name<…>` shell AT THE ROOT → classified
+    ///   AS-IS without being forced: the shared stable-carrier rule answers
+    ///   `Incomplete(MissingDependency)` for every import-type shell (a
+    ///   carrier-semantics stop, not an evaluation). The stop is root-only by
+    ///   design: the macro-surface replay identifies a callable occurrence by
+    ///   the member node the publication surface carried, and a ROOT shell
+    ///   resolved only on demand would replay as its resolved carrier. A shell
+    ///   reached THROUGH a local alias publishes the alias node as its subject,
+    ///   replays identically, and therefore normalizes through the shared
+    ///   demand like any other carrier (pinned at the public boundary by
+    ///   `svelte_alias_wrapped_import_type_snippet_prop_publishes_return`);
+    /// - a residual `DeclRef` / `InstantiationRef` the demand stopped on
+    ///   (a no-progress fix-point) → `Incomplete(MissingDependency)`;
+    /// - a demand that was operationally truncated or faulted → `Incomplete`
+    ///   with the demand's own typed reasons;
+    /// - every other shape classifies through the shared
+    ///   [`stable_member_carrier_partiality`] rule: a genuinely non-callable
+    ///   resolved shape (Object, Primitive, Mapped, KeyOf, an undecidable
+    ///   `Conditional` shell, …) and a STABLE authored miss keep the complete
+    ///   `NoSurface` answer, while an OPERATIONAL failure (an import-backed
+    ///   unresolvable, a budget / cancellation / torn-state fault) is an
+    ///   `Incomplete` realization with its typed reason.
+    ///
+    /// **Diagnostic propagation**: the shared demand fans every sub-query's
+    /// `dep_signature` into the active fact tracer and folds its partial /
+    /// suppress signals, so the caller's cache-validity signature observes the
+    /// same facts the realization depended on.
+    ///
+    /// [`ProjectSemanticDispatch::normalize_node_for_structural_fact_demand`]:
+    /// crate::project_semantic_dispatch::ProjectSemanticDispatch::normalize_node_for_structural_fact_demand
+    /// [`stable_member_carrier_partiality`]:
+    /// crate::semantic_query::surface_resolution::stable_member_carrier_partiality
+    fn realize_callable_member<C: crate::resolver_core::ResolverCapabilities>(
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
+        node: crate::semantic_query::SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> crate::semantic_query::surface_resolution::SurfaceResolution<
+        crate::semantic_query::SemanticNodeId,
+    > {
+        realize_callable_member_at(dispatch, node, context, 0)
+    }
 }
 
 /// Composite-nesting fuse for [`realize_callable_member`]. Only the
@@ -1491,5 +1513,93 @@ fn realize_callable_member_at<C: crate::resolver_core::ResolverCapabilities>(
             Some(reasons) => SurfaceResolution::incomplete(reasons),
             None => SurfaceResolution::no_surface(),
         },
+    }
+}
+
+/// Public callable demands. Each node-bearing result owns its operands.
+pub struct OwningCallableNodeView<'v, 'a, 'ctx, C: crate::resolver_core::ResolverCapabilities> {
+    view: &'v CallableNodeView<'a, 'ctx, C>,
+}
+
+impl<'a, 'ctx, C: crate::resolver_core::ResolverCapabilities> CallableNodeView<'a, 'ctx, C> {
+    /// Demand callable facts through owning result carriers.
+    pub fn owning(&self) -> OwningCallableNodeView<'_, 'a, 'ctx, C> {
+        OwningCallableNodeView { view: self }
+    }
+}
+
+macro_rules! owning_callable_methods {
+    ($(fn $name:ident(&self $(, $arg:ident: $ty:ty)*) -> $ret:ty;)*) => {
+        impl<C: crate::resolver_core::ResolverCapabilities> OwningCallableNodeView<'_, '_, '_, C> {
+            $(pub fn $name(&self $(, $arg: $ty)*) -> crate::semantic_query_memo::node_roots::Constructed<$ret> {
+                self.view.dispatch.construct(|| self.view.$name($($arg),*))
+            })*
+        }
+    };
+}
+
+owning_callable_methods! {
+    fn realized_callable_root(&self, context: ProjectionReductionContext) -> crate::semantic_query::surface_resolution::SurfaceResolution<SemanticNodeId>;
+    fn single_callable_arm(&self, context: ProjectionReductionContext) -> Option<SemanticNodeId>;
+    fn positional_params(&self, context: ProjectionReductionContext) -> Option<Vec<PositionalParamNode>>;
+    fn validated_snippet_positional_params(&self, context: ProjectionReductionContext) -> Option<Vec<PositionalParamNode>>;
+    fn slot_param_and_return_by_arm(&self, combine: ArmCombineNode, context: ProjectionReductionContext) -> Option<SlotCallableNodeParts>;
+}
+
+/// A callable signature owns its root while it borrows the dispatch services
+/// needed for further demands. Each node-bearing demand delivers a new owner.
+pub struct OwningSignatureNodeView<'a, 'ctx, C: crate::resolver_core::ResolverCapabilities> {
+    view: SignatureNodeView<'a, 'ctx, C>,
+    _root: crate::semantic_query_memo::node_roots::Constructed<SemanticNodeId>,
+}
+
+impl<'a, 'ctx, C: crate::resolver_core::ResolverCapabilities>
+    OwningCallableNodeView<'_, 'a, 'ctx, C>
+{
+    pub fn signature(
+        &self,
+        context: ProjectionReductionContext,
+    ) -> Option<OwningSignatureNodeView<'a, 'ctx, C>> {
+        let root = self
+            .view
+            .dispatch
+            .construct(|| self.view.signature(context).map(|view| view.function));
+        let function = root.value?;
+        Some(OwningSignatureNodeView {
+            view: SignatureNodeView {
+                dispatch: self.view.dispatch,
+                function,
+            },
+            _root: root.map(|value| value.expect("the signature is present")),
+        })
+    }
+}
+
+impl<C: crate::resolver_core::ResolverCapabilities> OwningSignatureNodeView<'_, '_, C> {
+    pub fn first_param(
+        &self,
+    ) -> crate::semantic_query_memo::node_roots::Constructed<Option<SemanticNodeId>> {
+        self.view.dispatch.construct(|| self.view.first_param())
+    }
+    pub fn return_type(
+        &self,
+    ) -> crate::semantic_query_memo::node_roots::Constructed<Option<SemanticNodeId>> {
+        self.view.dispatch.construct(|| self.view.return_type())
+    }
+    pub fn return_type_span(&self) -> Option<Span> {
+        self.view.return_type_span()
+    }
+    pub fn raw_params(
+        &self,
+    ) -> crate::semantic_query_memo::node_roots::Constructed<Arc<[FunctionParam]>> {
+        self.view.dispatch.construct(|| self.view.raw_params())
+    }
+    pub fn positional_params_expanded(
+        &self,
+        context: ProjectionReductionContext,
+    ) -> crate::semantic_query_memo::node_roots::Constructed<Option<Vec<PositionalParamNode>>> {
+        self.view
+            .dispatch
+            .construct(|| self.view.positional_params_expanded(context))
     }
 }

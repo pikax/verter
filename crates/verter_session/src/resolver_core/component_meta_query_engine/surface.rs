@@ -110,12 +110,15 @@ pub(crate) fn lower_and_project_to_expanded_node(
         PathSegment, ProjectionMode, QueryResult, SemanticQueryKey,
     };
 
-    let base = dispatch.lower_type_expr_in_owner_scope_with_mode(
-        scope_canonical_id,
-        scope_owner,
-        expr,
-        ProjectionMode::Expanded,
-    )?;
+    let base = dispatch
+        .owning()
+        .lower_type_expr_in_owner_scope_with_mode(
+            scope_canonical_id,
+            scope_owner,
+            expr,
+            ProjectionMode::Expanded,
+        )
+        .value?;
     let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base,
         path: std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
@@ -163,23 +166,29 @@ pub(crate) fn project_class_a_terminal_node(
     let (base_expr, path_segments) =
         crate::meta_resolve::dispatch_helpers::decompose_indexed_access_chain(expr);
     let (base, project_path) = if path_segments.is_empty() {
-        let base = dispatch.lower_type_expr_in_owner_scope_with_mode(
-            scope_canonical_id,
-            scope_owner,
-            expr,
-            ProjectionMode::Expanded,
-        )?;
+        let base = dispatch
+            .owning()
+            .lower_type_expr_in_owner_scope_with_mode(
+                scope_canonical_id,
+                scope_owner,
+                expr,
+                ProjectionMode::Expanded,
+            )
+            .value?;
         (
             base,
             std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
         )
     } else {
-        let base = dispatch.lower_type_expr_in_owner_scope_with_mode(
-            scope_canonical_id,
-            scope_owner,
-            base_expr,
-            ProjectionMode::Navigate,
-        )?;
+        let base = dispatch
+            .owning()
+            .lower_type_expr_in_owner_scope_with_mode(
+                scope_canonical_id,
+                scope_owner,
+                base_expr,
+                ProjectionMode::Navigate,
+            )
+            .value?;
         (base, path_segments)
     };
     let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {

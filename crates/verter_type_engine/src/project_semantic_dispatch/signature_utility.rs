@@ -202,6 +202,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// and the composed node of a composite one (a mixin construct
     /// intersection's candidate has no authored node of its own; its
     /// result is the intersection the kernel composed).
+    #[cfg(any(test, feature = "test-support"))]
     pub fn utility_inference_signature(
         &self,
         subject: SemanticNodeId,
@@ -257,62 +258,64 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         None
     }
 
-    /// Evaluate one signature utility over an already-settled `subject`
-    /// under the caller's `context`. A union subject distributes (module
-    /// docs): every arm settles through the same carrier demand point the
-    /// subject did and answers on its own, and the answers re-form a
-    /// canonical union. `None` is the utility's unanswerable shell (the
-    /// caller publishes the typed miss) — one unanswerable arm leaves the
-    /// whole union unanswered, never a partial union.
-    pub fn resolve_signature_utility(
-        &self,
-        utility: SignatureUtility,
-        subject: SemanticNodeId,
-        context: ProjectionReductionContext,
-    ) -> Option<SemanticNodeId> {
-        let Some(arms) = self.settled_union_arms(subject) else {
-            return self.resolve_signature_utility_on_arm(utility, subject, context);
-        };
-        let mut settled_arms = Vec::with_capacity(arms.len());
-        for &arm in arms.iter() {
-            if self.cancellation.is_cancelled() {
-                return None;
+    construction_ordinal_seam! {
+        /// Evaluate one signature utility over an already-settled `subject`
+        /// under the caller's `context`. A union subject distributes (module
+        /// docs): every arm settles through the same carrier demand point the
+        /// subject did and answers on its own, and the answers re-form a
+        /// canonical union. `None` is the utility's unanswerable shell (the
+        /// caller publishes the typed miss) — one unanswerable arm leaves the
+        /// whole union unanswered, never a partial union.
+        fn resolve_signature_utility(
+            &self,
+            utility: SignatureUtility,
+            subject: SemanticNodeId,
+            context: ProjectionReductionContext,
+        ) -> Option<SemanticNodeId> {
+            let Some(arms) = self.settled_union_arms(subject) else {
+                return self.resolve_signature_utility_on_arm(utility, subject, context);
+            };
+            let mut settled_arms = Vec::with_capacity(arms.len());
+            for &arm in arms.iter() {
+                if self.cancellation.is_cancelled() {
+                    return None;
+                }
+                settled_arms.push(self.resolve_signature_source_carrier(arm, context));
             }
-            settled_arms.push(self.resolve_signature_source_carrier(arm, context));
-        }
-        let mut per_arm = Vec::with_capacity(settled_arms.len());
-        match utility.projection() {
-            // `OmitThisParameter<T>` is `unknown extends ThisParameterType<T>
-            // ? T : (T extends (...args: infer A) => infer R ? (...args: A)
-            // => R : T)`: the receiver check runs over the DISTRIBUTED
-            // receiver union, so one receiver-less arm (its receiver is
-            // `unknown`) returns the subject unchanged; otherwise the second
-            // conditional distributes and every arm loses its receiver.
-            SignatureUtilityProjection::WithoutReceiver => {
-                for &arm in &settled_arms {
-                    let receiver = self.resolve_signature_utility(
-                        SignatureUtility::ThisParameterType,
-                        arm,
-                        context,
-                    )?;
-                    if matches!(
-                        self.graph().node_data(receiver).as_deref(),
-                        Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
-                    ) {
-                        return Some(subject);
+            let mut per_arm = Vec::with_capacity(settled_arms.len());
+            match utility.projection() {
+                // `OmitThisParameter<T>` is `unknown extends ThisParameterType<T>
+                // ? T : (T extends (...args: infer A) => infer R ? (...args: A)
+                // => R : T)`: the receiver check runs over the DISTRIBUTED
+                // receiver union, so one receiver-less arm (its receiver is
+                // `unknown`) returns the subject unchanged; otherwise the second
+                // conditional distributes and every arm loses its receiver.
+                SignatureUtilityProjection::WithoutReceiver => {
+                    for &arm in &settled_arms {
+                        let receiver = self.resolve_signature_utility(
+                            SignatureUtility::ThisParameterType,
+                            arm,
+                            context,
+                        )?;
+                        if matches!(
+                            self.graph().node_data(receiver).as_deref(),
+                            Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
+                        ) {
+                            return Some(subject);
+                        }
+                        per_arm.push(self.resolve_signature_utility(utility, arm, context)?);
                     }
-                    per_arm.push(self.resolve_signature_utility(utility, arm, context)?);
+                }
+                SignatureUtilityProjection::Result
+                | SignatureUtilityProjection::ParameterTuple
+                | SignatureUtilityProjection::Receiver => {
+                    for &arm in &settled_arms {
+                        per_arm.push(self.resolve_signature_utility(utility, arm, context)?);
+                    }
                 }
             }
-            SignatureUtilityProjection::Result
-            | SignatureUtilityProjection::ParameterTuple
-            | SignatureUtilityProjection::Receiver => {
-                for &arm in &settled_arms {
-                    per_arm.push(self.resolve_signature_utility(utility, arm, context)?);
-                }
-            }
+            Some(self.intern_normalized_union_or_intersection(&per_arm, true))
         }
-        Some(self.intern_normalized_union_or_intersection(&per_arm, true))
     }
 
     /// One signature utility over a single settled, non-union arm.

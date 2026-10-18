@@ -935,13 +935,14 @@ pub(crate) fn compute_bindings_via_graph(
         // and records its typed reason — the missing binding row is then
         // partial, never byte-identical to a genuinely non-callable member.
         let realized =
-            match verter_type_engine::project_semantic_dispatch::callable_view::realize_callable_member(
+            match verter_type_engine::project_semantic_dispatch::callable_view::CallableNodeView::new(
                 dispatch,
                 slot_member.value,
+            ).owning().realized_callable_root(
                 verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Shallow,
                 ),
-            ) {
+            ).value {
                 verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Resolved(id)
                 | verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(id) => {
                     id.into_inner()
@@ -1447,12 +1448,15 @@ fn closed_member_path_route_source(
                 // head re-enters the loop (a `DeclRef` mints the fact), an
                 // unresolved head fails closed below.
                 drop(data);
-                let resolved = dispatch.resolve_carrier_subject_node(
-                    current,
-                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
-                        ProjectionMode::Navigate,
-                    ),
-                );
+                let resolved = dispatch
+                    .owning()
+                    .resolve_carrier_subject_node(
+                        current,
+                        verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                            ProjectionMode::Navigate,
+                        ),
+                    )
+                    .value;
                 if resolved == current {
                     return None;
                 }
@@ -1529,12 +1533,12 @@ fn owner_local_member_reaches_non_owner_ref(
         return false;
     };
     let Some(member_node) = dispatch
-        .raise_authored_locator_to_hot(
+        .owning().raise_authored_locator_to_hot(
             &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(member.ty.clone()),
             verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                 ProjectionMode::Navigate,
             ),
-        )
+        ).value
         .at_optional_boundary()
     else {
         return false;
@@ -1584,12 +1588,15 @@ fn node_reaches_non_owner_ref(
                 // expansion); an unresolvable name cannot be proven
                 // imported and is ignored.
                 drop(data);
-                let resolved = dispatch.resolve_carrier_subject_node(
-                    node,
-                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
-                        ProjectionMode::Navigate,
-                    ),
-                );
+                let resolved = dispatch
+                    .owning()
+                    .resolve_carrier_subject_node(
+                        node,
+                        verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                            ProjectionMode::Navigate,
+                        ),
+                    )
+                    .value;
                 if resolved == node {
                     Vec::new()
                 } else {

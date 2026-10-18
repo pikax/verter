@@ -156,42 +156,46 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     // ── Intersection ──────────────────────────────────────────────────────
     // ── keyof ───────────────────────────────────────────────────────────
-    /// §22.2 `keyof` absorption: `keyof any = string | number | symbol`,
-    /// `keyof never = string | number | symbol` (TS quirk),
-    /// `keyof unknown = never`, `keyof error = error`.
-    pub fn absorb_key_of(&self, base: SemanticNodeId) -> Option<QueryBuildOutput> {
-        match self.peek_special(base)? {
-            (SpecialKind::Any | SpecialKind::Never, _) => {
-                Some(self.absorbed_output(self.string_number_symbol(), [base]))
+    construction_ordinal_seam! {
+        /// §22.2 `keyof` absorption: `keyof any = string | number | symbol`,
+        /// `keyof never = string | number | symbol` (TS quirk),
+        /// `keyof unknown = never`, `keyof error = error`.
+        fn absorb_key_of(&self, base: SemanticNodeId) -> Option<QueryBuildOutput> {
+            match self.peek_special(base)? {
+                (SpecialKind::Any | SpecialKind::Never, _) => {
+                    Some(self.absorbed_output(self.string_number_symbol(), [base]))
+                }
+                (SpecialKind::Unknown, _) => {
+                    Some(self.absorbed_output(self.primitive_node(PrimitiveKind::Never), [base]))
+                }
+                (SpecialKind::Error, err) => Some(self.absorbed_output(err, [base])),
             }
-            (SpecialKind::Unknown, _) => {
-                Some(self.absorbed_output(self.primitive_node(PrimitiveKind::Never), [base]))
-            }
-            (SpecialKind::Error, err) => Some(self.absorbed_output(err, [base])),
         }
     }
 
     // ── Indexed access ────────────────────────────────────────────────────
-    /// §22.2 indexed-access absorption for the `?[K]` shape:
-    /// `any[K] = any`, `never[K] = never`,
-    /// `unknown[K] = ` UNCONDITIONAL error for ALL `K` (`unknown` has no index
-    /// signatures — an illegal index is an `Opaque(QueryError)`, NOT per-K and
-    /// NOT a crash), `error[K] = error`.
-    pub fn absorb_indexed_access(&self, object: SemanticNodeId) -> Option<QueryBuildOutput> {
-        match self.peek_special(object)? {
-            (SpecialKind::Any, _) => {
-                Some(self.absorbed_output(self.primitive_node(PrimitiveKind::Any), [object]))
+    construction_ordinal_seam! {
+        /// §22.2 indexed-access absorption for the `?[K]` shape:
+        /// `any[K] = any`, `never[K] = never`,
+        /// `unknown[K] = ` UNCONDITIONAL error for ALL `K` (`unknown` has no index
+        /// signatures — an illegal index is an `Opaque(QueryError)`, NOT per-K and
+        /// NOT a crash), `error[K] = error`.
+        fn absorb_indexed_access(&self, object: SemanticNodeId) -> Option<QueryBuildOutput> {
+            match self.peek_special(object)? {
+                (SpecialKind::Any, _) => {
+                    Some(self.absorbed_output(self.primitive_node(PrimitiveKind::Any), [object]))
+                }
+                (SpecialKind::Never, _) => {
+                    Some(self.absorbed_output(self.primitive_node(PrimitiveKind::Never), [object]))
+                }
+                (SpecialKind::Unknown, _) => {
+                    let err = self.opaque(QueryError::Other(Arc::from(
+                        "indexed access into `unknown` (no index signatures)",
+                    )));
+                    Some(self.absorbed_output(err, [object]))
+                }
+                (SpecialKind::Error, err) => Some(self.absorbed_output(err, [object])),
             }
-            (SpecialKind::Never, _) => {
-                Some(self.absorbed_output(self.primitive_node(PrimitiveKind::Never), [object]))
-            }
-            (SpecialKind::Unknown, _) => {
-                let err = self.opaque(QueryError::Other(Arc::from(
-                    "indexed access into `unknown` (no index signatures)",
-                )));
-                Some(self.absorbed_output(err, [object]))
-            }
-            (SpecialKind::Error, err) => Some(self.absorbed_output(err, [object])),
         }
     }
 
@@ -211,114 +215,118 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     // ── Mapped ──────────────────────────────────────────────────────────
-    /// §22.2 mapped-type absorption on the mapped SOURCE:
-    /// over `any` ⇒ `any`; over `never` ⇒ `{}`; over `error` ⇒ `error`; a
-    /// DIRECT mapping over `unknown` (`{ [K in unknown] }`, `K` not constrained
-    /// to a key set) is illegal ⇒ error. (The COMMON `{ [K in keyof unknown] }`
-    /// path arrives here as source = `never` — `keyof unknown` already reduced
-    /// to `never` — and folds to `{}`.)
-    pub fn absorb_mapped(&self, source: SemanticNodeId) -> Option<QueryBuildOutput> {
-        match self.peek_special(source)? {
-            (SpecialKind::Any, _) => {
-                Some(self.absorbed_output(self.primitive_node(PrimitiveKind::Any), [source]))
+    construction_ordinal_seam! {
+        /// §22.2 mapped-type absorption on the mapped SOURCE:
+        /// over `any` ⇒ `any`; over `never` ⇒ `{}`; over `error` ⇒ `error`; a
+        /// DIRECT mapping over `unknown` (`{ [K in unknown] }`, `K` not constrained
+        /// to a key set) is illegal ⇒ error. (The COMMON `{ [K in keyof unknown] }`
+        /// path arrives here as source = `never` — `keyof unknown` already reduced
+        /// to `never` — and folds to `{}`.)
+        fn absorb_mapped(&self, source: SemanticNodeId) -> Option<QueryBuildOutput> {
+            match self.peek_special(source)? {
+                (SpecialKind::Any, _) => {
+                    Some(self.absorbed_output(self.primitive_node(PrimitiveKind::Any), [source]))
+                }
+                (SpecialKind::Never, _) => Some(self.absorbed_output(self.empty_object(), [source])),
+                (SpecialKind::Unknown, _) => {
+                    let err = self.opaque(QueryError::Other(Arc::from(
+                        "mapped type over `unknown` (not a key set)",
+                    )));
+                    Some(self.absorbed_output(err, [source]))
+                }
+                (SpecialKind::Error, err) => Some(self.absorbed_output(err, [source])),
             }
-            (SpecialKind::Never, _) => Some(self.absorbed_output(self.empty_object(), [source])),
-            (SpecialKind::Unknown, _) => {
-                let err = self.opaque(QueryError::Other(Arc::from(
-                    "mapped type over `unknown` (not a key set)",
-                )));
-                Some(self.absorbed_output(err, [source]))
-            }
-            (SpecialKind::Error, err) => Some(self.absorbed_output(err, [source])),
         }
     }
 
     // ── Conditional ───────────────────────────────────────────────────────
-    /// §22.2 conditional absorption on the CHECK type. Three rows, in
-    /// dominance order, after the checker's own first test — an error
-    /// EXTENDS type is the answer as well (`T extends error` ⇒ `error`),
-    /// unless the check type already is one:
-    ///
-    /// 1. `error extends T` ⇒ `error` (the error CARRIER dominates any/never
-    ///    and both branches — stays FIRST).
-    /// 2. `any extends T ? X : Y` ⇒ `X | Y` — the union of BOTH branches,
-    ///    mode-INDEPENDENT (distributive and non-distributive alike) — and
-    ///    `X` alone when `T` is `any` or `unknown`, which every check type
-    ///    satisfies. Built
-    ///    via [`intern_normalized_union_or_intersection`](Self::intern_normalized_union_or_intersection)
-    ///    (the `ReduceUnion` intern) so `X | X` folds to `X` with canonical
-    ///    dedup/order — NOT a raw `Union`. The relation engine would instead
-    ///    pick the TRUE branch for an `any` check, so this row MUST live here.
-    ///    SKIPPED when `extends` is an `infer` pattern: the true branch would
-    ///    bind the infer, so unioning both branches verbatim would leak an
-    ///    unbound [`Infer`](SemanticNodeData::Infer) — those fall through to
-    ///    the infer-binding path in `build_conditional`.
-    /// 3. DISTRIBUTIVE naked-`never` check (`distributive == true`) ⇒ `never`
-    ///    (the empty distribution). GATED on `distributive`: a
-    ///    non-distributive `never extends T ? X : Y` is the TRUE branch `X`
-    ///    (never is assignable to everything) and is decided by the relation
-    ///    path in `build_conditional` — collapsing it to `never` here would be
-    ///    UNSOUND.
-    ///
-    /// Everything else (distributive `Union` distribution, the `infer`-binding
-    /// paths, ordinary relation selection) is handled below the fast-reject in
-    /// `build_conditional`.
-    ///
-    /// Rows (1) and (3) read neither branch, so they root only on the
-    /// decision inputs; row (2) publishes both branches and roots on them.
-    pub fn absorb_conditional(
-        &self,
-        check: SemanticNodeId,
-        extends: SemanticNodeId,
-        distributive: bool,
-        mut force_branch: impl FnMut(bool) -> SemanticNodeId,
-    ) -> Option<QueryBuildOutput> {
-        let decision_roots = [check, extends];
-        // (0) An error EXTENDS type is the conditional's answer too: the
-        //     checker returns its error type when either operand is it.
-        if let Some((SpecialKind::Error, err)) = self.peek_special(extends) {
-            if !matches!(self.peek_special(check), Some((SpecialKind::Error, _))) {
-                return Some(self.absorbed_output(err, decision_roots));
-            }
-        }
-        match self.peek_special(check)? {
-            // (1) error dominates any/never and both branches.
-            (SpecialKind::Error, err) => Some(self.absorbed_output(err, decision_roots)),
-            // (2) `any extends T ? X : Y` ⇒ `X | Y`, unless an infer binding
-            //     would be involved (then fall through to the infer path).
-            // A conditional the checker defers over a generic operand
-            // (`any extends T ? 1 : 2`) keeps its shell: `getConditionalType`
-            // reads an `any` check only once neither operand is generic.
-            (SpecialKind::Any, _)
-                if !self.extends_is_infer_pattern(extends)
-                    && !self.conditional_is_deferred(check, extends) =>
-            {
-                let true_branch = force_branch(true);
-                // An `any` or `unknown` extends type admits every check
-                // type, so the false branch never joins: `any extends
-                // unknown ? X : Y` is `X` (the checker adds the false branch
-                // only when the extends type is neither).
-                if matches!(
-                    self.peek_special(self.declared_operand_where_written(extends)),
-                    Some((SpecialKind::Any | SpecialKind::Unknown, _))
-                ) {
-                    return Some(self.absorbed_output(true_branch, [check, extends, true_branch]));
+    construction_ordinal_seam! {
+        /// §22.2 conditional absorption on the CHECK type. Three rows, in
+        /// dominance order, after the checker's own first test — an error
+        /// EXTENDS type is the answer as well (`T extends error` ⇒ `error`),
+        /// unless the check type already is one:
+        ///
+        /// 1. `error extends T` ⇒ `error` (the error CARRIER dominates any/never
+        ///    and both branches — stays FIRST).
+        /// 2. `any extends T ? X : Y` ⇒ `X | Y` — the union of BOTH branches,
+        ///    mode-INDEPENDENT (distributive and non-distributive alike) — and
+        ///    `X` alone when `T` is `any` or `unknown`, which every check type
+        ///    satisfies. Built
+        ///    via [`intern_normalized_union_or_intersection`](Self::intern_normalized_union_or_intersection)
+        ///    (the `ReduceUnion` intern) so `X | X` folds to `X` with canonical
+        ///    dedup/order — NOT a raw `Union`. The relation engine would instead
+        ///    pick the TRUE branch for an `any` check, so this row MUST live here.
+        ///    SKIPPED when `extends` is an `infer` pattern: the true branch would
+        ///    bind the infer, so unioning both branches verbatim would leak an
+        ///    unbound [`Infer`](SemanticNodeData::Infer) — those fall through to
+        ///    the infer-binding path in `build_conditional`.
+        /// 3. DISTRIBUTIVE naked-`never` check (`distributive == true`) ⇒ `never`
+        ///    (the empty distribution). GATED on `distributive`: a
+        ///    non-distributive `never extends T ? X : Y` is the TRUE branch `X`
+        ///    (never is assignable to everything) and is decided by the relation
+        ///    path in `build_conditional` — collapsing it to `never` here would be
+        ///    UNSOUND.
+        ///
+        /// Everything else (distributive `Union` distribution, the `infer`-binding
+        /// paths, ordinary relation selection) is handled below the fast-reject in
+        /// `build_conditional`.
+        ///
+        /// Rows (1) and (3) read neither branch, so they root only on the
+        /// decision inputs; row (2) publishes both branches and roots on them.
+        fn absorb_conditional(
+            &self,
+            check: SemanticNodeId,
+            extends: SemanticNodeId,
+            distributive: bool,
+            mut force_branch: impl FnMut(bool) -> SemanticNodeId,
+        ) -> Option<QueryBuildOutput> {
+            let decision_roots = [check, extends];
+            // (0) An error EXTENDS type is the conditional's answer too: the
+            //     checker returns its error type when either operand is it.
+            if let Some((SpecialKind::Error, err)) = self.peek_special(extends) {
+                if !matches!(self.peek_special(check), Some((SpecialKind::Error, _))) {
+                    return Some(self.absorbed_output(err, decision_roots));
                 }
-                let false_branch = force_branch(false);
-                let union = self.intern_normalized_union_or_intersection(
-                    &[
-                        self.indexed_access_where_written(true_branch),
-                        self.indexed_access_where_written(false_branch),
-                    ],
-                    true,
-                );
-                Some(self.absorbed_output(union, [check, extends, true_branch, false_branch]))
             }
-            // (3) distributive naked-`never` ⇒ `never` (empty distribution).
-            (SpecialKind::Never, _) if distributive => Some(
-                self.absorbed_output(self.primitive_node(PrimitiveKind::Never), decision_roots),
-            ),
-            _ => None,
+            match self.peek_special(check)? {
+                // (1) error dominates any/never and both branches.
+                (SpecialKind::Error, err) => Some(self.absorbed_output(err, decision_roots)),
+                // (2) `any extends T ? X : Y` ⇒ `X | Y`, unless an infer binding
+                //     would be involved (then fall through to the infer path).
+                // A conditional the checker defers over a generic operand
+                // (`any extends T ? 1 : 2`) keeps its shell: `getConditionalType`
+                // reads an `any` check only once neither operand is generic.
+                (SpecialKind::Any, _)
+                    if !self.extends_is_infer_pattern(extends)
+                        && !self.conditional_is_deferred(check, extends) =>
+                {
+                    let true_branch = force_branch(true);
+                    // An `any` or `unknown` extends type admits every check
+                    // type, so the false branch never joins: `any extends
+                    // unknown ? X : Y` is `X` (the checker adds the false branch
+                    // only when the extends type is neither).
+                    if matches!(
+                        self.peek_special(self.declared_operand_where_written(extends)),
+                        Some((SpecialKind::Any | SpecialKind::Unknown, _))
+                    ) {
+                        return Some(self.absorbed_output(true_branch, [check, extends, true_branch]));
+                    }
+                    let false_branch = force_branch(false);
+                    let union = self.intern_normalized_union_or_intersection(
+                        &[
+                            self.indexed_access_where_written(true_branch),
+                            self.indexed_access_where_written(false_branch),
+                        ],
+                        true,
+                    );
+                    Some(self.absorbed_output(union, [check, extends, true_branch, false_branch]))
+                }
+                // (3) distributive naked-`never` ⇒ `never` (empty distribution).
+                (SpecialKind::Never, _) if distributive => Some(
+                    self.absorbed_output(self.primitive_node(PrimitiveKind::Never), decision_roots),
+                ),
+                _ => None,
+            }
         }
     }
 

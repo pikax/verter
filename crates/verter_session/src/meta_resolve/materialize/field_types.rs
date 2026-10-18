@@ -194,12 +194,12 @@ pub(crate) fn package_backed_object_like_root_identity_with_fence(
         .and_then(|locator| {
             let dispatch = query_engine.dispatch;
             dispatch
-                .raise_authored_locator_to_hot(
+                .owning().raise_authored_locator_to_hot(
                     &locator,
                     verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                         verter_type_engine::semantic_query::ProjectionMode::Navigate,
                     ),
-                )
+                ).value
                 .at_optional_boundary()
         })
         .is_some_and(|hot| {

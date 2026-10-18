@@ -75,12 +75,12 @@ pub(crate) fn slots_from_typeinfo_surface<C: crate::session_attachment::SessionC
             // request's materialization-cache suppress so the result is
             // never admitted warm as complete metadata.
             if dispatch
-                .demand_validated_structural_node(
+                .owning().demand_validated_structural_node(
                     member.value,
                     ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Navigate,
                     ),
-                )
+                ).value
                 .is_none()
             {
                 verter_type_engine::request_context::mark_request_result_partial();
@@ -104,7 +104,7 @@ pub(crate) fn slots_from_typeinfo_surface<C: crate::session_attachment::SessionC
             // member value records its typed reason before the drop, so the
             // missing slot is a PARTIAL surface, never byte-identical to a
             // surface that legitimately has no such slot.
-            let realized_root = match view.realized_callable_root(context) {
+            let realized_root = match view.owning().realized_callable_root(context).value {
                 verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Resolved(id)
                 | verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(id) => {
                     id.into_inner()
@@ -123,7 +123,7 @@ pub(crate) fn slots_from_typeinfo_surface<C: crate::session_attachment::SessionC
             };
             // The across-arms first-param + return NODES (fails closed to drop
             // the slot when any arm is non-callable).
-            let parts = view.slot_param_and_return_by_arm(combine, context)?;
+            let parts = view.owning().slot_param_and_return_by_arm(combine, context).value?;
             let scope = macro_surface.member_expr_scope(dispatch, member);
             // Bindings from the (across-arms-intersected) first-param NODE.
             let bindings = parts
@@ -195,7 +195,7 @@ pub(crate) fn slot_member_types_from_typeinfo_surface<
                     && member.published_name().as_deref() == Some(slot.name.as_str())
             })?;
             let view = CallableNodeView::new(dispatch, member.value);
-            let node = match view.realized_callable_root(context) {
+            let node = match view.owning().realized_callable_root(context).value {
                 verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Resolved(id)
                 | verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(id) => {
                     id.into_inner()
@@ -456,10 +456,12 @@ fn pick_source_root_node<C: verter_type_engine::resolver_core::ResolverCapabilit
     // must never publish a symbolic `NamedRoot['member']` access off an
     // operationally-incomplete carrier read.
     let peeled = dispatch
+        .owning()
         .peel_node_for_uninstantiated_carrier_fact_demand(
             first_param,
             ProjectionReductionContext::published(ProjectionMode::Navigate),
         )
+        .value
         .into_complete_node()?;
     match dispatch.graph().read_in_scope(peeled).as_deref() {
         Some(SemanticNodeData::InstantiationRef { base, args })

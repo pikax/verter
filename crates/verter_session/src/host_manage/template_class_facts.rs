@@ -553,15 +553,19 @@ fn classify_prop(
     // TYPED raise boundary: a genuine absence stays `MissingDependency`, but a
     // typed query failure publishes ITS OWN reason through the single
     // disposition authority instead of being erased into "missing dependency".
-    let hot = match dispatch.raise_semantic_type_source_to_hot(
-        &source,
-        SourceRaiseContext {
-            scope_canonical_id: canonical,
-            scope_owner: payload.anchor.owner,
-            context,
-            interior_failures: None,
-        },
-    ) {
+    let hot = match dispatch
+        .owning()
+        .raise_semantic_type_source_to_hot(
+            &source,
+            SourceRaiseContext {
+                scope_canonical_id: canonical,
+                scope_owner: payload.anchor.owner,
+                context,
+                interior_failures: None,
+            },
+        )
+        .value
+    {
         SourceRaiseOutcome::Raised(hot) => hot,
         SourceRaiseOutcome::Absent => {
             return unresolved_row(
@@ -637,7 +641,11 @@ fn classify_node(
         .filter(|_| carrier_instantiation_args(dispatch, node, &mut FxHashSet::default()).is_some())
     {
         let expected = [candidate.symbol.clone()];
-        match dispatch.demand_terminal_symbol_instantiation(node, &expected) {
+        match dispatch
+            .owning()
+            .demand_terminal_symbol_instantiation(node, &expected)
+            .value
+        {
             TerminalSymbolInstantiationDemandOutcome::Complete(Some(terminal)) => {
                 let symbol = terminal.symbol;
                 if candidate.symbol == symbol {
@@ -709,7 +717,11 @@ fn classify_closed_domain(
 ) -> ClosedLiteralDomain {
     let context =
         ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
-    let normalized = match dispatch.normalize_node_for_structural_fact_demand(node, context) {
+    let normalized = match dispatch
+        .owning()
+        .normalize_node_for_structural_fact_demand(node, context)
+        .value
+    {
         StructuralFactDemandOutcome::Complete(node) => node,
         StructuralFactDemandOutcome::Recovered { reasons, .. }
         | StructuralFactDemandOutcome::Partial(reasons) => {
@@ -760,18 +772,21 @@ fn classify_normalized_domain(
                 let context = ProjectionReductionContext::structural_transit_with_mode(
                     ProjectionMode::Navigate,
                 );
-                let normalized =
-                    match dispatch.normalize_node_for_structural_fact_demand(member, context) {
-                        StructuralFactDemandOutcome::Complete(node) => node,
-                        StructuralFactDemandOutcome::Recovered { reasons, .. }
-                        | StructuralFactDemandOutcome::Partial(reasons) => {
-                            unresolved = Some(ClosedLiteralDomain::Unresolved {
-                                reason: unresolved_reasons_from_partial(reasons).0,
-                                exactness: ResolutionExactness::Incomplete,
-                            });
-                            break;
-                        }
-                    };
+                let normalized = match dispatch
+                    .owning()
+                    .normalize_node_for_structural_fact_demand(member, context)
+                    .value
+                {
+                    StructuralFactDemandOutcome::Complete(node) => node,
+                    StructuralFactDemandOutcome::Recovered { reasons, .. }
+                    | StructuralFactDemandOutcome::Partial(reasons) => {
+                        unresolved = Some(ClosedLiteralDomain::Unresolved {
+                            reason: unresolved_reasons_from_partial(reasons).0,
+                            exactness: ResolutionExactness::Incomplete,
+                        });
+                        break;
+                    }
+                };
                 match classify_normalized_domain(dispatch, normalized, visited, remaining) {
                     ClosedLiteralDomain::Strings(member_values) => {
                         for value in member_values.iter().cloned() {

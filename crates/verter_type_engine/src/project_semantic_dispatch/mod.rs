@@ -115,6 +115,8 @@ pub mod locator_view_worklist;
 pub mod lower;
 mod module_object;
 pub mod output_materialization;
+mod owning_dispatch;
+pub use owning_dispatch::OwningDispatch;
 pub mod query_error_disposition;
 mod query_frames;
 pub mod signature_discovery;
@@ -559,9 +561,8 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// walk's caller keeps on the binder.
     substitution_binder: std::cell::RefCell<Option<(SemanticNodeId, substitute::BinderKind)>>,
     /// How many of this dispatcher's operations are open on its thread
-    /// ([`DispatchOperation`]). When the outermost one ends with no
-    /// construction owner of the graph left open, what the dispatcher held
-    /// for it is released with the rest of the operation's attachments.
+    /// ([`DispatchOperation`]). When the outermost one ends, the receipts
+    /// the dispatcher held for it are released, whatever owner stays open.
     operation_depth: std::cell::Cell<u32>,
     /// The dispatch's share of its graph's construction lane on this
     /// thread: the authority to read and root the graph's construction
@@ -577,19 +578,20 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
 /// One operation of a dispatcher: a query execution or a root connected
 /// demand. The outermost operation entered with no construction owner of the
 /// graph open on its thread opens its own, which owns everything the
-/// operation constructs and every delivery its nested reads hand up. When
-/// the outermost operation ends with no owner of the graph left open, those
-/// are released together with the receipts its demand paid and the
-/// self-evaluation receipts it admitted, each of which roots the operands it
-/// names, so the dispatcher holds nothing past its operations but the
-/// results it kept for replay, each under a retention charge like any other
-/// cache. What survives is what the returned carrier owns, what an explicit
-/// builder owner the caller holds keeps, or what a charged cache retains.
+/// operation constructs and every delivery its nested reads hand up, and
+/// releases them when it ends. Whenever the outermost operation ends — with
+/// or without a builder owner of the caller's still open — the receipts its
+/// demand paid and the self-evaluation receipts it admitted are released
+/// too: each roots the operands it names, and a receipt is the operation's
+/// own bookkeeping, never a result, so no builder keeps it. The dispatcher
+/// holds nothing past its operations but the results it kept for replay,
+/// each under a retention charge like any other cache. What survives is
+/// what the returned carrier owns, what an explicit builder owner the caller
+/// holds keeps, or what a charged cache retains.
 pub(crate) struct DispatchOperation<'g> {
     depth: &'g std::cell::Cell<u32>,
     self_evaluation_receipts: &'g SelfEvaluationReceipts,
     demand: &'g connected_demand::ConnectedDemandLedger<'g>,
-    arena: &'g Arc<crate::semantic_query_memo::arena::NodeArenaCore>,
     owner: Option<crate::semantic_query_memo::node_roots::NodeRootScope>,
 }
 
@@ -598,9 +600,7 @@ impl Drop for DispatchOperation<'_> {
         drop(self.owner.take());
         let depth = self.depth.get() - 1;
         self.depth.set(depth);
-        if depth == 0
-            && !crate::semantic_query_memo::node_roots::NodeRootScope::holds_owner(self.arena)
-        {
+        if depth == 0 {
             let receipts = std::mem::take(&mut *self.self_evaluation_receipts.borrow_mut());
             drop(receipts);
             self.demand.release_paid();
@@ -811,16 +811,18 @@ impl<'g> Drop for BuildLocalTaintGuard<'g> {
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
-    /// `key`'s flow return, and whether its evaluation read a member's
-    /// degraded body-derived return as a type — a fact the value's own
-    /// nodes do not carry, which the published answer must not drop.
-    pub fn execute_flow_return_observing_degraded_read(
-        &self,
-        key: crate::semantic_query::FlowReturnKey,
-    ) -> (crate::semantic_query::FlowReturnStep, bool) {
-        let before = self.degraded_member_reads.get();
-        let step = self.execute_flow_return(key);
-        (step, self.degraded_member_reads.get() != before)
+    construction_ordinal_seam! {
+        /// `key`'s flow return, and whether its evaluation read a member's
+        /// degraded body-derived return as a type — a fact the value's own
+        /// nodes do not carry, which the published answer must not drop.
+        fn execute_flow_return_observing_degraded_read(
+            &self,
+            key: crate::semantic_query::FlowReturnKey,
+        ) -> (crate::semantic_query::FlowReturnStep, bool) {
+            let before = self.degraded_member_reads.get();
+            let step = self.execute_flow_return(key);
+            (step, self.degraded_member_reads.get() != before)
+        }
     }
 }
 
@@ -982,9 +984,46 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             depth: &self.operation_depth,
             self_evaluation_receipts: &self.self_evaluation_receipts,
             demand: &self.connected_demand,
-            arena,
             owner,
         }
+    }
+
+    /// Run `build` as the construction of one public result and deliver its
+    /// value in the carrier that owns it ([`Constructed`]): everything the
+    /// build interns, roots or reads on this thread is kept by the carrier,
+    /// never by the dispatcher, so a discarded carrier releases it while the
+    /// dispatcher lives and a kept one outlives every dispatcher. A builder
+    /// owner the caller holds open keeps a share of it too, as it keeps every
+    /// construction made under it.
+    ///
+    /// [`Constructed`]: crate::semantic_query_memo::node_roots::Constructed
+    pub(crate) fn construct<T: owning_dispatch::ConstructionResult>(
+        &self,
+        build: impl FnOnce() -> T,
+    ) -> crate::semantic_query_memo::node_roots::Constructed<T> {
+        let sink = crate::semantic_query_memo::node_roots::ConstructionSink::enter(
+            self.binding.construction.arena(),
+        );
+        let operation = self.enter_operation(false);
+        let value = build();
+        let mut operands = crate::semantic_query_memo::node_roots::RootIds::new();
+        value.operands(&mut |node| operands.push(node));
+        crate::semantic_query_memo::node_roots::root_in_arena(
+            Arc::clone(self.binding.construction.arena()),
+            operands,
+        )
+        .capture_in_scope();
+        // Receipts end with this operation, before the sink closes. The
+        // carrier keeps the result's explicit roots, including reused nodes.
+        drop(operation);
+        sink.seal(value)
+    }
+
+    /// The dispatcher's public construction surface: every result it hands
+    /// a consumer outside the engine arrives in its owning carrier.
+    #[must_use]
+    pub fn owning(&self) -> OwningDispatch<'_, 'a, C> {
+        OwningDispatch { dispatch: self }
     }
 
     /// Open a nested construction scope of this dispatcher's graph: the
@@ -2592,11 +2631,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.substitute_semantic_type_param(node, parameter_node, arg)
     }
 
-    /// Intern an opaque node carrying the supplied query error. Used as the
-    /// fallback when a semantic subquery cannot be satisfied but the caller
-    /// wants a node id rather than a top-level error.
-    pub fn opaque(&self, err: QueryError) -> SemanticNodeId {
-        self.graph().intern_node(SemanticNodeData::Opaque(err))
+    construction_ordinal_seam! {
+        /// Intern an opaque node carrying the supplied query error. Used as the
+        /// fallback when a semantic subquery cannot be satisfied but the caller
+        /// wants a node id rather than a top-level error.
+        fn opaque(&self, err: QueryError) -> SemanticNodeId {
+            self.graph().intern_node(SemanticNodeData::Opaque(err))
+        }
     }
 
     /// Intern the `Opaque(RecursiveRef)` back-edge sentinel under the
@@ -2702,54 +2743,58 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         );
     }
 
-    /// Mode-aware lowering — the sole lowering entry point.
-    ///
-    /// The implicit `lower_type_expr_in_scope`
-    /// wrapper that defaulted to `ProjectionMode::Expanded` is
-    /// retired. Every caller MUST state mode explicitly:
-    ///
-    /// - Intermediate base lowering (the result is fed into a
-    ///   subsequent `ProjectPath { base, .., mode }` dispatch) — use
-    ///   `Navigate`. Lowering the base in `Expanded` eagerly reduces
-    ///   `keyof T` / `MappedType<T>` operators at the lowering site
-    ///   even when the terminal demand is shallow.
-    /// - True full-expansion call sites that read the lowered node
-    ///   as the published result (no path-walking follow-up) — pass
-    ///   `Expanded` explicitly.
-    ///
-    /// The audit footprint regression (ChatMessages cold-seq
-    /// `outputSchema|execute = 62`) traced to the implicit-Expanded
-    /// default surviving on intermediate-base lowering sites; the
-    /// fix is rule-3 of the demand-driven reducer spec.
-    pub fn lower_type_expr_in_scope_with_mode(
-        &self,
-        scope_canonical_id: &str,
-        expr: &verter_type_expr::TypeExpr,
-        mode: crate::semantic_query::ProjectionMode,
-    ) -> Option<SemanticNodeId> {
-        self.lower_type_expr_in_owner_scope_with_context(
-            scope_canonical_id,
-            verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            expr,
-            crate::semantic_query::ProjectionReductionContext::published(mode),
-        )
+    construction_ordinal_seam! {
+        /// Mode-aware lowering — the sole lowering entry point.
+        ///
+        /// The implicit `lower_type_expr_in_scope`
+        /// wrapper that defaulted to `ProjectionMode::Expanded` is
+        /// retired. Every caller MUST state mode explicitly:
+        ///
+        /// - Intermediate base lowering (the result is fed into a
+        ///   subsequent `ProjectPath { base, .., mode }` dispatch) — use
+        ///   `Navigate`. Lowering the base in `Expanded` eagerly reduces
+        ///   `keyof T` / `MappedType<T>` operators at the lowering site
+        ///   even when the terminal demand is shallow.
+        /// - True full-expansion call sites that read the lowered node
+        ///   as the published result (no path-walking follow-up) — pass
+        ///   `Expanded` explicitly.
+        ///
+        /// The audit footprint regression (ChatMessages cold-seq
+        /// `outputSchema|execute = 62`) traced to the implicit-Expanded
+        /// default surviving on intermediate-base lowering sites; the
+        /// fix is rule-3 of the demand-driven reducer spec.
+        fn lower_type_expr_in_scope_with_mode(
+            &self,
+            scope_canonical_id: &str,
+            expr: &verter_type_expr::TypeExpr,
+            mode: crate::semantic_query::ProjectionMode,
+        ) -> Option<SemanticNodeId> {
+            self.lower_type_expr_in_owner_scope_with_context(
+                scope_canonical_id,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                expr,
+                crate::semantic_query::ProjectionReductionContext::published(mode),
+            )
+        }
     }
 
-    /// Owner-exact mode-aware lowering for carrier-backed files whose module
-    /// and instance scripts share one canonical id.
-    pub fn lower_type_expr_in_owner_scope_with_mode(
-        &self,
-        scope_canonical_id: &str,
-        owner: verter_type_expr::TopLevelOwnerId,
-        expr: &verter_type_expr::TypeExpr,
-        mode: crate::semantic_query::ProjectionMode,
-    ) -> Option<SemanticNodeId> {
-        self.lower_type_expr_in_owner_scope_with_context(
-            scope_canonical_id,
-            owner,
-            expr,
-            crate::semantic_query::ProjectionReductionContext::published(mode),
-        )
+    construction_ordinal_seam! {
+        /// Owner-exact mode-aware lowering for carrier-backed files whose module
+        /// and instance scripts share one canonical id.
+        fn lower_type_expr_in_owner_scope_with_mode(
+            &self,
+            scope_canonical_id: &str,
+            owner: verter_type_expr::TopLevelOwnerId,
+            expr: &verter_type_expr::TypeExpr,
+            mode: crate::semantic_query::ProjectionMode,
+        ) -> Option<SemanticNodeId> {
+            self.lower_type_expr_in_owner_scope_with_context(
+                scope_canonical_id,
+                owner,
+                expr,
+                crate::semantic_query::ProjectionReductionContext::published(mode),
+            )
+        }
     }
 
     /// Context-explicit lowering — demand-aware sibling of
@@ -2780,146 +2825,154 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         )
     }
 
-    /// Owner-exact context-aware lowering. This is the carrier producer entry;
-    /// callers with a real authored region must pass its validated owner.
-    pub fn lower_type_expr_in_owner_scope_with_context(
-        &self,
-        scope_canonical_id: &str,
-        owner: verter_type_expr::TopLevelOwnerId,
-        expr: &verter_type_expr::TypeExpr,
-        context: crate::semantic_query::ProjectionReductionContext,
-    ) -> Option<SemanticNodeId> {
-        // A scope whose file is not (yet) materialised still lowers: the
-        // lowering is a pure typed-IR → carrier-graph mapping, and every
-        // reference that cannot resolve NOW stays a scoped `BareRef`
-        // carrier the demand points retry against the live view. Bailing
-        // here would destroy the authored head (name / args / scope) at
-        // raise time — `None` from this entry means "no lowering exists",
-        // never "the scope file is not loaded yet". The unknown file
-        // contributes a default content hash to the scope (the honest
-        // value for a file with no content generation); the carriers
-        // resolve by canonical id at demand, so nothing stale is baked in.
-        let whole_hash = self
-            .ctx
-            .shallow_file_state(scope_canonical_id)
-            .map(|shallow| shallow.whole_hash)
-            .unwrap_or_default();
-        let scope = NodeScopeId::File {
-            canonical_id: Arc::from(scope_canonical_id),
-            owner,
-            whole_hash,
-            local_scope: None,
-        };
-        let env = rustc_hash::FxHashMap::default();
-        let name_resolution = rustc_hash::FxHashMap::default();
-        let scope_payload = self
-            .ctx
-            .prepared_decl_bundle(scope_canonical_id)
-            .map(|bundle| {
-                crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
-                    &bundle, owner,
-                )
-            });
-        // R15/F11 — construct the resolver-context
-        // `ScopeShadowing` once at the dispatch entry point. The
-        // shadow set is derived from the same `scope_payload` the
-        // foundation (`524f469d`) consumed inline; any future
-        // shadow-source addition lands in `ScopeShadowing::from_*`
-        // rather than at every call site.
-        let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
-            scope_payload.as_ref(),
-        );
-        let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-        let id = self.shallow_lower_type_expr_with_context(
-            expr,
-            &env,
-            &scope,
-            &name_resolution,
-            scope_payload.as_ref(),
-            &shadowing,
-            &mut substitutions,
-            context,
-        );
-        Some(id)
-    }
-
-    /// Re-enter the ONE shared dispatch over a macro hot-mirror
-    /// [`HotTypeRef`](crate::semantic_query::HotTypeRef) at `mode`, returning
-    /// the resolved subject node.
-    ///
-    /// This is the macro-arg consumer's re-entry boundary: the mirror is a
-    /// query-free producer of the mode-neutral structural carrier; a consumer
-    /// resolves that carrier at its OWN demand by driving it as the base of an
-    /// empty-path `ProjectPath` query through the shared dispatch (carrier head
-    /// resolution + the requested-mode reduction). It is a DIFFERENT DEMAND on
-    /// the producer's handle, never a second lowering of the macro argument.
-    pub fn resolve_hot_handle_at_mode(
-        &self,
-        handle: crate::semantic_query::HotTypeRef,
-        mode: crate::semantic_query::ProjectionMode,
-    ) -> SemanticNodeId {
-        self.resolve_hot_handle_with_context(
-            handle,
-            crate::semantic_query::ProjectionReductionContext::published(mode),
-        )
-    }
-
-    /// Context-explicit sibling of [`Self::resolve_hot_handle_at_mode`] — the
-    /// consumer supplies the EXACT reduction context the eager macro-arg
-    /// lowering it replaced used (e.g. `structural_transit_with_mode(Navigate)`
-    /// for the publication carrier-base re-entry, or `published(mode)` for a
-    /// per-field demand).
-    pub fn resolve_hot_handle_with_context(
-        &self,
-        handle: crate::semantic_query::HotTypeRef,
-        context: crate::semantic_query::ProjectionReductionContext,
-    ) -> SemanticNodeId {
-        let read = self.execute_read(crate::semantic_query::SemanticQueryKey::ProjectPath {
-            base: handle.node(),
-            path: Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
-            context,
-        });
-        crate::meta_resolve::emit_dispatch_dep_signature_facts(self, &read.dep_signature);
-        match read.value {
-            QueryResult::Value(id) => id,
-            QueryResult::Recursive(id) => id,
-            QueryResult::Error(_) => handle.node(),
+    construction_ordinal_seam! {
+        /// Owner-exact context-aware lowering. This is the carrier producer entry;
+        /// callers with a real authored region must pass its validated owner.
+        fn lower_type_expr_in_owner_scope_with_context(
+            &self,
+            scope_canonical_id: &str,
+            owner: verter_type_expr::TopLevelOwnerId,
+            expr: &verter_type_expr::TypeExpr,
+            context: crate::semantic_query::ProjectionReductionContext,
+        ) -> Option<SemanticNodeId> {
+            // A scope whose file is not (yet) materialised still lowers: the
+            // lowering is a pure typed-IR → carrier-graph mapping, and every
+            // reference that cannot resolve NOW stays a scoped `BareRef`
+            // carrier the demand points retry against the live view. Bailing
+            // here would destroy the authored head (name / args / scope) at
+            // raise time — `None` from this entry means "no lowering exists",
+            // never "the scope file is not loaded yet". The unknown file
+            // contributes a default content hash to the scope (the honest
+            // value for a file with no content generation); the carriers
+            // resolve by canonical id at demand, so nothing stale is baked in.
+            let whole_hash = self
+                .ctx
+                .shallow_file_state(scope_canonical_id)
+                .map(|shallow| shallow.whole_hash)
+                .unwrap_or_default();
+            let scope = NodeScopeId::File {
+                canonical_id: Arc::from(scope_canonical_id),
+                owner,
+                whole_hash,
+                local_scope: None,
+            };
+            let env = rustc_hash::FxHashMap::default();
+            let name_resolution = rustc_hash::FxHashMap::default();
+            let scope_payload = self
+                .ctx
+                .prepared_decl_bundle(scope_canonical_id)
+                .map(|bundle| {
+                    crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+                        &bundle, owner,
+                    )
+                });
+            // R15/F11 — construct the resolver-context
+            // `ScopeShadowing` once at the dispatch entry point. The
+            // shadow set is derived from the same `scope_payload` the
+            // foundation (`524f469d`) consumed inline; any future
+            // shadow-source addition lands in `ScopeShadowing::from_*`
+            // rather than at every call site.
+            let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
+                scope_payload.as_ref(),
+            );
+            let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+            let id = self.shallow_lower_type_expr_with_context(
+                expr,
+                &env,
+                &scope,
+                &name_resolution,
+                scope_payload.as_ref(),
+                &shadowing,
+                &mut substitutions,
+                context,
+            );
+            Some(id)
         }
     }
 
-    /// Resolve a named declaration's body to a hot graph handle by executing the
-    /// shared `Instantiate` query (which carries args/substitutions/projection
-    /// mode/resolve-env — the semantic axes a body-only cache lacks) and wrapping
-    /// the resulting node. Reuses the `SemanticGraphStore` `Instantiate` memo —
-    /// the single resolution engine — so no new store/cache is introduced. The
-    /// returned `HotTypeRef` is never lifted into a cache key (R6).
-    ///
-    /// `args` is the caller's explicit type arguments (empty for a bare
-    /// named-decl body demand with no explicit type arguments; non-empty when
-    /// instantiating `Foo<T>` or with active substitutions). `prc` is the
-    /// caller's exact projection-reduction context.
-    pub fn decl_body_hot_ref(
-        &self,
-        canonical: &str,
-        owner: verter_type_expr::TopLevelOwnerId,
-        symbol: &str,
-        args: Arc<[SemanticNodeId]>,
-        prc: crate::semantic_query::ProjectionReductionContext,
-    ) -> Option<crate::semantic_query::HotTypeRef> {
-        let slot = self.type_slot_for(Arc::from(canonical), owner, Arc::from(symbol));
-        let read = self.execute_read(crate::semantic_query::SemanticQueryKey::Instantiate(
-            crate::semantic_query::InstantiateKey::new(
-                slot,
-                args,
-                self.instantiate_context_for(canonical, prc),
-            ),
-        ));
-        crate::meta_resolve::emit_dispatch_dep_signature_facts(self, &read.dep_signature);
-        match read.value {
-            QueryResult::Value(id) | QueryResult::Recursive(id) => {
-                Some(crate::semantic_query::HotTypeRef::new(id))
+    construction_ordinal_seam! {
+        /// Re-enter the ONE shared dispatch over a macro hot-mirror
+        /// [`HotTypeRef`](crate::semantic_query::HotTypeRef) at `mode`, returning
+        /// the resolved subject node.
+        ///
+        /// This is the macro-arg consumer's re-entry boundary: the mirror is a
+        /// query-free producer of the mode-neutral structural carrier; a consumer
+        /// resolves that carrier at its OWN demand by driving it as the base of an
+        /// empty-path `ProjectPath` query through the shared dispatch (carrier head
+        /// resolution + the requested-mode reduction). It is a DIFFERENT DEMAND on
+        /// the producer's handle, never a second lowering of the macro argument.
+        fn resolve_hot_handle_at_mode(
+            &self,
+            handle: crate::semantic_query::HotTypeRef,
+            mode: crate::semantic_query::ProjectionMode,
+        ) -> SemanticNodeId {
+            self.resolve_hot_handle_with_context(
+                handle,
+                crate::semantic_query::ProjectionReductionContext::published(mode),
+            )
+        }
+    }
+
+    construction_ordinal_seam! {
+        /// Context-explicit sibling of [`Self::resolve_hot_handle_at_mode`] — the
+        /// consumer supplies the EXACT reduction context the eager macro-arg
+        /// lowering it replaced used (e.g. `structural_transit_with_mode(Navigate)`
+        /// for the publication carrier-base re-entry, or `published(mode)` for a
+        /// per-field demand).
+        fn resolve_hot_handle_with_context(
+            &self,
+            handle: crate::semantic_query::HotTypeRef,
+            context: crate::semantic_query::ProjectionReductionContext,
+        ) -> SemanticNodeId {
+            let read = self.execute_read(crate::semantic_query::SemanticQueryKey::ProjectPath {
+                base: handle.node(),
+                path: Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
+                context,
+            });
+            crate::meta_resolve::emit_dispatch_dep_signature_facts(self, &read.dep_signature);
+            match read.value {
+                QueryResult::Value(id) => id,
+                QueryResult::Recursive(id) => id,
+                QueryResult::Error(_) => handle.node(),
             }
-            QueryResult::Error(_) => None,
+        }
+    }
+
+    construction_ordinal_seam! {
+        /// Resolve a named declaration's body to a hot graph handle by executing the
+        /// shared `Instantiate` query (which carries args/substitutions/projection
+        /// mode/resolve-env — the semantic axes a body-only cache lacks) and wrapping
+        /// the resulting node. Reuses the `SemanticGraphStore` `Instantiate` memo —
+        /// the single resolution engine — so no new store/cache is introduced. The
+        /// returned `HotTypeRef` is never lifted into a cache key (R6).
+        ///
+        /// `args` is the caller's explicit type arguments (empty for a bare
+        /// named-decl body demand with no explicit type arguments; non-empty when
+        /// instantiating `Foo<T>` or with active substitutions). `prc` is the
+        /// caller's exact projection-reduction context.
+        fn decl_body_hot_ref(
+            &self,
+            canonical: &str,
+            owner: verter_type_expr::TopLevelOwnerId,
+            symbol: &str,
+            args: Arc<[SemanticNodeId]>,
+            prc: crate::semantic_query::ProjectionReductionContext,
+        ) -> Option<crate::semantic_query::HotTypeRef> {
+            let slot = self.type_slot_for(Arc::from(canonical), owner, Arc::from(symbol));
+            let read = self.execute_read(crate::semantic_query::SemanticQueryKey::Instantiate(
+                crate::semantic_query::InstantiateKey::new(
+                    slot,
+                    args,
+                    self.instantiate_context_for(canonical, prc),
+                ),
+            ));
+            crate::meta_resolve::emit_dispatch_dep_signature_facts(self, &read.dep_signature);
+            match read.value {
+                QueryResult::Value(id) | QueryResult::Recursive(id) => {
+                    Some(crate::semantic_query::HotTypeRef::new(id))
+                }
+                QueryResult::Error(_) => None,
+            }
         }
     }
 }
@@ -5824,24 +5877,28 @@ mod tests;
 #[cfg(any(test, feature = "test-support"))]
 #[cfg_attr(not(test), allow(dead_code))]
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
-    /// The production mapped-type builder.
-    #[doc(hidden)]
-    pub fn build_mapped_type_for_tests(
-        &self,
-        source: SemanticNodeId,
-        mapper: &crate::semantic_query::MapperKey,
-        context: crate::semantic_query::ProjectionReductionContext,
-    ) -> walk::QueryBuildOutput {
-        self.build_mapped_type(source, mapper, context)
+    construction_ordinal_seam! {
+        /// The production mapped-type builder.
+        #[doc(hidden)]
+        fn build_mapped_type_for_tests(
+            &self,
+            source: SemanticNodeId,
+            mapper: &crate::semantic_query::MapperKey,
+            context: crate::semantic_query::ProjectionReductionContext,
+        ) -> walk::QueryBuildOutput {
+            self.build_mapped_type(source, mapper, context)
+        }
     }
 
-    /// The production deferred-node evaluation under the publication context.
-    #[doc(hidden)]
-    pub fn evaluate_deferred_semantic_node_for_tests(
-        &self,
-        node: SemanticNodeId,
-    ) -> SemanticNodeId {
-        self.evaluate_deferred_semantic_node(node)
+    construction_ordinal_seam! {
+        /// The production deferred-node evaluation under the publication context.
+        #[doc(hidden)]
+        fn evaluate_deferred_semantic_node_for_tests(
+            &self,
+            node: SemanticNodeId,
+        ) -> SemanticNodeId {
+            self.evaluate_deferred_semantic_node(node)
+        }
     }
 
     /// The production forcing boundary for one semantic operand.
@@ -5879,12 +5936,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         self.mint_authored_semantic_operand(locator, substitution)
     }
 
-    /// The production materialization cycle-gate builder.
-    #[doc(hidden)]
-    pub fn build_classify_materialization_cycle_gate_for_tests(
-        &self,
-        key: &crate::semantic_query::MaterializationCycleGateKey,
-    ) -> walk::QueryBuildOutput<SemanticQueryValue> {
-        self.build_classify_materialization_cycle_gate(key)
+    construction_ordinal_seam! {
+        /// The production materialization cycle-gate builder.
+        #[doc(hidden)]
+        fn build_classify_materialization_cycle_gate_for_tests(
+            &self,
+            key: &crate::semantic_query::MaterializationCycleGateKey,
+        ) -> walk::QueryBuildOutput<SemanticQueryValue> {
+            self.build_classify_materialization_cycle_gate(key)
+        }
     }
 }

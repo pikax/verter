@@ -57,6 +57,11 @@ impl SemanticDeliveryLease {
     pub fn signature(&self) -> Option<&SignatureEpochLease> {
         self.0.as_ref().and_then(|owner| owner.signature.as_ref())
     }
+    /// Another handle on this delivery that no construction owner captures:
+    /// the owner taking it keeps it itself.
+    pub(super) fn share(&self) -> Self {
+        Self(self.0.clone())
+    }
     /// The shared owner every clone of this delivery names, or `None` for
     /// an empty delivery.
     pub(super) fn owner_identity(&self) -> Option<usize> {

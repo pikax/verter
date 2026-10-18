@@ -13,132 +13,134 @@ use super::ProjectSemanticDispatch;
 use crate::semantic_query::{FlowReturnKey, SemanticNodeData, SemanticNodeId};
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
-    /// Solve the least fixed point
-    /// `T(i) = normalize(S(i) union union(T(j), j in holds(i)))`.
-    ///
-    /// The lattice bottom is an empty leaf set and is never passed to the
-    /// semantic union normalizer (whose empty result is `never`). A target
-    /// outside `members` must already have a stable completed or warm result.
-    pub fn solve_return_equation(
-        &self,
-        members: &[ReturnEquationMember],
-        flow_overrides: &FxHashMap<FlowReturnKey, SemanticNodeId>,
-    ) -> Result<Vec<SemanticNodeId>, ReturnEquationFailure> {
-        let index: FxHashMap<&ReturnObligationIdentity, usize> = members
-            .iter()
-            .enumerate()
-            .map(|(position, member)| (&member.identity, position))
-            .collect();
-        if index.len() != members.len() {
-            return Err(ReturnEquationFailure::UnresolvedOutsideHold);
-        }
-        if members.iter().any(|member| {
-            !matches!(
-                (&member.identity, &member.domain),
-                (
-                    ReturnObligationIdentity::FlowReturn(_),
-                    ReturnDomainMetadata::FlowReturn
-                ) | (
-                    ReturnObligationIdentity::ResolveCall(_),
-                    ReturnDomainMetadata::ResolveCall
-                )
-            )
-        }) {
-            return Err(ReturnEquationFailure::UnresolvedOutsideHold);
-        }
-
-        // Each member joins under the null algebra of the file its value is
-        // typed in; a component may span projects.
-        let nullabilities = members
-            .iter()
-            .map(|member| self.return_equation_nullability(&member.identity))
-            .collect::<Vec<_>>();
-        let seeds = members
-            .iter()
-            .zip(&nullabilities)
-            .map(|(member, nullability)| {
-                self.return_equation_leaf_set(&member.concrete_seeds, *nullability)
-            })
-            .collect::<Vec<_>>();
-        let mut current = seeds.clone();
-        let mut outside: FxHashMap<
-            ReturnObligationIdentity,
-            (Vec<SemanticNodeId>, Vec<SemanticNodeId>),
-        > = FxHashMap::default();
-        for member in members {
-            for hold in &member.holds {
-                if index.contains_key(hold) || outside.contains_key(hold) {
-                    continue;
-                }
-                let Some((result, fresh)) = self
-                    .stable_return_equation_target_override(hold, flow_overrides)
-                    .or_else(|| self.stable_return_equation_target(hold))
-                else {
-                    return Err(ReturnEquationFailure::UnresolvedOutsideHold);
-                };
-                outside.insert(
-                    hold.clone(),
-                    (
-                        self.return_equation_leaf_set(
-                            &[result],
-                            self.return_equation_nullability(hold),
-                        ),
-                        fresh,
-                    ),
-                );
+    construction_ordinal_seam! {
+        /// Solve the least fixed point
+        /// `T(i) = normalize(S(i) union union(T(j), j in holds(i)))`.
+        ///
+        /// The lattice bottom is an empty leaf set and is never passed to the
+        /// semantic union normalizer (whose empty result is `never`). A target
+        /// outside `members` must already have a stable completed or warm result.
+        fn solve_return_equation(
+            &self,
+            members: &[ReturnEquationMember],
+            flow_overrides: &FxHashMap<FlowReturnKey, SemanticNodeId>,
+        ) -> Result<Vec<SemanticNodeId>, ReturnEquationFailure> {
+            let index: FxHashMap<&ReturnObligationIdentity, usize> = members
+                .iter()
+                .enumerate()
+                .map(|(position, member)| (&member.identity, position))
+                .collect();
+            if index.len() != members.len() {
+                return Err(ReturnEquationFailure::UnresolvedOutsideHold);
             }
-        }
+            if members.iter().any(|member| {
+                !matches!(
+                    (&member.identity, &member.domain),
+                    (
+                        ReturnObligationIdentity::FlowReturn(_),
+                        ReturnDomainMetadata::FlowReturn
+                    ) | (
+                        ReturnObligationIdentity::ResolveCall(_),
+                        ReturnDomainMetadata::ResolveCall
+                    )
+                )
+            }) {
+                return Err(ReturnEquationFailure::UnresolvedOutsideHold);
+            }
 
-        loop {
-            let mut progressed = false;
-            let previous = current.clone();
-            for (position, member) in members.iter().enumerate() {
-                // Freshness is provenance consumed by position: a FLOW
-                // member's return position widens a FRESH primitive-literal
-                // leaf a held call contributed; a call member consuming
-                // another call keeps the literal (a value position).
-                let widen_fresh = matches!(member.domain, ReturnDomainMetadata::FlowReturn);
-                let mut leaves = seeds[position].clone();
+            // Each member joins under the null algebra of the file its value is
+            // typed in; a component may span projects.
+            let nullabilities = members
+                .iter()
+                .map(|member| self.return_equation_nullability(&member.identity))
+                .collect::<Vec<_>>();
+            let seeds = members
+                .iter()
+                .zip(&nullabilities)
+                .map(|(member, nullability)| {
+                    self.return_equation_leaf_set(&member.concrete_seeds, *nullability)
+                })
+                .collect::<Vec<_>>();
+            let mut current = seeds.clone();
+            let mut outside: FxHashMap<
+                ReturnObligationIdentity,
+                (Vec<SemanticNodeId>, Vec<SemanticNodeId>),
+            > = FxHashMap::default();
+            for member in members {
                 for hold in &member.holds {
-                    let (contributed, fresh): (&[SemanticNodeId], &[SemanticNodeId]) =
-                        if let Some(target) = index.get(hold) {
-                            (&previous[*target], &members[*target].fresh_literal_returns)
-                        } else if let Some((target, fresh)) = outside.get(hold) {
-                            (target, fresh)
-                        } else {
-                            (&[], &[])
-                        };
-                    if widen_fresh && !fresh.is_empty() {
-                        leaves.extend(contributed.iter().map(|leaf| {
-                            if fresh.contains(leaf) {
-                                self.widen_fresh_return_leaf(*leaf)
+                    if index.contains_key(hold) || outside.contains_key(hold) {
+                        continue;
+                    }
+                    let Some((result, fresh)) = self
+                        .stable_return_equation_target_override(hold, flow_overrides)
+                        .or_else(|| self.stable_return_equation_target(hold))
+                    else {
+                        return Err(ReturnEquationFailure::UnresolvedOutsideHold);
+                    };
+                    outside.insert(
+                        hold.clone(),
+                        (
+                            self.return_equation_leaf_set(
+                                &[result],
+                                self.return_equation_nullability(hold),
+                            ),
+                            fresh,
+                        ),
+                    );
+                }
+            }
+
+            loop {
+                let mut progressed = false;
+                let previous = current.clone();
+                for (position, member) in members.iter().enumerate() {
+                    // Freshness is provenance consumed by position: a FLOW
+                    // member's return position widens a FRESH primitive-literal
+                    // leaf a held call contributed; a call member consuming
+                    // another call keeps the literal (a value position).
+                    let widen_fresh = matches!(member.domain, ReturnDomainMetadata::FlowReturn);
+                    let mut leaves = seeds[position].clone();
+                    for hold in &member.holds {
+                        let (contributed, fresh): (&[SemanticNodeId], &[SemanticNodeId]) =
+                            if let Some(target) = index.get(hold) {
+                                (&previous[*target], &members[*target].fresh_literal_returns)
+                            } else if let Some((target, fresh)) = outside.get(hold) {
+                                (target, fresh)
                             } else {
-                                *leaf
-                            }
-                        }));
-                    } else {
-                        leaves.extend_from_slice(contributed);
+                                (&[], &[])
+                            };
+                        if widen_fresh && !fresh.is_empty() {
+                            leaves.extend(contributed.iter().map(|leaf| {
+                                if fresh.contains(leaf) {
+                                    self.widen_fresh_return_leaf(*leaf)
+                                } else {
+                                    *leaf
+                                }
+                            }));
+                        } else {
+                            leaves.extend_from_slice(contributed);
+                        }
+                    }
+                    let next = self.return_equation_leaf_set(&leaves, nullabilities[position]);
+                    if next != current[position] {
+                        current[position] = next;
+                        progressed = true;
                     }
                 }
-                let next = self.return_equation_leaf_set(&leaves, nullabilities[position]);
-                if next != current[position] {
-                    current[position] = next;
-                    progressed = true;
+                if !progressed {
+                    break;
                 }
             }
-            if !progressed {
-                break;
-            }
-        }
 
-        if current.iter().any(Vec::is_empty) {
-            return Err(ReturnEquationFailure::EmptyCycle);
+            if current.iter().any(Vec::is_empty) {
+                return Err(ReturnEquationFailure::EmptyCycle);
+            }
+            Ok(current
+                .iter()
+                .zip(&nullabilities)
+                .map(|(leaves, nullability)| self.intern_normalized_union(leaves, *nullability))
+                .collect())
         }
-        Ok(current
-            .iter()
-            .zip(&nullabilities)
-            .map(|(leaves, nullability)| self.intern_normalized_union(leaves, *nullability))
-            .collect())
     }
 
     /// The null algebra one equation member joins under: a flow member's

@@ -160,7 +160,7 @@ fn raise_component_meta_registry_source(
     source: &verter_type_expr::facts::SemanticTypeSource,
 ) -> Option<verter_type_engine::semantic_query::HotTypeRef> {
     dispatch
-        .raise_semantic_type_source_to_hot(
+        .owning().raise_semantic_type_source_to_hot(
             source,
             verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                 scope_canonical_id: producer_scope.canonical_id.as_ref(),
@@ -171,7 +171,7 @@ fn raise_component_meta_registry_source(
                     ),
                 interior_failures: None,
             },
-        )
+        ).value
         .at_optional_boundary()
 }
 
@@ -739,7 +739,7 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
         .source()
         .and_then(|source| {
             dispatch
-                .raise_semantic_type_source_to_hot(
+                .owning().raise_semantic_type_source_to_hot(
                     source,
                     verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                         scope_canonical_id: producer_scope.canonical_id.as_ref(),
@@ -747,7 +747,7 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
                         context: transit_ctx,
                         interior_failures: None,
                     },
-                )
+                ).value
                 .at_optional_boundary()
         })
         .map(|hot| hot.node());
@@ -763,7 +763,9 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
     .then(|| {
         field.authored_evidence.as_ref().and_then(|evidence| {
             dispatch
+                .owning()
                 .raise_authored_locator_to_hot(evidence.source().locator(), transit_ctx)
+                .value
                 .at_optional_boundary()
                 .map(|hot| hot.node())
         })
@@ -2246,14 +2248,14 @@ pub(crate) fn prepared_body_root_node(
     prepared: &verter_session_query::type_solver::PreparedTypeDecl,
 ) -> Option<SemanticNodeId> {
     dispatch
-        .raise_authored_locator_to_hot(
+        .owning().raise_authored_locator_to_hot(
             &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
                 prepared.body_facts.body_slot.clone(),
             ),
             verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                 verter_type_engine::semantic_query::ProjectionMode::Navigate,
             ),
-        )
+        ).value
         .at_optional_boundary()
         .map(|hot| hot.node())
 }

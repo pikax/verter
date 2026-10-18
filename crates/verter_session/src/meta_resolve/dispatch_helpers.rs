@@ -404,12 +404,12 @@ pub(crate) fn arg_preserving_member_use_site_slot<
     // one member annotation (never a body expansion, never an Instantiate
     // execution).
     let raised = dispatch
-        .raise_authored_locator_to_hot(
+        .owning().raise_authored_locator_to_hot(
             &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot.clone()),
             verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                 verter_type_engine::semantic_query::ProjectionMode::Navigate,
             ),
-        )
+        ).value
         .at_optional_boundary()?;
     let authored = resolved_instantiation_head(dispatch, raised.node())?;
     (authored == observed).then_some(slot)
@@ -444,12 +444,15 @@ fn resolved_instantiation_head<C: verter_type_engine::resolver_core::ResolverCap
                 if !data.carrier_type_args().is_empty() =>
             {
                 drop(data);
-                let resolved = dispatch.resolve_carrier_subject_node(
-                    current,
-                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
-                        verter_type_engine::semantic_query::ProjectionMode::Navigate,
-                    ),
-                );
+                let resolved = dispatch
+                    .owning()
+                    .resolve_carrier_subject_node(
+                        current,
+                        verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                            verter_type_engine::semantic_query::ProjectionMode::Navigate,
+                        ),
+                    )
+                    .value;
                 if resolved == current {
                     return None;
                 }

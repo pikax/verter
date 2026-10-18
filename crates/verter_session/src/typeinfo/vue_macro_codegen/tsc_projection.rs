@@ -26,7 +26,10 @@ fn nameable_render_node(
     node: verter_type_engine::semantic_query::SemanticNodeId,
     owner_canonical: &str,
 ) -> verter_type_engine::semantic_query::SemanticNodeId {
-    dispatch.widen_owner_local_nominal_typeofs(node, owner_canonical)
+    dispatch
+        .owning()
+        .widen_owner_local_nominal_typeofs(node, owner_canonical)
+        .value
 }
 
 pub(super) fn render_tsc_node(
@@ -896,10 +899,10 @@ fn inferred_class_members(
             };
             identity.anchor.canonical_id = std::sync::Arc::from(owner_canonical);
             identity.anchor.owner = owner;
-            let (type_text, typeof_paths) = match dispatch.execute_function_return_source(
+            let (type_text, typeof_paths) = match dispatch.owning().execute_function_return_source(
                 &verter_type_expr::facts::FunctionReturnSource::Flow(*identity),
                 owner_canonical,
-            ) {
+            ).value {
                 verter_type_engine::project_semantic_dispatch::flow_return::FunctionReturnNode::Flow(result) => {
                     // A DEGRADED SUCCESS never splices display text: this
                     // projection is fail-closed (every degraded shape
@@ -1327,13 +1330,13 @@ pub(super) fn tsc_emit_rows(
                 None => continue,
             },
         };
-        let Some(signature) = callable.signature(context) else {
+        let Some(signature) = callable.owning().signature(context) else {
             continue;
         };
         let parameters = match render_function_parameters(
             dispatch,
             owner_canonical,
-            &signature.raw_params()[1..],
+            &signature.raw_params().value[1..],
             counters,
         ) {
             Ok(parameters) => parameters,
@@ -1423,8 +1426,12 @@ fn render_emit_payload_parameters(
     use verter_type_engine::semantic_query::SemanticNodeData;
 
     let context = ProjectionReductionContext::published(ProjectionMode::Navigate);
-    let (normalized, local) =
-        observe_local(|| dispatch.normalize_node_for_structural_fact_demand(node, context));
+    let (normalized, local) = observe_local(|| {
+        dispatch
+            .owning()
+            .normalize_node_for_structural_fact_demand(node, context)
+            .value
+    });
     let Some(node) = normalized.into_complete_node() else {
         return Err(failure_from_local(local));
     };

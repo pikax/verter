@@ -1501,10 +1501,13 @@ impl VerterHost {
                             // rendered `symbol` demands a setup binding the
                             // declaration surface cannot satisfy, which
                             // fails the whole macro rather than one member.
-                            let render_node = dispatch.widen_owner_local_nominal_typeofs(
-                                reduced.node_id(),
-                                owner_canonical,
-                            );
+                            let render_node = dispatch
+                                .owning()
+                                .widen_owner_local_nominal_typeofs(
+                                    reduced.node_id(),
+                                    owner_canonical,
+                                )
+                                .value;
                             // `render_tsc_node` itself fails closed (typed
                             // `Err`) on a NESTED resolver degradation baked
                             // into the rendered text — see its doc comment.

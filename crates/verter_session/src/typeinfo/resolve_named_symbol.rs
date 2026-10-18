@@ -548,11 +548,15 @@ fn resolve_named_symbol_request(
         NamedSymbolTypeArgs::Wire(wire) => {
             let mut lowered: Vec<SemanticNodeId> = Vec::with_capacity(wire.len());
             for arg in wire {
-                match dispatch.lower_type_expr_in_scope_with_mode(
-                    canonical_id,
-                    arg.as_ref(),
-                    ProjectionMode::Navigate,
-                ) {
+                match dispatch
+                    .owning()
+                    .lower_type_expr_in_scope_with_mode(
+                        canonical_id,
+                        arg.as_ref(),
+                        ProjectionMode::Navigate,
+                    )
+                    .value
+                {
                     Some(node) => lowered.push(node),
                     None => return (Ok(None), effective_mode),
                 }

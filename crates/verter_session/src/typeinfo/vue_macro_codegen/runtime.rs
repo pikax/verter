@@ -249,11 +249,14 @@ fn is_definitely_non_object_root(
                 // definitely-non-object root — exactly as its widened
                 // `symbol` inhabitant is — so widen and let the primitive
                 // arm decide.
-                if let Some(widened) = dispatch.widened_nominal_typeof(subject) {
+                if let Some(widened) = dispatch.owning().widened_nominal_typeof(subject).value {
                     subject = widened;
                     continue;
                 }
-                let resolved = dispatch.resolve_carrier_subject_node(subject, resolution_context);
+                let resolved = dispatch
+                    .owning()
+                    .resolve_carrier_subject_node(subject, resolution_context)
+                    .value;
                 if resolved == subject {
                     return false;
                 }
@@ -372,7 +375,10 @@ pub(super) fn classify_runtime(
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<RuntimeClassification, ProjectionFailure> {
     counters.runtime_classifier_calls += 1;
-    let result = dispatch.execute_fact(dispatch.broad_runtime_key_for(subject));
+    let result = dispatch
+        .owning()
+        .execute_fact(dispatch.broad_runtime_key_for(subject))
+        .value;
     let classification = match result {
         Ok(verter_type_engine::semantic_query::FactResult::Complete(
             SemanticQueryValue::BroadRuntime(classification),
@@ -458,7 +464,9 @@ pub(super) fn emits_surface_has_invalid_member(
         .filter(|member| member.visibility.is_public())
         .any(|member| {
             let Some(node) = dispatch
+                .owning()
                 .normalize_node_for_structural_fact_demand(member.value, shape_context)
+                .value
                 .into_complete_node()
             else {
                 return false;
@@ -551,14 +559,17 @@ fn resolve_member_carrier(
     carrier_context: ProjectionReductionContext,
 ) -> Option<verter_type_engine::semantic_query::SemanticNodeId> {
     let (resolved, local) = observe_local(|| {
-        dispatch.resolve_carrier_subject_node(
-            node,
-            if tracked_dependency {
-                eager_context
-            } else {
-                carrier_context
-            },
-        )
+        dispatch
+            .owning()
+            .resolve_carrier_subject_node(
+                node,
+                if tracked_dependency {
+                    eager_context
+                } else {
+                    carrier_context
+                },
+            )
+            .value
     });
     if local.is_partial() {
         None

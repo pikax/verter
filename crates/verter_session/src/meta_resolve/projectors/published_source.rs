@@ -185,10 +185,12 @@ pub(crate) fn structural_member_value_source<
     // failed. Validate the original carrier through the shared demand before
     // using it to construct a projected member source.
     let resolved = dispatch
+        .owning()
         .normalize_node_for_structural_fact_demand(
             node,
             verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit(),
         )
+        .value
         .into_usable_node()?;
     let data = dispatch.graph().read_in_scope(resolved)?;
     if matches!(

@@ -369,20 +369,7 @@ impl ScopeStack {
     fn close(&mut self, token: u64) -> ConstructionOwners {
         let position = self.position(token);
         let mut owners = self.entries.remove(position);
-        let arena = &owners.arena;
-        let heir_of = |candidate: &ConstructionOwners| {
-            candidate.is_owner() && Arc::ptr_eq(&candidate.arena, arena)
-        };
-        let heir = self.entries[..position]
-            .iter()
-            .rposition(heir_of)
-            .or_else(|| {
-                self.entries[position..]
-                    .iter()
-                    .position(heir_of)
-                    .map(|offset| position + offset)
-            });
-        if let Some(heir) = heir {
+        if let Some(heir) = self.heir(position, &owners.arena) {
             let heir = &mut self.entries[heir];
             // The heir keeps the union, so merge the smaller holding into
             // the larger: an attachment that rises through every enclosing
@@ -399,6 +386,49 @@ impl ScopeStack {
         }
         owners
     }
+
+    /// The owner of `arena` a closing entry at `position` hands on to: the
+    /// one it was opened inside of first, else one opened after it that is
+    /// still open. A dispatcher's lane is never one.
+    fn heir(&self, position: usize, arena: &Arc<NodeArenaCore>) -> Option<usize> {
+        let heir_of = |candidate: &ConstructionOwners| {
+            candidate.is_owner() && Arc::ptr_eq(&candidate.arena, arena)
+        };
+        self.entries[..position]
+            .iter()
+            .rposition(heir_of)
+            .or_else(|| {
+                self.entries[position..]
+                    .iter()
+                    .position(heir_of)
+                    .map(|offset| position + offset)
+            })
+    }
+
+    /// Remove a carrier's construction owner and keep everything it holds
+    /// for the carrier. A builder owner still open on the thread keeps a
+    /// share of it too, as it keeps every construction made under it, and
+    /// releases that share when it closes.
+    fn seal(&mut self, token: u64) -> ConstructionOwners {
+        let position = self.position(token);
+        let owners = self.entries.remove(position);
+        if let Some(heir) = self.heir(position, &owners.arena) {
+            let heir = &mut self.entries[heir];
+            if !owners.constructed.is_empty() {
+                // Each intern count the carrier keeps is one acquisition;
+                // the builder's share is another.
+                heir.arena
+                    .retain(&owners.constructed)
+                    .expect("a sealed construction's operands are live");
+                heir.constructed.extend_from_slice(&owners.constructed);
+            }
+            heir.roots.extend(owners.roots.iter().cloned());
+            for lease in &owners.deliveries {
+                let _ = heir.adopt(lease.share());
+            }
+        }
+        owners
+    }
 }
 
 struct ConstructionOwners {
@@ -410,6 +440,10 @@ struct ConstructionOwners {
     /// so a dispatcher never keeps a result past the operation that
     /// produced it.
     dispatchers: usize,
+    /// Whether this owner is a construction a result carrier is being built
+    /// under ([`ConstructionSink`]): every delivery read while it is open is
+    /// kept here, so the carrier it seals into owns it.
+    carrier: bool,
     roots: Vec<NodeRoot>,
     /// The ordinals interned while this owner was the innermost one of its
     /// arena: each holds the one count its intern took, released together
@@ -436,6 +470,7 @@ impl ConstructionOwners {
             token,
             arena: Arc::clone(arena),
             dispatchers: 0,
+            carrier: false,
             roots: Vec::new(),
             constructed: Vec::new(),
             deliveries: Vec::new(),
@@ -629,7 +664,9 @@ impl NodeRootScope {
     /// owner of the arena, so a delivery stays held until no owner of its
     /// arena is open on the thread, whichever owner holds it; the oldest is
     /// the one least likely to close first, so the delivery is not handed on
-    /// again at every nested scope's close. A dispatcher's lane is not an
+    /// again at every nested scope's close. While a result carrier is being
+    /// built ([`ConstructionSink`]) its owner keeps the delivery instead, so
+    /// the carrier owns what its build read. A dispatcher's lane is not an
     /// owner: with no operation or builder open, the lease's own holder is
     /// its only owner.
     pub(crate) fn capture_delivery(
@@ -640,9 +677,24 @@ impl NodeRootScope {
         SCOPES.with(|scopes| {
             let mut scopes = scopes.borrow_mut();
             let owner = match arena {
-                Some(arena) => scopes.entries.iter_mut().find(|candidate| {
-                    candidate.is_owner() && Arc::as_ptr(&candidate.arena) as usize == arena
-                }),
+                Some(arena) => {
+                    let of_arena = |candidate: &ConstructionOwners| {
+                        candidate.is_owner() && Arc::as_ptr(&candidate.arena) as usize == arena
+                    };
+                    // A carrier under construction keeps every delivery its
+                    // build reads; otherwise the oldest owner does.
+                    match scopes
+                        .entries
+                        .iter()
+                        .rposition(|candidate| candidate.carrier && of_arena(candidate))
+                    {
+                        Some(carrier) => scopes.entries.get_mut(carrier),
+                        None => scopes
+                            .entries
+                            .iter_mut()
+                            .find(|candidate| of_arena(candidate)),
+                    }
+                }
                 None => scopes
                     .entries
                     .iter_mut()
@@ -727,5 +779,148 @@ impl Drop for NodeRootScope {
     fn drop(&mut self) {
         let owners = SCOPES.with(|scopes| scopes.borrow_mut().close(self.token));
         drop(owners);
+    }
+}
+
+/// The construction owner a dispatcher result carrier is built under: it
+/// keeps everything the build interns, roots and reads on this thread, and
+/// [`Self::seal`] closes it into the [`Constructed`] carrier that then owns
+/// it. Dropped unsealed (an unwinding build), it closes like any scope.
+pub(crate) struct ConstructionSink {
+    /// `None` once sealed.
+    token: Option<u64>,
+    core: Arc<NodeArenaCore>,
+    thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl ConstructionSink {
+    pub(crate) fn enter(arena: &Arc<NodeArenaCore>) -> Self {
+        let token = SCOPES.with(|scopes| {
+            let mut scopes = scopes.borrow_mut();
+            let token = scopes.mint();
+            let mut owners = ConstructionOwners::new(token, arena);
+            owners.carrier = true;
+            scopes.entries.push(owners);
+            token
+        });
+        Self {
+            token: Some(token),
+            core: Arc::clone(arena),
+            thread_bound: std::marker::PhantomData,
+        }
+    }
+
+    /// Close the build into the carrier of `value`.
+    pub(crate) fn seal<T>(mut self, value: T) -> Constructed<T> {
+        let token = self.token.take().expect("a sink seals once");
+        let owners = SCOPES.with(|scopes| scopes.borrow_mut().seal(token));
+        let core = Arc::clone(&self.core);
+        let empty = owners.constructed.is_empty()
+            && owners.roots.is_empty()
+            && owners.deliveries.is_empty();
+        Constructed {
+            value,
+            hold: ConstructionHold {
+                core,
+                owners: (!empty).then(|| Arc::new(owners)),
+            },
+        }
+    }
+}
+
+impl Drop for ConstructionSink {
+    fn drop(&mut self) {
+        if let Some(token) = self.token {
+            let owners = SCOPES.with(|scopes| scopes.borrow_mut().close(token));
+            drop(owners);
+        }
+    }
+}
+
+/// The construction a [`Constructed`] carrier owns. Clones share it; the
+/// last holder releases it.
+#[derive(Clone)]
+struct ConstructionHold {
+    core: Arc<NodeArenaCore>,
+    owners: Option<Arc<ConstructionOwners>>,
+}
+
+impl ConstructionHold {
+    fn owns(&self, id: SemanticNodeId) -> bool {
+        self.owners.as_ref().is_some_and(|owners| {
+            owners.constructed.contains(&id)
+                || owners
+                    .roots
+                    .iter()
+                    .any(|root| root.roots.operands().contains(&id))
+                || owners
+                    .deliveries
+                    .iter()
+                    .any(|lease| lease.roots().contains(&id))
+        })
+    }
+}
+
+/// A dispatcher construction result in its owning carrier.
+///
+/// The carrier owns the construction that produced its value — every node
+/// the build interned, rooted or read — so the value's operands stay live
+/// exactly as long as this carrier or a clone of it does: past its
+/// operation, its dispatcher, every builder scope and every cache. The
+/// value itself is an identity label that authorizes nothing; a read
+/// borrows a capability from the carrier ([`Self::node`]) that cannot
+/// outlive it. A copied label kept after the carrier drops names a released
+/// node. Only the dispatcher mints one.
+pub struct Constructed<T> {
+    pub value: T,
+    hold: ConstructionHold,
+}
+
+impl<T: Clone> Clone for Constructed<T> {
+    fn clone(&self) -> Self {
+        Self {
+            value: self.value.clone(),
+            hold: self.hold.clone(),
+        }
+    }
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for Constructed<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Constructed").field(&self.value).finish()
+    }
+}
+
+/// Two carriers are equal when their values are; the construction they own
+/// is ownership transport, never identity.
+impl<T: PartialEq> PartialEq for Constructed<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+impl<T: Eq> Eq for Constructed<T> {}
+
+impl<T> Constructed<T> {
+    /// Borrow a node this carrier owns. An ordinal the carrier does not own
+    /// is foreign: a copied label never authorizes a read.
+    pub fn node(&self, id: SemanticNodeId) -> Result<NodeRef<'_>, QueryError> {
+        if self.hold.owns(id) {
+            Ok(NodeRef {
+                id,
+                arena: &self.hold.core,
+            })
+        } else {
+            Err(QueryError::ForeignSemanticOperand)
+        }
+    }
+
+    /// The same construction carrying a value derived from this one: the
+    /// owner travels with the narrowed value.
+    #[must_use]
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Constructed<U> {
+        Constructed {
+            value: f(self.value),
+            hold: self.hold,
+        }
     }
 }
