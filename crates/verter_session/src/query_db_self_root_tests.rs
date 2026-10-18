@@ -4353,7 +4353,7 @@ fn component_meta_result_db_get_with_view_rejects_entry_from_superseded_generati
         }
     };
     let cached = CachedComponentMetaResult {
-        analysis,
+        analysis: crate::component_meta_cached_result::shared_component_meta_analysis(analysis),
         resolution_template: ResolutionTemplate {
             mode: verter_type_engine::semantic_query::ProjectionMode::Expanded,
             whole_hash: owner_whole_hash,

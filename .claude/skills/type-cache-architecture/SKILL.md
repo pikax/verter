@@ -291,7 +291,9 @@ its evidence), module-export names, namespace targets and proofs (a
 table's retention record holds the strings its own bindings introduce
 before it claims its record and evidence; the HAMT backing keeps a
 declared per-written-slot convention), and the import-type carrier's
-specifier. A terminal output unwrap (`OutputPayload::into_type_expr`)
+specifier, and a component-meta analysis (`SharedComponentMetaAnalysis`:
+the final-result cache holds it and every `ComponentMetaDelivery` shares
+it). A terminal output unwrap (`OutputPayload::into_type_expr`)
 moves the tree out of its cell when the carrier is the cell's last holder
 (`Owned::try_unwrap`, releasing the charge as the tree leaves) and
 otherwise hands the caller an unshared deep copy

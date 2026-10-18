@@ -151,7 +151,7 @@ const EXPECTED_HEAD_ALIASES: [(&str, &str); 3] = [
     ),
     (
         "ImportTypeHead",
-        "pub(crate) type ImportTypeHead<'a> = (&'a str, &'a OwnedSlice<OwnedStr>, bool);",
+        "pub(crate) type ImportTypeHead<'a> = (&'a OwnedStr, &'a OwnedSlice<OwnedStr>, bool);",
     ),
 ];
 
@@ -228,7 +228,7 @@ const CARRIER_SPECS: [CarrierSpec; 4] = [
     CarrierSpec {
         name: "ImportTypeCarrier",
         fields: &[
-            ("specifier", "Arc<str>"),
+            ("specifier", "OwnedStr"),
             ("qualifier", "OwnedSlice<OwnedStr>"),
             ("type_args", "Arc<[SemanticNodeId]>"),
             ("typeof_query", "bool"),
@@ -236,9 +236,9 @@ const CARRIER_SPECS: [CarrierSpec; 4] = [
         methods: &[
             (
                 "new",
-                "fn new(specifier: Arc<str>, qualifier: OwnedSlice<OwnedStr>, type_args: Arc<[SemanticNodeId]>, typeof_query: bool) -> Self",
+                "fn new(specifier: OwnedStr, qualifier: OwnedSlice<OwnedStr>, type_args: Arc<[SemanticNodeId]>, typeof_query: bool) -> Self",
             ),
-            ("specifier", "fn specifier(&self) -> &str"),
+            ("specifier", "fn specifier(&self) -> &OwnedStr"),
             ("qualifier", "fn qualifier(&self) -> &OwnedSlice<OwnedStr>"),
             ("typeof_query", "fn typeof_query(&self) -> bool"),
             ("arg_nodes", "fn arg_nodes(&self) -> &[SemanticNodeId]"),
@@ -288,7 +288,7 @@ const ACCESSOR_SPECS: [AccessorSpec; 10] = [
     AccessorSpec {
         name: "new_import_type",
         vis: "pub",
-        sig: "fn new_import_type(specifier: Arc<str>, qualifier: OwnedSlice<OwnedStr>, type_args: Arc<[SemanticNodeId]>, typeof_query: bool) -> Self",
+        sig: "fn new_import_type(specifier: impl Into<OwnedStr>, qualifier: OwnedSlice<OwnedStr>, type_args: Arc<[SemanticNodeId]>, typeof_query: bool) -> Self",
     },
     AccessorSpec {
         name: "typeof_head",

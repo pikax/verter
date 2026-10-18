@@ -2425,7 +2425,10 @@ mod tests {
             crate::component_meta_result_db::ComponentMetaResultEntry {
                 payload: Arc::new(
                     crate::component_meta_cached_result::CachedComponentMetaResult {
-                        analysis: empty_component_meta_analysis(),
+                        analysis:
+                            crate::component_meta_cached_result::shared_component_meta_analysis(
+                                empty_component_meta_analysis(),
+                            ),
                         resolution_template:
                             crate::component_meta_cached_result::ResolutionTemplate {
                                 mode: verter_type_engine::semantic_query::ProjectionMode::Expanded,
