@@ -20,7 +20,7 @@
 use std::sync::Arc;
 
 use verter_session_query::retention::allocation::{
-    arc_block_bytes, arc_slice_block_bytes, arc_str_bytes, heap_block_bytes, AliasSet,
+    arc_slice_block_bytes, arc_str_bytes, heap_block_bytes, AliasSet,
 };
 
 use super::demand::{MaterializedSet, ProjectionPath};
@@ -61,6 +61,17 @@ impl<T: OwnedHeap> OwnedHeap for Arc<[T]> {
     }
 }
 
+impl<T: OwnedHeap> OwnedHeap for Box<[T]> {
+    /// An exclusively owned list: its backing and its items' heap.
+    fn owned_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
+        heap_block_bytes(std::mem::size_of_val::<[T]>(self))
+            + self
+                .iter()
+                .map(|item| item.owned_heap_bytes(aliases))
+                .sum::<usize>()
+    }
+}
+
 impl<T: OwnedHeap> OwnedHeap for Option<T> {
     fn owned_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
         self.as_ref()
@@ -86,6 +97,7 @@ macro_rules! measured_by_owned_heap {
 }
 
 measured_by_owned_heap!(
+    super::PathSegment,
     super::SemanticNodeId,
     super::SignatureRef,
     super::BroadRuntimeKind,
@@ -118,6 +130,22 @@ impl<T: verter_session_query::retention::owned::Measured> OwnedHeap
     for verter_session_query::retention::owned::Owned<T>
 {
     /// A nested owned allocation: charged by its own cell.
+    fn owned_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
+        self.offer(aliases)
+    }
+}
+
+impl<T: verter_session_query::retention::owned::Measured> OwnedHeap
+    for verter_session_query::retention::owned::OwnedSlice<T>
+{
+    /// A nested owned slice: charged by its own cell.
+    fn owned_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
+        self.offer(aliases)
+    }
+}
+
+impl OwnedHeap for verter_session_query::retention::owned::OwnedStr {
+    /// A nested owned string: charged by its own cell.
     fn owned_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
         self.offer(aliases)
     }
@@ -189,7 +217,7 @@ impl OwnedHeap for PathSegment {
 
 impl OwnedHeap for ProjectionPath {
     fn owned_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
-        self.as_arc().owned_heap_bytes(aliases)
+        self.as_owned().owned_heap_bytes(aliases)
     }
 }
 
@@ -215,11 +243,10 @@ impl OwnedHeap for QueryError {
             QueryError::UnsupportedIntrinsic { name } | QueryError::Other(name) => {
                 name.owned_heap_bytes(aliases)
             }
-            QueryError::BudgetExceeded(failure) => failure.context.owned_heap_bytes(aliases),
+            QueryError::BudgetExceeded(failure) => failure.context.offer(aliases),
             QueryError::AliasCycle { chain } => chain.owned_heap_bytes(aliases),
             QueryError::RecursiveRef { name, args } => {
-                name.owned_heap_bytes(aliases)
-                    + arc_slice_block_bytes(args.operands_arc(), aliases).unwrap_or(0)
+                name.owned_heap_bytes(aliases) + args.operands_owned().offer(aliases)
             }
             QueryError::DeclPlaceholder {
                 canonical_id, name, ..
@@ -329,23 +356,9 @@ impl<T: OwnedHeap> OwnedHeap for QueryResult<T> {
     }
 }
 
-/// An `Arc<T>`'s block and the heap its value owns, once per `aliases`.
-pub(crate) fn arc_value_bytes<T: OwnedHeap>(value: &Arc<T>, aliases: &mut AliasSet) -> usize {
-    if aliases.first(value) {
-        arc_block_bytes(std::mem::size_of::<T>()) + T::owned_heap_bytes(value, aliases)
-    } else {
-        0
-    }
-}
-
 /// A field whose type is `Copy` owns no heap: the bound is the proof, so a
 /// field that later gains an allocation stops compiling here.
 pub(crate) const fn copy_inline<T: Copy>(_: &T) -> usize {
-    0
-}
-
-/// [`copy_inline`] for every element of a slice.
-pub(crate) const fn copy_slice_inline<T: Copy>(_: &[T]) -> usize {
     0
 }
 
@@ -378,27 +391,12 @@ node_set_key_heap_bytes!(
     super::FlowNarrowingKey,
     super::ContextualTypingKey,
     super::InferableParamSetId,
-    super::CanonicalTypeSubstitution,
 );
 
-impl super::PendingSubstitutionFrame {
-    /// The frame's pair list.
+impl super::CanonicalTypeSubstitution {
+    /// The pair list — an owned allocation charged by its own cell — and
+    /// its root attachment's owner.
     pub(crate) fn key_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
-        let Self { pairs } = self;
-        arc_slice_block_bytes(pairs, aliases).unwrap_or(0)
-    }
-}
-
-impl super::ConditionalPendingSubstitution {
-    /// Both branch frames; the distribution parameter is a node id.
-    pub(crate) fn key_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
-        let Self {
-            true_branch,
-            false_branch,
-            distribution,
-        } = self;
-        true_branch.key_heap_bytes(aliases)
-            + false_branch.key_heap_bytes(aliases)
-            + copy_inline(distribution)
+        self.0.offer(aliases) + self.1 .0.owned_heap_bytes(aliases)
     }
 }

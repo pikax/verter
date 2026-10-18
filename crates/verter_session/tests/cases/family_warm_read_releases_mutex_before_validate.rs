@@ -52,9 +52,9 @@ fn warm_read_validates_outside_entries_mutex() {
     let key = verter_session::for_tests::instantiate_key_for_tests(
         &host,
         verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
-            Arc::from(canonical),
+            verter_type_expr::OwnedStr::from(canonical),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from("Foo"),
+            verter_type_expr::OwnedStr::from("Foo"),
         ),
         Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
         ProjectionReductionContext::published(ProjectionMode::Expanded),

@@ -64,14 +64,14 @@ fn type_resolution_audit_repeated_query_uses_warm_cache() {
 
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::from("/types.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/types.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
-        name: Arc::from("Outer"),
+        name: verter_type_expr::OwnedStr::from("Outer"),
     });
 
     // First (cold) request — populates the shared memo.

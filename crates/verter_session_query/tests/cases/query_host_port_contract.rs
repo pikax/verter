@@ -12,8 +12,6 @@
 //! payload, the typed error channel, or the admission signal on either
 //! arm fails the assertions (or fails to compile).
 
-use std::sync::Arc;
-
 use verter_session_query::{
     AuthoredBodyLowering, AuthoredBodyShape, QueryHostAdmission, QueryHostError, QueryHostPort,
     QueryHostServe,
@@ -100,12 +98,12 @@ fn may_admit_warm(serve: &QueryHostServe) -> bool {
 fn decl_body_locator(canonical: &str, symbol: &str) -> AuthoredBodyLocator {
     AuthoredBodyLocator::DeclBody(TypeBodySlot {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(canonical),
-            symbol: Arc::from(symbol),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
+            symbol: verter_type_expr::OwnedStr::from(symbol),
             space: LocatorSymbolSpace::Type,
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         },
-        path: Arc::from(Vec::new()),
+        path: verter_type_expr::OwnedSlice::from(Vec::new()),
     })
 }
 

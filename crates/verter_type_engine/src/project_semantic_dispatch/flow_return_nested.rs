@@ -418,9 +418,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             &declared_evolving_captures;
         let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: Arc::from(self.canonical),
+                canonical_id: verter_type_expr::OwnedStr::from(self.canonical),
                 owner: function.declaration.owner,
-                symbol: Arc::clone(&function.declaration.name),
+                symbol: verter_type_expr::OwnedStr::from(function.declaration.name.clone()),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
             },
             function_part: function.part.clone(),
@@ -451,6 +451,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         hash_key: site.slice_key.clone(),
                         slice_hash: planned.hash(),
                     },
+                    &planned,
                 )?;
                 Some((
                     planned,
@@ -510,7 +511,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             &content.bindings,
             skeleton,
             bound,
-            planned.as_deref(),
+            planned.as_deref().map(|planned| &**planned),
             anchor,
             &key,
             outer_env,

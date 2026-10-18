@@ -21,7 +21,7 @@ fn budget_failure() -> BudgetExceededFailure {
         domain: BudgetDomain::SolverResolveSteps,
         limit: 10,
         actual: 11,
-        context: "disposition fixture".to_string(),
+        context: "disposition fixture".into(),
     }
 }
 
@@ -30,23 +30,29 @@ fn every_variant() -> Vec<QueryError> {
     vec![
         QueryError::Miss,
         QueryError::UnsupportedIntrinsic {
-            name: Arc::from("NoSuchIntrinsic"),
+            name: verter_type_expr::OwnedStr::from("NoSuchIntrinsic"),
         },
         QueryError::BudgetExceeded(budget_failure()),
         QueryError::Cancelled,
         QueryError::UnstableState { attempts: 3 },
         QueryError::AliasCycle {
-            chain: Arc::from(vec![Arc::<str>::from("A"), Arc::<str>::from("B")].into_boxed_slice()),
+            chain: verter_type_expr::OwnedSlice::from(
+                vec![
+                    verter_type_expr::OwnedStr::from("A"),
+                    verter_type_expr::OwnedStr::from("B"),
+                ]
+                .into_boxed_slice(),
+            ),
         },
         QueryError::RecursiveRef {
-            name: Arc::from("TreeNode"),
+            name: verter_type_expr::OwnedStr::from("TreeNode"),
             args: Default::default(),
         },
-        QueryError::Other(Arc::from("boom")),
+        QueryError::Other(verter_type_expr::OwnedStr::from("boom")),
         QueryError::DeclPlaceholder {
-            canonical_id: Arc::from("/a.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/a.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            name: Arc::from("Foo"),
+            name: verter_type_expr::OwnedStr::from("Foo"),
             whole_hash: Default::default(),
         },
         QueryError::ValueDomainMismatch {
@@ -119,7 +125,7 @@ fn only_miss_and_raise_miss_are_optional_absence() {
 #[test]
 fn recursive_ref_raises_as_recursion() {
     let err = QueryError::RecursiveRef {
-        name: Arc::from("TreeNode"),
+        name: verter_type_expr::OwnedStr::from("TreeNode"),
         args: Default::default(),
     };
     let class = classify_query_error(&err);
@@ -136,9 +142,9 @@ fn recursive_ref_raises_as_recursion() {
 #[test]
 fn decl_placeholder_is_expandable_and_never_missing_dependency() {
     let err = QueryError::DeclPlaceholder {
-        canonical_id: Arc::from("/a.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/a.ts"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        name: Arc::from("Foo"),
+        name: verter_type_expr::OwnedStr::from("Foo"),
         whole_hash: Default::default(),
     };
     let class = classify_query_error(&err);
@@ -164,7 +170,9 @@ fn decl_placeholder_is_expandable_and_never_missing_dependency() {
 fn cycle_sentinels_remain_control_carriers() {
     for err in [
         QueryError::AliasCycle {
-            chain: Arc::from(vec![Arc::<str>::from("A")].into_boxed_slice()),
+            chain: verter_type_expr::OwnedSlice::from(
+                vec![verter_type_expr::OwnedStr::from("A")].into_boxed_slice(),
+            ),
         },
         QueryError::RaiseAliasCycle,
         QueryError::TypeParamCycle,
@@ -191,7 +199,7 @@ fn alias_cycle_preserves_its_participant_chain() {
     let chain: Arc<[Arc<str>]> =
         Arc::from(vec![Arc::<str>::from("A"), Arc::<str>::from("B")].into_boxed_slice());
     let err = QueryError::AliasCycle {
-        chain: Arc::clone(&chain),
+        chain: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(chain.clone()),
     };
     assert_eq!(
         classify_query_error(&err).disposition,
@@ -258,9 +266,9 @@ fn unstable_state_is_a_partial_not_a_fault() {
 #[test]
 fn genuine_failures_are_the_error_type() {
     for err in [
-        QueryError::Other(Arc::from("boom")),
+        QueryError::Other(verter_type_expr::OwnedStr::from("boom")),
         QueryError::UnsupportedIntrinsic {
-            name: Arc::from("NoSuchIntrinsic"),
+            name: verter_type_expr::OwnedStr::from("NoSuchIntrinsic"),
         },
         QueryError::ValueDomainMismatch {
             expected: SemanticQueryValueTag::TypeNode,

@@ -9,6 +9,8 @@
 //! normalizer (compile-missing or a shallow-only rewrite) AND PASSES with it.
 
 use std::sync::Arc;
+use verter_type_expr::OwnedSlice;
+use verter_type_expr::OwnedStr;
 
 use verter_type_expr::facts::DeclarationOrigin;
 use verter_type_expr::facts::{
@@ -31,9 +33,9 @@ const CHILD: &str = "/components/Child.vue";
 
 fn anchor(canonical: &str) -> AuthoredAnchor {
     AuthoredAnchor {
-        canonical_id: Arc::from(canonical),
+        canonical_id: OwnedStr::from(canonical),
         owner: TopLevelOwnerId::ordinary_file(),
-        symbol: Arc::from("ChildProps"),
+        symbol: OwnedStr::from("ChildProps"),
         space: LocatorSymbolSpace::Type,
     }
 }
@@ -41,7 +43,7 @@ fn anchor(canonical: &str) -> AuthoredAnchor {
 fn slot(canonical: &str) -> TypeBodySlot {
     TypeBodySlot {
         anchor: anchor(canonical),
-        path: Arc::from(Vec::new().into_boxed_slice()),
+        path: OwnedSlice::from(Vec::new().into_boxed_slice()),
     }
 }
 

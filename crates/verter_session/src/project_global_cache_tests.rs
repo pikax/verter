@@ -1254,12 +1254,12 @@ fn identity_interner_is_per_store_owned_not_process_global() {
     let a1 = store_a.identity_interner().intern("/w/shared.ts");
     let a2 = store_a.identity_interner().intern("/w/shared.ts");
     assert!(
-        Arc::ptr_eq(&a1, &a2),
+        verter_type_expr::OwnedStr::ptr_eq(&a1, &a2),
         "one store dedups content-equal identity strings"
     );
     let b1 = store_b.identity_interner().intern("/w/shared.ts");
     assert!(
-        !Arc::ptr_eq(&a1, &b1),
+        !verter_type_expr::OwnedStr::ptr_eq(&a1, &b1),
         "a second store owns an INDEPENDENT pool — no process-global sharing"
     );
     assert_eq!(a1, b1, "content equality is unaffected by pool identity");

@@ -116,7 +116,7 @@ fn stopped_demands_never_offer_unevaluated_subjects_as_positional_values() {
     let keys = [
         SemanticQueryKey::ProjectPath {
             base: object,
-            path: Arc::from([]),
+            path: verter_type_expr::OwnedSlice::from([]),
             context,
         },
         SemanticQueryKey::KeyOf {
@@ -125,7 +125,7 @@ fn stopped_demands_never_offer_unevaluated_subjects_as_positional_values() {
         },
         SemanticQueryKey::IndexedAccess {
             base: object,
-            index: IndexKey::String(Arc::from("x")),
+            index: IndexKey::String(verter_type_expr::OwnedStr::from("x")),
             mode: ProjectionMode::Navigate,
         },
         SemanticQueryKey::ReduceUnion {
@@ -202,7 +202,7 @@ fn finite_mapped_batch_stops_at_its_first_refusal_and_warms_when_complete() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
     let mapped = graph.intern_node(SemanticNodeData::Mapped {
         source: domain,

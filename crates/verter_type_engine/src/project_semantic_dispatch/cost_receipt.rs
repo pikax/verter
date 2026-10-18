@@ -39,7 +39,7 @@ use verter_session_query::retention::{
 /// charged for. A receipt is meaningful only under the revision that
 /// recorded it, and a refusal only under the [`BudgetProfile`] that refused
 /// it.
-pub const COST_MODEL_REVISION: u32 = 2;
+pub const COST_MODEL_REVISION: u32 = 3;
 
 /// The exact identity of one semantic computation: the canonical demand
 /// and the materialized point it answers, as the memo's prepared key
@@ -283,6 +283,11 @@ pub struct CostDependency {
 pub struct OperationFootprint {
     /// The deepest nested query level its closure needs below its entry.
     pub query_depth: u16,
+    /// The deepest nested query level a continuation frame of its closure
+    /// needs below that frame's own entry. A frame runs from its drive,
+    /// never nested in the frame that needed it, so its depth is not
+    /// counted below whatever its result's reader was evaluating.
+    pub frame_query_depth: u16,
     /// The deepest instantiation frame its closure runs, counted from its
     /// own frame (0 when it runs no frame below its own).
     pub instantiation_height: u16,
@@ -372,32 +377,47 @@ impl DemandCostReceipt {
         };
         for dependency in &unique {
             let below = dependency.receipt.footprint;
-            footprint.query_depth = footprint.query_depth.max(
-                below
-                    .query_depth
-                    .saturating_add(dependency.nesting.query_levels()),
-            );
+            let levels = dependency.nesting.query_levels();
             footprint.instantiation_required = footprint
                 .instantiation_required
                 .max(below.instantiation_required);
             footprint.tail_steps = footprint.tail_steps.max(below.tail_steps);
             match dependency.nesting {
-                // The result's frames run one level below the consumer's.
+                // The result's frames run one level below the consumer's,
+                // each from the drive: its own nesting is a frame's.
                 Nesting::Frame { .. } => {
                     footprint.instantiation_height = footprint
                         .instantiation_height
                         .max(below.instantiation_height.saturating_add(1));
+                    footprint.frame_query_depth = footprint
+                        .frame_query_depth
+                        .max(below.query_depth)
+                        .max(below.frame_query_depth);
                 }
                 // The result's frames run in a drive of their own, from
-                // its first frame, wherever the consumer is.
+                // its first frame, entered where the consumer is: every
+                // frame of it nests below the consumer's entry.
                 Nesting::Drive => {
                     footprint.instantiation_required = footprint
                         .instantiation_required
                         .max(u32::from(below.instantiation_height) + 1);
+                    footprint.query_depth = footprint.query_depth.max(
+                        below
+                            .query_depth
+                            .max(below.frame_query_depth)
+                            .saturating_add(levels),
+                    );
                 }
                 // A result read synchronously is evaluated without frames
-                // inside a running drive.
-                Nesting::InPlace | Nesting::Entered => {}
+                // inside a running drive; frames its closure ran keep
+                // running from the drive.
+                Nesting::InPlace | Nesting::Entered => {
+                    footprint.query_depth = footprint
+                        .query_depth
+                        .max(below.query_depth.saturating_add(levels));
+                    footprint.frame_query_depth =
+                        footprint.frame_query_depth.max(below.frame_query_depth);
+                }
             }
         }
         Arc::new(Self {
@@ -435,17 +455,24 @@ impl DemandCostReceipt {
     }
 
     /// The bytes this receipt keeps alive of its own: its block, its
-    /// prerequisite list's backing and its own identity. A prerequisite's
-    /// identity lives in the prerequisite's receipt, which charges it.
-    fn retained_bytes(&self) -> usize {
+    /// prerequisite list's backing and its own identity, with the owned
+    /// names its identity reaches (each charged by its own cell, held by the
+    /// receipt). A prerequisite's identity lives in the prerequisite's
+    /// receipt, which charges it.
+    fn retained_footprint(&self) -> verter_session_query::retention::Footprint {
         use verter_session_query::retention::allocation::{
             arc_block_bytes, heap_block_bytes, AliasSet,
         };
-        arc_block_bytes(std::mem::size_of::<Self>())
+        let mut aliases = AliasSet::new();
+        let bytes = arc_block_bytes(std::mem::size_of::<Self>())
             + heap_block_bytes(std::mem::size_of_val::<[CostDependency]>(
                 &self.prerequisites,
             ))
-            + self.identity.owned_heap_bytes(&mut AliasSet::new())
+            + self.identity.owned_heap_bytes(&mut aliases);
+        verter_session_query::retention::Footprint {
+            bytes,
+            handles: aliases.take_handles(),
+        }
     }
 
     /// Reserve this receipt, and every receipt of its closure not yet
@@ -466,6 +493,28 @@ impl DemandCostReceipt {
         if self.retention.get().is_some() {
             return Ok(());
         }
+        // Most receipts are retained after every receipt they consumed
+        // already is: reserve the receipt alone, without walking.
+        let mut closure_reserved = true;
+        for dependency in self.prerequisites.iter() {
+            if dependency.receipt.retention.get().is_none() {
+                closure_reserved = false;
+                break;
+            }
+        }
+        if closure_reserved {
+            let footprint = self.retained_footprint();
+            return match account.reserve(ChargeClass::Retained, footprint.bytes) {
+                RetentionAdmission::Admitted(charge) => {
+                    drop(self.retention.set(footprint.handles.retained_with(
+                        charge,
+                        verter_session_query::retention::owned::ChargeCtx::new(account),
+                    )?));
+                    Ok(())
+                }
+                RetentionAdmission::Refused(refusal) => Err(refusal),
+            };
+        }
         let mut visited: FxHashSet<*const Self> = FxHashSet::default();
         let mut stack: Vec<(&Self, bool)> = vec![(self.as_ref(), false)];
         while let Some((next, expanded)) = stack.pop() {
@@ -473,10 +522,16 @@ impl DemandCostReceipt {
                 continue;
             }
             if expanded {
-                match account.reserve(ChargeClass::Retained, next.retained_bytes()) {
+                let footprint = next.retained_footprint();
+                match account.reserve(ChargeClass::Retained, footprint.bytes) {
                     // A concurrent store that reserved it first keeps its
                     // charge; this one releases on drop.
-                    RetentionAdmission::Admitted(charge) => drop(next.retention.set(charge)),
+                    RetentionAdmission::Admitted(charge) => {
+                        drop(next.retention.set(footprint.handles.retained_with(
+                            charge,
+                            verter_session_query::retention::owned::ChargeCtx::new(account),
+                        )?))
+                    }
                     RetentionAdmission::Refused(refusal) => return Err(refusal),
                 }
                 continue;
@@ -524,10 +579,15 @@ impl Drop for DemandCostReceipt {
     /// receipts of a chain as deep as the chain of computations it costs,
     /// and dropping them recursively would spend a native frame per level.
     fn drop(&mut self) {
+        if self.prerequisites.is_empty() {
+            return;
+        }
         let mut pending: Vec<CostDependency> = std::mem::take(&mut self.prerequisites).into_vec();
         while let Some(dependency) = pending.pop() {
             if let Some(mut last) = Arc::into_inner(dependency.receipt) {
-                pending.extend(std::mem::take(&mut last.prerequisites).into_vec());
+                if !last.prerequisites.is_empty() {
+                    pending.extend(std::mem::take(&mut last.prerequisites).into_vec());
+                }
             }
         }
     }

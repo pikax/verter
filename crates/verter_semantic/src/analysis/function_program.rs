@@ -1237,9 +1237,9 @@ fn link_callback_return_sources(
         .map(|entry| {
             let source = FunctionReturnSource::Flow(FlowFunctionReturnIdentity {
                 anchor: AuthoredAnchor {
-                    canonical_id: Arc::clone(canonical_id),
+                    canonical_id: verter_type_expr::OwnedStr::from(canonical_id),
                     owner: entry.key.declaration.owner,
-                    symbol: Arc::clone(&entry.key.declaration.name),
+                    symbol: verter_type_expr::OwnedStr::from(entry.key.declaration.name.clone()),
                     space: LocatorSymbolSpace::Value,
                 },
                 function_part: entry.key.part.clone(),
@@ -1433,7 +1433,9 @@ fn discover_statement<'ast>(
                             discover_function_inner(
                                 func,
                                 "default",
-                                FunctionPartIdentity::Member { member_path },
+                                FunctionPartIdentity::Member {
+                                    member_path: member_path.into(),
+                                },
                                 contributor_index,
                                 descent,
                                 0,
@@ -1444,7 +1446,9 @@ fn discover_statement<'ast>(
                             discover_arrow_inner(
                                 arrow,
                                 "default",
-                                FunctionPartIdentity::Member { member_path },
+                                FunctionPartIdentity::Member {
+                                    member_path: member_path.into(),
+                                },
                                 contributor_index,
                                 descent,
                                 ctx,
@@ -1646,9 +1650,11 @@ fn discover_variable_declaration<'ast>(
                 let served = verter_session_query::function_program::ProgramInitializerSource {
                     function: FlowFunctionReturnIdentity {
                         anchor: AuthoredAnchor {
-                            canonical_id: Arc::clone(&ctx.canonical_id),
+                            canonical_id: verter_type_expr::OwnedStr::from(
+                                ctx.canonical_id.clone(),
+                            ),
                             owner: anchor.owner,
-                            symbol: Arc::from(name.as_str()),
+                            symbol: verter_type_expr::OwnedStr::from(name.as_str()),
                             space: LocatorSymbolSpace::Value,
                         },
                         function_part: FunctionPartIdentity::Initializer,
@@ -1723,7 +1729,9 @@ fn discover_variable_declaration<'ast>(
                             discover_function_inner(
                                 func,
                                 &name,
-                                FunctionPartIdentity::Member { member_path },
+                                FunctionPartIdentity::Member {
+                                    member_path: member_path.into(),
+                                },
                                 contributor_index,
                                 descent(FunctionDescentStep::ObjectMember {
                                     member_ordinal: u32::try_from(member_ordinal)
@@ -1738,7 +1746,9 @@ fn discover_variable_declaration<'ast>(
                             discover_arrow_inner(
                                 arrow,
                                 &name,
-                                FunctionPartIdentity::Member { member_path },
+                                FunctionPartIdentity::Member {
+                                    member_path: member_path.into(),
+                                },
                                 contributor_index,
                                 descent(FunctionDescentStep::ObjectMember {
                                     member_ordinal: u32::try_from(member_ordinal)
@@ -2144,7 +2154,9 @@ fn discover_class_members<'ast>(
                 discover_function_inner(
                     &method.value,
                     name,
-                    FunctionPartIdentity::Member { member_path },
+                    FunctionPartIdentity::Member {
+                        member_path: member_path.into(),
+                    },
                     contributor_index,
                     descent,
                     overload,
@@ -2190,7 +2202,7 @@ fn discover_class_members<'ast>(
                             value,
                             name,
                             FunctionPartIdentity::Member {
-                                member_path: Arc::clone(&member_path),
+                                member_path: member_path.clone().into(),
                             },
                             contributor_index,
                             descent.clone(),
@@ -2199,13 +2211,13 @@ fn discover_class_members<'ast>(
                         ProgramExpressionSource::FieldInitializer {
                             source: FunctionReturnSource::Flow(FlowFunctionReturnIdentity {
                                 anchor: AuthoredAnchor {
-                                    canonical_id: Arc::clone(&ctx.canonical_id),
+                                    canonical_id: verter_type_expr::OwnedStr::from(ctx.canonical_id.clone()),
                                     owner: anchor.owner,
-                                    symbol: Arc::from(name),
+                                    symbol: verter_type_expr::OwnedStr::from(name),
                                     space: LocatorSymbolSpace::Value,
                                 },
                                 function_part: FunctionPartIdentity::Member {
-                                    member_path: Arc::clone(&member_path),
+                                    member_path: member_path.clone().into(),
                                 },
                                 overload_ordinal: 0,
                             }),
@@ -2232,7 +2244,9 @@ fn discover_class_members<'ast>(
                         discover_arrow_inner(
                             arrow,
                             name,
-                            FunctionPartIdentity::Member { member_path },
+                            FunctionPartIdentity::Member {
+                                member_path: member_path.into(),
+                            },
                             contributor_index,
                             descent,
                             ctx,
@@ -2242,7 +2256,9 @@ fn discover_class_members<'ast>(
                         discover_function_inner(
                             func,
                             name,
-                            FunctionPartIdentity::Member { member_path },
+                            FunctionPartIdentity::Member {
+                                member_path: member_path.into(),
+                            },
                             contributor_index,
                             descent,
                             0,

@@ -162,13 +162,13 @@ fn published_expanded_classifier_sees_every_context_bearing_family() {
                     Arc::from("/classifier/value.ts"),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
-                name: Arc::from("sample"),
+                name: verter_type_expr::OwnedStr::from("sample"),
             },
             0,
             Default::default(),
             Default::default(),
         ),
-        path: Arc::from([]),
+        path: verter_type_expr::OwnedSlice::from([]),
         context: TypeOfContext::new(ctx, Default::default()),
     };
     assert!(
@@ -193,7 +193,7 @@ fn published_expanded_classifier_sees_every_context_bearing_family() {
     assert!(key_is_published_expanded(&instantiate));
     let project_path = SemanticQueryKey::ProjectPath {
         base: SemanticNodeId(0),
-        path: Arc::from(Vec::new().into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::default(),
         context: published_expanded,
     };
     assert!(key_is_published_expanded(&project_path));
@@ -1036,7 +1036,7 @@ fn relation_oracle_record_target_normalisation_records_no_published_context() {
                 Arc::from("/workspace/src/schema.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
-            name: Arc::from("AppConfig"),
+            name: verter_type_expr::OwnedStr::from("AppConfig"),
         },
     )) {
         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
@@ -1049,10 +1049,10 @@ fn relation_oracle_record_target_normalisation_records_no_published_context() {
     // interns inside a decl body, exactly what `record_target_shape`'s
     // demand point materialises.
     let builtin_record_identity = || DeclIdentity {
-        canonical_id: Arc::from("__builtin__"),
+        canonical_id: verter_type_expr::OwnedStr::from("__builtin__"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: Default::default(),
-        decl_name: Arc::from("Record"),
+        decl_name: verter_type_expr::OwnedStr::from("Record"),
     };
     let lit_ui = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
         "ui".to_string(),
@@ -1136,9 +1136,9 @@ fn skeleton_instantiate(
         .expect("sel.ts must have shallow file state");
     let key = SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
         dispatch.type_slot_for(
-            Arc::from("/workspace/src/sel.ts"),
+            verter_type_expr::OwnedStr::from("/workspace/src/sel.ts"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(decl_name),
+            verter_type_expr::OwnedStr::from(decl_name),
         ),
         Arc::from(Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
         InstantiateContext::non_file(
@@ -1195,14 +1195,14 @@ fn root_conditional_still_distributes() {
     let branch_anchor = |name: &str| -> verter_type_engine::semantic_query::SemanticNodeId {
         match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: ScopeId {
-                canonical_id: Arc::from("/workspace/src/sel.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/workspace/src/sel.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
                 binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
             },
-            name: Arc::from(name),
+            name: verter_type_expr::OwnedStr::from(name),
         })) {
             QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
             other => panic!("ResolveDecl({name}) must anchor, got {other:?}"),
@@ -1221,7 +1221,7 @@ fn root_conditional_still_distributes() {
 
     let read = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: cond_node,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice(),
         ),
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
@@ -1302,7 +1302,7 @@ fn nested_open_conditional_not_distributed_under_expanded() {
 
     let read = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: mapped_node,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice(),
         ),
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
@@ -1604,9 +1604,9 @@ fn typeof_value_graph_lowers_at_requested_demand() {
     let read = dispatch.execute_type_node(SemanticQueryKey::Instantiate(
         verter_type_engine::semantic_query::InstantiateKey::new(
             dispatch.type_slot_for(
-                Arc::from("/workspace/src/factory.ts"),
+                verter_type_expr::OwnedStr::from("/workspace/src/factory.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("FactoryBag"),
+                verter_type_expr::OwnedStr::from("FactoryBag"),
             ),
             Arc::from(Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
             InstantiateContext::non_file(

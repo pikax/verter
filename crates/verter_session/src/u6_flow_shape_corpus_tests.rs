@@ -855,11 +855,11 @@ fn drive_flow(row: &Row, function: &str) -> MeasuredFlow {
                 verter_type_expr::locators::FunctionReturnLocator::Authored(slot)
                 | verter_type_expr::locators::FunctionReturnLocator::Jsdoc(slot) => slot,
             };
-            slot.anchor.canonical_id = Arc::from(canonical.as_str());
+            slot.anchor.canonical_id = verter_type_expr::OwnedStr::from(canonical.as_str());
             slot.anchor.owner = owner;
         }
         verter_type_expr::facts::FunctionReturnSource::Flow(identity) => {
-            identity.anchor.canonical_id = Arc::from(canonical.as_str());
+            identity.anchor.canonical_id = verter_type_expr::OwnedStr::from(canonical.as_str());
             identity.anchor.owner = owner;
         }
         verter_type_expr::facts::FunctionReturnSource::Absent => {}
@@ -2488,9 +2488,9 @@ mod corpus_suite {
         fn identity(canonical: &str, symbol: &str) -> FlowFunctionReturnIdentity {
             FlowFunctionReturnIdentity {
                 anchor: AuthoredAnchor {
-                    canonical_id: Arc::from(canonical),
+                    canonical_id: verter_type_expr::OwnedStr::from(canonical),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    symbol: Arc::from(symbol),
+                    symbol: verter_type_expr::OwnedStr::from(symbol),
                     space: LocatorSymbolSpace::Value,
                 },
                 function_part: FunctionPartIdentity::DeclarationBody,
@@ -2510,13 +2510,13 @@ mod corpus_suite {
             let dispatch = ProjectSemanticDispatch::new(&host_ctx);
             let key = FlowReturnKey {
                 function: dispatch.flow_function_slot_for(
-                    Arc::from(canonical),
+                    verter_type_expr::OwnedStr::from(canonical),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    Arc::from(function),
+                    verter_type_expr::OwnedStr::from(function),
                     FunctionPartIdentity::DeclarationBody,
                     0,
                 ),
-                normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+                normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
                 context: dispatch.flow_return_context_for(canonical),
                 demand: ReturnProjectionDemand::whole_return(),
                 input: FlowInputContext::empty(),

@@ -56,6 +56,7 @@
 //!   identity — so one reusable body-shape family exists per locator/env.
 
 use std::sync::Arc;
+use verter_type_expr::OwnedStr;
 
 use rustc_hash::FxHashMap;
 use verter_type_expr::locators::AuthoredBodyLocator;
@@ -186,7 +187,7 @@ fn register_locator_object_member_alias(
 }
 
 impl AnchorPreparedDecl {
-    fn name_resolution(&self) -> &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> {
+    fn name_resolution(&self) -> &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity> {
         match self {
             Self::Type(prepared) => &prepared.name_resolution,
             Self::Value(prepared) => &prepared.name_resolution,
@@ -332,7 +333,7 @@ pub(super) enum BinderIdentityMode<'a> {
     /// symbol name + the parameter's declared ordinal.
     DeclHeader {
         /// The declaring symbol's stable merged name.
-        owner_symbol: &'a Arc<str>,
+        owner_symbol: &'a verter_type_expr::OwnedStr,
     },
     /// A free authored `TypeParameter` occurrence: binder identity = the
     /// display name at ordinal 0.
@@ -353,7 +354,7 @@ pub(super) enum BinderIdentityMode<'a> {
         /// position names one — it qualifies the binder identity so two
         /// same-name parameters of DIFFERENT declared functions in one
         /// file never share a binder node.
-        anchor_symbol: Option<&'a Arc<str>>,
+        anchor_symbol: Option<&'a verter_type_expr::OwnedStr>,
     },
 }
 
@@ -409,7 +410,7 @@ pub struct LocatorShapeCtx<'a> {
     /// namespace-sibling aware) — the SAME fast path the reducing entry
     /// consults first. `None` when no prepared declaration exists for the
     /// anchor (the in-scope resolver below is then the whole authority).
-    name_resolution: Option<&'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>>,
+    name_resolution: Option<&'a FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>>,
     /// The anchor scope's declaration-scope payload (scope-local names +
     /// import bindings), threaded to the shared in-scope resolver.
     scope_payload: Option<&'a DeclarationScopePayload>,
@@ -425,7 +426,7 @@ impl<'a> LocatorShapeCtx<'a> {
     pub fn new(
         scope: &'a NodeScopeId,
         binders: &'a [LocatorBinderFrame],
-        name_resolution: Option<&'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>>,
+        name_resolution: Option<&'a FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>>,
         scope_payload: Option<&'a DeclarationScopePayload>,
     ) -> Self {
         Self::on(
@@ -440,7 +441,7 @@ impl<'a> LocatorShapeCtx<'a> {
     fn on(
         scope: &'a NodeScopeId,
         binders: BinderStack<'a>,
-        name_resolution: Option<&'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>>,
+        name_resolution: Option<&'a FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>>,
         scope_payload: Option<&'a DeclarationScopePayload>,
     ) -> Self {
         Self {
@@ -468,7 +469,7 @@ impl<'a> LocatorShapeCtx<'a> {
 struct ShapeLowerCtx<'a> {
     scope: &'a NodeScopeId,
     binders: BinderStack<'a>,
-    name_resolution: Option<&'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>>,
+    name_resolution: Option<&'a FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>>,
     scope_payload: Option<&'a DeclarationScopePayload>,
     infer_binders: &'a crate::semantic_query::InferBinderFactory,
     infer_source: Option<&'a AuthoredBodyLocator>,
@@ -1151,7 +1152,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 LocatorFunctionAwait::Param => {
                     let param = &function.func.parameters[function.params.len()];
                     function.params.push(FunctionParam {
-                        name: param.name.as_deref().map(Arc::<str>::from),
+                        name: param.name.as_deref().map(OwnedStr::from),
                         ty: value,
                         optional: param.optional,
                         rest: param.rest,
@@ -1222,7 +1223,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             } => {
                 let element = &elements[lowered.len()];
                 lowered.push(TupleElement {
-                    label: element.label.as_deref().map(Arc::<str>::from),
+                    label: element.label.as_deref().map(OwnedStr::from),
                     value,
                     optional: element.optional,
                     rest: element.rest,
@@ -1266,9 +1267,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ),
             LocatorFrame::IndexedObject { index, binders } => {
                 let key = match index {
-                    TypeExpr::Literal(LiteralValue::String(s)) => {
-                        Some(IndexKey::String(Arc::from(s.as_str())))
-                    }
+                    TypeExpr::Literal(LiteralValue::String(s)) => Some(IndexKey::String(
+                        verter_type_expr::OwnedStr::from(s.as_str()),
+                    )),
                     TypeExpr::Literal(LiteralValue::Number(n)) => {
                         crate::semantic_query::index_key::integer_convention_index_key(*n)
                             .map(IndexKey::Number)
@@ -1477,7 +1478,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     });
                     let declaration = graph.intern_node_with_scope(
                         SemanticNodeData::Infer {
-                            name: Arc::clone(&site.name),
+                            name: OwnedStr::from(&site.name),
                             binder: binder.clone(),
                             constraint,
                         },
@@ -1509,7 +1510,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     for (name, binder) in declarations {
                         let reference = graph.intern_node_with_scope(
                             SemanticNodeData::InferRef {
-                                name: Arc::clone(&name),
+                                name: OwnedStr::from(&name),
                                 binder,
                             },
                             scope.clone(),
@@ -1590,7 +1591,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         expressions: Vec<SemanticNodeId>,
         scope: &NodeScopeId,
     ) -> SemanticNodeId {
-        let quasis: Arc<[Arc<str>]> = quasis.iter().map(|q| Arc::from(q.as_str())).collect();
+        let quasis: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr> = quasis
+            .iter()
+            .map(|q| verter_type_expr::OwnedStr::from(q.as_str()))
+            .collect();
         self.graph().intern_node_with_scope(
             SemanticNodeData::TemplateLiteral {
                 quasis,
@@ -1644,7 +1648,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             unreachable!("a mapped type's parameter")
         };
         let graph = self.graph();
-        let mapper_display_name: Arc<str> = Arc::from(parameter.as_str());
+        let mapper_display_name = OwnedStr::from(parameter.as_str());
         let mapper_decl = DeclIdentity::from_scope(
             scope,
             crate::mapper_binder_registry::mapper_binder_decl_name_in(
@@ -1719,7 +1723,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     );
                     let base_infer = match graph.node_data(inner_id).as_deref() {
                         Some(SemanticNodeData::Infer { name, binder, .. }) => {
-                            Some((Arc::clone(name), binder.clone()))
+                            Some((Arc::<str>::from(name), binder.clone()))
                         }
                         _ => None,
                     };
@@ -1737,7 +1741,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if let Some((base_infer_name, binder)) = base_infer {
                     let reference = graph.intern_node_with_scope(
                         SemanticNodeData::InferRef {
-                            name: Arc::clone(&base_infer_name),
+                            name: OwnedStr::from(&base_infer_name),
                             binder,
                         },
                         scope.clone(),
@@ -1902,7 +1906,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 Some(declaration) => declaration,
                 _ => graph.intern_node_with_scope(
                     SemanticNodeData::Infer {
-                        name: Arc::from(name.as_str()),
+                        name: OwnedStr::from(name.as_str()),
                         binder: ctx.infer_binders.binder_for_expr(expr),
                         constraint: None,
                     },
@@ -1932,7 +1936,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         owner,
                         ..
                     } => ScopeId {
-                        canonical_id: Arc::clone(canonical_id),
+                        canonical_id: verter_type_expr::OwnedStr::from(canonical_id),
                         owner: *owner,
                         local_scope: None,
                         binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(*owner),
@@ -1941,16 +1945,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 };
                 let value_root = ValueRootKey {
                     scope: root_scope,
-                    name: Arc::from(root.as_str()),
+                    name: verter_type_expr::OwnedStr::from(root.as_str()),
                 };
                 let path: Arc<[Arc<str>]> = rest.iter().map(|s| Arc::from(s.as_str())).collect();
                 let type_args = self.lower_locator_shape_args(&value_ref.type_args, ctx);
                 let is_instance_field_value = rest.is_empty()
                     && type_args.is_empty()
                     && root.split(':').nth(1) == Some("field");
-                let canonical = Arc::clone(&value_root.scope.canonical_id);
+                let canonical = value_root.scope.canonical_id.clone();
                 let carrier = graph.intern_node_with_scope(
-                    SemanticNodeData::new_typeof(value_root, path, type_args),
+                    SemanticNodeData::new_typeof(
+                        value_root,
+                        verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(path),
+                        type_args,
+                    ),
                     scope.clone(),
                 );
                 if is_instance_field_value && ctx.binders.innermost_first().next().is_some() {
@@ -1970,7 +1978,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 graph.intern_node_with_scope(
                     SemanticNodeData::new_import_type(
                         Arc::clone(specifier),
-                        Arc::clone(qualifier),
+                        verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+                            Arc::clone(qualifier),
+                        ),
                         type_args,
                         *typeof_query,
                     ),
@@ -2109,7 +2119,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             function: verter_type_expr::facts::FlowFunctionReturnIdentity {
                 anchor: slot.anchor.clone(),
                 function_part: verter_type_expr::facts::FunctionPartIdentity::Member {
-                    member_path: Arc::from([member_ordinal]),
+                    member_path: verter_type_expr::OwnedSlice::from([member_ordinal]),
                 },
                 overload_ordinal: 0,
             },
@@ -2169,10 +2179,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // identity so same-name parameters of different declared functions
         // in one file never share a binder node.
         let anchor_symbol = ctx.infer_source.map(|locator| match locator {
-            AuthoredBodyLocator::DeclBody(slot) => Arc::clone(&slot.anchor.symbol),
-            AuthoredBodyLocator::AugmentationBody(body) => Arc::clone(&body.anchor.symbol),
-            AuthoredBodyLocator::JsdocTypedefBody(body) => Arc::clone(&body.anchor.symbol),
-            AuthoredBodyLocator::MacroPayload(payload) => Arc::clone(&payload.anchor.symbol),
+            AuthoredBodyLocator::DeclBody(slot) => slot.anchor.symbol.clone(),
+            AuthoredBodyLocator::AugmentationBody(body) => body.anchor.symbol.clone(),
+            AuthoredBodyLocator::JsdocTypedefBody(body) => body.anchor.symbol.clone(),
+            AuthoredBodyLocator::MacroPayload(payload) => payload.anchor.symbol.clone(),
         });
         let (own_frame, built) = self.build_type_param_binder_frame(
             &base,
@@ -2202,7 +2212,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .iter()
             .zip(func.type_parameters.iter())
             .map(|(binder, tp)| TypeParamDecl {
-                name: Arc::clone(&binder.name),
+                name: OwnedStr::from(&binder.name),
                 param: binder.binder,
                 constraint: binder.constraint,
                 default: binder.default,
@@ -2351,9 +2361,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 owner,
                 ..
             } => {
-                identity.anchor.canonical_id = Arc::clone(canonical_id);
+                identity.anchor.canonical_id = verter_type_expr::OwnedStr::from(canonical_id);
                 identity.anchor.owner = *owner;
-                Some(Arc::clone(canonical_id))
+                Some(canonical_id.clone())
             }
             _ => None,
         };
@@ -2626,10 +2636,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         use crate::project_semantic_dispatch::carrier::RefHeadResolution;
         if let Some((ri, whole_hash)) = resolved {
             let identity = DeclIdentity {
-                canonical_id: Arc::clone(&ri.canonical_id),
+                canonical_id: ri.canonical_id.clone(),
                 owner: ri.owner,
                 whole_hash,
-                decl_name: Arc::clone(&ri.symbol_name),
+                decl_name: ri.symbol_name.clone(),
             };
             return LocatorRefPlan::Carrier(RefHeadResolution::Resolved(identity));
         }
@@ -2642,10 +2652,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .is_some()
         {
             return LocatorRefPlan::Carrier(RefHeadResolution::Builtin(DeclIdentity {
-                canonical_id: Arc::from("__builtin__"),
+                canonical_id: verter_type_expr::OwnedStr::from("__builtin__"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: HashValue::default(),
-                decl_name: Arc::clone(name),
+                decl_name: verter_type_expr::OwnedStr::from(name),
             }));
         }
 
@@ -2682,9 +2692,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let slot = self
             .finalize_slot_seed_in_env(
                 crate::semantic_query::DeclarationSlotSeed::new(
-                    Arc::clone(&anchor.canonical_id),
+                    anchor.canonical_id.clone(),
                     anchor.owner,
-                    Arc::clone(&anchor.symbol),
+                    anchor.symbol.clone(),
                     crate::semantic_query::SemanticSymbolSpace::Type,
                 ),
                 &env,

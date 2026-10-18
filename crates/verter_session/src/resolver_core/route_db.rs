@@ -51,7 +51,7 @@ pub const ROUTE_DB_RESOLVER_VERSION: u32 = 2;
 /// rides the value-side `ValidatedFactCache` fact signature, revalidated
 /// against the live `StoreView` on every warm hit. `parse_env_hash` /
 /// `type_env_hash` do NOT key a route surface (R21 scoping).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct RouteNameKey {
     pub provider_canonical: Arc<str>,
     pub exported_name: Arc<str>,
@@ -93,7 +93,7 @@ impl RouteNameKey {
 /// surface (R5 query-identity family, R6 content-free, R21 split-env). Same
 /// resolve/lib env discipline as [`RouteNameKey`]; a barrel surface is a
 /// whole-file surface, so it carries no `symbol_space`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct BarrelSurfaceKey {
     pub barrel_canonical: Arc<str>,
     pub project_identity: ProjectIdentity,
@@ -123,7 +123,7 @@ impl BarrelSurfaceKey {
 }
 
 /// Result of resolving a named export route.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub enum RouteResult {
     /// Route resolved to a defining file and symbol.
     Resolved {
@@ -163,7 +163,7 @@ impl RouteResult {
 /// `barrel_canonical` coexist as distinct candidates inside the
 /// multi-candidate `ValidatedFactCache` slot — each candidate's
 /// signature validates against the current `StoreView`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub struct BarrelRouteSurface {
     /// The barrel canonical this surface was built for.
     pub barrel_canonical: String,
