@@ -106,6 +106,9 @@ admission returns its complete value uncached.
 | `FlowGraphBundleRef`, `ArtifactNode::entry_footprint`, `CacheEntry::{admit, _retention}`, `RefusedEntry`, `OwnedHandles::hold_or_pin`, cache `charged_to` / `retention` accounts, `GraphEntry`, `CompileSlot::_retention`, `compile_slot_retention` | Artifact, compile-slot and graph-bundle entry charges | REQUIRED | Entry lifetime (`cache_runtime/{admission,node,flow_slice_node}.rs`, `component_meta_caches.rs`, `project_semantic_dispatch/memo.rs`, session `compile_output_node.rs`, `types.rs`) | always |
 | `pin_generated_texts`, `ServedProducts::pin_texts`, fresh canonical-request and runtime-render delivery hooks | Caller-only generated code and source-map charges | REQUIRED | Text allocation lifetime, shared with any retaining cache; stateless, refused and fenced outputs remain complete and pinned (session `types.rs`, `host_resolve/{virtual_file_pipeline,compile_request_execute}.rs`, `host_compile.rs`) | always |
 | `CandidateFootprint`, `MeasuredCandidate`, `Candidate::_retention`, `ValidatedFactCache::reserve_candidate`, `CachedValue` / `OwnedValue` | Fact-validated cache candidate and reader-shared value charges | REQUIRED | Candidate metadata releases with the candidate; the value's charge follows its final holder (session `resolver_core/mod.rs`, `resolver_runtime.rs`) | always |
+| `OwnedFactSignature`, `ValidatedFactCache::{deliver_signature, charge_to_caller}` | Fact signatures shared by a candidate and its readers; uncached driver deliveries | REQUIRED | Signature / value allocation lifetime (session_query `facts/fact_cache.rs`, `retention/allocation.rs`; session `resolver_core/mod.rs`, `host_manage/source_request.rs`) | always |
+| `SharedTypeSource`, `ResolutionDiagnostics`, owned `ResolutionDiagnostic` names, `AuthoredTypeEvidence::owned_text` | Publication allocations a caller can clone out of a borrowed analysis | REQUIRED | Allocation lifetime (`verter_type_expr/src/publication.rs`, session `component_meta_footprint.rs`) | always |
+| `measured_by_heap_size!`, `heap_size::measured_heap_bytes`, `Owned::make_mut`, `OwnedSlice::make_mut`, owned flow skeleton / edge / read tables, `FlowBindingIdentity::name`, `FunctionDeclarationRef::name`, `FlowSliceFunctionKey::canonical_id` | Flow bundle tables and names charged by their own cells | REQUIRED | Allocation lifetime (`verter_retention/src/{heap_size,owned}.rs`, session_query `flow/*`, `function_program.rs`, semantic `analysis/flow/mod.rs`) | always |
 | `ConstructionCopy::unowned_heap_bytes` | Debug check that a construction copy shares only owned handles | REQUIRED | Call duration (`construction_copy.rs`) | always |
 | `DerivationStore::{storage, storage_charge_bytes}` | Origin-edge store storage charge, counted in the store's bookkeeping pins | REQUIRED | Store lifetime (`derivation.rs`, `retention.rs`) | always |
 | `SemanticDeliveryLease::hold_metadata_handles` | A retaining cache's hold on the root owners a delivery's metadata names | REQUIRED | Candidate / deferred-entry lifetime (`delivery_lease.rs`, `retention.rs`, `hash_cons_memos.rs`) | always |
@@ -133,9 +136,11 @@ admission returns its complete value uncached.
 
 ## Reader-shared request and artifact values
 
-`ValidatedFactCache` delivers `CachedValue` (`OwnedValue`) handles. Candidate
-metadata drains separately; its last cache hold transfers the value to a
-surviving reader's pin. Stable component-meta requests measure the resolved
+`ValidatedFactCache` delivers `CachedValue` (`OwnedValue`) handles and its
+fact signatures as `OwnedFactSignature` cells. Candidate metadata drains
+separately; its last cache hold transfers the value and the signature to a
+surviving reader's pin. The route and imported-root drivers pin a value or
+signature they deliver without admitting it. Stable component-meta requests measure the resolved
 state, and prepared bundles measure their admission tables and retain each
 lazy declaration, shared name table and input projection as its own cell.
 The declaration cells charge post-admission growth. `UnmeasuredValue` is
@@ -147,12 +152,18 @@ A component-meta state's analysis snapshot shares its lists as
 self-charged cells, so a reader's clone of the state or of one list keeps
 exactly those lists charged after the caches let go. A component-meta
 delivery shares the analysis cell the final-result cache publishes, so a
-caller keeping it past the cache keeps the analysis charged; the
-by-value APIs (`ComponentMetaDelivery::into_analysis`, the
-resolution-bearing reads) hand out a plain copy of the analysis bytes. A flow bundle's parts
-are borrowed through the bundle; every holder that keeps one keeps the
-bundle's handle, and the nested lists an evaluation copies out of a part
-live inside that evaluation, which keeps the handle. A terminal output
+caller keeping it past the cache keeps the analysis charged. A published
+type source (`SharedTypeSource`), a publication's diagnostic list
+(`ResolutionDiagnostics`) and its names, and authored evidence text are
+owned cells, so a caller cloning one out of a borrowed analysis keeps
+exactly that allocation charged. A delivery hands out no by-value copy of
+its analysis; the resolution-bearing reads
+(`get_component_meta_with_resolution`) still return the analysis by value,
+whose nested publication allocations are those shared owned cells. A flow
+bundle's parts are borrowed through the bundle and are not `Clone`; every
+holder that keeps one keeps the bundle's handle, and every table, rail and
+name reachable from a part, and the key's canonical and declaration name,
+is an owned cell charged by itself. A terminal output
 unwrap hands the caller either the sole cell's own tree or an unshared
 copy, never an alias of a retained payload.
 

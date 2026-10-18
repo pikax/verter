@@ -83,12 +83,6 @@ impl ComponentMetaDelivery {
     pub fn shared_analysis(&self) -> &SharedComponentMetaAnalysis {
         &self.analysis
     }
-
-    /// A plain copy of the analysis bytes, owned by the caller.
-    #[must_use]
-    pub fn into_analysis(self) -> ComponentMetaAnalysis {
-        self.analysis.0.clone()
-    }
 }
 
 impl Deref for ComponentMetaDelivery {

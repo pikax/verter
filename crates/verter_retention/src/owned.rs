@@ -695,6 +695,27 @@ impl<T: Measured> Owned<T> {
     }
 }
 
+impl<T: Measured + Clone> Owned<T> {
+    /// The value, mutably: in place while this is the allocation's only
+    /// handle and no owner has charged it yet — the unretained intermediate
+    /// of the computation building it — and otherwise on a fresh, uncharged
+    /// copy this handle moves to. A charge therefore never covers bytes its
+    /// measurement did not see, and no other holder observes the change.
+    pub fn make_mut(this: &mut Self) -> &mut T {
+        let in_place = Arc::get_mut(&mut this.0).is_some_and(|cell| {
+            let slot = cell.slot.get_mut();
+            slot.charge.is_none() && slot.block_share.is_none()
+        });
+        if !in_place {
+            *this = Self::new(this.0.value.clone());
+        }
+        match Arc::get_mut(&mut this.0) {
+            Some(cell) => &mut cell.value,
+            None => unreachable!("a fresh allocation has exactly one handle"),
+        }
+    }
+}
+
 impl<T: Measured> Clone for Owned<T> {
     /// Another owner of the same allocation: shares its one charge.
     fn clone(&self) -> Self {
@@ -836,6 +857,18 @@ impl<T: Measured> OwnedSlice<T> {
     #[must_use]
     pub fn cell_block_bytes() -> usize {
         Owned::<Box<[T]>>::cell_block_bytes()
+    }
+}
+
+impl<T: Measured + Clone> OwnedSlice<T> {
+    /// The items, mutably ([`Owned::make_mut`]): in place while this slice
+    /// is its allocation's only, uncharged handle, otherwise on a fresh
+    /// uncharged copy.
+    pub fn make_mut(this: &mut Self) -> &mut [T] {
+        match this.0.as_mut() {
+            Some(owned) => Owned::make_mut(owned),
+            None => &mut [],
+        }
     }
 }
 

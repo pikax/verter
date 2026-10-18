@@ -373,7 +373,7 @@ impl RouteLookup for crate::VerterHost {
         imported_name: &str,
     ) -> (
         Option<verter_session_query::type_solver::ResolvedRootIdentity>,
-        Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
+        verter_session_query::facts::fact_cache::OwnedFactSignature,
     ) {
         let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
         crate::VerterHost::resolve_imported_type_root_with_facts_with_store_view(
@@ -1049,7 +1049,7 @@ where
         imported_name: &str,
     ) -> (
         Option<verter_session_query::type_solver::ResolvedRootIdentity>,
-        Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
+        verter_session_query::facts::fact_cache::OwnedFactSignature,
     ) {
         verter_type_engine::count_resolver_context_call!(
             "RouteLookup::resolve_imported_type_root_with_facts"

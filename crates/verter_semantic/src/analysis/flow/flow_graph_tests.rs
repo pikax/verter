@@ -870,14 +870,14 @@ fn flow_graph_enumerates_every_node_family_and_empty_graphs() {
     );
     let empty = FunctionBodySkeleton {
         kind: FunctionBodyKind::Plain,
-        names: Arc::from([]),
-        regions: Arc::from([]),
-        bindings: Arc::from([]),
-        expr_sites: Arc::from([]),
-        return_sites: Arc::from([]),
-        yield_sites: Arc::from([]),
-        writes: Arc::from([]),
-        closure_assignments: Arc::from([]),
+        names: Default::default(),
+        regions: Default::default(),
+        bindings: Default::default(),
+        expr_sites: Default::default(),
+        return_sites: Default::default(),
+        yield_sites: Default::default(),
+        writes: Default::default(),
+        closure_assignments: Default::default(),
         span_index: Default::default(),
         name_index: Default::default(),
     };
