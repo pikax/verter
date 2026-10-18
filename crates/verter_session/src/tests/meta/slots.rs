@@ -2941,7 +2941,7 @@ fn output_memo_hash_work_is_one_traversal_per_lane_slot() {
         })
         .collect();
     let large = verter_type_expr::facts::SemanticTypeSource::Synthesized(
-        ResolvedLocalShape::Object(Arc::from(members)),
+        ResolvedLocalShape::Object(From::from(members)),
     );
     let distinct = closed_ref_source("DistinctAlias");
 

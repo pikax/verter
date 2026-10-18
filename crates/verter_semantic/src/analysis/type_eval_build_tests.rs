@@ -1530,7 +1530,7 @@ fn static_class_method_return_inference_normal_control_is_exact() {
                 owner: TopLevelOwnerId::ordinary_file(),
                 owner_local_ordinal: 0,
             },
-            member_path: Arc::from(vec![1]),
+            member_path: From::from(vec![1]),
         }
     );
 }
@@ -1575,7 +1575,7 @@ fn static_class_method_return_inference_same_name_instance_collision_stays_surfa
             owner: TopLevelOwnerId::ordinary_file(),
             owner_local_ordinal: 0,
         },
-        member_path: Arc::from(vec![1]),
+        member_path: From::from(vec![1]),
     };
 
     let static_fact = static_class_method_fact(&env, "Collision", "collide");
@@ -1608,7 +1608,7 @@ fn static_class_method_return_inference_same_name_instance_collision_stays_surfa
     assert_eq!(&decoded, shape);
 
     let mut changed = shape.clone();
-    let ObjectMemberFact::Method(method) = Arc::make_mut(&mut changed.members)
+    let ObjectMemberFact::Method(method) = verter_type_expr::OwnedSlice::make_mut(&mut changed.members)
         .iter_mut()
         .find(
             |member| matches!(member, ObjectMemberFact::Method(method) if method.string_name().expect("string-key fixture") == "collide"),

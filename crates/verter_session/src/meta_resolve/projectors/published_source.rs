@@ -210,7 +210,7 @@ pub(crate) fn structural_member_value_source<
     Some(verter_type_expr::facts::SemanticTypeSource::Projected(
         verter_type_expr::facts::ProjectedTypeFact::MemberPath {
             base: base.clone(),
-            path: std::sync::Arc::from(vec![member_key.clone()].into_boxed_slice()),
+            path: From::from(vec![member_key.clone()].into_boxed_slice()),
         },
     ))
 }

@@ -173,7 +173,7 @@ impl VerterHost {
             crate::resolver_core::HostResolverContext::from_current(self, &current_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&host_ctx);
         let source = verter_type_expr::facts::SemanticTypeSource::SyntheticSlotBinding(
-            std::sync::Arc::clone(key),
+            verter_retention::owned::Owned::new((**key).clone()),
         );
         let raised = dispatch
             .owning().raise_semantic_type_source_to_hot(

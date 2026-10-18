@@ -2035,6 +2035,105 @@ fn a_kept_nested_bundle_leaf_stays_charged_after_store_teardown() {
     }
 }
 
+/// A caller that clones a list or a name out of a lowered slice — its slot
+/// table, one slot's binding name, its expression table — keeps an owned
+/// handle: the nested allocation stays charged by its own cell after the
+/// slice, every reader and the stores let go, at zero headroom, and its own
+/// final drop restores the baseline at once. Dropping the leaf first leaves
+/// the slice's charge whole.
+#[test]
+fn a_kept_lowered_slice_leaf_stays_charged_after_store_teardown() {
+    use verter_session_query::retention::owned::OwnedStr;
+    use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
+    let name = "kept_lowered_slot_name_".repeat(256);
+    let source: &'static str = Box::leak(
+        format!("function myType() {{ const {name} = 1; return {{ b: {name} }} }}")
+            .into_boxed_str(),
+    );
+    for leaf in ["slots", "name", "exprs"] {
+        for leaf_first in [false, true] {
+            let account = SemanticRetentionAccount::new(RetentionLimits {
+                aggregate_ceiling_bytes: 0,
+                active_ceiling_bytes: 0,
+                max_entry_bytes: 0,
+                pin_threshold_bytes: 0,
+            });
+            let function = function_key("/fixtures/kept-lowered.ts", "myType", 5, source);
+            let host = VerterHost::new_standalone(HostConfig::default());
+            let rig = Rig {
+                host,
+                source: Arc::new(FixtureSkeletonSource::new(vec![(function.clone(), source)])),
+                stores: FlowSliceStores::charged_to_for_test(Arc::clone(&account)),
+            };
+            let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &rig.host;
+            let key = hash_key(function, &["b"]);
+            let FlowSliceHashOutcome::Planned(plan) =
+                rig.driver(ctx).lookup_hash(key.clone()).expect("hash")
+            else {
+                panic!("({leaf}) a planned slice");
+            };
+            let lowered_key = FlowSliceLoweredKey {
+                hash_key: key,
+                slice_hash: plan.hash(),
+            };
+            let ir = rig
+                .driver(ctx)
+                .lookup_lowered(lowered_key, &plan)
+                .expect("a complete slice is delivered even at zero headroom");
+            drop(plan);
+            let published = account.snapshot().total_bytes();
+            assert!(published >= name.len(), "({leaf}) the slice is charged");
+            let (kept, kept_len): (Box<dyn std::any::Any>, usize) = match leaf {
+                "slots" => {
+                    assert!(ir.slots.iter().any(|slot| slot.name.len() == name.len()));
+                    (Box::new(ir.slots.clone()), name.len())
+                }
+                "name" => {
+                    let kept = ir
+                        .slots
+                        .iter()
+                        .find(|slot| slot.name.len() == name.len())
+                        .expect("the long binding lowers to a slot")
+                        .name
+                        .clone();
+                    (Box::new(kept), name.len())
+                }
+                _ => {
+                    assert!(!ir.exprs.is_empty());
+                    (Box::new(ir.exprs.clone()), 1)
+                }
+            };
+            assert_eq!(
+                account.snapshot().total_bytes(),
+                published,
+                "({leaf}) a kept leaf shares the slice's charge"
+            );
+            drop(ir);
+            if leaf_first {
+                drop(kept);
+                drop(rig);
+            } else {
+                drop(rig);
+                let surviving = account.snapshot().total_bytes();
+                assert!(
+                    surviving >= kept_len && surviving < published,
+                    "({leaf}) the kept leaf owns its allocation, not the slice: \
+                     {surviving} of {published}"
+                );
+                if leaf == "name" {
+                    assert_eq!(surviving, OwnedStr::charge_for_len(name.len()));
+                }
+                drop(kept);
+            }
+            assert_eq!(
+                account.snapshot().total_bytes(),
+                0,
+                "({leaf}, leaf first {leaf_first}) final release is immediate"
+            );
+        }
+    }
+}
+
 #[test]
 fn graph_publication_charges_independently_allocated_equal_key_backing() {
     use verter_session_query::retention::owned::OwnedStr;

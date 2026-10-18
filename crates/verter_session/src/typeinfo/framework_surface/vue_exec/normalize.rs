@@ -634,7 +634,7 @@ fn closed_tuple_fact<C: verter_type_engine::resolver_core::ResolverCapabilities>
         .collect();
     Some(TuplePayloadFact {
         readonly: *readonly,
-        elements: Arc::from(element_facts?.into_boxed_slice()),
+        elements: From::from(element_facts?.into_boxed_slice()),
     })
 }
 
@@ -1182,7 +1182,7 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn property_style_emit_fiel
             id: verter_type_expr::facts::ResolvedEmitOccurrenceId::new(
                 verter_type_expr::facts::CallableOccurrenceHandle::member(
                     member.value.0,
-                    Arc::from([member_name.clone()]),
+                    From::from([member_name.clone()]),
                 ),
                 0,
             ),
@@ -1273,7 +1273,7 @@ fn inherited_emit_payload_source<C: verter_type_engine::resolver_core::ResolverC
         return Some(SemanticTypeSource::Projected(
             ProjectedTypeFact::MemberPath {
                 base: verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(base.clone()),
-                path: std::sync::Arc::from(vec![member.key.cloned_known()?].into_boxed_slice()),
+                path: From::from(vec![member.key.cloned_known()?].into_boxed_slice()),
             },
         ));
     }

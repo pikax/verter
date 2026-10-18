@@ -2287,7 +2287,7 @@ fn component_meta_output_failed_interior_locator_fails_closed_per_source_family(
     // (1) Closed OBJECT with a member whose value slot cannot deref.
     let object_source =
         tf::SemanticTypeSource::Closed(tf::ClosedTypeFact::Object(tf::ObjectShapeFact {
-            members: Arc::from(
+            members: From::from(
                 vec![tf::ObjectMemberFact::Property(tf::ObjectPropertyFact {
                     key: "member".into(),
                     optional: false,
@@ -2323,8 +2323,8 @@ fn component_meta_output_failed_interior_locator_fails_closed_per_source_family(
     // cannot deref.
     let function_source =
         tf::SemanticTypeSource::Closed(tf::ClosedTypeFact::Function(tf::FunctionSignatureFact {
-            type_parameters: Arc::from(Vec::new().into_boxed_slice()),
-            parameters: Arc::from(
+            type_parameters: From::from(Vec::new().into_boxed_slice()),
+            parameters: From::from(
                 vec![tf::FunctionParamFact {
                     name: Some("arg".to_string()),
                     optional: false,
@@ -2365,7 +2365,7 @@ fn component_meta_output_failed_interior_locator_fails_closed_per_source_family(
     let tuple_source =
         tf::SemanticTypeSource::Closed(tf::ClosedTypeFact::Tuple(tf::TuplePayloadFact {
             readonly: false,
-            elements: Arc::from(
+            elements: From::from(
                 vec![tf::TupleElementFact {
                     label: Some("payload".to_string()),
                     optional: false,
@@ -2390,7 +2390,7 @@ fn component_meta_output_failed_interior_locator_fails_closed_per_source_family(
     // (4) Closed OBJECT with an INDEX-SIGNATURE value slot that cannot deref.
     let index_source =
         tf::SemanticTypeSource::Closed(tf::ClosedTypeFact::Object(tf::ObjectShapeFact {
-            members: Arc::from(
+            members: From::from(
                 vec![tf::ObjectMemberFact::IndexSignature(
                     tf::IndexSignatureFact {
                         key_name: "k".to_string(),
@@ -2437,8 +2437,8 @@ fn component_meta_output_genuinely_absent_positions_stay_typed_unknown_not_failu
 
     let unannotated_fn =
         tf::SemanticTypeSource::Closed(tf::ClosedTypeFact::Function(tf::FunctionSignatureFact {
-            type_parameters: Arc::from(Vec::new().into_boxed_slice()),
-            parameters: Arc::from(
+            type_parameters: From::from(Vec::new().into_boxed_slice()),
+            parameters: From::from(
                 vec![tf::FunctionParamFact {
                     name: Some("arg".to_string()),
                     optional: false,

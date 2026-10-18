@@ -2089,7 +2089,7 @@ defineProps<{ own: SharedAlias }>()
     // enter the raise path for it.
     let nested_composite =
         verter_type_expr::facts::SemanticTypeSource::Synthesized(ResolvedLocalShape::Object(
-            Arc::from(vec![verter_type_expr::facts::SynthesizedMemberFact {
+            From::from(vec![verter_type_expr::facts::SynthesizedMemberFact {
                 name: "tag".to_string(),
                 optional: false,
                 ty: FactOrLocator::Leaf(LeafTypeFact::Ref("SharedAlias".to_string())),
