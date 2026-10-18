@@ -70,7 +70,7 @@ pub(crate) type BareRefHead<'a> = (&'a str, &'a NodeScopeId);
 
 /// Borrowed head view of a [`SemanticNodeData::ImportType`] carrier —
 /// `(specifier, qualifier, typeof_query)`, NEVER its `type_args`.
-pub(crate) type ImportTypeHead<'a> = (&'a str, &'a OwnedSlice<OwnedStr>, bool);
+pub(crate) type ImportTypeHead<'a> = (&'a OwnedStr, &'a OwnedSlice<OwnedStr>, bool);
 
 /// Deferred `typeof value.path<args>` carrier payload.
 ///
@@ -240,7 +240,7 @@ impl BareRefCarrier {
 /// No public copy: its specifier and argument list are lent only by borrow.
 #[derive(PartialEq, Eq, Hash, Debug)]
 pub struct ImportTypeCarrier {
-    specifier: Arc<str>,
+    specifier: OwnedStr,
     qualifier: OwnedSlice<OwnedStr>,
     type_args: Arc<[SemanticNodeId]>,
     typeof_query: bool,
@@ -248,7 +248,7 @@ pub struct ImportTypeCarrier {
 
 impl ImportTypeCarrier {
     fn new(
-        specifier: Arc<str>,
+        specifier: OwnedStr,
         qualifier: OwnedSlice<OwnedStr>,
         type_args: Arc<[SemanticNodeId]>,
         typeof_query: bool,
@@ -261,7 +261,7 @@ impl ImportTypeCarrier {
         }
     }
 
-    fn specifier(&self) -> &str {
+    fn specifier(&self) -> &OwnedStr {
         &self.specifier
     }
 
@@ -279,7 +279,7 @@ impl ImportTypeCarrier {
 
     fn with_type_args(&self, type_args: Arc<[SemanticNodeId]>) -> Self {
         Self {
-            specifier: Arc::clone(&self.specifier),
+            specifier: self.specifier.clone(),
             qualifier: self.qualifier.clone(),
             type_args,
             typeof_query: self.typeof_query,
@@ -408,13 +408,13 @@ impl SemanticNodeData {
     /// (`import("m").qualifier<args>` / `typeof import("m")`).
     #[must_use]
     pub fn new_import_type(
-        specifier: Arc<str>,
+        specifier: impl Into<OwnedStr>,
         qualifier: OwnedSlice<OwnedStr>,
         type_args: Arc<[SemanticNodeId]>,
         typeof_query: bool,
     ) -> Self {
         Self::ImportType(ImportTypeCarrier::new(
-            specifier,
+            specifier.into(),
             qualifier,
             type_args,
             typeof_query,

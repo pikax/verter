@@ -377,6 +377,69 @@ fn check_barrel_chain_proofs_and_folding(count: usize) -> [(&'static str, usize)
     ]
 }
 
+/// An export table's names and identities are owned strings its retention
+/// record holds, each charged once by its own cell — never by a length
+/// estimate beside them — so a long name costs the table's record nothing
+/// extra, and a name a reader keeps past the tables and their cache stays
+/// charged until its own drop.
+#[test]
+fn export_table_names_are_charged_by_their_own_cells_through_their_last_holder() {
+    use verter_session_query::retention::{
+        ChargeClass, RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+    use verter_type_engine::resolver_core::request_ports::RouteLookup;
+    let mut record_bytes = Vec::new();
+    for len in [1, 8192] {
+        let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+        let name = "n".repeat(len);
+        let leaf = format!("export const {name} = 1 as const;");
+        let files = [
+            ("leaf.ts", leaf.as_str()),
+            ("index.ts", "export * from './leaf';"),
+        ];
+        let project = ProbeProject {
+            files: &files,
+            ..ProbeProject::default()
+        };
+        let mut host = probe_host(project);
+        let mut routes = crate::resolver_core::route_db::RouteDb::new();
+        routes.module_export_account = StoreAccount::new(Arc::clone(&account));
+        Arc::get_mut(&mut host)
+            .expect("sole test host")
+            .resolver
+            .runtime
+            .routes = Arc::new(routes);
+        let table = host
+            .module_export_table("/wb/index.ts")
+            .expect("complete table");
+        let (kept, _) = table.bindings.iter().next().expect("the leaf's name");
+        let kept = kept.clone();
+        assert_eq!(kept.as_str(), name);
+        assert_eq!(kept.charge_class(), Some(ChargeClass::Retained));
+        assert_eq!(
+            kept.charge_bytes(),
+            Some(verter_type_expr::OwnedStr::charge_for_len(len)),
+            "the name is charged its own cell, once"
+        );
+        record_bytes.push(table.retention.as_ref().expect("admitted").charge.bytes());
+        host.resolver.runtime.routes.clear();
+        drop(table);
+        drop(host);
+        assert_eq!(account.snapshot().retained_bytes, 0);
+        assert_eq!(
+            account.snapshot().pinned_bytes,
+            verter_type_expr::OwnedStr::charge_for_len(len),
+            "the kept name alone stays charged"
+        );
+        drop(kept);
+        assert_eq!(account.snapshot().total_bytes(), 0);
+    }
+    assert_eq!(
+        record_bytes[0], record_bytes[1],
+        "a table's record does not estimate the names its cells charge"
+    );
+}
+
 #[test]
 fn export_tables_under_retention_pressure_answer_without_admission() {
     use verter_session_query::retention::{

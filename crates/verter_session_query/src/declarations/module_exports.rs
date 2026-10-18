@@ -7,13 +7,16 @@ use crate::retention::RetentionCharge;
 use crate::type_solver::ResolvedRootIdentity;
 
 pub type ModuleExportBindings = imbl::GenericHashMap<
-    Arc<str>,
+    verter_type_expr::OwnedStr,
     Option<ModuleExportBinding>,
     rustc_hash::FxBuildHasher,
     imbl::shared_ptr::DefaultSharedPtr,
 >;
 
-pub type ModuleExportBindingRef<'a> = (&'a Arc<str>, &'a Option<ModuleExportBinding>);
+pub type ModuleExportBindingRef<'a> = (
+    &'a verter_type_expr::OwnedStr,
+    &'a Option<ModuleExportBinding>,
+);
 
 #[derive(Debug, Clone)]
 pub struct ModuleExportTable {
@@ -159,7 +162,7 @@ pub(crate) fn sort_bytes<T>(items: &mut [T], key: impl Fn(&T) -> &[u8]) -> usize
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModuleExportBinding {
     Value(ResolvedRootIdentity),
-    Namespace(Arc<str>),
+    Namespace(verter_type_expr::OwnedStr),
 }
 
 impl verter_retention::heap_size::HeapSize for ModuleExportTable {
@@ -175,7 +178,8 @@ impl verter_retention::heap_size::HeapSize for ModuleExportTable {
         } else {
             verter_retention::allocation::heap_block_bytes(
                 self.owned_binding_slots
-                    * std::mem::size_of::<(Arc<str>, Option<ModuleExportBinding>)>(),
+                    * std::mem::size_of::<(verter_type_expr::OwnedStr, Option<ModuleExportBinding>)>(
+                    ),
             )
         };
         bindings + crate::retention::allocation::fact_slice_bytes(&self.facts, meter.handles())
