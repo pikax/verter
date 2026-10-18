@@ -92,7 +92,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> super::connected_demand::CostRecording<'_, '_> {
         let roots = self
             .graph()
-            .root_nodes([node, parameter, arg])
+            .root_nodes([node, parameter, arg].into_iter().filter(|node| {
+                // Signature-clause tokens are virtual semantic leaves, not
+                // graph allocations. Their identity stays in the cost key;
+                // only actual graph operands acquire counted root holds.
+                !crate::signature_kernel::SignatureStore::is_binder_token(*node)
+            }))
             .expect("a substitution owns its operands");
         self.connected_demand
             .record_cost(super::cost_receipt::CostIdentity::of_key(identity).with_roots(roots))
@@ -145,8 +150,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // arena-scoped, and semantic-node ids inside one arena are
         // content-addressed integers — so a triple of ids is a
         // complete identity for the substitution result. Substitution
-        // is a pure function of its three inputs, so the cache needs
-        // no fact-signature validation.
+        // has an immutable complete result for its three inputs. The memo
+        // stores only complete, priced results; a budget- or site-dependent
+        // refusal never publishes. Fact-bearing canonical work advances the
+        // separate evidence fence below.
         if let Some(cached) = self.priced_substitution_read(node, parameter_node, arg) {
             if let Some(observer) = verter_audit::current_observer() {
                 observer.record_event(verter_audit::AuditEvent::SubstituteMemoHit);

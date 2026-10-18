@@ -1714,9 +1714,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         match self.execute_resolve_call(key.clone()) {
             super::call_resolve::ResolveCallStep::Complete(result) => {
                 let return_type = super::return_equation::resolved_call_return_type(&result);
-                // A lazy alias return is demanded while checking this call,
-                // before an enclosing type query can choose its recovery site.
-                let return_type = self.check_indexed_call_return(return_type);
                 let fresh = self.call_result_is_fresh_literal(&result, return_type);
                 let held_by_flow = hold_flow_result
                     && self
@@ -1873,6 +1870,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         enum Phase {
             Enter,
             Deliver(Option<IndexedValue>),
+            CheckCall(Option<IndexedValue>),
         }
         let IndexedValueRun {
             path,
@@ -1903,9 +1901,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .node,
                 fresh: false,
             })),
-            IndexedNext::AwaitCall => Phase::Deliver(self.indexed_call_delivered(
+            IndexedNext::AwaitCall => Phase::CheckCall(self.indexed_call_delivered(
                 delivery.expect("a run waiting on a call resumes with its resolution"),
             )),
+            IndexedNext::AwaitReturn { mut original } => {
+                let read = self.read_frame_delivery(
+                    delivery.expect("a checked return resumes with its demand"),
+                );
+                if read.result_is_partial() {
+                    if let QueryResult::Value(
+                        crate::semantic_query::SemanticQueryValue::TypeNode(node),
+                    ) = read.value
+                    {
+                        original.node = node;
+                    }
+                }
+                Phase::Deliver(Some(original))
+            }
             IndexedNext::Finished => unreachable!("a finished run is not drained again"),
         };
         loop {
@@ -1944,6 +1956,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         }
                     };
                     continue;
+                }
+                Phase::CheckCall(value) => {
+                    if suspend {
+                        if let Some((original, key)) = value.and_then(|original| {
+                            self.indexed_call_return_key(original.node)
+                                .map(|key| (original, key))
+                        }) {
+                            *next = IndexedNext::AwaitReturn { original };
+                            return IndexedValuePoll::Need(key);
+                        }
+                    }
+                    value
                 }
                 Phase::Deliver(value) => value,
             };
@@ -2062,7 +2086,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         crate::semantic_query::SemanticQueryKey::ResolveCall(Box::new(key)),
                     );
                 }
-                phase = Phase::Deliver(self.resolve_indexed_call_key(key, hold_flow_result));
+                phase = Phase::CheckCall(self.resolve_indexed_call_key(key, hold_flow_result));
                 continue;
             }
             phase = Phase::Deliver(self.resolve_indexed_call(
@@ -2077,24 +2101,37 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// Check a lazy declared return while its call is still the expression
-    /// demand. Complete products retain their named carrier for display;
-    /// a checker recovery replaces it, and an unavailable structural check
-    /// keeps the original carrier under the partiality the demand folded.
-    fn check_indexed_call_return(&self, node: SemanticNodeId) -> SemanticNodeId {
-        let _site = self.checking_site_scope(
-            crate::semantic_query::checker_policy::TupleSplicePosition::Expression,
+    /// The shared instantiation demand of a call's lazy return. The indexed
+    /// continuation awaits it as an expression demand, so an alias chain
+    /// grows heap frames rather than nested native calls. Complete returns
+    /// retain their authored carrier; a refused return delivers its recovery.
+    fn indexed_call_return_key(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<crate::semantic_query::SemanticQueryKey> {
+        let data = self.graph().node_data(node)?;
+        let (base, args) = match data.as_ref() {
+            SemanticNodeData::InstantiationRef { base, args } => (base, Arc::clone(args.as_arc())),
+            SemanticNodeData::DeclRef { identity } => (identity, Arc::from([])),
+            _ => return None,
+        };
+        let slot = self.type_slot_for(
+            base.canonical_id.clone(),
+            base.owner,
+            base.decl_name.clone(),
         );
-        match self.normalize_node_for_structural_fact_demand(
-            node,
-            crate::semantic_query::ProjectionReductionContext::published(
-                crate::semantic_query::ProjectionMode::Expanded,
+        Some(crate::semantic_query::SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                slot,
+                args,
+                self.instantiate_context_for(
+                    &base.canonical_id,
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        crate::semantic_query::ProjectionMode::Expanded,
+                    ),
+                ),
             ),
-        ) {
-            super::evaluate::StructuralFactDemandOutcome::Recovered { node, .. } => node,
-            super::evaluate::StructuralFactDemandOutcome::Complete(_)
-            | super::evaluate::StructuralFactDemandOutcome::Partial(_) => node,
-        }
+        ))
     }
 
     /// The value a call's resolution, resolved by a frame of its own,
@@ -2107,9 +2144,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let value = match self.read_frame_delivery(delivery).value {
             QueryResult::Value(crate::semantic_query::SemanticQueryValue::ResolveCall(result)) => {
                 let return_type = super::return_equation::resolved_call_return_type(&result);
-                // A lazy alias return is demanded while checking this call,
-                // before an enclosing type query can choose its recovery site.
-                let return_type = self.check_indexed_call_return(return_type);
                 Some(IndexedValue {
                     node: return_type,
                     fresh: self.call_result_is_fresh_literal(&result, return_type),
@@ -9461,6 +9495,9 @@ enum IndexedNext {
     AwaitReference,
     /// Take the delivered resolution as the value of the call it resolves.
     AwaitCall,
+    /// The declared return is checked by its own instantiation frame; its
+    /// original carrier is retained when the check completes.
+    AwaitReturn { original: IndexedValue },
     /// Nothing: the run finished.
     Finished,
 }
@@ -10459,8 +10496,12 @@ pub(super) trait FlowDemandDriver {
         node: SemanticNodeId,
         context: ProjectionReductionContext,
     ) -> StructuralFactDemandOutcome;
-    /// Spread-normalise the tuple an array literal produces: a splice past
-    /// the checker's tuple-size limit is its TS2800 recovery.
+    /// Demand a lazy declared return through its continuation-capable query.
+    fn declared_call_return_read(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>>;
+    /// Spread-normalise the tuple an array literal produces.
     fn normalize_expression_tuple_spread(
         &self,
         elements: &[crate::semantic_query::TupleElement],
@@ -11054,6 +11095,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         context: ProjectionReductionContext,
     ) -> StructuralFactDemandOutcome {
         ProjectSemanticDispatch::normalize_node_for_structural_fact_demand(self, node, context)
+    }
+    fn declared_call_return_read(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>> {
+        self.indexed_call_return_key(node).map(|key| {
+            self.read_declared_return_at_seam(&key)
+                .map(super::narrow_value_cache_read)
+                .unwrap_or_else(|| self.execute_read(key))
+        })
     }
     fn normalize_expression_tuple_spread(
         &self,
@@ -11761,6 +11812,12 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     ) -> StructuralFactDemandOutcome {
         self.driver
             .normalize_node_for_structural_fact_demand(node, context)
+    }
+    fn declared_call_return_read(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>> {
+        self.driver.declared_call_return_read(node)
     }
     fn normalize_expression_tuple_spread(
         &self,
@@ -28628,9 +28685,39 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         });
                     }
                 }
+                let mut returned = super::return_equation::resolved_call_return_type(&result);
+                // Check this expression's lazy declared return before a type
+                // assertion or a later type demand can change its checking
+                // site. Keep a complete carrier's authored display identity.
+                if let Some(read) = self.dispatch.declared_call_return_read(returned) {
+                    let reasons = read.partial_reasons();
+                    if let (true, QueryResult::Value(node)) = (read.result_is_partial(), read.value)
+                    {
+                        if reasons
+                            .contains(crate::semantic_query::PartialReasonSet::OPERATION_BUDGET)
+                        {
+                            self.record_degradation(
+                                crate::semantic_query::FlowReturnDegradation::OperationBudget,
+                            );
+                        }
+                        let diagnostic = self.dispatch.arena().node_data(node).and_then(|data| {
+                            match data.as_ref() {
+                                SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+                                    diagnostic,
+                                    ..
+                                }) => Some(*diagnostic),
+                                _ => None,
+                            }
+                        });
+                        if let Some(diagnostic) = diagnostic {
+                            self.record_checker_diagnostic(diagnostic);
+                        }
+                        returned = node;
+                    }
+                }
                 Some(Positional::Value(CallValue::of_resolved_call(
                     self.dispatch,
-                    super::return_equation::resolved_call_return_type(&result),
+                    returned,
                 )))
             }
             // An SCC back-edge through the executor: the close discharges

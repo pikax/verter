@@ -359,7 +359,9 @@ fn an_expression_splice_past_the_limit_is_ts2800() {
     let declare = |name: &str, len: usize| format!("declare const {name}: {};\n", zeros(len));
     let source = format!(
         "{}{}{}{}\
-         declare function twice<T extends unknown[]>(a: T): [...T, ...T];\n\
+         {CONCAT}declare function twice<T extends unknown[]>(a: T): [...T, ...T];\n\
+         declare function concatTwice<T extends unknown[]>(a: T): Concat<T, T>;\n\
+         export function aliasAtLimit() {{ return concatTwice(a5000); }}\n\
          export function two() {{ return [...a5000, ...b4999] as const; }}\n\
          export function twoAtLimit() {{ return [...a5000, ...b5000] as const; }}\n\
          export function prefix() {{ return [1, ...c9999] as const; }}\n\
@@ -379,6 +381,7 @@ fn an_expression_splice_past_the_limit_is_ts2800() {
         ("suffix", Ok((true, 10_000))),
         ("call", Ok((false, 9_998))),
         ("callAtLimit", Err(())),
+        ("aliasAtLimit", Err(())),
     ] {
         let result = flow_return_audited_on_host(&host, &source, function)
             .into_result()
@@ -1067,7 +1070,7 @@ fn a_suspended_indexed_call_keeps_its_recovery_site_on_another_thread() {
     };
     use verter_type_engine::semantic_query_memo::{Claim, ReadCapture};
     let host = default_probe_host();
-    let source = format!("declare const z: {};\ndeclare function twice<T extends unknown[]>(a: T): [...T, ...T];\nexport const result = twice(z);", zeros(5_000));
+    let source = format!("declare const z: {};\n{CONCAT}declare function twice<T extends unknown[]>(a: T): Concat<T, T>;\nexport const result = twice(z);", zeros(5_000));
     with_probe_on_host(&host, ProbeProject::default(), &source, "1", |_, _| ());
     let dispatch = ProjectSemanticDispatch::new(&*host);
     let graph = dispatch.graph();

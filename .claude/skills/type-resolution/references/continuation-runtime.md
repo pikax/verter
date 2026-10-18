@@ -138,3 +138,13 @@ arm whose tested bucket is not `No`, records the typed `GuardNarrowing` gap on
 `Undecided`, and narrows the subject to `never` (branch alive, syntactic
 returns retained) when no arm survives an edge.
 
+
+A lazy declared call return is checked at its expression site before a later
+consumer can choose a type site. Indexed initializers await the return's
+instantiation (`IndexedNext::AwaitReturn`). A typeof frame keeps the operand
+answers and claims of inline signature probes (`TypeofFrameBuild`); a new
+return demand discards the tentative projection under `observe_read` and
+retries it after the runtime delivers the operand. A pending probe prevents
+its tentative source shape from warming. Complete returns retain their
+named carrier; checker recoveries retain the expression diagnostic. These
+reads never drive another execution inside a frame step.
