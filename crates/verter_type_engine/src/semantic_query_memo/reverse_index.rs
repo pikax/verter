@@ -18,8 +18,11 @@
 //!   intermediates);
 //! - **evidence → candidate**: a carrier names the candidates it validates.
 //!
-//! A candidate also registers directly under its extra canonicals (dispatch
-//! fences, strict self-roots). A chain or a diamond therefore costs
+//! A candidate's dispatch fence is evidence too: one node per fence
+//! allocation, naming every candidate that shares it, so candidates over
+//! one interned fence register its canonicals once. A candidate also
+//! registers directly under its extra canonicals (strict self-roots). A
+//! chain or a diamond therefore costs
 //! `O(F + E + C)` physical registrations — its files, its edges and its
 //! candidates — however many candidates share it, and an evidence many
 //! candidates share is registered once. [`ReceiptReverseIndex::reached_by`]
@@ -97,18 +100,57 @@ enum EvidenceOwner {
     Receipt(ResultReceipt),
     /// A candidate's top-level carrier.
     Carrier(Arc<[FactVersionRef]>),
+    /// A candidate's dispatch fence, shared by every candidate holding the
+    /// same allocation.
+    Fence(DepSignature),
+}
+
+/// What one evidence node reads: a canonical directly, or a consumed
+/// receipt.
+enum EvidenceRead<'a> {
+    Canonical(&'a str),
+    Receipt(&'a ResultReceipt),
 }
 
 impl EvidenceOwner {
-    fn facts(&self) -> &[FactVersionRef] {
+    fn is_empty(&self) -> bool {
         match self {
-            Self::Receipt(receipt) => receipt.facts(),
-            Self::Carrier(facts) => facts,
+            Self::Receipt(receipt) => receipt.facts().is_empty(),
+            Self::Carrier(facts) => facts.is_empty(),
+            Self::Fence(fence) => fence.is_empty(),
         }
     }
 
     fn addr(&self) -> EvidenceAddr {
-        self.facts().as_ptr() as EvidenceAddr
+        match self {
+            Self::Receipt(receipt) => receipt.facts().as_ptr() as EvidenceAddr,
+            Self::Carrier(facts) => facts.as_ptr() as EvidenceAddr,
+            Self::Fence(fence) => fence.as_ptr() as EvidenceAddr,
+        }
+    }
+
+    /// Visit what the node reads, in order.
+    fn for_each_read<'a>(&'a self, mut visit: impl FnMut(EvidenceRead<'a>)) {
+        let facts = match self {
+            Self::Receipt(receipt) => receipt.facts(),
+            Self::Carrier(facts) => facts,
+            Self::Fence(fence) => {
+                for crate::semantic_query::DepEntry(canonical, _) in fence.iter() {
+                    visit(EvidenceRead::Canonical(canonical));
+                }
+                return;
+            }
+        };
+        for fact in facts {
+            match fact {
+                FactVersionRef::Receipt(child) => visit(EvidenceRead::Receipt(child)),
+                leaf => {
+                    if let Some(canonical) = leaf.canonical_id() {
+                        visit(EvidenceRead::Canonical(canonical));
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -198,6 +240,8 @@ struct CandidateNode<K, P> {
     payload: P,
     /// The carrier evidence node, when the carrier holds any fact.
     carrier: Option<EvidenceAddr>,
+    /// The dispatch-fence evidence node, when the candidate has a fence.
+    fence: Option<EvidenceAddr>,
     /// The extra canonicals the candidate registered under, sharing the
     /// index's own copy of each.
     extras: Box<[Arc<str>]>,
@@ -445,7 +489,7 @@ impl<K: Eq + Hash + Clone, P> IndexState<K, P> {
     /// reaches that is not indexed yet — each once, from an explicit stack.
     /// Evidence with no fact reaches no canonical and is not indexed.
     fn link_evidence(&mut self, owner: EvidenceOwner, parent: Holder) -> Option<EvidenceAddr> {
-        if owner.facts().is_empty() {
+        if owner.is_empty() {
             return None;
         }
         let root = owner.addr();
@@ -459,20 +503,16 @@ impl<K: Eq + Hash + Clone, P> IndexState<K, P> {
                 continue;
             }
             let holder = Holder::Evidence(addr);
-            for fact in owner.facts() {
-                match fact {
-                    FactVersionRef::Receipt(child) => {
-                        if !child.facts().is_empty() {
-                            pending.push((EvidenceOwner::Receipt(child.clone()), holder));
-                        }
-                    }
-                    leaf => {
-                        if let Some(canonical) = leaf.canonical_id() {
-                            self.link_canonical(canonical, holder);
-                        }
+            owner.for_each_read(|read| match read {
+                EvidenceRead::Receipt(child) => {
+                    if !child.facts().is_empty() {
+                        pending.push((EvidenceOwner::Receipt(child.clone()), holder));
                     }
                 }
-            }
+                EvidenceRead::Canonical(canonical) => {
+                    self.link_canonical(canonical, holder);
+                }
+            });
             let mut parents = Tracked::default();
             insert_holder(&mut self.storage.set_slots, &mut parents, parent);
             self.note_linked(parent);
@@ -510,20 +550,16 @@ impl<K: Eq + Hash + Clone, P> IndexState<K, P> {
             let node = self.evidence.table.remove(&addr).expect("present above");
             self.storage.set_slots -= node.parents.slots;
             let holder = Holder::Evidence(addr);
-            for fact in node.owner.facts() {
-                match fact {
-                    FactVersionRef::Receipt(child) => {
-                        if !child.facts().is_empty() {
-                            pending.push((child.facts().as_ptr() as EvidenceAddr, holder));
-                        }
-                    }
-                    leaf => {
-                        if let Some(canonical) = leaf.canonical_id() {
-                            self.unlink_canonical(canonical, holder);
-                        }
+            node.owner.for_each_read(|read| match read {
+                EvidenceRead::Receipt(child) => {
+                    if !child.facts().is_empty() {
+                        pending.push((child.facts().as_ptr() as EvidenceAddr, holder));
                     }
                 }
-            }
+                EvidenceRead::Canonical(canonical) => {
+                    self.unlink_canonical(canonical, holder);
+                }
+            });
             released.push(node.owner);
         }
         self.evidence.release_sparse();
@@ -541,8 +577,8 @@ impl<K: Eq + Hash + Clone, P> IndexState<K, P> {
         for canonical in node.extras.iter() {
             self.unlink_canonical(canonical, holder);
         }
-        if let Some(carrier) = node.carrier {
-            self.unlink_evidence(carrier, holder, released);
+        for evidence in [node.carrier, node.fence].into_iter().flatten() {
+            self.unlink_evidence(evidence, holder, released);
         }
         self.candidates.release_sparse();
         self.candidate_ids.release_sparse();
@@ -589,13 +625,14 @@ impl<K, P> Default for ReceiptReverseIndex<K, P> {
 impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
     /// The bytes a candidate's own registration keeps: its two table
     /// buckets and node, its extra-canonical list, and the edges naming it
-    /// (one per extra canonical, one from its carrier). Its payload's heap
-    /// is the caller's to add.
-    pub fn candidate_bytes(extras: usize, has_carrier: bool) -> usize {
+    /// (one per extra canonical, one from each of its `evidence` nodes —
+    /// its carrier and its fence). Its payload's heap is the caller's to
+    /// add.
+    pub fn candidate_bytes(extras: usize, evidence: usize) -> usize {
         id_bucket_bytes::<K>()
             + candidate_bucket_bytes::<K, P>()
             + extras * std::mem::size_of::<Arc<str>>()
-            + (extras + usize::from(has_carrier)) * EDGE_BYTES
+            + (extras + evidence) * EDGE_BYTES
     }
 
     /// Register candidate `key` with `payload`: its carrier evidence, every
@@ -611,12 +648,26 @@ impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
         carrier: &Arc<[FactVersionRef]>,
         extras: impl IntoIterator<Item = &'a str>,
     ) {
+        self.register_fenced(key, payload, carrier, &DepSignature::default(), extras);
+    }
+
+    /// [`Self::register`], with the candidate's dispatch `fence` registered
+    /// as one evidence node that every candidate holding the same fence
+    /// allocation shares, instead of as extra canonicals of each.
+    pub fn register_fenced<'a>(
+        &self,
+        key: K,
+        payload: P,
+        carrier: &Arc<[FactVersionRef]>,
+        fence: &DepSignature,
+        extras: impl IntoIterator<Item = &'a str>,
+    ) {
         let extras: SmallVec<[&str; 8]> = dedup_canonicals(extras);
         let mut released = Vec::new();
         {
             let mut state = self.state.lock();
             state.unregister(&key, &mut released);
-            if carrier.is_empty() && extras.is_empty() {
+            if carrier.is_empty() && fence.is_empty() && extras.is_empty() {
                 state.settle();
                 drop(state);
                 drop(released);
@@ -631,6 +682,7 @@ impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
                 .collect();
             state.storage.candidate_extras += extras.len();
             let carrier = state.link_evidence(EvidenceOwner::Carrier(Arc::clone(carrier)), holder);
+            let fence = state.link_evidence(EvidenceOwner::Fence(fence.clone()), holder);
             state.candidate_ids.table.insert(key.clone(), id);
             state.candidate_ids.note_inserted();
             state.candidates.table.insert(
@@ -639,6 +691,7 @@ impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
                     key,
                     payload,
                     carrier,
+                    fence,
                     extras,
                 },
             );
@@ -822,24 +875,15 @@ impl MemoRegistration {
 /// registration change in one step.
 pub(super) type CanonicalToEntries = ReceiptReverseIndex<u64, MemoRegistration>;
 
-/// The edges a family-memo candidate registers names: one per distinct
-/// dispatch-fence canonical and one from its carrier when the carrier holds
-/// any fact. Zero when it registers nothing.
+/// The edges a family-memo candidate registers names: one from its carrier
+/// when the carrier holds any fact and one from its dispatch fence when it
+/// has one. Zero when it registers nothing.
 pub(super) fn direct_edge_count(
     read_set_signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
     dispatch_dep_signature: &DepSignature,
 ) -> usize {
-    dispatch_fence_canonicals(dispatch_dep_signature).len()
-        + usize::from(!read_set_signature.facts.is_empty())
-}
-
-/// A dispatch fence's canonicals, each once.
-fn dispatch_fence_canonicals(dispatch_dep_signature: &DepSignature) -> SmallVec<[&str; 8]> {
-    dedup_canonicals(
-        dispatch_dep_signature
-            .iter()
-            .map(|crate::semantic_query::DepEntry(canonical, _)| canonical.as_ref()),
-    )
+    usize::from(!read_set_signature.facts.is_empty())
+        + usize::from(!dispatch_dep_signature.is_empty())
 }
 
 /// The family-memo candidates published since the reverse index was last
@@ -950,8 +994,8 @@ impl PendingRegistrations {
     }
 }
 
-/// What one family-memo candidate's registration keeps, by the edges naming
-/// it ([`direct_edge_count`]): its node, its edges, and
+/// What one family-memo candidate's registration keeps, by the evidence
+/// edges naming it ([`direct_edge_count`]): its node, its edges, and
 /// the one `Arc<FamilyKey>` clone it names its family by — its block and the
 /// boxes the clone copies, plus the owned names the clone shares with
 /// `family`, handed back for the candidate to hold. The evidence it shares
@@ -967,10 +1011,8 @@ pub(super) fn registration_footprint(
         };
     }
     let clone = super::family_footprint::family_key_clone_heap_bytes(family);
-    // The carrier edge is counted with the extras; the node's extra list
-    // holds at most every edge.
     verter_session_query::retention::Footprint {
-        bytes: CanonicalToEntries::candidate_bytes(direct_edges, false)
+        bytes: CanonicalToEntries::candidate_bytes(0, direct_edges)
             + arc_block_bytes(std::mem::size_of::<FamilyKey>())
             + clone.bytes,
         handles: clone.handles,
@@ -978,8 +1020,8 @@ pub(super) fn registration_footprint(
 }
 
 /// Register `entry`, the candidate it was admitted as, for `slot`: the first
-/// of its slots registers its carrier and dispatch-fence canonicals, each
-/// later one joins that registration. A candidate with no direct edge
+/// of its slots registers its carrier and its dispatch fence, each later
+/// one joins that registration. A candidate with no direct edge
 /// registers nothing. Caller holds the `entries` lock.
 pub(super) fn register_candidate(
     canonical_to_entries: &CanonicalToEntries,
@@ -995,21 +1037,21 @@ pub(super) fn register_candidate(
     }) {
         return;
     }
-    let extras = dispatch_fence_canonicals(&entry.dispatch_dep_signature);
-    if entry.read_set_signature.facts.is_empty() && extras.is_empty() {
+    if entry.read_set_signature.facts.is_empty() && entry.dispatch_dep_signature.is_empty() {
         return;
     }
     // The index's lock acquisition, as request audit contention.
     #[cfg(feature = "semantic-observe")]
     crate::request_observers::record_family_map_lock_acquisition(std::time::Duration::ZERO);
-    canonical_to_entries.register(
+    canonical_to_entries.register_fenced(
         entry.admission_seq,
         MemoRegistration {
             family: Arc::clone(family),
             slots: smallvec::smallvec![slot],
         },
         &entry.read_set_signature.facts,
-        extras,
+        &entry.dispatch_dep_signature,
+        [],
     );
 }
 

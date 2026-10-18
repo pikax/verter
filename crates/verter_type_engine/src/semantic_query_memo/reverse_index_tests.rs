@@ -293,7 +293,10 @@ fn held_bytes<K: Eq + std::hash::Hash + Clone, P: Clone>(
         .table
         .values()
         .map(|node| {
-            ReceiptReverseIndex::<K, P>::candidate_bytes(node.extras.len(), node.carrier.is_some())
+            ReceiptReverseIndex::<K, P>::candidate_bytes(
+                node.extras.len(),
+                usize::from(node.carrier.is_some()) + usize::from(node.fence.is_some()),
+            )
         })
         .sum();
     let extras_lists: usize = state
@@ -465,6 +468,81 @@ fn memo_candidates_evict_through_uncached_receipts_and_drain_the_index() {
     assert_eq!(store.invalidate_canonical(&canonical(20)), 0);
 
     assert_eq!(store.invalidate_canonical(&canonical(0)), 5);
+    assert_eq!(
+        store.reverse_index_occupancy(),
+        ReverseIndexOccupancy::default()
+    );
+    assert_eq!(store.canonical_to_entries.storage_charge_bytes(), 0);
+    let ops = store.reverse_index_edge_ops();
+    assert_eq!(ops.linked, ops.unlinked);
+}
+
+/// Candidates sharing one interned dispatch fence register its canonicals
+/// once: the fence is one evidence node naming each candidate, so `C`
+/// candidates over a `k`-canonical fence cost `k + C` fence edges, where a
+/// per-candidate fence would cost `C·k`. An edit to any fence canonical
+/// still reaches every candidate, and the last eviction drains the index.
+#[test]
+fn candidates_sharing_a_dispatch_fence_register_its_canonicals_once() {
+    use crate::semantic_query::{
+        BinderScopeId, DepEntry, DepSignature, DepVersion, PrimitiveKind, QueryResult,
+        ResolveDeclKey, ScopeId, SemanticNodeData, SemanticQueryKey,
+    };
+    use verter_session_query::facts::fact_cache::ReadSetSignature;
+    use verter_session_query::retention::StoreAccount;
+
+    const FENCE: usize = 8;
+    const CANDIDATES: usize = 6;
+    let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+    let store = super::super::SemanticGraphStore::with_account(StoreAccount::new(account));
+    let carrier = ReadSetSignature::new(Arc::from(vec![file("/w/carrier.ts")]));
+    let fence = || {
+        DepSignature::new(
+            (0..FENCE)
+                .map(|j| {
+                    DepEntry::new(
+                        &format!("/w/fence{j}.ts"),
+                        DepVersion::WholeHash([j as u8; 16]),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+    };
+    let node = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    for i in 0..CANDIDATES {
+        let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+        let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: ScopeId {
+                canonical_id: verter_type_expr::OwnedStr::from("/w/carrier.ts"),
+                owner,
+                local_scope: None,
+                binder_scope_id: BinderScopeId::file_scope(owner),
+            },
+            name: verter_type_expr::OwnedStr::from(format!("N{i}").as_str()),
+        });
+        assert_eq!(
+            store.publish_with_carrier_and_dispatch_for_tests(
+                key,
+                QueryResult::Value(node),
+                carrier.clone(),
+                Arc::from([]),
+                fence(),
+            ),
+            1
+        );
+    }
+    assert_eq!(
+        store.reverse_index_occupancy(),
+        ReverseIndexOccupancy {
+            canonicals: 1 + FENCE,
+            evidence: 2,
+            candidates: CANDIDATES,
+            edges: 1 + FENCE + 2 * CANDIDATES,
+        }
+    );
+    assert_eq!(store.canonical_to_entries_count("/w/fence3.ts"), CANDIDATES);
+
+    assert_eq!(store.invalidate_canonical("/w/fence3.ts"), CANDIDATES);
     assert_eq!(
         store.reverse_index_occupancy(),
         ReverseIndexOccupancy::default()

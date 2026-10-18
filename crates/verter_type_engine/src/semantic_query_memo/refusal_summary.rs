@@ -114,7 +114,8 @@ impl RefusalSummary {
             + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
             + RefusalIndex::candidate_bytes(
                 self.index_extras().count(),
-                !self.carrier.facts.is_empty(),
+                usize::from(!self.carrier.facts.is_empty())
+                    + usize::from(!self.read.dep_signature.is_empty()),
             )
             + self
                 .prefix
@@ -127,15 +128,10 @@ impl RefusalSummary {
         }
     }
 
-    /// The canonicals the summary registers under besides its carrier: its
-    /// strict self-roots and its dispatch fence.
+    /// The canonicals the summary registers under besides its carrier and
+    /// its dispatch fence: its strict self-roots.
     fn index_extras(&self) -> impl Iterator<Item = &str> + '_ {
-        self.self_root_canonicals.iter().map(AsRef::as_ref).chain(
-            self.read
-                .dep_signature
-                .iter()
-                .map(|crate::semantic_query::DepEntry(canonical, _)| canonical.as_ref()),
-        )
+        self.self_root_canonicals.iter().map(AsRef::as_ref)
     }
 
     fn shared_parts(&self) -> super::retention::SharedParts<'_> {
@@ -167,10 +163,11 @@ pub(crate) struct RefusalSummaries {
 
 impl RefusalSummaries {
     fn register(&self, key: &RefusalKey, summary: &RefusalSummary) {
-        self.index.register(
+        self.index.register_fenced(
             key.clone(),
             (),
             &summary.carrier.facts,
+            &summary.read.dep_signature,
             summary.index_extras(),
         );
     }

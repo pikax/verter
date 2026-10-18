@@ -1063,8 +1063,9 @@ again. The reverse index
 refusal-summary table and `cache_runtime::ReverseIndexedCandidateStore`)
 registers DIRECT edges, each once: canonical → the evidence (carrier, receipt
 or page, cached or not) whose own facts read it, consumed receipt → the
-evidence that consumed it, carrier → its candidates, plus each candidate's
-extra canonicals (dispatch fence / strict self-roots). A chain or diamond costs
+evidence that consumed it, carrier → its candidates, dispatch fence → the
+candidates sharing that fence allocation (one node per interned fence, so its
+canonicals register once), plus each candidate's strict self-roots. A chain or diamond costs
 `O(F + E + C)` physical registrations however many candidates share it —
 never a per-candidate canonical closure — and `invalidate_canonical` walks up
 from the canonical, each node once. Unregistering a candidate drops every
