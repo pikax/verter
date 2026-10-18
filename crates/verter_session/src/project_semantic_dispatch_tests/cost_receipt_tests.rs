@@ -2425,4 +2425,34 @@ fn invalidating_a_canonical_drops_the_refusals_its_failed_prefix_reached() {
         store.refusal_index_occupancy_for_tests(),
         ReverseIndexOccupancy::default()
     );
+
+    // An evaluation in flight across an explicit invalidation read what the
+    // invalidation dropped, before the index could hold its summary: its
+    // refusal is never sealed. One entering after the invalidation is.
+    let before_invalidation = store.refusal_entry_for_tests(&host);
+    assert_eq!(store.invalidate_canonical("/w/base.ts"), 0);
+    assert!(
+        !store.seal_refusal_for_tests(
+            &host,
+            key("Prefixed"),
+            profile.clone(),
+            before_invalidation,
+            refusal(),
+            through_prefix(),
+        ),
+        "a refusal entered before an invalidation is never sealed after it"
+    );
+    assert_eq!(store.refusal_summary_count_for_tests(), 0);
+    assert_eq!(
+        store.refusal_index_occupancy_for_tests(),
+        ReverseIndexOccupancy::default()
+    );
+    assert!(store.seal_refusal_for_tests(
+        &host,
+        key("Prefixed"),
+        profile.clone(),
+        store.refusal_entry_for_tests(&host),
+        refusal(),
+        through_prefix(),
+    ));
 }

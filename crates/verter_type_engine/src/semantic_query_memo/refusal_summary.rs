@@ -177,8 +177,8 @@ impl RefusalSummaries {
 }
 
 /// The store field: the table, how many summaries it holds (read without
-/// its lock by every isolated root while it is empty), and how many times
-/// it has been cleared.
+/// its lock by every isolated root while it is empty), how many times it
+/// has been cleared and how many explicit invalidations it has seen.
 #[derive(Default)]
 pub(crate) struct RefusalSummaryTable {
     table: Mutex<RefusalSummaries>,
@@ -187,6 +187,12 @@ pub(crate) struct RefusalSummaryTable {
     /// entered before a clear finishes after it, and its summary — decided
     /// against what the clear dropped — is never inserted.
     clears: AtomicU64,
+    /// Advanced under the table's lock by every explicit invalidation of a
+    /// canonical, whatever it dropped: an evaluation that entered before
+    /// one may have read the invalidated canonical's old version, and the
+    /// index the invalidation walked could not hold its summary yet, so its
+    /// refusal is never inserted.
+    invalidations: AtomicU64,
 }
 
 impl RefusalSummaryTable {
@@ -210,12 +216,13 @@ impl RefusalSummaryTable {
 }
 
 /// Where an isolated root entered the store: the project generation and
-/// the refusal table's clear count it evaluated under. Its refusal is
-/// sealed only while both still hold.
+/// the refusal table's clear and invalidation counts it evaluated under. Its
+/// refusal is sealed only while all three still hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RefusalEntryState {
     pub generation: u64,
     pub clears: u64,
+    pub invalidations: u64,
 }
 
 impl SemanticGraphStore {
@@ -261,6 +268,7 @@ impl SemanticGraphStore {
         RefusalEntryState {
             generation: ctx.request_flags().current_project_generation(),
             clears: self.refusal_summaries.clears.load(Ordering::Acquire),
+            invalidations: self.refusal_summaries.invalidations.load(Ordering::Acquire),
         }
     }
 
@@ -269,7 +277,8 @@ impl SemanticGraphStore {
     /// the retention account declines to keep,
     /// and, decided under the table's lock in the same step as the
     /// insertion, a cancelled evaluation, one the project moved under, or
-    /// one the table was cleared under: a torn or superseded evaluation
+    /// one the table was cleared or a canonical explicitly invalidated
+    /// under: a torn or superseded evaluation
     /// never becomes a summary, however its completion interleaves with the
     /// cancellation or the clear. Its facts are revalidated at every
     /// delivery. A re-sealed refusal is the newest.
@@ -314,6 +323,8 @@ impl SemanticGraphStore {
             if flags.is_cancelled()
                 || flags.current_project_generation() != entered.generation
                 || self.refusal_summaries.clears.load(Ordering::Acquire) != entered.clears
+                || self.refusal_summaries.invalidations.load(Ordering::Acquire)
+                    != entered.invalidations
             {
                 drop(summaries);
                 // The summary and its reservation are released outside the
@@ -358,10 +369,14 @@ impl SemanticGraphStore {
     /// Drop every sealed refusal whose observed facts reach `canonical_id`,
     /// failed-prefix receipts included, answering how many were dropped.
     /// Validity stays read-side: this is the eager cleanup of an explicit
-    /// invalidation, never a delivery decision.
+    /// invalidation, never a delivery decision. An evaluation in flight
+    /// across it seals nothing.
     pub(crate) fn invalidate_refusal_summaries(&self, canonical_id: &str) -> usize {
         let dropped = {
             let mut summaries = self.refusal_summaries.table.lock();
+            self.refusal_summaries
+                .invalidations
+                .fetch_add(1, Ordering::AcqRel);
             let reached = summaries.index.reached_by(canonical_id);
             if reached.is_empty() {
                 return 0;
