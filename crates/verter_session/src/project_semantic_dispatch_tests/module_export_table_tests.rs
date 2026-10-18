@@ -494,7 +494,7 @@ fn check_export_table_and_namespace_work(count: usize) -> [(&'static str, usize)
             Arc::from("/wb/scenario.ts"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
         ),
-        name: Arc::from("ns"),
+        name: verter_type_expr::OwnedStr::from("ns"),
     };
     let (_guard, _) = dispatch.enter_connected_demand(false);
     let read = |key| {
@@ -795,7 +795,7 @@ fn a_growing_namespace_shares_unchanged_tables_and_retains_linear_nodes() {
                         Arc::from("/wb/scenario.ts"),
                         verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     ),
-                    name: Arc::from("ns"),
+                    name: verter_type_expr::OwnedStr::from("ns"),
                 },
                 context,
             ))

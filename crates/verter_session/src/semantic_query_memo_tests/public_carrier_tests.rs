@@ -39,14 +39,14 @@ fn host() -> VerterHost {
 fn key(name: &str) -> SemanticQueryKey {
     SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::from(FILE),
+            canonical_id: verter_type_expr::OwnedStr::from(FILE),
             owner: TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 TopLevelOwnerId::ordinary_file(),
             ),
         },
-        name: Arc::from(name),
+        name: verter_type_expr::OwnedStr::from(name),
     })
 }
 
@@ -58,7 +58,7 @@ fn literal(store: &SemanticGraphStore, text: &str) -> SemanticNodeId {
 fn object(store: &SemanticGraphStore, text: &str) -> SemanticNodeId {
     let value = literal(store, text);
     let member = SurfaceMember {
-        key: AuthoredPropertyKey::String(Arc::from("member")),
+        key: AuthoredPropertyKey::String(verter_type_expr::OwnedStr::from("member")),
         value,
         optional: false,
         readonly: false,
@@ -351,7 +351,7 @@ fn a_root_survives_its_documents_close_and_drains_with_its_last_clone() {
         let node = graph.intern_node_with_scope(
             SemanticNodeData::Literal(LiteralValue::String("closed".into())),
             NodeScopeId::File {
-                canonical_id: Arc::from(FILE),
+                canonical_id: verter_type_expr::OwnedStr::from(FILE),
                 owner: TopLevelOwnerId::ordinary_file(),
                 whole_hash: [0; 16],
                 local_scope: None,
@@ -516,7 +516,7 @@ fn a_deferred_substitutions_pending_operands_stay_owned_by_the_delivering_read()
                     true_branch_ref: literal(store, "true branch"),
                     false_branch_ref: literal(store, "false branch"),
                     distributive: false,
-                    pending: Some(Arc::new(
+                    pending: Some(verter_session_query::retention::owned::Owned::new(
                         ConditionalPendingSubstitution::empty().append_true(param, argument),
                     )),
                 });
@@ -553,7 +553,9 @@ fn dispatchers_drop_in_any_order_and_never_release_a_live_dispatchers_operands()
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let first = host.semantic_dispatch();
     let second = host.semantic_dispatch();
-    let node = first.opaque(QueryError::Other(Arc::from("first's operand")));
+    let node = first.opaque(QueryError::Other(verter_type_expr::OwnedStr::from(
+        "first's operand",
+    )));
     drop(second);
     assert!(
         graph.node_is_live(node),
@@ -594,7 +596,7 @@ fn a_projected_one_level_surface_owns_its_members() {
             &host,
             &d,
             base.id(),
-            Arc::from([]),
+            verter_type_expr::OwnedSlice::from([]),
             ProjectionReductionContext::published(ProjectionMode::Shallow),
             None,
         )
@@ -660,9 +662,9 @@ fn a_delivered_flow_return_result_owns_its_node_past_its_request_and_close() {
     );
     let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: Arc::from(FLOW),
+            canonical_id: verter_type_expr::OwnedStr::from(FLOW),
             owner: TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("pf"),
+            symbol: verter_type_expr::OwnedStr::from("pf"),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
         function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,

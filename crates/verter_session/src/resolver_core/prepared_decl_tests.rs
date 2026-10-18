@@ -1170,7 +1170,7 @@ fn broken_lease_augmentation_prepared_build_surfaces_lease_miss() {
     assert!(
         matches!(
             prepare_augmentation_type_decl_outcome_in(
-                &Arc::from("/ws/fixture.ts"),
+                &verter_type_expr::OwnedStr::from("/ws/fixture.ts"),
                 &state,
                 &scope,
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -1191,7 +1191,7 @@ fn broken_lease_augmentation_prepared_build_surfaces_lease_miss() {
     assert!(
         matches!(
             prepare_augmentation_type_decl_outcome_in(
-                &Arc::from("/ws/fixture.ts"),
+                &verter_type_expr::OwnedStr::from("/ws/fixture.ts"),
                 &state,
                 &scope,
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -1387,11 +1387,11 @@ export type Variant = 'solid' | 'outline'
     // Every identity minted for this file shares ONE canonical-id
     // allocation — the pool's — instead of a fresh String per identity.
     let pooled_canonical = interner.intern("/src/types.ts");
-    assert!(Arc::ptr_eq(
+    assert!(verter_type_expr::OwnedStr::ptr_eq(
         &props.root_identity.canonical_id,
         &pooled_canonical
     ));
-    assert!(Arc::ptr_eq(
+    assert!(verter_type_expr::OwnedStr::ptr_eq(
         &variant.root_identity.canonical_id,
         &pooled_canonical
     ));
@@ -1401,10 +1401,16 @@ export type Variant = 'solid' | 'outline'
         .name_resolution
         .get_key_value("Variant")
         .expect("local sibling resolves");
-    assert!(Arc::ptr_eq(&resolved.canonical_id, &pooled_canonical));
+    assert!(verter_type_expr::OwnedStr::ptr_eq(
+        &resolved.canonical_id,
+        &pooled_canonical
+    ));
     // The map key and the identity's symbol name are ONE allocation for a
     // local symbol (key == resolved symbol).
-    assert!(Arc::ptr_eq(key, &resolved.symbol_name));
+    assert!(verter_type_expr::OwnedStr::ptr_eq(
+        key,
+        &resolved.symbol_name
+    ));
 }
 
 #[test]
@@ -1436,7 +1442,7 @@ export const defaults = { label: 'ok' }
         .expect("defaults preparation should succeed")
         .expect("defaults should be present");
     assert!(
-        Arc::ptr_eq(
+        verter_type_expr::OwnedStr::ptr_eq(
             &ty.root_identity.canonical_id,
             &value.root_identity.canonical_id
         ),

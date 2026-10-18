@@ -414,7 +414,13 @@ fn active_instantiation_index_follows_its_stack() {
     use crate::semantic_query::SemanticNodeId;
 
     let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
-    let declaration = |name: &str| (Arc::<str>::from("/a.ts"), owner, Arc::<str>::from(name));
+    let declaration = |name: &str| {
+        (
+            verter_type_expr::OwnedStr::from("/a.ts"),
+            owner,
+            verter_type_expr::OwnedStr::from(name),
+        )
+    };
     let entry = |name: &str, arg: u64| ActiveInstantiation {
         identity: declaration(name),
         args: Arc::from([SemanticNodeId(arg)]),

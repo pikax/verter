@@ -1003,9 +1003,9 @@ fn decl_anchor(
     space: LocatorSymbolSpace,
 ) -> AuthoredAnchor {
     AuthoredAnchor {
-        canonical_id: canonical_id.clone(),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical_id.clone()),
         owner,
-        symbol: Arc::from(name),
+        symbol: verter_type_expr::OwnedStr::from(name),
         space,
     }
 }
@@ -2844,13 +2844,15 @@ fn class_method_flow_identity(
     }
     Some(FlowFunctionReturnIdentity {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(""),
+            canonical_id: verter_type_expr::OwnedStr::from(""),
             owner: TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(class_name),
+            symbol: verter_type_expr::OwnedStr::from(class_name),
             space: LocatorSymbolSpace::Value,
         },
         function_part: FunctionPartIdentity::Member {
-            member_path: Arc::from(vec![raw_member_ordinal].into_boxed_slice()),
+            member_path: verter_type_expr::OwnedSlice::from(
+                vec![raw_member_ordinal].into_boxed_slice(),
+            ),
         },
         overload_ordinal,
     })
@@ -2884,13 +2886,13 @@ fn mark_variable_object_flow_returns(shape: &mut ObjectExpr, name: &str) {
         };
         method.function.flow_return = Some(Box::new(FlowFunctionReturnIdentity {
             anchor: AuthoredAnchor {
-                canonical_id: Arc::from(""),
+                canonical_id: verter_type_expr::OwnedStr::from(""),
                 owner: TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from(name),
+                symbol: verter_type_expr::OwnedStr::from(name),
                 space: LocatorSymbolSpace::Value,
             },
             function_part: FunctionPartIdentity::Member {
-                member_path: Arc::from(vec![ordinal].into_boxed_slice()),
+                member_path: verter_type_expr::OwnedSlice::from(vec![ordinal].into_boxed_slice()),
             },
             overload_ordinal: 0,
         }));
@@ -3022,13 +3024,13 @@ fn collect_named_class_selecting(
                         function_expr.flow_return = static_property_key_name(&prop.key).map(|_| {
                             Box::new(FlowFunctionReturnIdentity {
                                 anchor: AuthoredAnchor {
-                                    canonical_id: Arc::from(""),
+                                    canonical_id: verter_type_expr::OwnedStr::from(""),
                                     owner: TopLevelOwnerId::ordinary_file(),
-                                    symbol: Arc::from(name.as_str()),
+                                    symbol: verter_type_expr::OwnedStr::from(name.as_str()),
                                     space: LocatorSymbolSpace::Value,
                                 },
                                 function_part: FunctionPartIdentity::Member {
-                                    member_path: Arc::from(
+                                    member_path: verter_type_expr::OwnedSlice::from(
                                         vec![raw_member_ordinal].into_boxed_slice(),
                                     ),
                                 },
@@ -3056,13 +3058,13 @@ fn collect_named_class_selecting(
                         function_expr.flow_return = static_property_key_name(&prop.key).map(|_| {
                             Box::new(FlowFunctionReturnIdentity {
                                 anchor: AuthoredAnchor {
-                                    canonical_id: Arc::from(""),
+                                    canonical_id: verter_type_expr::OwnedStr::from(""),
                                     owner: TopLevelOwnerId::ordinary_file(),
-                                    symbol: Arc::from(name.as_str()),
+                                    symbol: verter_type_expr::OwnedStr::from(name.as_str()),
                                     space: LocatorSymbolSpace::Value,
                                 },
                                 function_part: FunctionPartIdentity::Member {
-                                    member_path: Arc::from(
+                                    member_path: verter_type_expr::OwnedSlice::from(
                                         vec![raw_member_ordinal].into_boxed_slice(),
                                     ),
                                 },
@@ -4767,9 +4769,9 @@ fn lower_identifier_variable_parts(
                     Arc::make_mut(function).flow_return =
                         Some(Box::new(FlowFunctionReturnIdentity {
                             anchor: AuthoredAnchor {
-                                canonical_id: Arc::from(""),
+                                canonical_id: verter_type_expr::OwnedStr::from(""),
                                 owner: TopLevelOwnerId::ordinary_file(),
-                                symbol: Arc::from(name.as_str()),
+                                symbol: verter_type_expr::OwnedStr::from(name.as_str()),
                                 space: LocatorSymbolSpace::Value,
                             },
                             function_part: FunctionPartIdentity::Initializer,

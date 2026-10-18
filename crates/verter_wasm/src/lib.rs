@@ -1091,7 +1091,7 @@ impl WasmVerterHost {
                     std::sync::Arc::<str>::from(canonical_id_owned.as_str()),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
-                name: std::sync::Arc::<str>::from(decl_name_owned.as_str()),
+                name: verter_type_expr::OwnedStr::from(decl_name_owned.as_str()),
             });
             let record = host
                 .resolve_type_with_audit(key, &canonical_id_owned)

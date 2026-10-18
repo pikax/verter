@@ -20,7 +20,7 @@ fn state_from(source: &str) -> Arc<ShallowFileState> {
 
 fn namespace(prefix: &str, origin: LocalScopeOrigin) -> LocalScopePayload {
     LocalScopePayload::Namespace {
-        prefix: Arc::from(prefix),
+        prefix: verter_type_expr::OwnedStr::from(prefix),
         origin,
     }
 }

@@ -266,7 +266,9 @@ trait ConditionalBranches<C: crate::resolver_core::ResolverCapabilities> {
         dispatch: &ProjectSemanticDispatch<'_, C>,
     ) -> Option<(SemanticNodeId, SemanticNodeId)>;
     /// The pending substitution the branches carry.
-    fn pending(&self) -> Option<Arc<ConditionalPendingSubstitution>>;
+    fn pending(
+        &self,
+    ) -> Option<verter_session_query::retention::owned::Owned<ConditionalPendingSubstitution>>;
     /// One member of a distributed check, decided without distribution.
     fn member(
         &mut self,
@@ -289,7 +291,7 @@ trait ConditionalBranches<C: crate::resolver_core::ResolverCapabilities> {
 struct MaterializedBranches {
     true_branch: SemanticNodeId,
     false_branch: SemanticNodeId,
-    pending: Option<Arc<ConditionalPendingSubstitution>>,
+    pending: Option<verter_session_query::retention::owned::Owned<ConditionalPendingSubstitution>>,
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> ConditionalBranches<C>
@@ -318,7 +320,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ConditionalBranches<C>
         Some((self.true_branch, self.false_branch))
     }
 
-    fn pending(&self) -> Option<Arc<ConditionalPendingSubstitution>> {
+    fn pending(
+        &self,
+    ) -> Option<verter_session_query::retention::owned::Owned<ConditionalPendingSubstitution>> {
         self.pending.clone()
     }
 
@@ -335,9 +339,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ConditionalBranches<C>
             false_branch: self.false_branch,
             distributive: false,
             pending: self.pending.as_ref().map(|pending| {
-                pending
-                    .distributed_over(member)
-                    .map_or_else(|| Arc::clone(pending), Arc::new)
+                pending.distributed_over(member).map_or_else(
+                    || pending.clone(),
+                    verter_session_query::retention::owned::Owned::new,
+                )
             }),
         })
     }
@@ -398,7 +403,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ConditionalBranches<C> for L
         Some((true_branch, (self.lower_branch)(false)))
     }
 
-    fn pending(&self) -> Option<Arc<ConditionalPendingSubstitution>> {
+    fn pending(
+        &self,
+    ) -> Option<verter_session_query::retention::owned::Owned<ConditionalPendingSubstitution>> {
         None
     }
 
@@ -465,7 +472,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         true_branch: SemanticNodeId,
         false_branch: SemanticNodeId,
         distributive: bool,
-        pending: Option<Arc<ConditionalPendingSubstitution>>,
+        pending: Option<
+            verter_session_query::retention::owned::Owned<ConditionalPendingSubstitution>,
+        >,
     ) -> super::walk::QueryBuildOutput {
         verter_audit::attribute_scope!(ConditionalReduce);
         self.decide_conditional(
@@ -555,8 +564,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 && !self.is_conditional_checker_recovery(operands.absorbed_check)
                 && !self.is_conditional_checker_recovery(operands.extends)
         };
-        if incomplete_without_recovery && operand_read.value().0 == authored_check {
+        if incomplete_without_recovery
+            && operand_read.value().0 == authored_check
+            && !self.decision_waits()
+        {
             if let Some(arm) = self.true_through_written_arm(authored_check, extends) {
+                // An arm relation that waits on a read proves nothing yet:
+                // the frame runs the decision again once it is delivered.
+                if self.decision_waits() {
+                    let _ = arm.discard();
+                    let _ = operand_read.discard();
+                    return self.waiting_decision_output();
+                }
                 // The normalized operands are unused: the arm's own complete
                 // relation proves the true branch. Their reuse evidence
                 // still belongs to this build.
@@ -587,6 +606,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 ));
             }
         };
+        // A decision whose frame waits on an operand's read decides nothing
+        // from the gap it read: its frame runs it again once delivered.
+        if self.decision_waits() {
+            return self.waiting_decision_output();
+        }
         if incomplete_without_recovery {
             // A relation can reject an early constituent without demanding
             // a later one. That short circuit cannot repair an operand whose
@@ -625,7 +649,27 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
         }
         let check = operands.check;
+        // A decision running as its frame demands the operands its relation
+        // relates first, as the checker instantiates a conditional's check
+        // and extends types before relating them: the relation then reads
+        // them answered instead of evaluating them in place. What the
+        // demand observed is the relation's to observe, so it is dropped.
+        if self.deciding_on_the_runtime() {
+            let demanded = self.observe_read(|| {
+                for operand in [check, extends] {
+                    let _ = self.unwrap_identity_carrier_for_relation(operand);
+                }
+            });
+            let _ = demanded.discard();
+            if self.decision_waits() {
+                return self.waiting_decision_output();
+            }
+        }
         let observation = self.observe_read(|| self.conditional_branch_selection(check, extends));
+        if self.decision_waits() {
+            let _ = observation.discard();
+            return self.waiting_decision_output();
+        }
         let relation_complete = observation.observations_are_complete();
         let false_recovery = observation.value().0 == ConditionalBranchSelection::False
             && observation.operation_refusals().iter().any(|refusal| {
@@ -822,6 +866,20 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             )
     }
 
+    /// What a decision that waits on a read returns: a typed gap its frame
+    /// discards, never a branch.
+    fn waiting_decision_output(&self) -> super::walk::QueryBuildOutput {
+        let reasons = crate::semantic_query::PartialReasonSet::PROPAGATED;
+        let mut output = super::walk::QueryBuildOutput::from((
+            QueryResult::Error(QueryError::IncompleteSemanticOperand { reasons }),
+            self.project_generation_signature(),
+        ));
+        output.cache_suppress = true;
+        output.mark_partial();
+        output.add_partial_reasons(reasons);
+        output
+    }
+
     /// A conditional's operands as the checker constructs them before it
     /// relates them: a union or intersection operand is the type its
     /// written names reduce to (`1 & ReturnType<typeof anyf>` is `any`), an
@@ -930,6 +988,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     recovered = true;
                     value
                 }
+                // A decision whose run waits on a read drops that run:
+                // reading on, it reaches the reads the remaining positions
+                // make in this run rather than one position per run.
+                _ if self.decision_waits() => element.value,
                 _ => return None,
             };
             let mut position = element.copy();
@@ -960,7 +1022,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         extends: SemanticNodeId,
         (true_branch, false_branch): (SemanticNodeId, SemanticNodeId),
         distributive: bool,
-        pending: Option<Arc<ConditionalPendingSubstitution>>,
+        pending: Option<
+            verter_session_query::retention::owned::Owned<ConditionalPendingSubstitution>,
+        >,
         selection: ConditionalBranchSelection,
     ) -> super::walk::QueryBuildOutput {
         let suspended_roots = self.observed_self_roots_from_nodes(
@@ -1093,7 +1157,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             Some(SemanticNodeData::TemplateLiteral {
                 quasis,
                 expressions,
-            }) => (Arc::clone(quasis), Arc::clone(expressions.as_arc())),
+            }) => (quasis.clone(), Arc::clone(expressions.as_arc())),
             _ => return None,
         };
         let read = self.execute_read(SemanticQueryKey::TemplateLiteralReduce {
@@ -1258,7 +1322,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     result,
                     OriginEdgeKind::InferBind,
                     Arc::from([check, extends]),
-                    OriginMeta::SubstitutedParam(Arc::clone(&binding.name)),
+                    OriginMeta::SubstitutedParam(binding.name.clone()),
                     fence.clone(),
                 );
             }
@@ -1431,10 +1495,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 name,
                 whole_hash,
             })) => crate::semantic_query::DeclIdentity {
-                canonical_id: Arc::clone(canonical_id),
+                canonical_id: canonical_id.clone(),
                 owner: *owner,
                 whole_hash: *whole_hash,
-                decl_name: Arc::clone(name),
+                decl_name: name.clone(),
             },
             _ => return node,
         };
@@ -1892,9 +1956,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     ) -> Option<SemanticNodeId> {
         let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
             self.type_slot_for(
-                Arc::clone(&base.canonical_id),
+                base.canonical_id.clone(),
                 base.owner,
-                Arc::clone(&base.decl_name),
+                base.decl_name.clone(),
             ),
             Arc::clone(args),
             self.instantiate_context_for(

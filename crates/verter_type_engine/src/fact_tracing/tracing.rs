@@ -233,7 +233,14 @@ pub(crate) fn install_recorder(recorder: &FactReadRecorder) -> RecorderScope {
 }
 
 fn active_recorders() -> SmallVec<[*const FactReadRecorder; 4]> {
-    ACTIVE_RECORDERS.with(|slot| slot.borrow().clone())
+    ACTIVE_RECORDERS.with(|slot| {
+        let recorders = slot.borrow();
+        if recorders.is_empty() {
+            SmallVec::new()
+        } else {
+            recorders.clone()
+        }
+    })
 }
 
 /// Push `cell` onto the tracer stack.

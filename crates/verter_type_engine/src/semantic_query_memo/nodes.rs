@@ -108,15 +108,17 @@ impl SemanticGraphStore {
     /// scope of this graph — the producer lane a semantic builder runs in.
     /// The scope is the capability: outside one the ordinal authorizes
     /// nothing and the read is `None`. A live node is returned under its own
-    /// root, so the lease outlives the scope. A slot a legacy close already
-    /// released reads as the unresolved placeholder with no root, exactly as
-    /// the production close lifecycle reports it, and none of its children
-    /// can be borrowed through it.
+    /// root, so the lease outlives the scope. A slot whose last owner already
+    /// dropped reads as the unresolved placeholder with no root, and none of
+    /// its children can be borrowed through it.
     pub fn read_in_scope(&self, id: SemanticNodeId) -> Option<node_data_lease::NodeDataLease> {
         if !node_roots::NodeRootScope::holds(&self.arena.core) {
             return None;
         }
-        match node_roots::NodeRootSet::acquire(Arc::clone(&self.arena.core), vec![id]) {
+        match node_roots::NodeRootSet::acquire(
+            Arc::clone(&self.arena.core),
+            smallvec::smallvec![id],
+        ) {
             Ok(roots) => Some(node_data_lease::NodeDataLease {
                 data: self.arena.get(id)?,
                 root: node_roots::NodeRoot::from_roots(id, roots),
@@ -131,7 +133,7 @@ impl SemanticGraphStore {
 
     /// Root a live construction ordinal for delivery beyond the construction
     /// scope this thread holds of this graph. Without such a scope the
-    /// ordinal is foreign; a slot a legacy close already released is stale.
+    /// ordinal is foreign; a slot whose last owner already dropped is stale.
     /// Neither is ever delivered as an absent node.
     pub fn root_in_scope(&self, id: SemanticNodeId) -> Result<node_roots::NodeRoot, QueryError> {
         if !node_roots::NodeRootScope::holds(&self.arena.core) {
@@ -279,14 +281,17 @@ impl SemanticGraphStore {
     /// owner minted. Test builds expose the ordinal read as a fixture seam.
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
-    pub fn node_data(&self, id: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
+    pub fn node_data(&self, id: SemanticNodeId) -> Option<crate::semantic_query_memo::NodeData> {
         self.arena.get(id)
     }
 
     /// Construction-ordinal read; see the test-build variant.
     #[cfg(not(any(test, feature = "test-support")))]
     #[must_use]
-    pub(crate) fn node_data(&self, id: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
+    pub(crate) fn node_data(
+        &self,
+        id: SemanticNodeId,
+    ) -> Option<crate::semantic_query_memo::NodeData> {
         self.arena.get(id)
     }
 }

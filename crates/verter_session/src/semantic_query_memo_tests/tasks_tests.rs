@@ -20,7 +20,7 @@ fn ctx_host() -> VerterHost {
 
 fn scope(canonical: &str) -> ScopeId {
     ScopeId {
-        canonical_id: Arc::from(canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical),
         owner: TopLevelOwnerId::ordinary_file(),
         local_scope: None,
         binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
@@ -32,7 +32,7 @@ fn scope(canonical: &str) -> ScopeId {
 fn key(name: &str) -> SemanticQueryKey {
     SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/wait-cycle.ts"),
-        name: Arc::from(name),
+        name: verter_type_expr::OwnedStr::from(name),
     })
 }
 

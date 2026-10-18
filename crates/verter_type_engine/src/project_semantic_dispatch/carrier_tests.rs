@@ -6,10 +6,10 @@ fn carrier_resolver_context_bundles_resolution_inputs() {
     // and assert every accessor returns the wired value.
     let mut env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
     env.insert("T".to_string(), SemanticNodeId(11));
-    let mut name_resolution: FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> =
+    let mut name_resolution: FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity> =
         FxHashMap::default();
     name_resolution.insert(
-        Arc::from("Foo"),
+        verter_type_expr::OwnedStr::from("Foo"),
         ResolvedRootIdentity::new("/foo.ts", "Foo"),
     );
     let scope = NodeScopeId::Global;

@@ -90,12 +90,12 @@ pub fn synthesise_svelte_default_value_symbol(
             false,
             FactOrLocator::Locator(TypeBodySlot {
                 anchor: AuthoredAnchor {
-                    canonical_id: Arc::from(""),
+                    canonical_id: verter_type_expr::OwnedStr::from(""),
                     owner: export.binding_key.owner,
-                    symbol: Arc::clone(&export.binding_key.name),
+                    symbol: verter_type_expr::OwnedStr::from(export.binding_key.name.clone()),
                     space: LocatorSymbolSpace::Value,
                 },
-                path: Arc::from([]),
+                path: verter_type_expr::OwnedSlice::from([]),
             }),
         ));
     }
@@ -191,9 +191,9 @@ mod tests {
         AuthoredTypePayloadRef {
             locator: AuthoredBodyLocator::MacroPayload(MacroPayloadLocator {
                 anchor: AuthoredAnchor {
-                    canonical_id: Arc::from(""),
+                    canonical_id: verter_type_expr::OwnedStr::from(""),
                     owner: TopLevelOwnerId::instance(0),
-                    symbol: Arc::from("default"),
+                    symbol: verter_type_expr::OwnedStr::from("default"),
                     space: LocatorSymbolSpace::Value,
                 },
                 macro_index,

@@ -252,9 +252,9 @@ mod tests {
         let diag = ShallowDiagnostic::InstantiationError {
             decl: dummy_decl(),
             error: verter_type_engine::project_semantic_dispatch::walk::DiagnosticError::for_tests(
-                verter_type_engine::semantic_query::QueryError::Other(std::sync::Arc::from(
-                    "synthetic",
-                )),
+                verter_type_engine::semantic_query::QueryError::Other(
+                    verter_type_expr::OwnedStr::from("synthetic"),
+                ),
             ),
         };
         let proj = shallow_to_expansion(&diag);

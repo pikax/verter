@@ -829,7 +829,7 @@ mod tests {
 
         let dummy_id: Arc<str> = Arc::from("/x");
         let scope = ScopeId {
-            canonical_id: Arc::clone(&dummy_id),
+            canonical_id: verter_type_expr::OwnedStr::from(dummy_id.clone()),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
@@ -845,7 +845,7 @@ mod tests {
 
         let resolve_decl = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: scope.clone(),
-            name: Arc::from("X"),
+            name: verter_type_expr::OwnedStr::from("X"),
         });
         let instantiate =
             SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
@@ -861,12 +861,12 @@ mod tests {
             ));
         let project_member = SemanticQueryKey::ProjectMember {
             base: dummy_node,
-            member: Arc::from("p"),
+            member: verter_type_expr::OwnedStr::from("p"),
             mode: ProjectionMode::Navigate,
         };
         let indexed_access = SemanticQueryKey::IndexedAccess {
             base: dummy_node,
-            index: IndexKey::String(Arc::from("k")),
+            index: IndexKey::String(verter_type_expr::OwnedStr::from("k")),
             mode: ProjectionMode::Navigate,
         };
         let key_of = SemanticQueryKey::KeyOf {
@@ -908,7 +908,7 @@ mod tests {
         };
         let project_path = SemanticQueryKey::ProjectPath {
             base: dummy_node,
-            path: Arc::from(Vec::new().into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::default(),
             context: crate::semantic_query::ProjectionReductionContext::published(
                 ProjectionMode::Navigate,
             ),
@@ -984,7 +984,7 @@ mod tests {
             },
         };
         let template_literal_reduce = SemanticQueryKey::TemplateLiteralReduce {
-            pattern: Arc::from(Vec::new().into_boxed_slice()),
+            pattern: verter_type_expr::OwnedSlice::default(),
             args: Arc::from(Vec::new().into_boxed_slice()),
             context: crate::semantic_query::TemplateLiteralReduceContext {
                 resolve_env_hash: Default::default(),
@@ -995,7 +995,7 @@ mod tests {
         };
         let flow_narrowing_at = SemanticQueryKey::FlowNarrowingAt {
             point: crate::semantic_query::ProgramPointId {
-                canonical_id: Arc::from("f.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("f.ts"),
                 offset: 0,
             },
             flow: crate::semantic_query::FlowNarrowingKey::empty(),
@@ -1010,7 +1010,7 @@ mod tests {
         };
         let contextual_type_at = SemanticQueryKey::ContextualTypeAt {
             point: crate::semantic_query::ProgramPointId {
-                canonical_id: Arc::from("f.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("f.ts"),
                 offset: 0,
             },
             contextual: crate::semantic_query::ContextualTypingKey::empty(),

@@ -1337,12 +1337,12 @@ impl VerterHost {
                                     AuthoredBodyLocator::DeclBody(
                                         verter_type_expr::locators::TypeBodySlot {
                                             anchor: verter_type_expr::locators::AuthoredAnchor {
-                                                canonical_id,
+                                                canonical_id: canonical_id.into(),
                                                 owner,
-                                                symbol,
+                                                symbol: symbol.into(),
                                                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                                             },
-                                            path: std::sync::Arc::from(
+                                            path: verter_type_expr::OwnedSlice::from(
                                                 Vec::new().into_boxed_slice(),
                                             ),
                                         },
@@ -1730,15 +1730,15 @@ impl VerterHost {
                                             // `ProjectPath` demand needs (member
                                             // names only — a closed demand input,
                                             // not a node).
-                                            let dispatch_path: std::sync::Arc<[SemanticPathSegment]> =
-                                                std::sync::Arc::from(
+                                            let dispatch_path: verter_type_expr::OwnedSlice<SemanticPathSegment> =
+                                                verter_type_expr::OwnedSlice::from(
                                                     ctx.output_path
                                                         .iter()
                                                         .map(|seg| match seg {
                                                             MacroPathSegment::Member(name) => {
                                                                 SemanticPathSegment::Member(
                                                                     verter_type_expr::PropertyKey::String(
-                                                                        std::sync::Arc::clone(name),
+                                                                        verter_type_expr::OwnedStr::from(std::sync::Arc::clone(name)),
                                                                     ),
                                                                 )
                                                             }

@@ -28,9 +28,9 @@ const CANONICAL: &str = "/ws/mixed-return-equation.ts";
 fn flow_identity(name: &str) -> FlowFunctionReturnIdentity {
     FlowFunctionReturnIdentity {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(CANONICAL),
+            canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(name),
+            symbol: verter_type_expr::OwnedStr::from(name),
             space: LocatorSymbolSpace::Value,
         },
         function_part: FunctionPartIdentity::DeclarationBody,
@@ -45,7 +45,7 @@ fn call_key(
 ) -> ResolveCallKey {
     ResolveCallKey {
         point: ProgramPointId {
-            canonical_id: Arc::from(CANONICAL),
+            canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
             offset,
         },
         callee,

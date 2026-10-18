@@ -53,10 +53,19 @@ use crate::semantic_query::{
 /// owned bytes inside them).
 /// The heap a clone of `key` allocates afresh: its boxes and their
 /// contents, every `Arc` being shared with `key`.
-pub(super) fn family_key_clone_heap_bytes(key: &FamilyKey) -> usize {
+///
+/// A clone shares the key's owned names too: they are handed back with the
+/// figure, for the clone's holder to hold.
+pub(super) fn family_key_clone_heap_bytes(
+    key: &FamilyKey,
+) -> verter_session_query::retention::Footprint {
     let mut aliases = AliasSet::new();
     let _ = family_key_heap_bytes(key, &mut aliases);
-    family_key_heap_bytes(key, &mut aliases)
+    let bytes = family_key_heap_bytes(key, &mut aliases);
+    verter_session_query::retention::Footprint {
+        bytes,
+        handles: aliases.take_handles(),
+    }
 }
 
 pub(super) fn family_key_heap_bytes(key: &FamilyKey, aliases: &mut AliasSet) -> usize {
@@ -82,7 +91,7 @@ pub(super) fn family_key_heap_bytes(key: &FamilyKey, aliases: &mut AliasSet) -> 
         FamilyKey::InstantiateAuthored { identity } => {
             box_block_bytes(identity) + identity.key_heap_bytes(aliases)
         }
-        FamilyKey::ProjectMember { base, member } => inline(base) + arc_str_bytes(member, aliases),
+        FamilyKey::ProjectMember { base, member } => inline(base) + text_bytes(member, aliases),
         FamilyKey::IndexedAccess { base, index } => inline(base) + index.owned_heap_bytes(aliases),
         FamilyKey::KeyOf {
             base,
@@ -128,7 +137,7 @@ pub(super) fn family_key_heap_bytes(key: &FamilyKey, aliases: &mut AliasSet) -> 
         } => {
             value_root_heap_bytes(value_root, aliases)
                 + box_block_bytes(path)
-                + arc_str_list_bytes(path, aliases)
+                + text_bytes(path, aliases)
                 + inline(resolve_env_hash)
                 + inline(provenance)
                 + inline(merge_role)
@@ -240,7 +249,7 @@ pub(super) fn family_key_heap_bytes(key: &FamilyKey, aliases: &mut AliasSet) -> 
             lib_env_hash,
             project_identity,
         } => {
-            arc_str_list_bytes(pattern, aliases)
+            text_bytes(pattern, aliases)
                 + copy_slice_bytes(args, aliases)
                 + inline(resolve_env_hash)
                 + inline(type_env_hash)
@@ -331,8 +340,69 @@ pub(super) const fn inline<T: Copy>(_: &T) -> usize {
 }
 
 /// An `Arc` slice of heap-free elements: its block alone.
-pub(super) fn copy_slice_bytes<T: Copy>(slice: &Arc<[T]>, aliases: &mut AliasSet) -> usize {
-    arc_slice_block_bytes(slice, aliases).unwrap_or(0)
+pub(super) fn copy_slice_bytes<S: KeySlice + ?Sized>(slice: &S, aliases: &mut AliasSet) -> usize {
+    slice.key_slice_bytes(aliases)
+}
+
+/// A key's slice of inline elements: a raw shared slice the key counts, or
+/// an owned slice charged by its own cell.
+pub(super) trait KeySlice {
+    fn key_slice_bytes(&self, aliases: &mut AliasSet) -> usize;
+}
+
+impl<T: Copy> KeySlice for Arc<[T]> {
+    fn key_slice_bytes(&self, aliases: &mut AliasSet) -> usize {
+        arc_slice_block_bytes(self, aliases).unwrap_or(0)
+    }
+}
+
+impl<T: Copy + verter_session_query::retention::owned::Measured> KeySlice
+    for verter_type_expr::OwnedSlice<T>
+{
+    fn key_slice_bytes(&self, aliases: &mut AliasSet) -> usize {
+        self.offer(aliases)
+    }
+}
+
+/// A key's text: a raw shared string the key counts, or an owned one
+/// charged by its own cell.
+pub(super) trait KeyText {
+    fn key_text_bytes(&self, aliases: &mut AliasSet) -> usize;
+}
+
+impl KeyText for Arc<str> {
+    fn key_text_bytes(&self, aliases: &mut AliasSet) -> usize {
+        arc_str_bytes(self, aliases)
+    }
+}
+
+impl KeyText for verter_type_expr::OwnedStr {
+    fn key_text_bytes(&self, aliases: &mut AliasSet) -> usize {
+        self.offer(aliases)
+    }
+}
+
+impl KeyText for Arc<[Arc<str>]> {
+    fn key_text_bytes(&self, aliases: &mut AliasSet) -> usize {
+        arc_str_list_bytes(self, aliases)
+    }
+}
+
+impl KeyText for verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr> {
+    fn key_text_bytes(&self, aliases: &mut AliasSet) -> usize {
+        self.offer(aliases)
+    }
+}
+
+impl<T: KeyText + ?Sized> KeyText for Box<T> {
+    fn key_text_bytes(&self, aliases: &mut AliasSet) -> usize {
+        (**self).key_text_bytes(aliases)
+    }
+}
+
+/// The heap a key's text keeps, by its kind ([`KeyText`]).
+pub(super) fn text_bytes<T: KeyText + ?Sized>(text: &T, aliases: &mut AliasSet) -> usize {
+    text.key_text_bytes(aliases)
 }
 
 /// The block a `Box` holds its pointee in. Never aliased: a clone of the
@@ -342,14 +412,6 @@ pub(super) fn copy_slice_bytes<T: Copy>(slice: &Arc<[T]>, aliases: &mut AliasSet
 #[allow(clippy::borrowed_box)]
 fn box_block_bytes<T>(_: &Box<T>) -> usize {
     box_bytes::<T>()
-}
-
-/// An `Arc<T>`'s block, or `None` when this charge already counted it.
-fn sized_arc_block_bytes<T>(value: &Arc<T>, aliases: &mut AliasSet) -> Option<usize> {
-    use verter_session_query::retention::allocation::arc_block_bytes;
-    aliases
-        .first(value)
-        .then(|| arc_block_bytes(std::mem::size_of::<T>()))
 }
 
 /// A declaration slot's file and symbol names.
@@ -364,8 +426,8 @@ pub(super) fn decl_slot_heap_bytes(
         symbol_space,
         env,
     } = slot;
-    arc_str_bytes(defining_canonical, aliases)
-        + arc_str_bytes(merged_symbol_name, aliases)
+    text_bytes(defining_canonical, aliases)
+        + text_bytes(merged_symbol_name, aliases)
         + inline(owner)
         + inline(symbol_space)
         + inline(env)
@@ -378,7 +440,7 @@ fn scope_heap_bytes(scope: &ScopeId, aliases: &mut AliasSet) -> usize {
         local_scope,
         binder_scope_id,
     } = scope;
-    arc_str_bytes(canonical_id, aliases)
+    text_bytes(canonical_id, aliases)
         + inline(owner)
         + inline(local_scope)
         + inline(binder_scope_id)
@@ -386,7 +448,7 @@ fn scope_heap_bytes(scope: &ScopeId, aliases: &mut AliasSet) -> usize {
 
 fn resolve_decl_heap_bytes(key: &ResolveDeclKey, aliases: &mut AliasSet) -> usize {
     let ResolveDeclKey { scope, name } = key;
-    scope_heap_bytes(scope, aliases) + arc_str_bytes(name, aliases)
+    scope_heap_bytes(scope, aliases) + text_bytes(name, aliases)
 }
 
 fn value_root_heap_bytes(slot: &ValueRootSlotIdentity, aliases: &mut AliasSet) -> usize {
@@ -397,7 +459,7 @@ fn value_root_heap_bytes(slot: &ValueRootSlotIdentity, aliases: &mut AliasSet) -
         lib_env_hash,
     } = slot;
     scope_heap_bytes(scope, aliases)
-        + arc_str_bytes(name, aliases)
+        + text_bytes(name, aliases)
         + inline(project_identity)
         + inline(type_env_hash)
         + inline(lib_env_hash)
@@ -408,7 +470,7 @@ fn program_point_heap_bytes(point: &ProgramPointId, aliases: &mut AliasSet) -> u
         canonical_id,
         offset,
     } = point;
-    arc_str_bytes(canonical_id, aliases) + inline(offset)
+    text_bytes(canonical_id, aliases) + inline(offset)
 }
 
 /// A context identity is a handle to a self-charged interned record: it
@@ -446,9 +508,7 @@ fn authored_locator_heap_bytes(locator: &AuthoredBodyLocator, aliases: &mut Alia
         }) => {
             let scope = match scope {
                 AuthoredAugmentationScope::Global => 0,
-                AuthoredAugmentationScope::Module { specifier } => {
-                    arc_str_bytes(specifier, aliases)
-                }
+                AuthoredAugmentationScope::Module { specifier } => text_bytes(specifier, aliases),
             };
             anchor_heap_bytes(anchor, aliases) + scope + copy_slice_bytes(path, aliases)
         }
@@ -470,10 +530,7 @@ fn anchor_heap_bytes(anchor: &AuthoredAnchor, aliases: &mut AliasSet) -> usize {
         symbol,
         space,
     } = anchor;
-    arc_str_bytes(canonical_id, aliases)
-        + arc_str_bytes(symbol, aliases)
-        + inline(owner)
-        + inline(space)
+    text_bytes(canonical_id, aliases) + text_bytes(symbol, aliases) + inline(owner) + inline(space)
 }
 
 /// A sealed authored operand: its locator. The operand's lexical scope is
@@ -605,12 +662,17 @@ fn mapper_heap_bytes(mapper: &crate::semantic_query::MapperKey) -> usize {
 
 /// A conditional's shared pending-substitution record and its frames.
 fn pending_heap_bytes(
-    pending: &Option<Arc<crate::semantic_query::ConditionalPendingSubstitution>>,
+    pending: &Option<
+        verter_session_query::retention::owned::Owned<
+            crate::semantic_query::ConditionalPendingSubstitution,
+        >,
+    >,
     aliases: &mut AliasSet,
 ) -> usize {
     pending.as_ref().map_or(0, |pending| {
-        sized_arc_block_bytes(pending, aliases)
-            .map_or(0, |block| block + pending.key_heap_bytes(aliases))
+        // An owned allocation the key shares with the payload: charged by
+        // its own cell.
+        pending.offer(aliases)
     })
 }
 
@@ -622,7 +684,7 @@ fn broad_subject_heap_bytes(
     use crate::locator_identity::BroadRuntimeSubjectRoute;
     let route = match subject.route() {
         BroadRuntimeSubjectRoute::Payload => 0,
-        BroadRuntimeSubjectRoute::Member(name) => arc_str_bytes(name, aliases),
+        BroadRuntimeSubjectRoute::Member(name) => text_bytes(name, aliases),
     };
     decl_slot_heap_bytes(subject.owner(), aliases) + inline(&subject.macro_index()) + route
 }
@@ -630,7 +692,7 @@ fn broad_subject_heap_bytes(
 fn apparent_scope_heap_bytes(scope: &ApparentDemandScope, aliases: &mut AliasSet) -> usize {
     match scope {
         ApparentDemandScope::Anchored => 0,
-        ApparentDemandScope::Rootless { canonical } => arc_str_bytes(canonical, aliases),
+        ApparentDemandScope::Rootless { canonical } => text_bytes(canonical, aliases),
     }
 }
 
@@ -873,7 +935,7 @@ pub(super) fn query_key_heap_bytes(key: &SemanticQueryKey, aliases: &mut AliasSe
                 + inline(&key.context())
         }
         SemanticQueryKey::ProjectMember { base, member, mode } => {
-            inline(base) + arc_str_bytes(member, aliases) + inline(mode)
+            inline(base) + text_bytes(member, aliases) + inline(mode)
         }
         SemanticQueryKey::IndexedAccess { base, index, mode } => {
             inline(base) + index.owned_heap_bytes(aliases) + inline(mode)
@@ -904,9 +966,7 @@ pub(super) fn query_key_heap_bytes(key: &SemanticQueryKey, aliases: &mut AliasSe
             path,
             context,
         } => {
-            value_root_heap_bytes(value_root, aliases)
-                + arc_str_list_bytes(path, aliases)
-                + inline(context)
+            value_root_heap_bytes(value_root, aliases) + text_bytes(path, aliases) + inline(context)
         }
         SemanticQueryKey::ReduceUnion {
             members,
@@ -1010,9 +1070,7 @@ pub(super) fn query_key_heap_bytes(key: &SemanticQueryKey, aliases: &mut AliasSe
             pattern,
             args,
             context,
-        } => {
-            arc_str_list_bytes(pattern, aliases) + copy_slice_bytes(args, aliases) + inline(context)
-        }
+        } => text_bytes(pattern, aliases) + copy_slice_bytes(args, aliases) + inline(context),
         SemanticQueryKey::FlowNarrowingAt {
             point,
             flow,

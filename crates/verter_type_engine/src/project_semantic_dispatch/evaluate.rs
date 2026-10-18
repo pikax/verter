@@ -401,7 +401,7 @@ enum DeferredEvaluationStage {
         object: SemanticNodeId,
     },
     AwaitValueChildren {
-        data: Arc<SemanticNodeData>,
+        data: crate::semantic_query_memo::NodeData,
         children: Vec<SemanticNodeId>,
         values: Vec<SemanticNodeId>,
     },
@@ -413,7 +413,7 @@ struct DeferredEvaluationFrame {
     context: ProjectionReductionContext,
     demand: DeferredEvaluationDemand,
     memo_checked: bool,
-    visited: rustc_hash::FxHashSet<SemanticNodeId>,
+    visited: VisitedNodes,
     completeness: ResultCompleteness,
     availability: crate::semantic_query::FactStatus,
     cache_suppress: bool,
@@ -433,7 +433,7 @@ impl DeferredEvaluationFrame {
         budget_epoch: u64,
         demand: DeferredEvaluationDemand,
     ) -> Self {
-        let mut visited = rustc_hash::FxHashSet::default();
+        let mut visited = VisitedNodes::default();
         visited.insert(node);
         Self {
             entry_node: node,
@@ -475,6 +475,37 @@ impl DeferredEvaluationFrame {
     }
 }
 
+/// The nodes one evaluation frame has advanced through. A frame advances
+/// a few steps, so the set is a short list until it grows wide enough to
+/// need a table.
+#[derive(Default)]
+struct VisitedNodes {
+    listed: smallvec::SmallVec<[SemanticNodeId; 8]>,
+    wide: Option<rustc_hash::FxHashSet<SemanticNodeId>>,
+}
+
+impl VisitedNodes {
+    /// Up to this many nodes, membership is a linear scan.
+    const LINEAR_SCAN_MAX: usize = 16;
+
+    /// Add `node`; `false` when it was already visited.
+    fn insert(&mut self, node: SemanticNodeId) -> bool {
+        if let Some(wide) = &mut self.wide {
+            return wide.insert(node);
+        }
+        for listed in self.listed.iter() {
+            if listed.0 == node.0 {
+                return false;
+            }
+        }
+        self.listed.push(node);
+        if self.listed.len() > Self::LINEAR_SCAN_MAX {
+            self.wide = Some(self.listed.drain(..).collect());
+        }
+        true
+    }
+}
+
 enum DeferredEvaluationAction {
     Continue,
     Push {
@@ -487,7 +518,7 @@ enum DeferredEvaluationAction {
 
 fn clone_index_key(index: &IndexKey) -> IndexKey {
     match index {
-        IndexKey::String(text) => IndexKey::String(Arc::clone(text)),
+        IndexKey::String(text) => IndexKey::String(text.clone()),
         IndexKey::Number(number) => IndexKey::Number(*number),
         IndexKey::UniqueSymbol(identity) => IndexKey::UniqueSymbol(identity.clone()),
         IndexKey::Computed(node) => IndexKey::Computed(*node),
@@ -816,7 +847,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .clone(),
             ),
             Some(SemanticNodeData::Literal(LiteralValue::String(text))) => {
-                IndexKey::String(Arc::from(text.as_str()))
+                IndexKey::String(verter_type_expr::OwnedStr::from(text.as_str()))
             }
             Some(SemanticNodeData::Literal(LiteralValue::Number(number))) => {
                 // Bounded integer-convention fold: `IndexKey::Number`
@@ -1347,9 +1378,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         let read = self.execute_read(SemanticQueryKey::Instantiate(
                             crate::semantic_query::InstantiateKey::new(
                                 self.type_slot_for(
-                                    Arc::clone(&identity.canonical_id),
+                                    identity.canonical_id.clone(),
                                     identity.owner,
-                                    Arc::clone(&identity.decl_name),
+                                    identity.decl_name.clone(),
                                 ),
                                 Arc::from(args.to_vec().into_boxed_slice()),
                                 self.instantiate_context_for(
@@ -1419,14 +1450,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let probe = self.observe_read(|| {
                         self.execute_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                             scope: ScopeId {
-                                canonical_id: Arc::clone(&identity.canonical_id),
+                                canonical_id: identity.canonical_id.clone(),
                                 owner: identity.owner,
                                 local_scope: None,
                                 binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
                                     identity.owner,
                                 ),
                             },
-                            name: Arc::clone(&identity.decl_name),
+                            name: identity.decl_name.clone(),
                         }))
                     });
                     // A negative lookup does not replace this authored carrier.
@@ -1474,11 +1505,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // stable stop above.
                 SemanticNodeData::InstantiationRef { base, args } => {
                     let slot = self.type_slot_for(
-                        Arc::clone(&base.canonical_id),
+                        base.canonical_id.clone(),
                         base.owner,
-                        Arc::clone(&base.decl_name),
+                        base.decl_name.clone(),
                     );
-                    let owner_canonical = Arc::clone(&base.canonical_id);
+                    let owner_canonical = base.canonical_id.clone();
                     let arguments = self.evaluate_carrier_arguments(base, args, context);
                     completeness = completeness.merge(arguments.completeness);
                     availability = availability.join(arguments.availability);
@@ -2008,12 +2039,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         match self.lower_locator(AuthoredBodyLocator::DeclBody(TypeBodySlot {
             anchor: AuthoredAnchor {
-                canonical_id: Arc::clone(&identity.canonical_id),
+                canonical_id: identity.canonical_id.clone(),
                 owner: identity.owner,
-                symbol: Arc::clone(&identity.decl_name),
+                symbol: identity.decl_name.clone(),
                 space: LocatorSymbolSpace::Type,
             },
-            path: Arc::from(Vec::new().into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::default(),
         })) {
             QueryResult::Value(body) => Some(body),
             QueryResult::Recursive(_) | QueryResult::Error(_) => None,
@@ -2210,15 +2241,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // This memo has no single file owner. Every consumed
                 // declaration and augmentation contributor is a strict root,
                 // including whole-file facts retained on evidence pages.
-                roots.extend(signature_entries(&facts).filter_map(|fact| match fact {
-                    FactVersionRef::FileWholeHash { canonical_id, hash } => {
-                        Some((Arc::from(canonical_id.as_str()), *hash))
-                    }
-                    _ => None,
-                }));
-                self.ctx
-                    .complete_graph_signature(&roots, facts.to_vec())
-                    .ok()
+                crate::fact_signature_helpers::shared_completed_carrier_rooting_traced_files(
+                    &roots, &facts,
+                )
+                .map(Ok)
+                .unwrap_or_else(|| {
+                    roots.extend(signature_entries(&facts).filter_map(|fact| match fact {
+                        FactVersionRef::FileWholeHash { canonical_id, hash } => Some((
+                            verter_type_expr::OwnedStr::from(canonical_id.as_str()),
+                            *hash,
+                        )),
+                        _ => None,
+                    }));
+                    self.ctx.complete_graph_signature(&roots, facts.to_vec())
+                })
+                .ok()
             }
             FactReadSetFinalise::NonCacheable(_) => None,
             FactReadSetFinalise::MutationUnstable => {
@@ -2462,9 +2499,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return evaluated;
         };
         let slot = self.type_slot_for(
-            Arc::clone(&base.canonical_id),
+            base.canonical_id.clone(),
             base.owner,
-            Arc::clone(&base.decl_name),
+            base.decl_name.clone(),
         );
         let read = self.execute_read(SemanticQueryKey::Instantiate(
             crate::semantic_query::InstantiateKey::new(
@@ -2702,7 +2739,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         super::cost_receipt::CostIdentity::of_key((entry_node, context, demand))
                             .with_roots(
                                 self.graph()
-                                    .root_nodes(vec![entry_node])
+                                    .root_nodes([entry_node])
                                     .expect("evaluation operand is live"),
                             ),
                     );
@@ -2731,7 +2768,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 if let Some(&first) = children.first() {
                                     let frame = frames.last_mut().expect("active evaluator frame");
                                     frame.stage = DeferredEvaluationStage::AwaitValueChildren {
-                                        data: Arc::clone(&data),
+                                        data: data.clone(),
                                         children,
                                         values: Vec::new(),
                                     };
@@ -2792,7 +2829,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 let (value_root, path) =
                                     data.typeof_head().expect("TypeOf carrier head");
                                 let value_root = value_root.clone();
-                                let path = Arc::clone(path);
+                                let path = path.clone();
                                 let type_args: Vec<SemanticNodeId> =
                                     data.carrier_type_args().to_vec();
                                 let context =
@@ -2849,7 +2886,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             } => {
                                 let read =
                                     self.execute_read(SemanticQueryKey::TemplateLiteralReduce {
-                                        pattern: Arc::clone(quasis),
+                                        pattern: (*quasis).clone(),
                                         args: Arc::clone(expressions.as_arc()),
                                         context: self.template_literal_reduce_context(),
                                     });
@@ -2867,9 +2904,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     ) =>
                             {
                                 let slot = self.type_slot_for(
-                                    Arc::clone(&base.canonical_id),
+                                    base.canonical_id.clone(),
                                     base.owner,
-                                    Arc::clone(&base.decl_name),
+                                    base.decl_name.clone(),
                                 );
                                 let read = self.execute_read(SemanticQueryKey::Instantiate(
                                     crate::semantic_query::InstantiateKey::new(
@@ -2888,9 +2925,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 whole_hash: _,
                             }) => {
                                 let base = self.type_slot_for(
-                                    Arc::clone(canonical_id),
+                                    canonical_id.clone(),
                                     *owner,
-                                    Arc::clone(name),
+                                    name.clone(),
                                 );
                                 let context =
                                     frames.last().expect("active evaluator frame").context;
@@ -3048,7 +3085,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let receipt = match cached {
             Some(receipt) => receipt,
             None => {
-                let Ok(roots) = self.graph().root_nodes(vec![node]) else {
+                let Ok(roots) = self.graph().root_nodes([node]) else {
                     return false;
                 };
                 let receipt = super::cost_receipt::DemandCostReceipt::new(
@@ -3556,7 +3593,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             reduction.completeness = reduction
                                 .completeness
                                 .merge(ResultCompleteness::partial(reasons));
-                            return self.end_composite(reduction, None);
+                            // A conditional decision whose run waits on a
+                            // read drops that run: reading on, it reaches
+                            // the reads the remaining arms make in this run
+                            // rather than one arm per run.
+                            if !self.decision_waits() {
+                                return self.end_composite(reduction, None);
+                            }
+                            arm
                         }
                     };
                     // A union joins a named union's members, whatever they
@@ -3682,7 +3726,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     expressions,
                 }) => {
                     let read = self.execute_read(SemanticQueryKey::TemplateLiteralReduce {
-                        pattern: Arc::clone(quasis),
+                        pattern: (*quasis).clone(),
                         args: Arc::clone(expressions.as_arc()),
                         context: self.template_literal_reduce_context(),
                     });
@@ -4048,7 +4092,7 @@ pub mod forwarding_tests {
         // no dependency on the source whose execution was superseded.
         let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
             base: number,
-            path: Arc::from([]),
+            path: verter_type_expr::OwnedSlice::from([]),
             context: ProjectionReductionContext::published(ProjectionMode::Expanded),
         });
         if moved {

@@ -3444,16 +3444,31 @@ impl verter_session_query::facts::store_view::StoreView for HostStoreView {
                 // The KEYED lookup: the fact names one function position,
                 // and validity is that position's own live body hash —
                 // never "some entry in this file matches closely enough".
-                let key = verter_session_query::function_program::FunctionProgramKey {
-                    declaration: verter_session_query::function_program::FunctionDeclarationRef {
-                        owner: function.owner,
-                        name: Arc::clone(&function.merged_symbol_name),
-                        space: function.symbol_space,
-                    },
-                    part: function.function_part.clone(),
-                    overload_ordinal: function.overload_ordinal,
-                };
-                index.get(&key).is_some_and(|matched| {
+                // A value-space position is found by its borrowed name; any
+                // other space names its whole key.
+                let matched =
+                    if function.symbol_space == verter_session_query::facts::SymbolSpace::Value {
+                        index.value_function(
+                            function.owner,
+                            &function.merged_symbol_name,
+                            &function.function_part,
+                            function.overload_ordinal,
+                        )
+                    } else {
+                        index.get(
+                            &verter_session_query::function_program::FunctionProgramKey {
+                                declaration:
+                                    verter_session_query::function_program::FunctionDeclarationRef {
+                                        owner: function.owner,
+                                        name: Arc::from(function.merged_symbol_name.as_str()),
+                                        space: function.symbol_space,
+                                    },
+                                part: function.function_part.clone(),
+                                overload_ordinal: function.overload_ordinal,
+                            },
+                        )
+                    };
+                matched.is_some_and(|matched| {
                     &matched.entry().flow_body_stable_hash() == flow_body_stable_hash
                 })
             }

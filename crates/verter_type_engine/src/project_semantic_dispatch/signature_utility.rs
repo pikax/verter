@@ -369,7 +369,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     crate::semantic_query::SignatureResultSource::Function(
                         verter_type_expr::facts::FunctionReturnSource::Flow(identity),
                     ) if demand_source => {
-                        let canonical = Arc::clone(&identity.anchor.canonical_id);
+                        let canonical = identity.anchor.canonical_id.clone();
                         match self.execute_function_return_source(
                             &verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone()),
                             canonical.as_ref(),
@@ -458,10 +458,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .graph()
             .intern_node(SemanticNodeData::InstantiationRef {
                 base: crate::semantic_query::DeclIdentity {
-                    canonical_id: Arc::from("__builtin__"),
+                    canonical_id: verter_type_expr::OwnedStr::from("__builtin__"),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     whole_hash: Default::default(),
-                    decl_name: Arc::from(utility.builtin_name()),
+                    decl_name: verter_type_expr::OwnedStr::from(utility.builtin_name()),
                 },
                 args: crate::semantic_query::PayloadArray::from([subject]),
             });
@@ -474,7 +474,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     let key = member.key.cloned_known()?;
                     member.value = self.graph().intern_node(SemanticNodeData::IndexedAccess {
                         object: source,
-                        index: crate::semantic_query::IndexKey::String(Arc::from(key.as_string()?)),
+                        index: crate::semantic_query::IndexKey::String(
+                            verter_type_expr::OwnedStr::from(key.as_string()?),
+                        ),
                     });
                     Some(crate::semantic_query::SurfaceEntry::Member(member))
                 }

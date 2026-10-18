@@ -36,21 +36,21 @@ fn deferred_signature_sources_capture_outer_binders_and_exclude_their_own_clause
     let string = prim(&d, PrimitiveKind::String);
     let v = d.graph().intern_node(SemanticNodeData::TypeParam {
         decl: verter_type_engine::semantic_query::DeclIdentity {
-            canonical_id: Arc::from(CANONICAL),
+            canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: host.shallow_file_state(CANONICAL).unwrap().whole_hash,
-            decl_name: Arc::from("V"),
+            decl_name: verter_type_expr::OwnedStr::from("V"),
         },
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("V"),
+        display_name: verter_type_expr::OwnedStr::from("V"),
     });
     let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: Arc::from(CANONICAL),
+            canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("generic"),
+            symbol: verter_type_expr::OwnedStr::from("generic"),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
         function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
@@ -77,7 +77,7 @@ fn deferred_signature_sources_capture_outer_binders_and_exclude_their_own_clause
     function.flow_return = Some(Box::new(identity.clone()));
     let expr = TypeExpr::Function(Arc::new(function));
     let scope = NodeScopeId::File {
-        canonical_id: Arc::from(CANONICAL),
+        canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: host.shallow_file_state(CANONICAL).unwrap().whole_hash,
         local_scope: None,
@@ -127,9 +127,9 @@ fn deferred_signature_sources_capture_outer_binders_and_exclude_their_own_clause
     }
     let mut lexical = FunctionExpr::synthetic(Vec::new(), None, Vec::new());
     let mut lexical_identity = identity;
-    lexical_identity.anchor.symbol = Arc::from("Lexical");
+    lexical_identity.anchor.symbol = verter_type_expr::OwnedStr::from("Lexical");
     lexical_identity.function_part = verter_type_expr::facts::FunctionPartIdentity::Member {
-        member_path: Arc::from([0]),
+        member_path: verter_type_expr::OwnedSlice::from([0]),
     };
     lexical.flow_return = Some(Box::new(lexical_identity));
     let callee = d.shallow_lower_type_expr_with_context_for_tests(
@@ -396,7 +396,7 @@ fn empty_is_a_complete_negative_distinct_from_incomplete() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("Free"),
+        display_name: verter_type_expr::OwnedStr::from("Free"),
     });
     assert_eq!(
         ready(discover(&d, unconstrained, SignatureKind::Call)),
@@ -491,7 +491,7 @@ fn alias_and_constraint_settle_to_the_signature_shape() {
         param_index: 0,
         constraint: Some(alias),
         default: None,
-        display_name: Arc::from("Fn"),
+        display_name: verter_type_expr::OwnedStr::from("Fn"),
     });
     let store = d.graph().signature_store();
     assert_eq!(
@@ -517,13 +517,13 @@ fn optionality_and_tuple_rest_flatten_under_the_active_context() {
         elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![
                 TupleElement {
-                    label: Some(Arc::from("a")),
+                    label: Some(verter_type_expr::OwnedStr::from("a")),
                     value: string,
                     optional: false,
                     rest: false,
                 },
                 TupleElement {
-                    label: Some(Arc::from("b")),
+                    label: Some(verter_type_expr::OwnedStr::from("b")),
                     value: number,
                     optional: true,
                     rest: false,
@@ -649,7 +649,7 @@ fn declared_result_applies_the_call_map_once_and_leaks_no_binder_token() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let ret = d.graph().intern_node(SemanticNodeData::Array {
         element: t,
@@ -662,7 +662,7 @@ fn declared_result_applies_the_call_map_once_and_leaks_no_binder_token() {
         SignatureKind::Call,
         vec![param(t)],
         vec![TypeParamDecl {
-            name: Arc::from("T"),
+            name: verter_type_expr::OwnedStr::from("T"),
             param: t,
             constraint: None,
             default: None,
@@ -1046,7 +1046,7 @@ fn mixin_construct_intersections_follow_the_checker_mixin_rule() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let generic = callable(
         &d,
@@ -1063,7 +1063,7 @@ fn mixin_construct_intersections_follow_the_checker_mixin_rule() {
                 true,
             )],
             vec![TypeParamDecl {
-                name: Arc::from("T"),
+                name: verter_type_expr::OwnedStr::from("T"),
                 param: binder,
                 constraint: None,
                 default: None,
@@ -1228,7 +1228,7 @@ fn generic_identity(
         param_index: 0,
         constraint,
         default: None,
-        display_name: Arc::from(name),
+        display_name: verter_type_expr::OwnedStr::from(name),
     });
     signature(
         d,
@@ -1237,7 +1237,7 @@ fn generic_identity(
         SignatureKind::Call,
         vec![param(t)],
         vec![TypeParamDecl {
-            name: Arc::from(name),
+            name: verter_type_expr::OwnedStr::from(name),
             param: t,
             constraint,
             default: None,
@@ -1505,7 +1505,7 @@ fn untyped_javascript_signatures_publish_the_untyped_flag() {
     let string = prim(&d, PrimitiveKind::String);
     let flagged = |file: &str, param_ty: SemanticNodeId| {
         let mut occ = occurrence("f", 0);
-        occ.function.anchor.canonical_id = Arc::from(file);
+        occ.function.anchor.canonical_id = verter_type_expr::OwnedStr::from(file);
         let identity = occ.function.clone();
         let node = d.graph().intern_node(SemanticNodeData::Signature {
             kind: SignatureKind::Call,
@@ -1691,7 +1691,7 @@ fn utility_inference_reads_the_last_shared_signature_and_never_a_union_or_binder
         param_index: 0,
         constraint: Some(overloaded),
         default: None,
-        display_name: Arc::from("Fn"),
+        display_name: verter_type_expr::OwnedStr::from("Fn"),
     });
     for subject in [union, constrained] {
         assert_ne!(
@@ -1738,7 +1738,7 @@ fn deferred_callable_headers_keep_event_parameters_without_demanding_the_return(
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
     let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
     let scope = NodeScopeId::File {
-        canonical_id: Arc::from(CANONICAL),
+        canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
         owner,
         whole_hash: host.shallow_file_state(CANONICAL).unwrap().whole_hash,
         local_scope: None,
@@ -1756,9 +1756,9 @@ fn deferred_callable_headers_keep_event_parameters_without_demanding_the_return(
     function.flow_return = Some(Box::new(
         verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: Arc::from(CANONICAL),
+                canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
                 owner,
-                symbol: Arc::from("emit"),
+                symbol: verter_type_expr::OwnedStr::from("emit"),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
             },
             function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
@@ -1817,7 +1817,7 @@ fn with_deferred_utility_header(
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
     let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
     let scope = NodeScopeId::File {
-        canonical_id: Arc::from(CANONICAL),
+        canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
         owner,
         whole_hash: host.shallow_file_state(CANONICAL).unwrap().whole_hash,
         local_scope: None,
@@ -1825,9 +1825,9 @@ fn with_deferred_utility_header(
     function.flow_return = Some(Box::new(
         verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: Arc::from(CANONICAL),
+                canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
                 owner,
-                symbol: Arc::from(symbol),
+                symbol: verter_type_expr::OwnedStr::from(symbol),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
             },
             function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,

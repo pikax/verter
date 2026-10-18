@@ -96,7 +96,7 @@ fn assert_distinct_identity(a: &SemanticQueryKey, b: &SemanticQueryKey) {
 
 fn point(canonical: &str, offset: u32) -> ProgramPointId {
     ProgramPointId {
-        canonical_id: Arc::from(canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical),
         offset,
     }
 }
@@ -504,7 +504,7 @@ fn resolve_call_value_domain_is_resolve_call() {
 #[test]
 fn type_param_decl_carries_exact_param_node_and_per_parameter_const() {
     let decl = TypeParamDecl {
-        name: Arc::from("T"),
+        name: verter_type_expr::OwnedStr::from("T"),
         param: SemanticNodeId(41),
         constraint: Some(SemanticNodeId(42)),
         default: Some(SemanticNodeId(43)),

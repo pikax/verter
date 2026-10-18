@@ -185,7 +185,7 @@ impl<D: super::InferenceDemandDriver> super::InferenceTxn<'_, D> {
             };
             fixed.push(crate::semantic_query::InferBinding {
                 param: input.param,
-                name: input.name,
+                name: verter_type_expr::OwnedStr::from(input.name),
                 bound,
             });
         }

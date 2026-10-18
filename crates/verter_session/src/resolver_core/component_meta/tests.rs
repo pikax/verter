@@ -18,9 +18,9 @@ fn local_ref_shape(type_ref: &str) -> verter_type_expr::facts::ResolvedLocalShap
     verter_type_expr::facts::ResolvedLocalShape::Ref(
         verter_type_expr::locators::SymbolBodyLocator {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: std::sync::Arc::from(""),
+                canonical_id: verter_type_expr::OwnedStr::from(""),
                 owner: TopLevelOwnerId::instance(0),
-                symbol: std::sync::Arc::from(type_ref),
+                symbol: verter_type_expr::OwnedStr::from(type_ref),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Type,
             },
         },
@@ -1186,9 +1186,9 @@ type Props = Pick<ImportedBase, 'href'>
                 type_annotation: Some("string".to_string()),
                 payload: Some(verter_type_expr::locators::MacroPayloadLocator {
                     anchor: verter_type_expr::locators::AuthoredAnchor {
-                        canonical_id: std::sync::Arc::from("/test.ts"),
+                        canonical_id: verter_type_expr::OwnedStr::from("/test.ts"),
                         owner: TopLevelOwnerId::instance(0),
-                        symbol: std::sync::Arc::from("default"),
+                        symbol: verter_type_expr::OwnedStr::from("default"),
                         space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                     },
                     macro_index: 0,

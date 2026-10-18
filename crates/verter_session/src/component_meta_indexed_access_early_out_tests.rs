@@ -226,14 +226,16 @@ fn concrete_slots_object_props_skip_define_props_member_route_projection() {
         verter_type_engine::semantic_query::SemanticQueryKey::ResolveDecl(
             verter_type_engine::semantic_query::ResolveDeclKey {
                 scope: verter_type_engine::semantic_query::ScopeId {
-                    canonical_id: Arc::from("/workspace/src/button-types.ts"),
+                    canonical_id: verter_type_expr::OwnedStr::from(
+                        "/workspace/src/button-types.ts",
+                    ),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     local_scope: None,
                     binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                         verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     ),
                 },
-                name: Arc::from("ButtonSlots"),
+                name: verter_type_expr::OwnedStr::from("ButtonSlots"),
             },
         ),
     ) {
@@ -245,7 +247,7 @@ fn concrete_slots_object_props_skip_define_props_member_route_projection() {
     let surface = match dispatch.execute_type_node(
         verter_type_engine::semantic_query::SemanticQueryKey::ProjectPath {
             base: resolved,
-            path: Arc::from(
+            path: verter_type_expr::OwnedSlice::from(
                 Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice(),
             ),
             context: verter_type_engine::semantic_query::ProjectionReductionContext::published(

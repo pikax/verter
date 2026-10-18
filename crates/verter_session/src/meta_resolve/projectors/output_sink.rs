@@ -677,7 +677,7 @@ fn admit_member_shape_if_possible(
     ) {
         return value;
     }
-    let scope = key.scope_canonical().clone();
+    let scope = key.scope_canonical();
     let Some(observed_scope) = ctx.observe_materialize_scope(scope.as_ref()) else {
         return value;
     };

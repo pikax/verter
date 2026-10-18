@@ -418,7 +418,9 @@ impl<'a> Matrix<'a> {
                         verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
                         0,
                     ),
-                    normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+                    normalized_type_args: verter_type_expr::OwnedSlice::from(
+                        Vec::new().into_boxed_slice(),
+                    ),
                     context: dispatch.flow_return_context_for(&canonical),
                     demand: ReturnProjectionDemand::whole_return(),
                     input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -454,7 +456,7 @@ impl<'a> Matrix<'a> {
                 verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
                 0,
             ),
-            normalized_type_args: Arc::from([]),
+            normalized_type_args: verter_type_expr::OwnedSlice::from([]),
             context: dispatch.flow_return_context_for(&canonical),
             demand: ReturnProjectionDemand::whole_return(),
             input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -949,9 +951,9 @@ mod thread_cpu {
 fn observe(host: &VerterHost, canonical: &str, symbol: &str, scoped: bool) -> (Observed, Vec<u32>) {
     let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(symbol),
+            symbol: verter_type_expr::OwnedStr::from(symbol),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
         function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
