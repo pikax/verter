@@ -324,6 +324,9 @@ pub mod flow_admission_fault_injection {
         /// Optional observer of actual preparation refusals, including inline demands.
         pub refused_preparations:
             std::sync::Mutex<Option<Vec<crate::semantic_query::FlowReturnKey>>>,
+        /// What happened to each contextual call a flow frame held.
+        pub contextual_routes:
+            std::sync::Mutex<Vec<crate::project_semantic_dispatch::ContextualRouteEventForTests>>,
         #[cfg(any(test, feature = "test-support"))]
         pub observe_product_execution: AtomicBool,
         #[cfg(any(test, feature = "test-support"))]
@@ -3287,6 +3290,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// refused admission — aborts and retires the ENTIRE deferred batch
     /// without publishing anything, so `ReturnOnly` stays non-publishing
     /// and no torn or provisional member can warm.
+    ///
+    /// A root demanded outside any drive evaluates as a frame of the
+    /// continuation runtime, whose completion releases the batch the same
+    /// way, by the same publication.
     pub(super) fn execute_flow_return_cold_build(
         &self,
         key: SemanticQueryKey,
@@ -3295,6 +3302,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             matches!(key, SemanticQueryKey::FlowReturn(_)),
             "the flow-return executor admits FlowReturn keys only"
         );
+        if self.drives_on_the_runtime(&key) {
+            return self.drive_query(key);
+        }
         let SemanticQueryKey::FlowReturn(root_key) = key.clone() else {
             unreachable!("the flow-return executor admits FlowReturn keys only")
         };
@@ -3309,7 +3319,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// Drain the SCC-closed member batch onto the root's published
     /// carrier, fenced on the FLOW root's own published candidate.
-    fn flow_return_drain_completed_members(
+    pub(super) fn flow_return_drain_completed_members(
         &self,
         root_key: &FlowReturnKey,
         carrier: &crate::semantic_query_memo::PublishedMemoCandidate,
@@ -10125,6 +10135,7 @@ use branches::{BranchStep, DeadPath, Entered};
 use nested::{NestedChildParts, NestedDemand, NestedSignatureStep};
 #[path = "flow_return_operators.rs"]
 mod operators;
+pub(super) use call_stack::HeldContextualRoute;
 use call_stack::{CallArgumentWait, CallDrive, CallFunctionWait, CallInFlight, CallStep};
 
 #[path = "flow_return_call_effects.rs"]
@@ -10523,6 +10534,26 @@ pub(super) trait FlowDemandDriver {
     fn arena(&self) -> super::arena_ops::ArenaOps<'_>;
     fn call_undecided_relations(&self) -> u64;
     fn discard_call_relation_observations(&self, count: u64);
+    /// Count again the undecided relations a held executor attempt
+    /// observed, for the run that resumes it.
+    fn restore_call_relation_observations(&self, count: u64);
+    /// Open a window in which a contextual callback types while its call's
+    /// collector waits ([`ProjectSemanticDispatch::open_contextual_window`]).
+    fn open_contextual_window(&self) -> bool;
+    fn close_contextual_window(&self);
+    /// Whether the running flow evaluation waits on a demand its frame must
+    /// produce first.
+    fn contextual_window_waits(&self) -> bool;
+    /// Whether relating a typed callback to its call's held contextual
+    /// target waits on a demand the frame must produce first
+    /// ([`ProjectSemanticDispatch::contextual_delivery_waits`]).
+    fn contextual_delivery_waits(
+        &self,
+        state: &super::call_resolve::ContextualCallState,
+        typed: SemanticNodeId,
+    ) -> bool;
+    fn hold_contextual_route(&self, route: HeldContextualRoute);
+    fn take_held_contextual_route(&self, asked: &ResolveCallKey) -> Option<HeldContextualRoute>;
     fn pending_obligation_count(&self) -> usize;
     fn enter_lexical_demand(&self, canonical: Arc<str>) -> super::LexicalDemandScopeGuard<'_>;
     fn presence_intersection_for_flow(
@@ -11156,6 +11187,32 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     fn discard_call_relation_observations(&self, count: u64) {
         let mut txn = self.dispatch_txn.borrow_mut();
         txn.call.undecided_relations = txn.call.undecided_relations.saturating_sub(count);
+    }
+    fn restore_call_relation_observations(&self, count: u64) {
+        let mut txn = self.dispatch_txn.borrow_mut();
+        txn.call.undecided_relations = txn.call.undecided_relations.saturating_add(count);
+    }
+    fn open_contextual_window(&self) -> bool {
+        ProjectSemanticDispatch::open_contextual_window(self)
+    }
+    fn close_contextual_window(&self) {
+        ProjectSemanticDispatch::close_contextual_window(self);
+    }
+    fn contextual_window_waits(&self) -> bool {
+        ProjectSemanticDispatch::contextual_window_waits(self)
+    }
+    fn contextual_delivery_waits(
+        &self,
+        state: &super::call_resolve::ContextualCallState,
+        typed: SemanticNodeId,
+    ) -> bool {
+        ProjectSemanticDispatch::contextual_delivery_waits(self, state, typed)
+    }
+    fn hold_contextual_route(&self, route: HeldContextualRoute) {
+        ProjectSemanticDispatch::hold_contextual_route(self, route);
+    }
+    fn take_held_contextual_route(&self, asked: &ResolveCallKey) -> Option<HeldContextualRoute> {
+        ProjectSemanticDispatch::take_held_contextual_route(self, asked)
     }
     fn pending_obligation_count(&self) -> usize {
         self.dispatch_txn
@@ -11828,6 +11885,31 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     }
     fn discard_call_relation_observations(&self, count: u64) {
         self.driver.discard_call_relation_observations(count);
+    }
+    fn restore_call_relation_observations(&self, count: u64) {
+        self.driver.restore_call_relation_observations(count);
+    }
+    fn open_contextual_window(&self) -> bool {
+        self.driver.open_contextual_window()
+    }
+    fn close_contextual_window(&self) {
+        self.driver.close_contextual_window();
+    }
+    fn contextual_window_waits(&self) -> bool {
+        self.driver.contextual_window_waits()
+    }
+    fn contextual_delivery_waits(
+        &self,
+        state: &super::call_resolve::ContextualCallState,
+        typed: SemanticNodeId,
+    ) -> bool {
+        self.driver.contextual_delivery_waits(state, typed)
+    }
+    fn hold_contextual_route(&self, route: HeldContextualRoute) {
+        self.driver.hold_contextual_route(route);
+    }
+    fn take_held_contextual_route(&self, asked: &ResolveCallKey) -> Option<HeldContextualRoute> {
+        self.driver.take_held_contextual_route(asked)
     }
     fn pending_obligation_count(&self) -> usize {
         self.driver.pending_obligation_count()
@@ -28368,11 +28450,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 }
                 call_stack::ResolveCallProgress::Function(function) => {
                     let call_stack::RouteFunction { at, request } = *function;
+                    let window = self.open_function_argument_window(&at);
                     let node = self.eval_nested_demand(request.demand);
+                    if window {
+                        self.dispatch.close_contextual_window();
+                    }
                     progress = self.deliver_resolve_call_function(
                         at,
                         request.mark,
                         Positional::Value(node),
+                        window,
                     );
                 }
             }

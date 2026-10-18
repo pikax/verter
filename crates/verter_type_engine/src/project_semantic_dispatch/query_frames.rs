@@ -35,6 +35,16 @@
 //! of the transaction, and resumes with the same session once each is
 //! delivered: a call's inference spans the frame's suspensions.
 //!
+//! A function's return evaluated outside any drive is a frame as well. While
+//! a contextual call in its body types a callback — the call's candidate
+//! collector held out of the transaction meanwhile — an instantiation or a
+//! `typeof` the callback reads that must be computed becomes the frame's
+//! need: the call's route is held as it stood before the callback, with its
+//! collector, and the run that reached the need is dropped and runs again
+//! once it is delivered, resuming the held route at that call instead of
+//! asking its executor again. The callback then types over answered reads,
+//! into the same collector.
+//!
 //! Every other query, and every query a frame's step evaluates in place,
 //! keeps the synchronous path; code a step reaches never drives.
 //!
@@ -107,12 +117,59 @@ pub(super) enum QueryFrame<'p, 'a, C: crate::resolver_core::ResolverCapabilities
 
 /// The build a frame carries between its steps: an instantiation's, a
 /// `typeof`'s whose value's annotation is lowering, a conditional type's
-/// decision, or a call's resolution.
+/// decision, a call's resolution, or a function's flow return.
 pub(super) enum FrameBuild {
     Instantiate(Box<InstantiateBuild>),
     Typeof(Box<TypeofBuild>),
     Conditional(Box<ConditionalBuild>),
     Call(Box<CallBuild>),
+    Flow(Box<FlowBuild>),
+}
+
+/// A function's flow return between its steps: the answers to the reads
+/// its contextual callbacks made, the one it waits on and the others its
+/// last run reached, and the contextual calls it holds.
+///
+/// A run evaluates the function's body. While a contextual call in it types
+/// a callback, its candidate's collector held out of the transaction, a read
+/// of an instantiation or a `typeof` none of the answers holds that must be
+/// computed becomes a need of the frame. The call's route is held as it
+/// stood before the callback, collector included, and the run is dropped
+/// with what it observed; the next run resumes the held route where the
+/// call is asked again, and the callback types over the delivered answers
+/// into that same collector. Outside a callback typing under a held
+/// collector, every read evaluates in place, as it does in a synchronous
+/// build.
+#[derive(Default)]
+pub(super) struct FlowBuild {
+    answers: FxHashMap<SemanticQueryKey, QueryDelivery>,
+    awaiting: Option<SemanticQueryKey>,
+    /// The claim the awaited read entered with, until the runtime takes it.
+    claim: Option<ClaimAttempt>,
+    pending: std::collections::VecDeque<(SemanticQueryKey, ClaimAttempt)>,
+    /// The contextual calls held across the frame's runs, each with its
+    /// candidate's collector.
+    routes: Vec<super::flow_return::HeldContextualRoute>,
+}
+
+/// What the flow evaluation whose frame is stepping reads at its seam.
+pub(super) struct FlowSeam {
+    answers: FxHashMap<SemanticQueryKey, QueryDelivery>,
+    /// The reads the run reached that no answer holds, in the order it
+    /// reached them, each with the claim it entered with.
+    needs: Vec<(SemanticQueryKey, ClaimAttempt)>,
+    /// The frame depth a needed demand's own frame runs at.
+    depth: u32,
+    /// How many queries the run is evaluating in place now: their reads
+    /// evaluate as they would anywhere.
+    nested: u32,
+    /// How many contextual callbacks are typing now, each under a held
+    /// collector.
+    windows: u32,
+    /// The checker transaction's frame depth the function's own evaluation
+    /// runs at: a callee's evaluated inline beneath it is not this frame's.
+    frame_depth: usize,
+    routes: Vec<super::flow_return::HeldContextualRoute>,
 }
 
 /// A call resolution between its steps: the executor frame its walk
@@ -210,11 +267,17 @@ pub(super) struct DecisionSeam {
 /// the decision's own again when it returns.
 pub(super) struct NestedDecisionQuery<'d> {
     seam: Option<&'d std::cell::RefCell<Option<DecisionSeam>>>,
+    flow: Option<&'d std::cell::RefCell<Option<FlowSeam>>>,
 }
 
 impl Drop for NestedDecisionQuery<'_> {
     fn drop(&mut self) {
         if let Some(cell) = self.seam {
+            if let Some(seam) = cell.borrow_mut().as_mut() {
+                seam.nested -= 1;
+            }
+        }
+        if let Some(cell) = self.flow {
             if let Some(seam) = cell.borrow_mut().as_mut() {
                 seam.nested -= 1;
             }
@@ -756,6 +819,11 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
                             self.hold_call_need_for_tests(demand);
                             build.claim.take()
                         }
+                        Some(FrameBuild::Flow(build)) => {
+                            #[cfg(any(test, feature = "test-support"))]
+                            self.hold_call_need_for_tests(demand);
+                            build.claim.take()
+                        }
                         _ => None,
                     };
                     if let Some(claim) = claim {
@@ -893,6 +961,14 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
                     .abandon_resolve_call_build(idx, build.suspension.take());
             }
         }
+        // A flow return stopped between its runs releases the contextual
+        // calls it held, each collector abandoned, and aborts the members
+        // its runs completed, which no publication of it will drain.
+        if let Some(FrameBuild::Flow(build)) = frame.build.as_mut() {
+            self.dispatch
+                .release_held_contextual_routes(std::mem::take(&mut build.routes));
+            self.dispatch.relation_abort_completed_members();
+        }
         // A build stopped between its steps leaves the declaration it
         // entered; its producer lease aborts its flight as it drops.
         if let Some((identity, args)) = frame.active.take() {
@@ -936,10 +1012,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// before is a chain of frames; any other `typeof` completes in the
     /// frame's first step.
     pub(super) fn drives_on_the_runtime(&self, key: &SemanticQueryKey) -> bool {
-        matches!(
-            key,
-            SemanticQueryKey::Instantiate(_) | SemanticQueryKey::TypeOf { .. }
-        ) && !crate::semantic_execution::drive_running()
+        let family = match key {
+            SemanticQueryKey::Instantiate(_) | SemanticQueryKey::TypeOf { .. } => true,
+            // A function's return evaluated as a machinery root, outside
+            // every open obligation.
+            SemanticQueryKey::FlowReturn(_) => {
+                self.dispatch_txn.borrow().obligations.decides_root()
+            }
+            _ => false,
+        };
+        family
+            && !crate::semantic_execution::drive_running()
             && self.active_operand_evidence.borrow().is_empty()
     }
 
@@ -1403,10 +1486,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// as they would anywhere.
     pub(super) fn nested_decision_query(&self) -> NestedDecisionQuery<'_> {
         let mut seam = self.decision_seam.borrow_mut();
+        let mut flow = self.flow_seam.borrow_mut();
         NestedDecisionQuery {
             seam: seam.as_mut().map(|seam| {
                 seam.nested += 1;
                 &self.decision_seam
+            }),
+            flow: flow.as_mut().map(|seam| {
+                seam.nested += 1;
+                &self.flow_seam
             }),
         }
     }
@@ -1477,8 +1565,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(FrameBuild::Call(build)) => {
                 self.drain_call(&frame.key, build, delivery, frame.depth + 1)
             }
+            // A flow return keeps its deliveries as answers to the reads its
+            // contextual callbacks made.
+            Some(FrameBuild::Flow(build)) => {
+                self.drain_flow(&frame.key, build, delivery, frame.depth + 1)
+            }
             None => {
                 self.open_cold_build(None);
+                // A frame produces its key as a synchronous build does.
+                #[cfg(any(test, feature = "test-support"))]
+                if let Some(hook) = self.graph().produce_hook_for_tests() {
+                    hook(&frame.key, &|nested| {
+                        let _ = self.execute_via_cold_build_helper(nested);
+                    });
+                }
                 match &frame.key {
                     SemanticQueryKey::Instantiate(key) => {
                         let refusal = self
@@ -1560,9 +1660,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             }
                         }
                     }
+                    SemanticQueryKey::FlowReturn(_) => {
+                        let FrameBuild::Flow(build) =
+                            frame.build.insert(FrameBuild::Flow(Box::default()))
+                        else {
+                            unreachable!("the build was just inserted")
+                        };
+                        self.drain_flow(&frame.key, build, None, frame.depth + 1)
+                    }
                     _ => unreachable!(
-                        "a frame produces an instantiation, a typeof, a conditional decision \
-                         or a call resolution"
+                        "a frame produces an instantiation, a typeof, a conditional decision, \
+                         a call resolution or a flow return"
                     ),
                 }
             }
@@ -1701,6 +1809,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.dispatch_txn.borrow_mut().call.last_root_failure = None;
             match &publication {
                 Some(publication) => self.resolve_call_drain_completed_members(call, publication),
+                None => self.relation_abort_completed_members(),
+            }
+        }
+        // So is a flow return's, for the members its evaluation completed.
+        if let SemanticQueryKey::FlowReturn(flow) = &frame.key {
+            match &publication {
+                Some(publication) => self.flow_return_drain_completed_members(flow, publication),
                 None => self.relation_abort_completed_members(),
             }
         }
@@ -1847,6 +1962,315 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         seam.needs = needs;
         waits
     }
+
+    /// Carry a flow return's frame on: record a delivery as the answer to
+    /// the read it waited on, need the next one its last run reached, or
+    /// run the function's evaluation with every answer the frame holds and
+    /// every contextual call it holds. A run that reached a read none of
+    /// them answers is dropped with what it observed, the contextual call
+    /// that read it held for the next run; a run that reached none is the
+    /// build.
+    fn drain_flow(
+        &self,
+        key: &SemanticQueryKey,
+        build: &mut FlowBuild,
+        delivery: Option<QueryDelivery>,
+        depth: u32,
+    ) -> FramePoll {
+        let SemanticQueryKey::FlowReturn(flow) = key else {
+            unreachable!("a flow frame produces a flow return")
+        };
+        if let Some(delivery) = delivery {
+            let answered = build
+                .awaiting
+                .take()
+                .expect("a delivery answers the read its run waited on");
+            build.answers.insert(answered, delivery);
+        }
+        if let Some((need, claim)) = build.pending.pop_front() {
+            build.awaiting = Some(need.clone());
+            build.claim = Some(claim);
+            return FramePoll::Need(need);
+        }
+        // The function's own evaluation runs one frame below the depth the
+        // transaction has now.
+        let frame_depth = self.dispatch_txn.borrow().reentry().depth() + 1;
+        let installed = self.flow_seam.replace(Some(FlowSeam {
+            answers: std::mem::take(&mut build.answers),
+            needs: Vec::new(),
+            depth,
+            nested: 0,
+            windows: 0,
+            frame_depth,
+            routes: std::mem::take(&mut build.routes),
+        }));
+        verter_debug_assert!(installed.is_none(), "one flow evaluation runs per step");
+        let run = self.observe_read(|| self.build_flow_return(flow));
+        let seam = self
+            .flow_seam
+            .take()
+            .expect("the flow evaluation's seam stays installed for its run");
+        build.answers = seam.answers;
+        build.routes = seam.routes;
+        let mut needs = seam.needs.into_iter();
+        let output = match needs.next() {
+            Some((need, claim)) => match run.discard() {
+                // An aborted run is the build's answer: its abort is
+                // observed, never discarded.
+                Err(abort) => self.aborted_build_output(abort).into(),
+                Ok(_) => {
+                    // The dropped run's typed failure is the next run's to
+                    // report.
+                    self.dispatch_txn.borrow_mut().flow.last_root_failure = None;
+                    build.awaiting = Some(need.clone());
+                    build.claim = Some(claim);
+                    build.pending = needs.collect();
+                    return FramePoll::Need(need);
+                }
+            },
+            None => run
+                .adopt(self)
+                .unwrap_or_else(|abort| self.aborted_build_output(abort).into()),
+        };
+        // A completed build holds no contextual call any more: one its run
+        // did not reach again is released.
+        self.release_held_contextual_routes(std::mem::take(&mut build.routes));
+        FramePoll::Done(Box::new(output))
+    }
+
+    /// Answer a read at the seam of the flow evaluation whose frame is
+    /// stepping, while a contextual callback in the function's own body
+    /// types under its call's held collector: an instantiation or a
+    /// `typeof` the frame holds the answer to reads it; one the memo serves
+    /// warm answers at once and joins the answers; one that must be
+    /// computed becomes one of the frame's needs and reads as a typed gap
+    /// nothing built from it keeps. `None` everywhere else, where the read
+    /// evaluates in place.
+    pub(super) fn read_at_flow_seam(&self, key: &SemanticQueryKey) -> Option<ValueRead> {
+        if !matches!(
+            key,
+            SemanticQueryKey::Instantiate(_) | SemanticQueryKey::TypeOf { .. }
+        ) {
+            return None;
+        }
+        enum Seam {
+            Answered(QueryDelivery),
+            Waiting,
+            Enter,
+        }
+        let (seam, depth) = {
+            let installed = self.flow_seam.borrow();
+            let seam = installed.as_ref()?;
+            if !self.flow_seam_is_open(seam) || seam.windows == 0 {
+                return None;
+            }
+            let read = match seam.answers.get(key).cloned() {
+                Some(delivery) => Seam::Answered(delivery),
+                None if seam.needs.iter().any(|(needed, _)| needed == key) => Seam::Waiting,
+                None => Seam::Enter,
+            };
+            (read, seam.depth)
+        };
+        let nesting = Nesting::Frame { depth };
+        Some(match seam {
+            Seam::Answered(delivery) => self.read_delivery(delivery, nesting),
+            Seam::Waiting => self.suspended_decision_read(),
+            Seam::Enter => match self.enter_query_frame(key, depth) {
+                Err(delivery) => {
+                    self.with_flow_seam(|seam| {
+                        seam.answers.insert(key.clone(), (*delivery).clone());
+                    });
+                    self.read_delivery(*delivery, nesting)
+                }
+                Ok(claim) => {
+                    self.with_flow_seam(|seam| seam.needs.push((key.clone(), claim)));
+                    self.suspended_decision_read()
+                }
+            },
+        })
+    }
+
+    /// Whether the flow evaluation's own body is evaluating here: not a
+    /// query it evaluates in place, nor a callee evaluated inline beneath
+    /// it.
+    fn flow_seam_is_open(&self, seam: &FlowSeam) -> bool {
+        seam.nested == 0 && self.dispatch_txn.borrow().reentry().depth() == seam.frame_depth
+    }
+
+    fn with_flow_seam(&self, update: impl FnOnce(&mut FlowSeam)) {
+        update(
+            self.flow_seam
+                .borrow_mut()
+                .as_mut()
+                .expect("the flow evaluation's seam stays installed for its run"),
+        );
+    }
+
+    /// Open a window in which a contextual callback of the stepping flow
+    /// evaluation's own body types while its call's collector is held: its
+    /// reads the frame must produce become the frame's needs. Whether the
+    /// window opened — not outside a flow frame's run, nor once the run
+    /// waits on a need already, when what is left of it is dropped.
+    pub(super) fn open_contextual_window(&self) -> bool {
+        let mut installed = self.flow_seam.borrow_mut();
+        let Some(seam) = installed.as_mut() else {
+            return false;
+        };
+        if !seam.needs.is_empty() || !self.flow_seam_is_open(seam) {
+            return false;
+        }
+        seam.windows += 1;
+        true
+    }
+
+    /// Close a window [`Self::open_contextual_window`] opened.
+    pub(super) fn close_contextual_window(&self) {
+        if let Some(seam) = self.flow_seam.borrow_mut().as_mut() {
+            seam.windows = seam.windows.saturating_sub(1);
+        }
+    }
+
+    /// Whether the stepping flow evaluation's run waits on a need: what is
+    /// left of it is dropped.
+    pub(super) fn contextual_window_waits(&self) -> bool {
+        self.flow_seam
+            .borrow()
+            .as_ref()
+            .is_some_and(|seam| !seam.needs.is_empty())
+    }
+
+    /// Demand what relating a typed callback to the contextual target its
+    /// call's held collector waits on unwraps — the operands, and a
+    /// signature's parameter and return types, as the relation instantiates
+    /// them before relating — at the stepping flow evaluation's seam: one
+    /// the answers hold or the memo serves warm reads at once, one that
+    /// must be computed becomes one of the frame's needs. What the demand
+    /// observed is the relation's to observe, so it is dropped. Whether the
+    /// run must stop for any; never outside a flow frame's own body.
+    pub(super) fn contextual_delivery_waits(
+        &self,
+        state: &super::call_resolve::ContextualCallState,
+        typed: SemanticNodeId,
+    ) -> bool {
+        let Some(target) = state.pending_delivery_target() else {
+            return false;
+        };
+        if !self.open_contextual_window() {
+            return false;
+        }
+        let graph = self.graph();
+        let mut operands = Vec::new();
+        for node in [typed, target] {
+            operands.push(node);
+            if let Some(SemanticNodeData::Signature {
+                params,
+                return_type,
+                ..
+            }) = graph.node_data(node).as_deref()
+            {
+                operands.extend(params.iter().map(|param| param.ty));
+                operands.push(*return_type);
+            }
+        }
+        let demanded = self.observe_read(|| {
+            for operand in operands {
+                let _ = self.unwrap_identity_carrier_for_relation(operand);
+            }
+        });
+        let _ = demanded.discard();
+        self.close_contextual_window();
+        self.contextual_window_waits()
+    }
+
+    /// Hold a contextual call's route, collector included, for the stepping
+    /// flow evaluation's next run.
+    pub(super) fn hold_contextual_route(&self, route: super::flow_return::HeldContextualRoute) {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some((session, collected)) = route.held_collector_for_tests() {
+            self.record_contextual_route_for_tests(ContextualRouteEventForTests::Held {
+                session,
+                collected,
+            });
+        }
+        let mut installed = self.flow_seam.borrow_mut();
+        match installed.as_mut() {
+            Some(seam) => seam.routes.push(route),
+            None => {
+                drop(installed);
+                self.release_held_contextual_routes(vec![route]);
+            }
+        }
+    }
+
+    /// The route the stepping flow evaluation's last run held for the call
+    /// it asks with `asked`, to resume instead of asking its executor.
+    pub(super) fn take_held_contextual_route(
+        &self,
+        asked: &crate::semantic_query::ResolveCallKey,
+    ) -> Option<super::flow_return::HeldContextualRoute> {
+        let route = {
+            let mut installed = self.flow_seam.borrow_mut();
+            let seam = installed.as_mut()?;
+            if !self.flow_seam_is_open(seam) {
+                return None;
+            }
+            let position = seam
+                .routes
+                .iter()
+                .position(|route| route.asked() == asked)?;
+            seam.routes.remove(position)
+        };
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some((session, collected)) = route.held_collector_for_tests() {
+            self.record_contextual_route_for_tests(ContextualRouteEventForTests::Resumed {
+                session,
+                collected,
+            });
+        }
+        Some(route)
+    }
+
+    /// Release contextual routes no run resumes: each held collector returns
+    /// to the transaction abandoned, and what the route observed is dropped.
+    pub(super) fn release_held_contextual_routes(
+        &self,
+        routes: Vec<super::flow_return::HeldContextualRoute>,
+    ) {
+        for route in routes {
+            #[cfg(any(test, feature = "test-support"))]
+            if let Some((session, collected)) = route.held_collector_for_tests() {
+                self.record_contextual_route_for_tests(ContextualRouteEventForTests::Released {
+                    session,
+                    collected,
+                });
+            }
+            route.release(self);
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn record_contextual_route_for_tests(&self, event: ContextualRouteEventForTests) {
+        self.binding
+            .observers
+            .flow
+            .contextual_routes
+            .lock()
+            .expect("the contextual-route observer is never poisoned")
+            .push(event);
+    }
+}
+
+/// What happened to a contextual call a flow frame held. Test-only.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextualRouteEventForTests {
+    /// Held across the frame's suspension, its collector holding
+    /// `collected` deposits.
+    Held { session: u64, collected: usize },
+    /// Resumed by the frame's next run.
+    Resumed { session: u64, collected: usize },
+    /// Released unresumed, its collector abandoned.
+    Released { session: u64, collected: usize },
 }
 
 /// What a call frame's walk held when it suspended. Test-only.

@@ -337,18 +337,18 @@ impl InferenceSession {
             .map(|reverse| &reverse.spec)
     }
 
-    /// A rollback point over the session's per-parameter candidate lists.
-    /// Deposits strictly APPEND onto `InferenceInfo::candidates` (the info
-    /// set itself is fixed at session open), so a checkpoint is the ordered
-    /// list of candidate lengths and rollback truncates back to it — the
-    /// alternative-scoping primitive: a LOSING overload / signature-group
-    /// alternative's deposits must not survive into fixation.
     /// The candidates the session's parameters collected so far.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn collected_candidates_for_tests(&self) -> usize {
         self.infos.iter().map(|info| info.candidates.len()).sum()
     }
 
+    /// A rollback point over the session's per-parameter candidate lists.
+    /// Deposits strictly APPEND onto `InferenceInfo::candidates` (the info
+    /// set itself is fixed at session open), so a checkpoint is the ordered
+    /// list of candidate lengths and rollback truncates back to it — the
+    /// alternative-scoping primitive: a LOSING overload / signature-group
+    /// alternative's deposits must not survive into fixation.
     pub(crate) fn checkpoint(&self) -> SessionCheckpoint {
         let reverse = self.reverse_projection.as_ref();
         SessionCheckpoint {

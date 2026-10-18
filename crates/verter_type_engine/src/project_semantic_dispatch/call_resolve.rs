@@ -2522,7 +2522,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             skipped_generic_functions;
         // Only the walk a frame drives over its own call suspends; an
         // error-recovery reading, a contextual route and every call
-        // evaluated in place relate in place.
+        // evaluated in place relate in place. A contextual route suspends
+        // where its flow evaluation's frame holds it, between the callback
+        // it waits on and the relation of that callback's type
+        // (`flow_return_call_stack`).
         let suspends = !recovery
             && self.call_walk_suspends(key)
             && self.dispatch_txn.borrow().call.contextual.is_none();

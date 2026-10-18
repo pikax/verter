@@ -709,3 +709,259 @@ fn a_call_released_while_suspended_with_its_inference_open_leaves_nothing_open()
         assert_eq!(display(&dispatch, &answer), "Union(2 | 1)");
     }
 }
+
+const CONTEXTUAL_FILE: &str = "/semantic-task/contextual.ts";
+
+/// A body whose generic call infers `T` from its first argument, then types
+/// its callback under `(x: T) => U` — the candidate's collector held while
+/// the callback types — and infers `U` from what the callback returns.
+const CONTEXTUAL: &str = "type Box<T> = { v: T };\n\
+                          declare function both<T, U>(seed: T, f: (x: T) => U): [T, U];\n\
+                          declare const late: Box<3>;\n\
+                          export function f() {\n\
+                          return both(1, (x) => late);\n\
+                          }\n";
+
+fn contextual_host() -> Arc<crate::VerterHost> {
+    let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        CONTEXTUAL_FILE,
+        &crate::u6_flow_shape_corpus_tests::module_script(CONTEXTUAL),
+        crate::FileLanguage::script_ts(),
+    );
+    host
+}
+
+/// The return of `f`, evaluated as a machinery root.
+fn contextual_return_key(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+) -> SemanticQueryKey {
+    SemanticQueryKey::FlowReturn(Box::new(
+        verter_type_engine::semantic_query::FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                verter_type_expr::OwnedStr::from(CONTEXTUAL_FILE),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                verter_type_expr::OwnedStr::from("f"),
+                verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
+            context: dispatch.flow_return_context_for(CONTEXTUAL_FILE),
+            demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
+            result_contract:
+                verter_type_engine::project_semantic_dispatch::flow_solve::flow_return_result_contract_id(),
+        },
+    ))
+}
+
+/// The display of the return a flow evaluation answered.
+fn display_return(host: &crate::VerterHost, answer: &QueryResult<SemanticQueryValue>) -> String {
+    match answer {
+        QueryResult::Value(SemanticQueryValue::FlowReturn(result)) => {
+            let expr = host
+                .project_node_to_type_expr_for_test(result.return_type())
+                .expect("the return projects to a type");
+            crate::resolver_core::surface_projector::render_type_expr_display(&expr)
+                .expect("the return displays")
+        }
+        other => panic!("the body answers a return: {other:?}"),
+    }
+}
+
+/// The return of `f`, evaluated through the query entry.
+fn execute_return(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+) -> QueryResult<SemanticQueryValue> {
+    use verter_type_engine::semantic_query::SemanticQueryApi as _;
+    match dispatch.execute(contextual_return_key(dispatch)) {
+        QueryResult::Value(output) => QueryResult::Value(output.value),
+        other => panic!("the body answers a return: {other:?}"),
+    }
+}
+
+fn contextual_routes(
+    host: &crate::VerterHost,
+) -> Vec<verter_type_engine::project_semantic_dispatch::ContextualRouteEventForTests> {
+    std::mem::take(
+        &mut *host
+            .flow_fault_injection
+            .contextual_routes
+            .lock()
+            .expect("the observer is never poisoned"),
+    )
+}
+
+/// Lend `f`'s return as a task with the demands its contextual callback
+/// stops on held by another task, poll it until it waits with the call's
+/// collector held, and hand it to `then` with that collector's session.
+fn suspend_the_contextual_call<R>(
+    host: &crate::VerterHost,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    waker: &Waker,
+    then: impl FnOnce(
+        &mut Option<SemanticTask<'_, '_, crate::resolver_core::HostCapabilities>>,
+        u64,
+    ) -> R,
+) -> R {
+    use verter_type_engine::project_semantic_dispatch::ContextualRouteEventForTests as Event;
+    let _ = contextual_routes(host);
+    dispatch
+        .with_semantic_task_for_tests(contextual_return_key(dispatch), |slot| {
+            let task = slot.as_mut().expect("the task is lent");
+            task.hold_call_needs_for_tests();
+            assert!(
+                task.poll_for_tests(waker).is_pending(),
+                "the callback's read waits on another task's producer"
+            );
+            let events = contextual_routes(host);
+            let [Event::Held { session, collected }] = events.as_slice() else {
+                panic!("the call's route is held once, collector included: {events:?}");
+            };
+            assert_eq!(
+                *collected, 1,
+                "its collector holds what the seed inferred for `T`"
+            );
+            then(slot, *session)
+        })
+        .expect("the cold root runs as a task")
+}
+
+/// A contextual call whose callback reads a `typeof` another task is
+/// producing suspends its function's evaluation with the call's candidate
+/// collector held: `T` holds what `1` inferred, out of the transaction
+/// while the task waits. Moved to another thread it stays pending; once the
+/// producer goes away it resumes there, the call's held route resumed with
+/// that same collector — its executor is not asked again — and answers as
+/// an uninterrupted evaluation does, leaving nothing open.
+#[test]
+fn a_contextual_call_suspends_with_its_collector_held_and_resumes_to_the_uninterrupted_answer() {
+    use verter_type_engine::project_semantic_dispatch::ContextualRouteEventForTests as Event;
+    let uninterrupted = {
+        let host = contextual_host();
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let answer = display_return(&host, &execute_return(&dispatch));
+        let events = contextual_routes(&host);
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    Event::Held { session: held, collected: 1 },
+                    Event::Resumed { session: resumed, collected: 1 },
+                ] if held == resumed
+            ),
+            "the callback's cold read is produced by a frame of its own, the call held \
+             and resumed with its collector across it: {events:?}"
+        );
+        answer
+    };
+    assert_eq!(
+        uninterrupted, "[number, Box<3>]",
+        "`T` keeps what the seed inferred, `U` is what the callback returns"
+    );
+
+    let host = contextual_host();
+    let dispatch = ProjectSemanticDispatch::new(&*host);
+    let graph = host.project_type_store().semantic_graph();
+    let counter = Arc::new(CountingWaker::default());
+    let waker = Waker::from(Arc::clone(&counter));
+    let (answer, held) = suspend_the_contextual_call(&host, &dispatch, &waker, |slot, held| {
+        let task = slot.as_mut().expect("the task is lent");
+        assert_eq!(
+            dispatch.open_request_state_for_tests().collecting_sessions,
+            0,
+            "the lender holds no collector: the task does"
+        );
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    assert!(
+                        task.poll_for_tests(&waker).is_pending(),
+                        "moved to another thread, the call still waits"
+                    );
+                })
+                .join()
+                .expect("the pending poll returns");
+        });
+        assert!(task.release_held_call_needs_for_tests() > 0);
+        assert!(
+            counter.0.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "the producer going away wakes the task"
+        );
+        let answer = std::thread::scope(|scope| {
+            scope
+                .spawn(|| match task.poll_for_tests(&waker) {
+                    Poll::Ready(TaskOutcomeForTests::Answered(answer)) => answer,
+                    Poll::Ready(TaskOutcomeForTests::Stopped) => panic!("nothing stops the task"),
+                    Poll::Pending => panic!("the woken task produces the read itself"),
+                })
+                .join()
+                .expect("the resumed task answers")
+        });
+        (answer, held)
+    });
+    assert_eq!(
+        contextual_routes(&host),
+        vec![Event::Resumed {
+            session: held,
+            collected: 1
+        }],
+        "the next run resumes the held route, with the collector it held"
+    );
+    assert_eq!(display_return(&host, &answer), uninterrupted);
+    assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+    assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+    assert!(graph.resident_flight_keys_for_tests().is_empty());
+}
+
+/// A contextual call suspended with its collector held, then released while
+/// pending — its request abandoned, or the task dropped on another thread —
+/// releases the collector, its frames' flights and its wait: no session is
+/// left that could still collect and nothing stays open. The request goes
+/// on to the uninterrupted answer.
+#[test]
+fn a_contextual_call_released_while_suspended_leaves_nothing_open() {
+    use verter_type_engine::project_semantic_dispatch::ContextualRouteEventForTests as Event;
+    for dropped_elsewhere in [false, true] {
+        let host = contextual_host();
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let graph = host.project_type_store().semantic_graph();
+        let waker = Waker::from(Arc::new(CountingWaker::default()));
+        let held = suspend_the_contextual_call(&host, &dispatch, &waker, |slot, held| {
+            if dropped_elsewhere {
+                let task = slot.take().expect("the task is lent");
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(move || drop(task))
+                        .join()
+                        .expect("the task drops on another thread");
+                });
+            }
+            held
+        });
+        assert_eq!(
+            contextual_routes(&host),
+            vec![Event::Released {
+                session: held,
+                collected: 1
+            }],
+            "the held route is released with its collector (dropped elsewhere: {dropped_elsewhere})"
+        );
+        assert_eq!(
+            dispatch.open_request_state_for_tests(),
+            NOTHING_OPEN,
+            "the released call closes what it opened (dropped elsewhere: {dropped_elsewhere})"
+        );
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        let resident = graph.resident_flight_keys_for_tests();
+        assert!(
+            resident.is_empty(),
+            "the call's flights, its completed members' and the held producers go: {resident:?}"
+        );
+        assert_eq!(
+            display_return(&host, &execute_return(&dispatch)),
+            "[number, Box<3>]"
+        );
+    }
+}

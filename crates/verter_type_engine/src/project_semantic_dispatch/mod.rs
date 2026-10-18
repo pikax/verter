@@ -119,8 +119,8 @@ pub mod query_error_disposition;
 mod query_frames;
 #[cfg(any(test, feature = "test-support"))]
 pub use query_frames::{
-    take_call_suspensions_for_tests, CallSuspensionForTests, OpenRequestStateForTests,
-    SemanticTask, TaskOutcomeForTests,
+    take_call_suspensions_for_tests, CallSuspensionForTests, ContextualRouteEventForTests,
+    OpenRequestStateForTests, SemanticTask, TaskOutcomeForTests,
 };
 pub mod signature_discovery;
 pub mod signature_utility;
@@ -580,6 +580,10 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// The call resolution whose frame is stepping, while its walk runs:
     /// the walk it resumes and the answers its operand demands read.
     call_seam: std::cell::RefCell<Option<query_frames::CallSeam>>,
+    /// The flow evaluation whose frame is stepping, while its run lasts:
+    /// the answers its frame received, the contextual callbacks typing now
+    /// and the contextual calls held across its runs.
+    flow_seam: std::cell::RefCell<Option<query_frames::FlowSeam>>,
     /// The binder the running substitution walk replaces, classified once
     /// for every node the walk visits ([`Self::substitution_binder`]).
     /// Emptied at each walk's entry, so it never outlives the hold the
@@ -989,6 +993,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             driven_root_traced: std::cell::RefCell::new(None),
             decision_seam: std::cell::RefCell::new(None),
             call_seam: std::cell::RefCell::new(None),
+            flow_seam: std::cell::RefCell::new(None),
             substitution_binder: std::cell::RefCell::new(None),
         }
     }
@@ -1048,6 +1053,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             driven_root_traced,
             decision_seam,
             call_seam,
+            flow_seam,
             substitution_binder,
         } = self;
         instantiate_active.swap(&other.instantiate_active);
@@ -1086,6 +1092,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         driven_root_traced.swap(&other.driven_root_traced);
         decision_seam.swap(&other.decision_seam);
         call_seam.swap(&other.call_seam);
+        flow_seam.swap(&other.flow_seam);
         substitution_binder.swap(&other.substitution_binder);
     }
 
@@ -4123,9 +4130,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // An instantiation or a `typeof` a running conditional decision
         // reads is answered by its frame's deliveries, or becomes the
         // frame's need; any other query the decision reaches evaluates in
-        // place, where only those deliveries answer it.
+        // place, where only those deliveries answer it. So is one a
+        // contextual callback reads while its call's collector waits.
         if publication.is_none() && operand_evidence.is_none() {
-            if let Some(read) = self.read_at_decision_seam(&key) {
+            if let Some(read) = self
+                .read_at_decision_seam(&key)
+                .or_else(|| self.read_at_flow_seam(&key))
+            {
                 return read;
             }
         }

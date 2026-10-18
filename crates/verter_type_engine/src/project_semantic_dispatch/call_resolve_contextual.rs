@@ -63,6 +63,24 @@ pub(super) struct ContextualCandidateBindings {
 }
 
 impl ContextualCallState {
+    /// The suspended candidate collector this continuation holds: its
+    /// session and how many deposits it holds.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(in crate::project_semantic_dispatch) fn held_collector_for_tests(
+        &self,
+    ) -> Option<(u64, usize)> {
+        let session = self.active.as_ref()?.session.as_ref()?;
+        Some((session.id.0, session.collected_candidates_for_tests()))
+    }
+
+    /// The contextual target the held collector waits to relate a typed
+    /// callback to.
+    pub(in crate::project_semantic_dispatch) fn pending_delivery_target(
+        &self,
+    ) -> Option<SemanticNodeId> {
+        self.active.as_ref()?.pending_target
+    }
+
     pub(super) fn was_context_sensitive(&self, index: usize) -> bool {
         self.original
             .as_ref()
@@ -877,7 +895,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 fixed: progress.fixed,
                 diagnostic: state.diagnostic,
             });
-            progress.session.as_mut().expect("collector").abandon();
+            // Nothing holds the finished collector any more: it returns to
+            // the transaction abandoned, as a rejected candidate's does.
+            self.restore_collecting_session(&mut progress.session);
+            self.abandon_session(session_id);
         }
         result
     }
@@ -911,6 +932,21 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 ContextualCandidateFailure::Degraded(ResolveCallFailure::Undecidable),
             ),
         }
+    }
+
+    /// Release the suspended candidate collector a contextual continuation
+    /// holds, which no delivery will advance: it returns to the transaction
+    /// abandoned, as a rejected candidate's does.
+    pub(in crate::project_semantic_dispatch) fn release_contextual_collector(
+        &self,
+        state: &mut ContextualCallState,
+    ) {
+        let Some(session) = state.active.take().and_then(|progress| progress.session) else {
+            return;
+        };
+        let id = session.id;
+        self.restore_collecting_session(&mut Some(session));
+        self.abandon_session(id);
     }
 
     /// Take a collecting session out of the transaction, for its candidate's
