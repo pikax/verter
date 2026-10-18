@@ -27,7 +27,7 @@ fn published(expression: TypeExpr) -> PublicTypeReference {
     PublicTypeReference {
         publication: verter_session::meta_resolve::MaterializedTypePublication::for_test(
             verter_type_expr::PublicationResult::Published {
-                selected_source: Arc::new(selected_source),
+                selected_source: verter_type_expr::SharedTypeSource::new(selected_source),
                 semantic_authority: verter_type_expr::SemanticAuthority::Resolved,
                 exactness: verter_type_expr::ResolutionExactness::ExactConcrete,
                 reason: Box::new(verter_type_expr::PublicationReason::ResolvedExactConcrete),

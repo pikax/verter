@@ -6,11 +6,10 @@
 //! Keyed by validated provider file identity. Stores positive and negative roots.
 //! Concurrent cold requests for the same imported-root key coalesce via singleflight.
 
-use std::sync::Arc;
-
 #[cfg(any(test, feature = "test-support"))]
 use crate::resolver_core::PermissiveStoreView;
 use crate::resolver_core::{SingleflightGroup, ValidatedFactCache};
+#[cfg(any(test, feature = "test-support"))]
 use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_session_query::facts::store_view::StoreView;
 
@@ -79,7 +78,7 @@ impl ImportedRootResult {
 /// then observe as "nothing to invalidate on".
 pub(crate) struct ImportedRootFlightOutcome {
     pub(crate) root: crate::resolver_core::CachedValue<ImportedRootResult>,
-    pub(crate) facts: Arc<[FactVersionRef]>,
+    pub(crate) facts: crate::resolver_core::OwnedFactSignature,
     pub(crate) admitted: bool,
 }
 
@@ -160,7 +159,7 @@ impl ImportedRootDb {
         resolve: F,
     ) -> Option<(
         crate::resolver_core::CachedValue<ImportedRootResult>,
-        Arc<[FactVersionRef]>,
+        crate::resolver_core::OwnedFactSignature,
     )>
     where
         V: StoreView + ?Sized,
@@ -315,6 +314,7 @@ fn test_host() -> &'static crate::VerterHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use verter_session_query::facts::fact_cache::FactVersionRef;
     use verter_session_query::facts::store_view::{StoreView, StoreViewCompatToken};
 
@@ -341,6 +341,87 @@ mod tests {
 
         fn validates(&self, _fact: &FactVersionRef) -> bool {
             true
+        }
+    }
+
+    /// A database whose cache charges `account`.
+    fn charged_to(
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) -> ImportedRootDb {
+        ImportedRootDb {
+            roots: ValidatedFactCache::with_retention_account(
+                verter_session_query::retention::StoreAccount::new(Arc::clone(account)),
+            ),
+            singleflight: SingleflightGroup::default(),
+        }
+    }
+
+    /// A resolved root the cache does not admit — its signature is empty —
+    /// still reaches its caller charged, pinned, for as long as the caller
+    /// keeps it, after the cache and its flights are gone; an admitted root
+    /// is retained instead, and its caller's own signature is pinned. Each
+    /// final drop restores the baseline.
+    #[test]
+    fn a_delivered_root_and_its_signature_are_charged_to_the_caller_keeping_them() {
+        use verter_session_query::retention::{
+            ChargeClass, RetentionLimits, SemanticRetentionAccount,
+        };
+        let canonical = format!("/{}.ts", "delivered_root_".repeat(1024));
+        let resolved = || ImportedRootResult::Resolved {
+            canonical_source: canonical.clone(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            resolved_symbol: "Root".to_owned(),
+        };
+        for admitted in [false, true] {
+            let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+            let db = charged_to(&account);
+            let facts = if admitted {
+                vec![FactVersionRef::FileWholeHash {
+                    canonical_id: canonical.clone(),
+                    hash: [1u8; 16],
+                }]
+            } else {
+                Vec::new()
+            };
+            let (root, signature) = db
+                .get_or_resolve_returning_facts(
+                    "/index.ts",
+                    "Root",
+                    &TestView::new(1),
+                    test_host(),
+                    || Some((resolved(), facts.clone())),
+                )
+                .expect("the resolved root is delivered");
+            let root_charge = root.charge_bytes().expect("a delivered root is charged");
+            assert!(root_charge >= canonical.len());
+            assert_eq!(signature.len(), facts.len());
+            assert_eq!(
+                signature.charge_class(),
+                admitted.then_some(ChargeClass::Pinned)
+            );
+            let signature_charge = signature.charge_bytes().unwrap_or(0);
+            if admitted {
+                assert!(signature_charge >= canonical.len());
+                assert_eq!(root.charge_class(), Some(ChargeClass::Retained));
+            } else {
+                assert_eq!(
+                    root.charge_class(),
+                    Some(ChargeClass::Pinned),
+                    "an unadmitted root is its caller's"
+                );
+                assert_eq!(account.snapshot().retained_bytes, 0, "nothing is cached");
+            }
+            drop(db);
+            let kept = account.snapshot();
+            assert_eq!(kept.retained_bytes, 0);
+            assert_eq!(
+                kept.pinned_bytes,
+                root_charge + signature_charge,
+                "(admitted {admitted}) the caller keeps exactly what it holds"
+            );
+            drop(root);
+            drop(signature);
+            assert_eq!(account.snapshot().total_bytes(), 0);
         }
     }
 

@@ -1057,7 +1057,7 @@ fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_lan
     let prepared = build_indexed_function_body_skeleton(&body, source, entry).expect("indexed fixture structure");
     let function = entry.key().clone();
     let key = verter_session_query::flow::bundle::FlowSliceFunctionKey {
-        canonical_id, function, parse_env_hash: [0u8; 16],
+        canonical_id: canonical_id.into(), function, parse_env_hash: [0u8; 16],
         flow_body_stable_hash: [body_hash_tag; 16], flow_body_exact_hash: [body_hash_tag; 16],
         parse_key, file_language,
         build_toolchain_fingerprint: verter_session_query::source::toolchain::current_build_toolchain_fingerprint(),

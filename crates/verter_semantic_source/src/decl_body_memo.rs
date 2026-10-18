@@ -1322,7 +1322,7 @@ impl DeclBodyMemo {
             verter_language::default_parse_identity_for(&self.eval_source, &file_language)
                 .expect("fixture parse identity");
         verter_session_query::flow::bundle::FlowSliceFunctionKey {
-            canonical_id: Arc::clone(&self.key.canonical),
+            canonical_id: (&self.key.canonical).into(),
             function: entry.key().clone(),
             flow_body_stable_hash: entry.flow_body_stable_hash(),
             flow_body_exact_hash: entry.flow_body_exact_hash().expect("fixture exact body"),
