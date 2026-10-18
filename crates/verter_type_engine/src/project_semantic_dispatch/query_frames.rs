@@ -425,7 +425,10 @@ struct UnreturnedTask<'a, C: crate::resolver_core::ResolverCapabilities> {
 impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> SemanticTask<'p, 'a, C> {
     /// Advance the task as far as it can go: `Ready` with its root's
     /// delivery (`Err` when a stop abandoned it), or `Pending` once it
-    /// waits on a producer outside it that will wake `waker`.
+    /// waits on a producer outside it that will wake `waker`. Cancelling
+    /// the request wakes nothing: the stop is seen at the next poll, so the
+    /// executor re-polls or drops a pending task its request cancelled
+    /// ([`crate::semantic_execution::SemanticExecution::poll`]).
     pub(super) fn poll(
         &mut self,
         waker: &std::task::Waker,
