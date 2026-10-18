@@ -960,9 +960,9 @@ mod tests {
         ];
         let role = verter_type_expr::PropCallableRole::SvelteSnippet {
             symbol: verter_type_expr::ResolvedSymbolIdentity {
-                canonical_id: Arc::from("/node_modules/svelte/index.d.ts"),
+                canonical_id: "/node_modules/svelte/index.d.ts".into(),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from("Snippet"),
+                symbol: "Snippet".into(),
             },
             exactness: verter_type_expr::ResolutionExactness::ExactSymbolic,
             provenance: verter_type_expr::ResolutionProvenance::FrameworkSurface,

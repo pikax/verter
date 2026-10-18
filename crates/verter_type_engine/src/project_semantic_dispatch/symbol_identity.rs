@@ -85,15 +85,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
         let (mut head, mut pending_members, import_type_specifier) = match origin {
             AuthoredReferenceHeadFact::Bare { local_name, .. } => {
-                (Arc::clone(local_name), Vec::new(), None)
+                (Arc::<str>::from(local_name), Vec::new(), None)
             }
             AuthoredReferenceHeadFact::Qualified {
                 local_root,
                 member_path,
                 ..
             } => (
-                Arc::clone(local_root),
-                member_path.iter().cloned().collect(),
+                Arc::<str>::from(local_root),
+                member_path.iter().map(Arc::<str>::from).collect(),
                 None,
             ),
             AuthoredReferenceHeadFact::NotReference => return Ok(None),
@@ -106,9 +106,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     return Err(PropCallableRoleUnresolvedReason::Unsupported);
                 };
                 (
-                    Arc::clone(first),
-                    rest.to_vec(),
-                    Some(Arc::clone(specifier)),
+                    Arc::<str>::from(first),
+                    rest.iter().map(Arc::<str>::from).collect(),
+                    Some(Arc::<str>::from(specifier)),
                 )
             }
             AuthoredReferenceHeadFact::Unavailable => {
@@ -257,9 +257,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         .expect("a resolved reference route has an import edge"),
                     local_alias_hops: Arc::from(aliases),
                     terminal: ResolvedSymbolIdentity {
-                        canonical_id: current_canonical,
+                        canonical_id: current_canonical.into(),
                         owner: current_owner,
-                        symbol: head,
+                        symbol: head.into(),
                     },
                     exactness: ResolutionExactness::ExactSymbolic,
                 }));
@@ -318,7 +318,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
                         }
                         let read = self.execute_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
-                            scope: ScopeId::file(Arc::clone(&symbol.canonical_id), symbol.owner),
+                            scope: ScopeId::file(symbol.canonical_id.clone(), symbol.owner),
                             name: verter_type_expr::OwnedStr::from(symbol.symbol.clone()),
                         }));
                         subject = match self.identity_read_subject(read) {
@@ -351,20 +351,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             }
                             SemanticNodeData::DeclRef { identity } => {
                                 subject = IdentitySubject::Symbol(ResolvedSymbolIdentity {
-                                    canonical_id: std::sync::Arc::<str>::from(
-                                        identity.canonical_id.as_str(),
-                                    ),
+                                    canonical_id: identity.canonical_id.clone(),
                                     owner: identity.owner,
-                                    symbol: std::sync::Arc::<str>::from(identity.decl_name.as_str()),
+                                    symbol: identity.decl_name.clone(),
                                 });
                             }
                             SemanticNodeData::InstantiationRef { base, args } => {
                                 let symbol = ResolvedSymbolIdentity {
-                                    canonical_id: std::sync::Arc::<str>::from(
-                                        base.canonical_id.as_str(),
-                                    ),
+                                    canonical_id: base.canonical_id.clone(),
                                     owner: base.owner,
-                                    symbol: std::sync::Arc::<str>::from(base.decl_name.as_str()),
+                                    symbol: base.decl_name.clone(),
                                 };
                                 if expected.contains(&symbol) {
                                     return TerminalSymbolInstantiationDemandOutcome::Complete(Some(
@@ -466,7 +462,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     }
                     last_symbol = Some(symbol.clone());
                     let read = self.execute_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
-                        scope: ScopeId::file(Arc::clone(&symbol.canonical_id), symbol.owner),
+                        scope: ScopeId::file(symbol.canonical_id.clone(), symbol.owner),
                         name: verter_type_expr::OwnedStr::from(symbol.symbol.clone()),
                     }));
                     subject = match self.identity_read_subject(read) {
@@ -493,20 +489,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         }
                         SemanticNodeData::DeclRef { identity } => {
                             subject = IdentitySubject::Symbol(ResolvedSymbolIdentity {
-                                canonical_id: std::sync::Arc::<str>::from(
-                                    identity.canonical_id.as_str(),
-                                ),
+                                canonical_id: identity.canonical_id.clone(),
                                 owner: identity.owner,
-                                symbol: std::sync::Arc::<str>::from(identity.decl_name.as_str()),
+                                symbol: identity.decl_name.clone(),
                             });
                         }
                         SemanticNodeData::InstantiationRef { base, args } => {
                             let symbol = ResolvedSymbolIdentity {
-                                canonical_id: std::sync::Arc::<str>::from(
-                                    base.canonical_id.as_str(),
-                                ),
+                                canonical_id: base.canonical_id.clone(),
                                 owner: base.owner,
-                                symbol: std::sync::Arc::<str>::from(base.decl_name.as_str()),
+                                symbol: base.decl_name.clone(),
                             };
                             if expected.contains(&symbol) {
                                 return SymbolIdentityDemandOutcome::Complete(Some(symbol));
@@ -588,9 +580,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             ..
                         }) => {
                             let symbol = ResolvedSymbolIdentity {
-                                canonical_id: std::sync::Arc::<str>::from(canonical_id.as_str()),
+                                canonical_id: canonical_id.clone(),
                                 owner: *owner,
-                                symbol: std::sync::Arc::<str>::from(name.as_str()),
+                                symbol: name.clone(),
                             };
                             if expected.contains(&symbol) {
                                 return SymbolIdentityDemandOutcome::Complete(Some(symbol));

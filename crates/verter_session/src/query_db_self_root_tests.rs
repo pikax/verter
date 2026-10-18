@@ -668,10 +668,10 @@ fn shape_cache_db_synthetic_binding_untracked_self_root_rejects_warm_entry() {
     // the identity drops it, so the key roots on `c` via
     // `scope_canonical_id`.
     let carrier = SyntheticCarrierKey {
-        scope_canonical_id: Arc::<str>::from(c),
+        scope_canonical_id: From::from(c),
         surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
-        slot_name: Some(Arc::from("default")),
-        binding_name: Arc::from("items"),
+        slot_name: Some(From::from("default")),
+        binding_name: From::from("items"),
         value_node: 7,
     };
     let key = verter_type_engine::component_meta_caches::ShapeCacheKey::synthetic_binding_whole(

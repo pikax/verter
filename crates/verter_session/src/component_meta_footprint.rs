@@ -1724,7 +1724,7 @@ impl PayloadHeap for fx::SemanticTypeSource {
             Self::Projected(fact) => fact.heap(m),
             Self::Synthesized(shape) => shape.heap(m),
             Self::Closed(fact) => fact.heap(m),
-            Self::SyntheticSlotBinding(key) => arc_heap(key, m),
+            Self::SyntheticSlotBinding(key) => key.offer(&mut *m.aliases),
         }
     }
 }

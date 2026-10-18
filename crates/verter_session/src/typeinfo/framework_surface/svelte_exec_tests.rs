@@ -19,9 +19,9 @@ fn retain_test_snippet_members(surface: &TypeInfoSurface, names: &[&str]) -> Typ
         {
             verter_type_expr::PropCallableRole::SvelteSnippet {
                 symbol: verter_type_expr::ResolvedSymbolIdentity {
-                    canonical_id: Arc::from("/node_modules/svelte/index.d.ts"),
+                    canonical_id: "/node_modules/svelte/index.d.ts".into(),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    symbol: Arc::from("Snippet"),
+                    symbol: "Snippet".into(),
                 },
                 exactness: ResolutionExactness::ExactSymbolic,
                 provenance: ResolutionProvenance::FrameworkSurface,

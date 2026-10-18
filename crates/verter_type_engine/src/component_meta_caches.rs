@@ -1652,10 +1652,10 @@ mod retention_tests {
         let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
         let db = ShapeCacheDb::new().charged_to(StoreAccount::new(Arc::clone(&account)));
         let carrier = SyntheticCarrierKey {
-            scope_canonical_id: Arc::from("/c.vue"),
+            scope_canonical_id: From::from("/c.vue"),
             surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
-            slot_name: Some(Arc::from("default")),
-            binding_name: Arc::from("item"),
+            slot_name: Some(From::from("default")),
+            binding_name: From::from("item"),
             value_node: 1,
         };
         let deep = TypeExpr::Union(Arc::from(vec![

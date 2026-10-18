@@ -1504,10 +1504,10 @@ fn slot_binding_mapper_name(padding: usize) -> Arc<str> {
     let source = Arc::new(TypeExpr::Literal(LiteralValue::String("a".into())));
     let value = Arc::new(TypeExpr::SyntheticSlotBinding(Arc::new(
         SyntheticCarrierKey {
-            scope_canonical_id: Arc::from("/c.vue"),
+            scope_canonical_id: From::from("/c.vue"),
             surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
-            slot_name: Some(Arc::from("default")),
-            binding_name: Arc::from("item"),
+            slot_name: Some(From::from("default")),
+            binding_name: From::from("item"),
             value_node: backing.0,
         },
     )));
@@ -1591,10 +1591,10 @@ fn a_synthetic_binding_over_a_future_node_fails_closed() {
     let graph = SemanticGraphStore::new();
     let backing = prim(&graph, PrimitiveKind::Number);
     let key = |value_node: u64| SyntheticCarrierKey {
-        scope_canonical_id: Arc::from("/c.vue"),
+        scope_canonical_id: From::from("/c.vue"),
         surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
-        slot_name: Some(Arc::from("default")),
-        binding_name: Arc::from("item"),
+        slot_name: Some(From::from("default")),
+        binding_name: From::from("item"),
         value_node,
     };
     let count = graph.node_count();

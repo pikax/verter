@@ -929,20 +929,20 @@ fn corpus() -> Vec<(&'static str, TypeExpr)> {
     v.push((
         "synthetic-slot",
         TypeExpr::SyntheticSlotBinding(Arc::new(SyntheticCarrierKey {
-            scope_canonical_id: Arc::from("/owner.vue"),
+            scope_canonical_id: From::from("/owner.vue"),
             surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
-            slot_name: Some(Arc::from("default")),
-            binding_name: Arc::from("row"),
+            slot_name: Some(From::from("default")),
+            binding_name: From::from("row"),
             value_node: 7,
         })),
     ));
     v.push((
         "synthetic-binding",
         TypeExpr::SyntheticSlotBinding(Arc::new(SyntheticCarrierKey {
-            scope_canonical_id: Arc::from("/owner2.vue"),
+            scope_canonical_id: From::from("/owner2.vue"),
             surface_kind: SyntheticCarrierSurfaceKind::Binding,
             slot_name: None,
-            binding_name: Arc::from("b"),
+            binding_name: From::from("b"),
             value_node: 0,
         })),
     ));

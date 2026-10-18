@@ -720,7 +720,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if let Some(identity) = identity {
                 out.push(NamedCall {
                     span,
-                    name: Arc::clone(name),
+                    name: Arc::<str>::from(name),
                     identity,
                 });
             }

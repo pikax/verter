@@ -759,18 +759,18 @@ fn synthetic_slot_binding_is_live_wire_only_and_capture_fails_closed() {
     use verter_type_expr::{SyntheticCarrierKey, SyntheticCarrierSurfaceKind};
 
     let non_zero = TypeExpr::synthetic_slot_binding(SyntheticCarrierKey {
-        scope_canonical_id: Arc::from("/abs/Foo.vue"),
+        scope_canonical_id: From::from("/abs/Foo.vue"),
         surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
-        slot_name: Some(Arc::from("default")),
-        binding_name: Arc::from("controls"),
+        slot_name: Some(From::from("default")),
+        binding_name: From::from("controls"),
         // A large SESSION id proving no u32 truncation / no wire-arena remap.
         value_node: 424242,
     });
     let zero = TypeExpr::synthetic_slot_binding(SyntheticCarrierKey {
-        scope_canonical_id: Arc::from("/abs/Bar.vue"),
+        scope_canonical_id: From::from("/abs/Bar.vue"),
         surface_kind: SyntheticCarrierSurfaceKind::Binding,
         slot_name: None,
-        binding_name: Arc::from("model"),
+        binding_name: From::from("model"),
         // The legitimate absent sentinel.
         value_node: 0,
     });

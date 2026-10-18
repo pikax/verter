@@ -703,7 +703,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     fn raise_projected_member_path(
         &self,
         base: &AuthoredBodyLocator,
-        path: &Arc<[verter_type_expr::facts::FactPropertyKey]>,
+        path: &[verter_type_expr::facts::FactPropertyKey],
         ctx: &SourceRaiseContext<'_>,
     ) -> SourceRaiseOutcome {
         let locator = absolutize_locator(base, ctx.scope_canonical_id);
@@ -1125,7 +1125,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     ///   fabricated shape.
     fn raise_synthetic_binding_source_to_hot(
         &self,
-        key: &Arc<verter_type_expr::SyntheticCarrierKey>,
+        key: &verter_type_expr::SyntheticCarrierKey,
         ctx: &SourceRaiseContext<'_>,
     ) -> HotTypeRef {
         use crate::semantic_query::ProjectionMode;

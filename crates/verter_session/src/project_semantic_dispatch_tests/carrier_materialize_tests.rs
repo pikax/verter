@@ -49,10 +49,10 @@ fn hot_type_ref_is_send_sync_and_round_trips_node() {
 #[test]
 fn synthetic_binding_id_is_content_free_and_rehydrates() {
     let key = SyntheticCarrierKey {
-        scope_canonical_id: Arc::from("/Comp.vue"),
+        scope_canonical_id: From::from("/Comp.vue"),
         surface_kind: SyntheticCarrierSurfaceKind::Binding,
         slot_name: None,
-        binding_name: Arc::from("row"),
+        binding_name: From::from("row"),
         value_node: 99,
     };
     let id = SyntheticBindingId::from_carrier_key(&key);

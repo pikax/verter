@@ -266,7 +266,7 @@ pub(crate) fn slot_return_publications_from_typeinfo_surface<
                             base: AuthoredBodyLocator::MacroPayload(base.clone()),
                             occurrence: verter_type_expr::facts::CallableOccurrenceHandle::member(
                                 member.value.0,
-                                Arc::from([slot.name.clone()]),
+                                From::from([slot.name.clone()]),
                             ),
                             projection:
                                 verter_type_expr::facts::CallableOccurrenceProjection::Return,

@@ -2087,18 +2087,18 @@ pub enum AuthoredReferenceArgLocator {
 pub enum AuthoredReferenceHeadFact {
     NotReference,
     Bare {
-        local_name: Arc<str>,
-        args: Arc<[AuthoredReferenceArgLocator]>,
+        local_name: OwnedStr,
+        args: OwnedSlice<AuthoredReferenceArgLocator>,
     },
     Qualified {
-        local_root: Arc<str>,
-        member_path: Arc<[Arc<str>]>,
-        args: Arc<[AuthoredReferenceArgLocator]>,
+        local_root: OwnedStr,
+        member_path: OwnedSlice<OwnedStr>,
+        args: OwnedSlice<AuthoredReferenceArgLocator>,
     },
     ImportType {
-        specifier: Arc<str>,
-        member_path: Arc<[Arc<str>]>,
-        args: Arc<[AuthoredReferenceArgLocator]>,
+        specifier: OwnedStr,
+        member_path: OwnedSlice<OwnedStr>,
+        args: OwnedSlice<AuthoredReferenceArgLocator>,
     },
     Unavailable,
 }
@@ -2429,9 +2429,9 @@ pub enum FunctionReturnSource {
 )]
 pub struct FunctionSignatureFact {
     /// The function's own type parameters.
-    pub type_parameters: Arc<[NarrowTypeParam]>,
+    pub type_parameters: OwnedSlice<NarrowTypeParam>,
     /// Ordered parameter facts.
-    pub parameters: Arc<[FunctionParamFact]>,
+    pub parameters: OwnedSlice<FunctionParamFact>,
     /// Where the return type comes from. A DECLARED return (authored TS
     /// annotation or JSDoc recovery) replays its content-free locator; a
     /// body-derived return names the served function position the session's
@@ -2655,7 +2655,7 @@ pub enum ObjectMemberFact {
 )]
 pub struct ObjectShapeFact {
     /// The ordered object members.
-    pub members: Arc<[ObjectMemberFact]>,
+    pub members: OwnedSlice<ObjectMemberFact>,
 }
 
 /// A folded/sound enum member scalar. Numeric values are stored as the
@@ -3495,7 +3495,7 @@ pub enum FactOrLocator {
     /// nested mirror of [`ClosedTypeFact::LeafUnion`]. Ordered as produced;
     /// leaf members only, so the arm stays non-recursive and the fact is
     /// complete by itself (never a union of unions, never a locator arm).
-    LeafUnion(Arc<[LeafTypeFact]>),
+    LeafUnion(OwnedSlice<LeafTypeFact>),
     /// The escape: any non-leaf structure addressed by a body locator.
     Locator(TypeBodySlot),
     /// The authored macro / field payload escape (`define*<T>()`, `$props<T>()`,
@@ -3509,8 +3509,24 @@ pub enum FactOrLocator {
     /// default's empty / legacy-prop `$props` map and its snippet `$slots`
     /// map): named LEAF members only — closed and finite by construction,
     /// never an open recursive arm.
-    LeafObject(Arc<[SynthesizedLeafMember]>),
+    LeafObject(OwnedSlice<SynthesizedLeafMember>),
 }
+
+// List items held in owned lists: measured through their `HeapSize`.
+verter_retention::measured_by_heap_size!(
+    LeafTypeFact,
+    SynthesizedLeafMember,
+    SynthesizedMemberFact,
+    TupleElementFact,
+    ProjectedMemberFact,
+    ProjectedIndexSignatureFact,
+    FunctionSignatureFact,
+    FunctionParamFact,
+    NarrowTypeParam,
+    ObjectMemberFact,
+    AuthoredReferenceArgLocator,
+    SemanticTypeSource,
+);
 
 /// A closed leaf type fact (a primitive, a literal, or a bare named reference).
 #[derive(
@@ -3605,7 +3621,7 @@ pub struct TuplePayloadFact {
     /// Whether the tuple is readonly.
     pub readonly: bool,
     /// The ordered tuple elements.
-    pub elements: Arc<[TupleElementFact]>,
+    pub elements: OwnedSlice<TupleElementFact>,
 }
 
 /// An indexed-access fact (`Obj['a']['b']`) — path-precise, graph-free.
@@ -3625,7 +3641,7 @@ pub struct IndexedAccessFact {
     /// The object body locator.
     pub object: TypeBodySlot,
     /// The ordered index-key path.
-    pub index_path: Arc<[String]>,
+    pub index_path: OwnedSlice<String>,
 }
 
 /// The synthesized shape of a `ResolvedLocalType`.
@@ -3643,7 +3659,7 @@ pub struct IndexedAccessFact {
 )]
 pub enum ResolvedLocalShape {
     /// A synthesized object surface.
-    Object(Arc<[SynthesizedMemberFact]>),
+    Object(OwnedSlice<SynthesizedMemberFact>),
     /// A tuple payload.
     Tuple(TuplePayloadFact),
     /// An indexed access.
@@ -3755,13 +3771,13 @@ pub struct ProjectedIndexSignatureFact {
 )]
 pub struct ProjectedSurfaceFact {
     /// The projected members.
-    pub members: Arc<[ProjectedMemberFact]>,
+    pub members: OwnedSlice<ProjectedMemberFact>,
     /// Ordered call signatures.
-    pub call_signatures: Arc<[FunctionSignatureFact]>,
+    pub call_signatures: OwnedSlice<FunctionSignatureFact>,
     /// Ordered construct signatures.
-    pub construct_signatures: Arc<[FunctionSignatureFact]>,
+    pub construct_signatures: OwnedSlice<FunctionSignatureFact>,
     /// Concrete declared index signatures.
-    pub index_signatures: Arc<[ProjectedIndexSignatureFact]>,
+    pub index_signatures: OwnedSlice<ProjectedIndexSignatureFact>,
     /// Open-surface flag (distinct from concrete `index_signatures`).
     pub has_index_signature: bool,
 }
@@ -3919,7 +3935,7 @@ pub enum ClosedTypeFact {
     /// result of a fully-closed reduction (e.g. a distributive
     /// `Exclude`/`Extract` over literal unions). Ordered as produced; leaf
     /// members only, so the fact is complete by itself.
-    LeafUnion(Arc<[LeafTypeFact]>),
+    LeafUnion(OwnedSlice<LeafTypeFact>),
     /// A closed object surface.
     Object(ObjectShapeFact),
     /// A function / call-shape.
@@ -3975,7 +3991,7 @@ pub enum ProjectedTypeFact {
         /// The authored base body the projection starts from.
         base: AuthoredBodyLocator,
         /// The ordered member-name path off the base.
-        path: Arc<[FactPropertyKey]>,
+        path: OwnedSlice<FactPropertyKey>,
     },
     /// A projected callable occurrence route. `occurrence` is minted by the
     /// resolver from the exact instantiated semantic subject, so replay never
@@ -4037,7 +4053,7 @@ pub enum ProjectedTypeFact {
 )]
 pub struct CallableOccurrenceHandle {
     semantic_subject: u64,
-    path: Arc<[String]>,
+    path: OwnedSlice<String>,
 }
 
 impl CallableOccurrenceHandle {
@@ -4046,13 +4062,13 @@ impl CallableOccurrenceHandle {
     pub fn root(semantic_subject: u64) -> Self {
         Self {
             semantic_subject,
-            path: Arc::from([]),
+            path: OwnedSlice::default(),
         }
     }
 
     /// Mint a callable member occurrence.
     #[must_use]
-    pub fn member(semantic_subject: u64, path: Arc<[String]>) -> Self {
+    pub fn member(semantic_subject: u64, path: OwnedSlice<String>) -> Self {
         Self {
             semantic_subject,
             path,
@@ -4253,7 +4269,7 @@ pub enum SemanticTypeSource {
     Closed(ClosedTypeFact),
     /// (s) a synthetic slot-binding / `defineSlots` binding carrier source
     /// (the no-parser graph-native binding row's publication source).
-    SyntheticSlotBinding(Arc<crate::SyntheticCarrierKey>),
+    SyntheticSlotBinding(verter_retention::owned::Owned<crate::SyntheticCarrierKey>),
 }
 
 /// A PROVEN structural reason a schema position carries no semantic type
@@ -4523,10 +4539,10 @@ pub struct ExpansionResultFact<T> {
 /// already-absolute case (a source re-absolutized under a consuming scope)
 /// returns `None` allocation-free. On the first change the unchanged
 /// prefix is copied once and the remainder rebuilt.
-fn absolutize_fact_slice<T: Clone>(
-    items: &Arc<[T]>,
+fn absolutize_fact_slice<T: Clone, S: From<Vec<T>>>(
+    items: &[T],
     absolutize: impl Fn(&T) -> Option<T>,
-) -> Option<Arc<[T]>> {
+) -> Option<S> {
     // Allocation-free scan to the first changed element; an unchanged
     // slice exits here without touching the heap.
     let (first_changed, first_value) = items
@@ -4540,7 +4556,7 @@ fn absolutize_fact_slice<T: Clone>(
     for item in &items[first_changed + 1..] {
         rebuilt.push(absolutize(item).unwrap_or_else(|| item.clone()));
     }
-    Some(Arc::from(rebuilt.into_boxed_slice()))
+    Some(S::from(rebuilt))
 }
 
 /// Absolutize an optional slot position in place-style (None = unchanged).
@@ -4613,7 +4629,7 @@ impl AuthoredReferenceHeadFact {
         if prefix.is_empty() {
             return self.clone();
         }
-        let prefixed = |args: &Arc<[AuthoredReferenceArgLocator]>| {
+        let prefixed = |args: &OwnedSlice<AuthoredReferenceArgLocator>| {
             args.iter()
                 .map(|arg| match arg {
                     AuthoredReferenceArgLocator::Value(locator) => {
@@ -4633,8 +4649,8 @@ impl AuthoredReferenceHeadFact {
         match self {
             AuthoredReferenceHeadFact::Bare { local_name, args } => {
                 AuthoredReferenceHeadFact::Bare {
-                    local_name: Arc::clone(local_name),
-                    args: Arc::from(prefixed(args)),
+                    local_name: local_name.clone(),
+                    args: prefixed(args).into(),
                 }
             }
             AuthoredReferenceHeadFact::Qualified {
@@ -4642,18 +4658,18 @@ impl AuthoredReferenceHeadFact {
                 member_path,
                 args,
             } => AuthoredReferenceHeadFact::Qualified {
-                local_root: Arc::clone(local_root),
-                member_path: Arc::clone(member_path),
-                args: Arc::from(prefixed(args)),
+                local_root: local_root.clone(),
+                member_path: member_path.clone(),
+                args: prefixed(args).into(),
             },
             AuthoredReferenceHeadFact::ImportType {
                 specifier,
                 member_path,
                 args,
             } => AuthoredReferenceHeadFact::ImportType {
-                specifier: Arc::clone(specifier),
-                member_path: Arc::clone(member_path),
-                args: Arc::from(prefixed(args)),
+                specifier: specifier.clone(),
+                member_path: member_path.clone(),
+                args: prefixed(args).into(),
             },
             AuthoredReferenceHeadFact::NotReference => AuthoredReferenceHeadFact::NotReference,
             AuthoredReferenceHeadFact::Unavailable => AuthoredReferenceHeadFact::Unavailable,
@@ -4666,7 +4682,7 @@ impl AuthoredReferenceHeadFact {
     /// The authored LOCAL SPELLING is never rewritten; only the argument
     /// locators' anchors absolutize.
     fn absolutize(&self, canonical_id: &str) -> Option<Self> {
-        let args = |args: &Arc<[AuthoredReferenceArgLocator]>| {
+        let args = |args: &OwnedSlice<AuthoredReferenceArgLocator>| {
             absolutize_fact_slice(args, |arg| arg.absolutize(canonical_id))
         };
         match self {
@@ -4674,7 +4690,7 @@ impl AuthoredReferenceHeadFact {
                 local_name,
                 args: a,
             } => args(a).map(|args| AuthoredReferenceHeadFact::Bare {
-                local_name: Arc::clone(local_name),
+                local_name: local_name.clone(),
                 args,
             }),
             AuthoredReferenceHeadFact::Qualified {
@@ -4682,8 +4698,8 @@ impl AuthoredReferenceHeadFact {
                 member_path,
                 args: a,
             } => args(a).map(|args| AuthoredReferenceHeadFact::Qualified {
-                local_root: Arc::clone(local_root),
-                member_path: Arc::clone(member_path),
+                local_root: local_root.clone(),
+                member_path: member_path.clone(),
                 args,
             }),
             AuthoredReferenceHeadFact::ImportType {
@@ -4691,8 +4707,8 @@ impl AuthoredReferenceHeadFact {
                 member_path,
                 args: a,
             } => args(a).map(|args| AuthoredReferenceHeadFact::ImportType {
-                specifier: Arc::clone(specifier),
-                member_path: Arc::clone(member_path),
+                specifier: specifier.clone(),
+                member_path: member_path.clone(),
                 args,
             }),
             AuthoredReferenceHeadFact::NotReference | AuthoredReferenceHeadFact::Unavailable => {
@@ -4717,8 +4733,8 @@ impl FunctionSignatureFact {
             return None;
         }
         Some(Self {
-            type_parameters: type_parameters.unwrap_or_else(|| Arc::clone(&self.type_parameters)),
-            parameters: parameters.unwrap_or_else(|| Arc::clone(&self.parameters)),
+            type_parameters: type_parameters.unwrap_or_else(|| Clone::clone(&self.type_parameters)),
+            parameters: parameters.unwrap_or_else(|| Clone::clone(&self.parameters)),
             return_source: return_source.unwrap_or_else(|| self.return_source.clone()),
             return_reference_head: return_reference_head
                 .unwrap_or_else(|| self.return_reference_head.clone()),
@@ -4851,7 +4867,7 @@ impl IndexedAccessFact {
     fn absolutize(&self, canonical_id: &str) -> Option<Self> {
         self.object.absolutize(canonical_id).map(|object| Self {
             object,
-            index_path: Arc::clone(&self.index_path),
+            index_path: Clone::clone(&self.index_path),
         })
     }
 }
@@ -4916,7 +4932,7 @@ impl ProjectedTypeFact {
                 base.absolutize(canonical_id)
                     .map(|base| ProjectedTypeFact::MemberPath {
                         base,
-                        path: Arc::clone(path),
+                        path: Clone::clone(path),
                     })
             }
             ProjectedTypeFact::CallableOccurrence {
@@ -4978,13 +4994,13 @@ impl ProjectedTypeFact {
                     return None;
                 }
                 Some(ProjectedTypeFact::Surface(ProjectedSurfaceFact {
-                    members: members.unwrap_or_else(|| Arc::clone(&surface.members)),
+                    members: members.unwrap_or_else(|| Clone::clone(&surface.members)),
                     call_signatures: call_signatures
-                        .unwrap_or_else(|| Arc::clone(&surface.call_signatures)),
+                        .unwrap_or_else(|| Clone::clone(&surface.call_signatures)),
                     construct_signatures: construct_signatures
-                        .unwrap_or_else(|| Arc::clone(&surface.construct_signatures)),
+                        .unwrap_or_else(|| Clone::clone(&surface.construct_signatures)),
                     index_signatures: index_signatures
-                        .unwrap_or_else(|| Arc::clone(&surface.index_signatures)),
+                        .unwrap_or_else(|| Clone::clone(&surface.index_signatures)),
                     has_index_signature: surface.has_index_signature,
                 }))
             }
