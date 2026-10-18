@@ -295,7 +295,7 @@ mod source_identity_fence {
             registry.account_carrier_ide_content_verdict(
                 CANONICAL,
                 SOURCE,
-                &compile_error(code),
+                &compile_error(code).as_ref().copied(),
                 false,
                 false,
             );
@@ -308,7 +308,7 @@ mod source_identity_fence {
         registry.account_carrier_ide_content_verdict(
             CANONICAL,
             SOURCE,
-            &compile_error("XInvalidExpression"),
+            &compile_error("XInvalidExpression").as_ref().copied(),
             false,
             false,
         );

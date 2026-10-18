@@ -738,10 +738,11 @@ fn get_ide_is_a_pure_cached_read_no_compute() {
 
     // `get_ide` must never reach a compute path. These method/fn names are the
     // compile producers; their presence means `get_ide` computes on read.
-    const COMPUTE_NAMES: [&str; 5] = [
+    const COMPUTE_NAMES: [&str; 6] = [
         "ensure_compile_artifacts",
         "ensure_compiled",
         "ensure_ide_compiled",
+        "compile_ide",
         "get_virtual_file",
         "compile_entry",
     ];
@@ -754,21 +755,21 @@ fn get_ide_is_a_pure_cached_read_no_compute() {
     assert!(
         compute_hits.is_empty(),
         "`get_ide` calls a compute path {compute_hits:?}. `get_ide` MUST stay a \
-         pure cached read (`peek_tsx`); the explicit `ensure_ide_compiled` path computes."
+         pure cached read (`peek_tsx`); the explicit `compile_ide` path computes."
     );
 }
 
-/// Static guard: the IDE-ensure path must NOT request
-/// `VirtualNodeKind::Main`. `ensure_ide_compiled` resolves through the `Ide`
-/// demand, not a Main virtual-node request.
+/// Static guard: the IDE compile path must NOT request
+/// `VirtualNodeKind::Main`. `compile_ide` (which `ensure_ide_compiled`
+/// wraps) resolves through the `Ide` demand, not a Main virtual-node request.
 #[test]
 fn ensure_ide_compiled_never_requests_virtual_node_main() {
     let src = read_workspace_file(PIPELINE_REL);
     let file = syn::parse_file(&src).expect("parse virtual_file_pipeline.rs");
     let fns = index_free_fns(&file);
     let ensure_ide = fns
-        .get("ensure_ide_compiled")
-        .expect("ensure_ide_compiled not found — the explicit IDE-ensure path moved");
+        .get("compile_ide")
+        .expect("compile_ide not found — the explicit IDE compile path moved");
 
     // Walk the body for any path segment `Main` (the `VirtualNodeKind::Main`
     // variant). The IDE-ensure path resolves through `CompileDemand::Ide`, so
@@ -796,13 +797,13 @@ fn ensure_ide_compiled_never_requests_virtual_node_main() {
 
     assert_eq!(
         counter.main_hits, 0,
-        "`ensure_ide_compiled` references `VirtualNodeKind::Main` — it MUST NOT \
+        "`compile_ide` references `VirtualNodeKind::Main` — it MUST NOT \
          request the runtime Main node. It resolves through `CompileDemand::Ide`, so a Main-less \
          carrier (Svelte) succeeds without a runtime Main."
     );
     assert!(
         counter.demand_ide,
-        "`ensure_ide_compiled` must resolve through `CompileDemand::Ide` — the \
+        "`compile_ide` must resolve through `CompileDemand::Ide` — the \
          `Ide` demand was not observed in its body."
     );
 }
