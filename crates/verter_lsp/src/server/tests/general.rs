@@ -3458,7 +3458,6 @@ const extra = 42
         canonical_id,
         false,
         Some(&ide.code),
-        ide.source_map.as_deref(),
         Some((&uri, &revision)),
     );
     let edit = async {

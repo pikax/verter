@@ -757,7 +757,7 @@ The provider result must also attest completion: tsserver requires successful se
 
 **Watched dependency changes** (`handle_did_change_watched_files`, `refresh_open_importers_after_disk_change`): a disk create/change/delete of a file that is not open in the editor (a) reads the transitive importer closure BEFORE applying the change — an unresolved import is reachable only through the extension-stripped stem that query unions in (`EdgeStore::remove_file` removes the file's OWN outgoing edges and keeps the reverse buckets that name it as a target, so its importers stay reachable after a delete and a later re-create); (b) applies the `WorkspaceChange` to the VFS whether or not the host ever tracked the file, so a cached presence/absence answer moves with the disk; then (c) once the provider state has committed (after the awaited delete/carrier work, or at the end of the spawned non-carrier resync) re-records every importer's import edges and, for the OPEN ones only, advances the diagnostics generation, drops the cached document half, and arms a diagnostics-only publication — which retires the prior completion receipt. Closed and unrelated documents are never scheduled; an editor-open file ignores disk events entirely. Non-carrier changes are also FORWARDED to the provider before the importer refresh (`forward_watched_files_to_provider` → `TypeProvider::notify_watched_files_changed`, default no-op): an owned TSGO has no file watcher of its own under Verter, declares `workspace.didChangeWatchedFiles.dynamicRegistration`, and only re-reads a changed or deleted dependency when it receives `workspace/didChangeWatchedFiles`. Carrier paths are excluded — the carrier store is their authority.
 
-**Retries are for states a retry can change.** `pending_snapshot_provider_sync` gates `typeProviderSyncComplete`, so an entry that can never settle suppresses level 2 for the whole session. Three such states are terminal instead: a non-carrier script with ownership ready and no nearest config (`SyncOutcome::Terminal`); a carrier publication that carries no `CarrierIde` companion (nothing to activate — only a source change can produce one, and that re-enters through the ordinary sync); and a content-transition heal whose generation did not move (`record_content_transition_at` is strictly increasing, so a heal is always observable). A carrier whose IDE output is cold is COMPILED by the gateway (`compile_ide`, consuming its served artifact) rather than published API-only: publishing the narrower set would shrink the carrier's advertised companions and strand the open document's IDE member.
+**Retries are for states a retry can change.** `pending_snapshot_provider_sync` gates `typeProviderSyncComplete`, so an entry that can never settle suppresses level 2 for the whole session. Three such states are terminal instead: a non-carrier script with ownership ready and no nearest config (`SyncOutcome::Terminal`); a carrier publication that carries no `CarrierIde` companion (nothing to activate — only a source change can produce one, and that re-enters through the ordinary sync); and a content-transition heal whose generation did not move (`record_content_transition_at` is strictly increasing, so a heal is always observable). A carrier whose IDE output is cold is COMPILED by the gateway (`ensure_ide_compiled` then `get_ide`) rather than published API-only: publishing the narrower set would shrink the carrier's advertised companions and strand the open document's IDE member.
 
 **TSGO owned provider: one ordering barrier per API query.** The `--lsp` and `--api` sides are separate connections; an API query must observe every editor write already sent on the LSP side. Writes only mark `LspWriteBarrier::note_lsp_write`; `settle_lsp_writes` runs lazily before an API query, at most once per batch of writes, and the barrier request is the syntax-only `textDocument/foldingRange` — a diagnostic pull there costs a full semantic check per write.
 
@@ -1309,19 +1309,3 @@ expose `semanticNodeRoots`, `semanticNodeInternalEdges` and
 `semanticNodePermanentNodes`. These required current counts add no observation
 history. See the [ownership reference](../type-resolution/references/counted-node-ownership.md)
 for the ownership contract, the close and the sidecar cleanup.
-
-### IDE artifact delivery and refusable retention
-
-`VerterHost::compile_ide` returns the complete served `IdeResponse`, including
-its source map, under the IDE-only demand. Artifact-consuming callers use that
-return value: retention may refuse admission even though compilation succeeds.
-`get_ide` remains a cache-only peek; `ensure_ide_compiled` answers producibility
-without promising a later cache hit. Projection recovery passes the served
-artifact together with the document revision captured before compilation and
-compares that revision under the install guard.
-
-Coordinator diagnostics use the serving provider kind as well as object presence.
-`TypeProviderKind::None` completes the native diagnostic batch and does not wait
-for provider import receipts or query an injected provider object. Such an object
-may still serve explicit feature queries; provider-present modes keep their
-committed-surface and completeness requirements.

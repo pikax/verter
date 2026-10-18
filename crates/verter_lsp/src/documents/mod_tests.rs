@@ -246,13 +246,7 @@ mod source_identity_fence {
             let _ = registry.did_change(uri, 2, REVISION_B);
         }));
 
-        let attempted = registry.snapshot_identity(&uri).expect("open revision");
-        let ide = registry
-            .host()
-            .compile_ide(&canonical, &registry.tsx_profile.read())
-            .expect("compile")
-            .expect("carrier IDE");
-        registry.install_missing_carrier_projection(&canonical, &attempted, &ide);
+        registry.install_missing_carrier_projection(&canonical);
 
         assert!(
             registry

@@ -1529,16 +1529,23 @@ impl DocumentRegistry {
         self.documents.get(uri.as_str())?.projection.clone()
     }
 
-    /// Install a missing carrier projection from the IDE artifact just served.
-    /// The caller captures the revision before compiling; the install compares
-    /// it under the document guard so an intervening edit or reopen rejects
-    /// the old mapper. Cache admission is independent of this delivery.
-    pub(crate) fn install_missing_carrier_projection(
-        &self,
-        canonical_id: &str,
-        attempted: &DocumentSnapshotIdentity,
-        ide: &IdeResponse,
-    ) {
+    /// Install a carrier's provider projection from the host's CACHED IDE
+    /// surface, but only when the document has none.
+    ///
+    /// The document commit does not compile, so a carrier whose open-time
+    /// compile failed carries no projection — and a document with no projection
+    /// fails closed on every capture (`capture_provider_request_surface`
+    /// returns `None`) until a repair path compiles one: the attempt-bounded
+    /// interactive repair serves the request in hand, while the debounced
+    /// coordinator recovers request-independently — it already compiles the
+    /// IDE surface once per quiet window, and this turns that compile into the
+    /// projection the document was missing, at no extra compile and on no
+    /// foreground request path.
+    ///
+    /// Reads the host cache only — it never compiles — and leaves a document
+    /// that already has a projection untouched, so it cannot disturb the
+    /// steady-state carry.
+    pub fn install_missing_carrier_projection(&self, canonical_id: &str) {
         let Some(uri) = self.canonical_id_to_uri(canonical_id) else {
             return;
         };
@@ -1550,11 +1557,18 @@ impl DocumentRegistry {
         {
             return;
         }
-        // Compare the caller's pre-compile revision under the write guard below.
-        let Some(mapper) = ide
-            .source_map
-            .as_ref()
-            .and_then(|source_map| PositionMapper::from_json(source_map).ok())
+        // SOURCE-IDENTITY FENCE: the host-cache read below happens with no
+        // lock held, so a `didChange` can commit a newer revision in the
+        // read→install window. Capture the revision this cached surface is
+        // being installed FOR, and compare under the shard write guard —
+        // never install a mapper over bytes it does not describe.
+        let Some(attempted) = self.snapshot_identity(&uri) else {
+            return;
+        };
+        let Some(mapper) = self
+            .host()
+            .get_ide(canonical_id, &self.tsx_profile.read())
+            .and_then(|tsx| PositionMapper::from_json(&tsx.source_map?).ok())
         else {
             return;
         };
@@ -1784,7 +1798,7 @@ impl DocumentRegistry {
         // close/reopen caller gains the same guarantee.
         self.host().ensure_loaded(&canonical_id);
         // IDE-sync: drive the IDE/TSX surface (not the runtime `Main`) so a
-        // Main-less carrier (Svelte) refreshes its mapper. `Ok(None)` (no IDE
+        // Main-less carrier (Svelte) refreshes its mapper. `Ok(false)` (no IDE
         // surface) and `Err` yield no response; `Ok(Some)` is the response.
         let ensured = self.host().compile_ide(&canonical_id, &profile);
         let resp = ensured.as_ref().ok().cloned().flatten();

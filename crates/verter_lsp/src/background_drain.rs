@@ -1057,11 +1057,10 @@ pub(super) async fn sync_pending_carrier_provider_file(
             .unwrap_or_else(|_| documents.host().get_ide(canonical_id, &profile))
     });
     // The drain's compile is the OTHER path that can recover a carrier left
-    // without a provider projection (the document commit never compiles). Use
-    // the artifact just served, leaving an existing projection untouched.
-    if let (Some((_, attempted)), Some(ide)) = (open_pin, ide.as_ref()) {
-        documents.install_missing_carrier_projection(canonical_id, attempted, ide);
-    }
+    // without a provider projection (the document commit never compiles). Cache
+    // read only — the compile just above already ran — and a no-op once a
+    // projection exists.
+    documents.install_missing_carrier_projection(canonical_id);
     // Route through the SINGLE carrier-sync gateway: tsserver PUBLISHES the carrier
     // companions into the on-disk store the plugin reads (the configured-project
     // membership), tsgo opens the companions directly, and an owner loss RETRACTS the
@@ -1459,7 +1458,6 @@ async fn apply_owner_resolved_carrier_sync(
                             canonical_id,
                             path,
                             &ide.code,
-                            ide.source_map.as_deref(),
                             &committed_state.owner_binding,
                         )
                     });

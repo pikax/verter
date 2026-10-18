@@ -810,22 +810,11 @@ fn absorb_inbox(
     }
 }
 
-/// The provider serving coordinator diagnostics. An injected object remains
-/// available to feature queries in None mode, but that mode delivers no
-/// provider companions and completes diagnostics from the native batch alone.
-fn diagnostics_provider(deps: &SyncCoordinatorDeps) -> Option<&dyn TypeProvider> {
-    if matches!(deps.type_provider_kind, crate::TypeProviderKind::None) {
-        None
-    } else {
-        deps.type_provider.as_deref()
-    }
-}
-
 /// Whether `canonical_id`'s import closure is current enough to publish while a
 /// workspace scan runs. A route with no type provider publishes only Verter's
 /// own diagnostics, which read no provider state.
 fn dependencies_current(deps: &SyncCoordinatorDeps, canonical_id: &str) -> bool {
-    diagnostics_provider(deps).is_none()
+    deps.type_provider.is_none()
         || deps
             .dependency_receipts
             .is_current(canonical_id, &deps.documents, &deps.vfs_workspace)
@@ -1614,7 +1603,7 @@ fn arm_open_importer_republish(
 /// provider sync either, which is why a style-only edit, whose whole point is
 /// that it needs no provider work, still reaches this.
 ///
-/// Carrier-agnostic: `compile_ide` answers `Ok(None)` for anything
+/// Carrier-agnostic: `ensure_ide_compiled` answers `Ok(false)` for anything
 /// with no IDE surface, so a self-file document (rune module, plain script)
 /// pays a source lookup and nothing else, while Vue and Svelte carriers refresh
 /// identically.
@@ -1631,7 +1620,7 @@ fn refresh_carrier_ide_surface(deps: &SyncCoordinatorDeps, canonical_id: &str) {
     // check the recovery helper this replaced performed first.
     //
     // `sync_file`'s provider arm is deliberately NOT gated on it, and keeps its
-    // own `compile_ide`: retracting or clearing a closed carrier's
+    // own `ensure_ide_compiled`: retracting or clearing a closed carrier's
     // provider state is work a close still owes, and that arm also syncs
     // carriers that were never open (a workspace file whose `.tsx` an importer
     // needs).
@@ -1643,26 +1632,23 @@ fn refresh_carrier_ide_surface(deps: &SyncCoordinatorDeps, canonical_id: &str) {
     // reaching this tick.
     deps.documents.host().ensure_loaded(canonical_id);
     let profile = deps.documents.tsx_profile.read().clone();
-    let (_, revision) = deps.documents.open_compile_pin(canonical_id);
-    let Some(attempted) = revision.as_ref() else {
+    let compiled = crate::server::block_in_place_guarded(|| {
+        deps.documents
+            .host()
+            .ensure_ide_compiled(canonical_id, &profile)
+    });
+    if !compiled.unwrap_or(false) {
         return;
-    };
-    let Some(ide) = crate::server::block_in_place_guarded(|| {
-        deps.documents.host().compile_ide(canonical_id, &profile)
-    })
-    .ok()
-    .flatten() else {
-        return;
-    };
+    }
     // A carrier whose open-time compile FAILED has no provider projection and
     // fails closed on every capture until a repair path compiles one. The
     // interactive repair heals it on the next provider-backed request, but only
     // attempt-bounded and only when a request arrives — this tick is the
-    // request-INDEPENDENT recovery. It uses the artifact just served and is
-    // a no-op once a projection exists, so it never disturbs
+    // request-INDEPENDENT recovery. Cache read only — the compile just above
+    // already ran — and a no-op once a projection exists, so it never disturbs
     // the steady-state carry.
     deps.documents
-        .install_missing_carrier_projection(canonical_id, attempted, &ide);
+        .install_missing_carrier_projection(canonical_id);
 }
 
 /// Perform the actual sync: sync TSX/DTS to the type provider.
@@ -1852,12 +1838,13 @@ async fn sync_file(
     // slot the refresh just filled — the same profile, so the same normalized
     // slot — and a warm hit starts no cold run.
     let profile = deps.documents.tsx_profile.read().clone();
-    let ide = tokio::task::block_in_place(|| {
+    let _ = tokio::task::block_in_place(|| {
         deps.documents
             .host()
-            .compile_ide(canonical_id, &profile)
-            .unwrap_or_else(|_| deps.documents.host().get_ide(canonical_id, &profile))
+            .ensure_ide_compiled(canonical_id, &profile)
     });
+    tracing::info!("sync_coordinator: HOST_GET_IDE_START {canonical_id}");
+    let ide = tokio::task::block_in_place(|| deps.documents.host().get_ide(canonical_id, &profile));
     let is_jsx = ide.as_ref().map(|ide| ide.is_jsx).unwrap_or(false);
 
     // TEST SEAM: a one-shot pause, keyed by canonical id, that fires HERE —
@@ -2020,7 +2007,6 @@ async fn sync_file(
                                 canonical_id,
                                 &ide_path,
                                 &ide.code,
-                                ide.source_map.as_deref(),
                                 &committed_state.owner_binding,
                             )
                     });
@@ -2312,7 +2298,6 @@ async fn preserve_open_unresolved_carrier(
                 canonical_id,
                 ide_path,
                 &ide.code,
-                ide.source_map.as_deref(),
                 &target.owner_binding,
             );
         if current {
@@ -2611,11 +2596,11 @@ async fn publish_merged_diagnostics(
             &uri,
             &publication,
             verter_diagnostics.clone(),
-            diagnostics_provider(deps).is_none(),
+            deps.type_provider.is_none(),
             None,
         )
         .await;
-    if diagnostics_provider(deps).is_none() {
+    if deps.type_provider.is_none() {
         return true;
     }
     let batch = merge_provider_diagnostics(deps, canonical_id, verter_diagnostics).await;
@@ -2698,14 +2683,14 @@ async fn merge_provider_diagnostics(
     canonical_id: &str,
     verter_diags: Vec<Diagnostic>,
 ) -> ProviderDiagnosticBatch {
-    let Some(tp) = diagnostics_provider(deps) else {
+    let Some(tp) = &deps.type_provider else {
         return ProviderDiagnosticBatch::complete(verter_diags);
     };
     let encoding = deps.position_encoding.read().clone();
     provider_diagnostics_batch(
         &deps.documents,
         &deps.provider_sync_states,
-        tp,
+        tp.as_ref(),
         encoding,
         canonical_id,
         verter_diags,

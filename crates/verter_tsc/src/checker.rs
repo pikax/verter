@@ -333,7 +333,7 @@ fn generate_public_api_stubs(
 ///
 /// Vue uses `StandaloneCompiler` with `CompileTarget::TSX`. Svelte's
 /// standalone route refuses `IdeCompanion`, so Svelte is dispatched through
-/// the existing host IDE path (`compile_ide`).
+/// the existing host IDE path (`ensure_ide_compiled` + `get_ide`).
 /// IN-MEMORY: nothing is written to disk — `base_dir` only roots each carrier's
 /// deterministic virtual path (`<base>/Name_<hash>.tsx`, or `.jsx` for a
 /// JavaScript carrier — see the extension derivation below). Returns
@@ -350,9 +350,9 @@ fn generate_svelte_ide_tsx(
 ) -> Result<(PathBuf, String, PathBuf), api_check::TypecheckError> {
     let canonical_id = canonical_path_id(svelte_path);
     let profile = ide_check_profile();
-    let ide = match host.compile_ide(&canonical_id, &profile) {
-        Ok(Some(ide)) => ide,
-        Ok(None) => {
+    match host.ensure_ide_compiled(&canonical_id, &profile) {
+        Ok(true) => {}
+        Ok(false) => {
             return Err(api_check::TypecheckError::new(format!(
                 "verter-tsc: svelte carrier produced no IDE projection for {}",
                 svelte_path.display()
@@ -364,7 +364,13 @@ fn generate_svelte_ide_tsx(
                 svelte_path.display()
             )));
         }
-    };
+    }
+    let ide = host.get_ide(&canonical_id, &profile).ok_or_else(|| {
+        api_check::TypecheckError::new(format!(
+            "verter-tsc: compiler produced no validation carrier for {}",
+            svelte_path.display()
+        ))
+    })?;
 
     let svelte_dir = svelte_path.parent().unwrap_or(Path::new("."));
     let mut code = rewrite_relative_imports(&ide.code, svelte_dir)

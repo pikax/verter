@@ -3396,7 +3396,6 @@ const msg = 'hello'
             canonical_id,
             false,
             Some("export default { updated: true }"),
-            None,
             Some((&uri, &revision)),
         )
         .await;
@@ -3505,7 +3504,6 @@ const msg = 'hello'
             canonical_id,
             false,
             Some("export default { ts: true }"),
-            None,
             Some((&uri, &revision)),
         )
         .await;
@@ -3625,7 +3623,7 @@ const msg = 'hello'
 
     // Flip to TS (is_jsx = false → desired `.tsx`) but with NO IDE code this pass.
     server
-        .preserve_open_unresolved_carrier(canonical_id, false, None, None, None)
+        .preserve_open_unresolved_carrier(canonical_id, false, None, None)
         .await;
 
     let calls = provider.file_sync_calls();
@@ -3727,7 +3725,6 @@ const msg = 'hello'
             canonical_id,
             false,
             Some("export default { ts: true }"),
-            None,
             Some((&uri, &revision)),
         )
         .await;
@@ -3841,7 +3838,6 @@ const msg = 'hello'
             canonical_id,
             false,
             Some("export default { ts: true }"),
-            None,
             Some((&uri, &revision)),
         )
         .await;
@@ -3993,7 +3989,7 @@ const msg = 'hello'
 
     // No prior committed state seeded; no IDE code this pass.
     server
-        .preserve_open_unresolved_carrier(canonical_id, false, None, None, None)
+        .preserve_open_unresolved_carrier(canonical_id, false, None, None)
         .await;
 
     let state = server
@@ -4610,7 +4606,7 @@ async fn sync_carrier_ide_unresolved_forces_unresolved_over_prior_owned() {
     );
 
     server
-        .sync_carrier_ide_unresolved(canonical_id, "export const x = 1;", None, false, None)
+        .sync_carrier_ide_unresolved(canonical_id, "export const x = 1;", false, None)
         .await;
 
     let state = server
@@ -13410,44 +13406,4 @@ async fn a_coordinator_started_closed_yields_when_the_document_opens_before_its_
         "the lane-less coordinator delivered nothing beside the open document"
     );
     assert!(server.pending_snapshot_provider_sync.contains(id));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn ide_freshness_uses_served_mapping_without_retained_compile() {
-    let (service, provider, _uri) = make_request_surface_carrier().await;
-    let server = service.inner();
-    let canonical = "/workspace/src/App.vue";
-    let profile = server.documents.tsx_profile.read().clone();
-    let ide = server
-        .documents
-        .host()
-        .compile_ide(canonical, &profile)
-        .expect("compile")
-        .expect("IDE surface");
-    let committed = server
-        .provider_sync_state_for_source(canonical)
-        .expect("committed IDE");
-    let path = committed.ide_path.as_deref().expect("IDE path");
-    server.documents.host().invalidate_compile_slots(canonical);
-    assert!(server
-        .documents
-        .host()
-        .get_ide(canonical, &profile)
-        .is_none());
-    let current = |map| {
-        crate::provider_sync::open_ide_leg_is_current(
-            server.project_sync.as_ref().expect("provider sync"),
-            &server.documents,
-            Some(&committed),
-            canonical,
-            path,
-            &ide.code,
-            map,
-            &committed.owner_binding,
-        )
-    };
-    assert!(current(ide.source_map.as_deref()));
-    assert!(!current(Some("different-map")));
-    provider.forget_applied_content();
-    assert!(!current(ide.source_map.as_deref()));
 }

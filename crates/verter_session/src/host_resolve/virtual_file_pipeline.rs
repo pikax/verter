@@ -2483,12 +2483,12 @@ impl VerterHost {
         }
 
         // A real failure (missing source, compile error) propagates as `Err`
-        // — never collapsed into `Ok(None)`. A successful compile that
-        // produced no IDE artifact is `Ok(None)`. The
+        // — never collapsed into `Ok(false)`. A successful compile that
+        // produced no IDE artifact (a non-carrier surface) is `Ok(false)`. The
         // profile is normalized to carry the `TSX` target bit so `want_ide` is
         // driven regardless of the caller's runtime target; the compile + the
-        // cache-only `get_ide` read share the same normalized profile. The
-        // served artifact is returned independently of cache admission.
+        // subsequent `get_ide` read share the SAME normalized profile, so the
+        // slot the `CachedTsx` lands in is exactly the one `get_ide` peeks.
         let ide_profile = Self::ide_normalized_profile(profile);
         let served =
             self.ensure_compile_artifacts(canonical.clone(), &ide_profile, CompileDemand::Ide)?;

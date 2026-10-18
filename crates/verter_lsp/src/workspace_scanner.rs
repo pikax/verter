@@ -1038,10 +1038,9 @@ pub(crate) async fn sync_file_to_provider(
         _ => None,
     };
     // IDE-sync: drive the IDE/TSX surface (not the runtime `Main`) so a
-    // Main-less carrier (Svelte) serves its IDE artifact even without cache admission.
-    let ide = host
-        .compile_ide(canonical_id, profile)
-        .unwrap_or_else(|_| host.get_ide(canonical_id, profile));
+    // Main-less carrier (Svelte) populates its `CachedTsx` before `get_ide`.
+    let _ = host.ensure_ide_compiled(canonical_id, profile);
+    let ide = host.get_ide(canonical_id, profile);
     let is_jsx = ide.as_ref().map(|ide| ide.is_jsx).unwrap_or(false);
 
     #[cfg(test)]
@@ -1241,7 +1240,6 @@ pub(crate) async fn sync_file_to_provider(
                             canonical_id,
                             &tsx_path,
                             &ide.code,
-                            ide.source_map.as_deref(),
                             &committed_state.owner_binding,
                         )
                     });

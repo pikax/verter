@@ -939,7 +939,7 @@ pub fn materialize(req: &MaterializeRequest) -> Result<MaterializeReport, Materi
         host.ensure_loaded(&canonical);
 
         // This pass consumes exactly two products: the IDE artifact below and
-        // the separate public-API declaration. `compile_ide` is the
+        // the separate public-API declaration. `ensure_ide_compiled` is the
         // route for the first and normalizes the TSX bit (idempotent here — the
         // profile already carries `IDE`), so it drives the same compile into the
         // same compile `get_ide` peeks while asking only for what is read.
