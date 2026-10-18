@@ -38,7 +38,7 @@ use crate::semantic_query::{QueryError, SemanticNodeId};
 /// Purely positional — it names WHICH child slot the fold descended through,
 /// so a consumer can locate the degraded leaf inside the compat tree without
 /// re-parsing any spelling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub(crate) enum MaterializePathSegment {
     UnionArm(u32),
     IntersectionArm(u32),
@@ -83,7 +83,7 @@ pub(crate) enum MaterializePathSegment {
 }
 
 /// Which slot of an object member carries the degraded leaf.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub(crate) enum ObjectMemberSlot {
     /// Computed property / method key expression.
     Key,
@@ -96,7 +96,7 @@ pub(crate) enum ObjectMemberSlot {
 }
 
 /// Which slot of a type parameter carries the degraded leaf.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub(crate) enum TypeParameterSlot {
     Constraint,
     Default,
@@ -106,7 +106,7 @@ pub(crate) enum TypeParameterSlot {
 /// [`TypeExpr`]: the TYPED reason plus the positional path from the tree root.
 /// The reason is the ONLY control channel — the compat tree leaf at this
 /// position is inert [`UnknownValue`] text.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub struct DegradedLeaf {
     path: Arc<[MaterializePathSegment]>,
     reason: QueryError,

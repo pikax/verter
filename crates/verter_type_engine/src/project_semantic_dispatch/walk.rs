@@ -100,7 +100,7 @@ pub(super) fn observe_typeof_internal_path_mode(mode: ProjectionMode) {
 pub fn probe_walk_typeof_internal_path_mode<C: crate::resolver_core::ResolverCapabilities>(
     dispatch: &ProjectSemanticDispatch<'_, C>,
     base: SemanticNodeId,
-    path: Arc<[crate::semantic_query::PathSegment]>,
+    path: verter_type_expr::OwnedSlice<PathSegment>,
     context: crate::semantic_query::ProjectionReductionContext,
 ) -> Option<ProjectionMode> {
     LAST_WALK_TYPEOF_INTERNAL_PATH_MODE.with(|c| c.set(None));
@@ -123,7 +123,7 @@ pub fn probe_walk_typeof_internal_path_mode<C: crate::resolver_core::ResolverCap
 pub fn probe_walk_typeof_resolved<C: crate::resolver_core::ResolverCapabilities>(
     dispatch: &ProjectSemanticDispatch<'_, C>,
     base: SemanticNodeId,
-    path: Arc<[crate::semantic_query::PathSegment]>,
+    path: verter_type_expr::OwnedSlice<PathSegment>,
     context: crate::semantic_query::ProjectionReductionContext,
 ) -> Option<SemanticNodeId> {
     LAST_WALK_TYPEOF_RESOLVED.with(|c| c.set(None));
@@ -204,8 +204,8 @@ pub enum ShallowDiagnostic {
     /// a root-level miss is the caller's missing-dependency channel and
     /// must not double-report.
     UnresolvedSurfaceArm {
-        name: Arc<str>,
-        owner_canonical: Arc<str>,
+        name: verter_session_query::retention::owned::OwnedStr,
+        owner_canonical: verter_session_query::retention::owned::OwnedStr,
         owner: verter_type_expr::TopLevelOwnerId,
     },
     /// A flow-bearing root whose reducer is still pending
@@ -288,6 +288,93 @@ impl ShallowDiagnostic {
                 target: target.clone(),
             },
         }
+    }
+}
+
+/// The walker diagnostics a read delivers.
+///
+/// A sealed, self-charged list: clones share one allocation and its one
+/// charge, released with the last handle, and the diagnostics are reachable
+/// only by borrow. Every empty list is the one process-static empty list,
+/// which no owner charges.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct WalkerDiagnostics(
+    verter_session_query::retention::owned::Owned<Box<[ShallowDiagnostic]>>,
+);
+
+impl WalkerDiagnostics {
+    /// A list of `diagnostics`, in order.
+    #[must_use]
+    pub fn new(diagnostics: impl Into<Vec<ShallowDiagnostic>>) -> Self {
+        let diagnostics: Vec<ShallowDiagnostic> = diagnostics.into();
+        if diagnostics.is_empty() {
+            return crate::semantic_query_memo::empty_diagnostics();
+        }
+        Self(verter_session_query::retention::owned::Owned::new(
+            diagnostics.into_boxed_slice(),
+        ))
+    }
+
+    /// The process-static empty list. Only its static initialiser calls
+    /// this.
+    pub(crate) fn static_empty() -> Self {
+        Self(verter_session_query::retention::owned::Owned::new(
+            Box::new([]),
+        ))
+    }
+
+    /// The owned allocation behind a nonempty list; `None` for the static
+    /// empty list.
+    pub(crate) fn owned(
+        &self,
+    ) -> Option<&verter_session_query::retention::owned::Owned<Box<[ShallowDiagnostic]>>> {
+        (!self.is_empty()).then_some(&self.0)
+    }
+
+    /// Whether two lists share one allocation.
+    #[must_use]
+    pub fn ptr_eq(this: &Self, other: &Self) -> bool {
+        verter_session_query::retention::owned::Owned::ptr_eq(&this.0, &other.0)
+    }
+
+    /// Bytes this list's charge holds; `None` while no owner charged it.
+    #[must_use]
+    pub fn charge_bytes(&self) -> Option<usize> {
+        self.0.charge_bytes()
+    }
+}
+
+impl std::ops::Deref for WalkerDiagnostics {
+    type Target = [ShallowDiagnostic];
+    fn deref(&self) -> &[ShallowDiagnostic] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for WalkerDiagnostics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+impl Default for WalkerDiagnostics {
+    fn default() -> Self {
+        crate::semantic_query_memo::empty_diagnostics()
+    }
+}
+
+impl From<Vec<ShallowDiagnostic>> for WalkerDiagnostics {
+    fn from(diagnostics: Vec<ShallowDiagnostic>) -> Self {
+        Self::new(diagnostics)
+    }
+}
+
+impl verter_session_query::retention::owned::Measured for ShallowDiagnostic {
+    fn heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        crate::semantic_query::allocation_footprint::OwnedHeap::owned_heap_bytes(self, aliases)
     }
 }
 
@@ -814,7 +901,7 @@ pub struct ShallowSurfaceMember {
     /// [`SurfaceMember::declaration_origin`] so the Shallow round-trip pairs
     /// the member's spans with its real declaration file (not its value-node
     /// scope).
-    pub declaration_origin: Option<Arc<str>>,
+    pub declaration_origin: Option<verter_type_expr::OwnedStr>,
     /// Excess-property provenance, carried verbatim from
     /// [`SurfaceMember::excess_origin`] through the walker's intermediate
     /// state so shallow projections round-trip it losslessly. A member
@@ -1136,7 +1223,7 @@ struct CompositeJoin {
     slot: usize,
     node: SemanticNodeId,
     arms: Arc<[SemanticNodeId]>,
-    path: Arc<[PathSegment]>,
+    path: verter_type_expr::OwnedSlice<PathSegment>,
     index: usize,
 }
 
@@ -1175,7 +1262,7 @@ enum CompositeHop {
 enum WalkFrame {
     Step {
         node: SemanticNodeId,
-        path: Arc<[PathSegment]>,
+        path: verter_type_expr::OwnedSlice<PathSegment>,
         index: usize,
         /// The union or intersection split this step is an arm of, and how
         /// it reads the segment there.
@@ -1233,7 +1320,7 @@ enum WalkFrame {
 /// fallen back to a deferred Mapped shell instead of substituting
 /// `K = 1.5`.
 enum LiteralKey {
-    String(Arc<str>),
+    String(verter_type_expr::OwnedStr),
     Number(f64),
 }
 
@@ -1287,7 +1374,7 @@ struct WalkPrefixes<'a, 'b> {
     /// Open until the walk leaves its linear run; the receipts it sealed stay.
     recording: Option<crate::project_semantic_dispatch::connected_demand::PrefixRecording<'a, 'b>>,
     base: SemanticNodeId,
-    path: Arc<[PathSegment]>,
+    path: verter_type_expr::OwnedSlice<PathSegment>,
     receipts: Vec<Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>>,
 }
 
@@ -1384,7 +1471,7 @@ pub(crate) struct PathWalker<'a, 'b, C: crate::resolver_core::ResolverCapabiliti
     /// apparent-wrapper read on the way is scoped to that file's project, so
     /// the entry's key names the project it read
     /// ([`Self::apparent_wrapper_read`]).
-    origin_file: Option<Arc<str>>,
+    origin_file: Option<verter_type_expr::OwnedStr>,
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'a, C> {
@@ -1728,7 +1815,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     pub(super) fn record_prefix_receipts(
         &mut self,
         base: SemanticNodeId,
-        path: &Arc<[PathSegment]>,
+        path: &verter_type_expr::OwnedSlice<PathSegment>,
     ) {
         if path.len() < 2 {
             return;
@@ -1739,7 +1826,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             .map(|recording| WalkPrefixes {
                 recording: Some(recording),
                 base,
-                path: Arc::clone(path),
+                path: path.clone(),
                 receipts: Vec::new(),
             });
     }
@@ -1776,7 +1863,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         }
         let key = SemanticQueryKey::ProjectPath {
             base: prefixes.base,
-            path: Arc::from(prefixes.path[..=index].to_vec().into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::from(
+                prefixes.path[..=index].to_vec().into_boxed_slice(),
+            ),
             context: crate::semantic_query::ProjectionReductionContext::published(
                 ProjectionMode::Navigate,
             ),
@@ -1890,7 +1979,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 PathSegment::Index(key) => key.clone(),
                 PathSegment::Member(key) => match key {
                     crate::semantic_query::PropertyKey::String(text) => {
-                        IndexKey::String(Arc::clone(text))
+                        IndexKey::String(text.clone())
                     }
                     crate::semantic_query::PropertyKey::Number(number) => IndexKey::Number(*number),
                     crate::semantic_query::PropertyKey::UniqueSymbol(symbol) => {
@@ -1962,8 +2051,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             .and_then(|scope| scope.canonical_file());
         // One entry per index key type: a union key type declares one
         // index signature per constituent, as the checker splits it.
-        let mut string_values: Vec<(SemanticNodeId, Option<Arc<str>>)> = Vec::new();
-        let mut applicable: Vec<(SemanticNodeId, Option<Arc<str>>)> = Vec::new();
+        let mut string_values: Vec<(SemanticNodeId, Option<verter_type_expr::OwnedStr>)> =
+            Vec::new();
+        let mut applicable: Vec<(SemanticNodeId, Option<verter_type_expr::OwnedStr>)> = Vec::new();
         for signature in signatures {
             let origin = signature
                 .declaration_origin
@@ -2239,7 +2329,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             edge_kind,
             Arc::from(vec![object].into_boxed_slice()),
             meta,
-            Arc::clone(self.fence),
+            self.fence.clone(),
         );
         self.record_intermediate(Some(value));
         value
@@ -2251,7 +2341,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         match segment {
             PathSegment::Member(key) => OwnedIndexAccessKey::Name(key.clone()),
             PathSegment::Index(IndexKey::String(value)) => {
-                OwnedIndexAccessKey::Name(PropertyKey::String(Arc::clone(value)))
+                OwnedIndexAccessKey::Name(PropertyKey::String(value.clone()))
             }
             PathSegment::Index(IndexKey::Number(value)) => {
                 OwnedIndexAccessKey::Name(PropertyKey::Number(*value))
@@ -2501,7 +2591,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     self.visited_nodes.remove(&surface);
                     frames.push(WalkFrame::Step {
                         node: surface,
-                        path: Arc::clone(&join.path),
+                        path: join.path.clone(),
                         index: join.index,
                         arm_read: Some(ArmRead {
                             at: join.index,
@@ -2756,7 +2846,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     fn classify_numeric_index_segment(&self, segment: &PathSegment) -> Option<NumericIndexDemand> {
         let key = match segment {
             PathSegment::Index(IndexKey::Number(n)) => IndexKey::Number(*n),
-            PathSegment::Index(IndexKey::String(s)) => IndexKey::String(Arc::clone(s)),
+            PathSegment::Index(IndexKey::String(s)) => IndexKey::String(s.clone()),
             PathSegment::Index(IndexKey::UniqueSymbol(identity)) => {
                 IndexKey::UniqueSymbol(identity.clone())
             }
@@ -2967,7 +3057,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         }
         if !keys.iter().all(|key| match key {
             IndexKey::String(name) => {
-                domain.membership(&PropertyKey::String(Arc::clone(name))) == Some(true)
+                domain.membership(&PropertyKey::String(name.clone())) == Some(true)
             }
             _ => false,
         }) {
@@ -3018,7 +3108,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             let IndexKey::String(name) = key else {
                 unreachable!("finite string keys checked above")
             };
-            let property = PropertyKey::String(Arc::clone(name));
+            let property = PropertyKey::String(verter_type_expr::OwnedStr::from(name));
             let source_optional = || match source_index.as_ref()?.project_known_key(&property) {
                 crate::semantic_query::SurfaceKeyProjection::Exact(member) => Some(member.optional),
                 crate::semantic_query::SurfaceKeyProjection::AbsentProven => None,
@@ -3044,7 +3134,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 else {
                     let miss = QueryBuildOutput::from((
                         QueryResult::Error(QueryError::Miss),
-                        Arc::clone(self.fence),
+                        self.fence.clone(),
                     ));
                     return self.stop_finite_mapped_with(miss, object, index_node);
                 };
@@ -3060,7 +3150,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     OriginEdgeKind::ProjectIndex,
                     Arc::from([source, source_object, argument]),
                     OriginMeta::Index(key.clone()),
-                    Arc::clone(self.fence),
+                    self.fence.clone(),
                 );
                 for &read in &source_reads {
                     selected_mapper.value_expr = self.dispatch.substitute_semantic_type_param(
@@ -3100,7 +3190,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 OriginEdgeKind::ProjectIndex,
                 Arc::from([object, source, mapper.key_space]),
                 OriginMeta::Index(key.clone()),
-                Arc::clone(self.fence),
+                self.fence.clone(),
             );
             self.visited_aliases.clear();
             self.visited_nodes.clear();
@@ -3118,7 +3208,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             ) {
                 let miss = QueryBuildOutput::from((
                     QueryResult::Error(QueryError::Miss),
-                    Arc::clone(self.fence),
+                    self.fence.clone(),
                 ));
                 return self.stop_finite_mapped_with(miss, object, index_node);
             }
@@ -3166,12 +3256,11 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 index: IndexKey::Computed(index),
             },
         );
-        let mut output =
-            QueryBuildOutput::from((QueryResult::Value(carrier), Arc::clone(self.fence)))
-                .with_observed_self_roots(
-                    self.dispatch
-                        .observed_self_roots_from_nodes([object, index]),
-                );
+        let mut output = QueryBuildOutput::from((QueryResult::Value(carrier), self.fence.clone()))
+            .with_observed_self_roots(
+                self.dispatch
+                    .observed_self_roots_from_nodes([object, index]),
+            );
         output.merge_completeness(self.completeness);
         output.cache_suppress = true;
         output.walker_diagnostics = std::mem::take(&mut self.walker_diagnostics);
@@ -3201,7 +3290,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             }
             let known = match key {
                 IndexKey::String(value) => {
-                    crate::semantic_query::PropertyKey::String(Arc::clone(value))
+                    crate::semantic_query::PropertyKey::String(value.clone())
                 }
                 IndexKey::Number(value) => crate::semantic_query::PropertyKey::Number(*value),
                 IndexKey::UniqueSymbol(value) => {
@@ -3217,7 +3306,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 OriginEdgeKind::ProjectIndex,
                 Arc::from([object]),
                 OriginMeta::Index(key.clone()),
-                Arc::clone(self.fence),
+                self.fence.clone(),
             );
         }
         let values: Vec<_> = values
@@ -3411,7 +3500,10 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 canonical_id,
                 name,
                 ..
-            }) => Some((Arc::clone(canonical_id), Arc::clone(name))),
+            }) => Some((
+                std::sync::Arc::<str>::from(canonical_id.as_str()),
+                std::sync::Arc::<str>::from(name.as_str()),
+            )),
             _ => None,
         }
     }
@@ -3440,7 +3532,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             .graph()
             .node_scope(base)
             .and_then(|scope| scope.canonical_file());
-        let initial_path: Arc<[PathSegment]> = Arc::from(path.to_vec().into_boxed_slice());
+        let initial_path: verter_type_expr::OwnedSlice<PathSegment> =
+            verter_type_expr::OwnedSlice::from(path.to_vec().into_boxed_slice());
         let mut frames: Vec<WalkFrame> = vec![WalkFrame::Step {
             node: base,
             path: initial_path,
@@ -3513,7 +3606,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     fn advance_step(
         &mut self,
         start_node: SemanticNodeId,
-        path: &Arc<[PathSegment]>,
+        path: &verter_type_expr::OwnedSlice<PathSegment>,
         start_index: usize,
         arm_read: Option<ArmRead>,
         frames: &mut Vec<WalkFrame>,
@@ -3521,7 +3614,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     ) {
         if !self.visited_nodes.insert(start_node) {
             results.push(self.dispatch.opaque(QueryError::AliasCycle {
-                chain: Arc::from(Vec::<Arc<str>>::new()),
+                chain: verter_type_expr::OwnedSlice::from(Vec::<Arc<str>>::new()),
             }));
             return;
         }
@@ -3553,7 +3646,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         while index < path.len() {
             if cap_active && index >= budget {
                 results.push(self.dispatch.opaque(QueryError::RecursiveRef {
-                    name: Arc::from("depth-budget-exceeded"),
+                    name: verter_type_expr::OwnedStr::from("depth-budget-exceeded"),
                     args: Default::default(),
                 }));
                 return;
@@ -3586,7 +3679,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     let known_key = match segment {
                         PathSegment::Member(key) => key.clone(),
                         PathSegment::Index(IndexKey::String(value)) => {
-                            crate::semantic_query::PropertyKey::String(Arc::clone(value))
+                            crate::semantic_query::PropertyKey::String(value.clone())
                         }
                         PathSegment::Index(IndexKey::Number(value)) => {
                             crate::semantic_query::PropertyKey::Number(*value)
@@ -3735,7 +3828,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         edge_kind,
                         Arc::from([current]),
                         meta,
-                        Arc::clone(self.fence),
+                        self.fence.clone(),
                     );
                     current = member_value;
                     index += 1;
@@ -3745,7 +3838,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     let known_key = match segment {
                         PathSegment::Member(key) => key.clone(),
                         PathSegment::Index(IndexKey::String(value)) => {
-                            crate::semantic_query::PropertyKey::String(Arc::clone(value))
+                            crate::semantic_query::PropertyKey::String(verter_type_expr::OwnedStr::from(value))
                         }
                         PathSegment::Index(IndexKey::Number(value)) => {
                             crate::semantic_query::PropertyKey::Number(*value)
@@ -3886,7 +3979,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                 edge_kind,
                                 Arc::from(vec![current].into_boxed_slice()),
                                 meta,
-                                Arc::clone(self.fence),
+                                self.fence.clone(),
                             );
                             current = member_value;
                             index += 1;
@@ -4020,7 +4113,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                     slot,
                                     node: current,
                                     arms: arms.members_arc(),
-                                    path: Arc::clone(path),
+                                    path: path.clone(),
                                     index,
                                 }),
                             )
@@ -4036,7 +4129,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     for (arm_index, arm) in arms.iter().enumerate() {
                         frames.push(WalkFrame::Step {
                             node: *arm,
-                            path: Arc::clone(&remaining_path),
+                            path: remaining_path.clone(),
                             index,
                             arm_read: Some(ArmRead {
                                 at: index,
@@ -4157,7 +4250,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                     slot,
                                     node: current,
                                     arms: arms.members_arc(),
-                                    path: Arc::clone(path),
+                                    path: path.clone(),
                                     index,
                                 }),
                             )
@@ -4173,7 +4266,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     for (arm_index, arm) in arms.iter().enumerate() {
                         frames.push(WalkFrame::Step {
                             node: *arm,
-                            path: Arc::clone(&remaining_path),
+                            path: remaining_path.clone(),
                             index,
                             arm_read: Some(ArmRead {
                                 at: index,
@@ -4216,12 +4309,12 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         false,
                     );
                     let distributive = *distributive;
-                    let rest_path: Arc<[PathSegment]> =
-                        Arc::from(path[index..].to_vec().into_boxed_slice());
+                    let rest_path: verter_type_expr::OwnedSlice<PathSegment> =
+                        verter_type_expr::OwnedSlice::from(path[index..].to_vec().into_boxed_slice());
                     let true_projection =
                         self.execute_read_folding_partial(SemanticQueryKey::ProjectPath {
                             base: true_branch,
-                            path: Arc::clone(&rest_path),
+                            path: rest_path.clone(),
                             context: self.context_from_template(
                                 crate::semantic_query::ProjectionReductionContext::published(
                                     self.mode(),
@@ -4259,7 +4352,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         OriginEdgeKind::ConditionalSelect,
                         Arc::from(vec![check, extends].into_boxed_slice()),
                         OriginMeta::Branch(BranchSelection::Deferred),
-                        Arc::clone(self.fence),
+                        self.fence.clone(),
                     );
                     self.graph().record_conditional_deferred();
                     results.push(wrapper);
@@ -4421,7 +4514,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         match next_segment {
                             Some(PathSegment::Member(
                                 crate::semantic_query::PropertyKey::String(name),
-                            )) => (Some(LiteralKey::String(Arc::clone(name))), true),
+                            )) => (Some(LiteralKey::String(name.clone())), true),
                             Some(PathSegment::Member(
                                 crate::semantic_query::PropertyKey::Number(number),
                             )) => (Some(LiteralKey::Number(number.get() as f64)), false),
@@ -4429,7 +4522,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                 crate::semantic_query::PropertyKey::UniqueSymbol(_),
                             )) => (None, false),
                             Some(PathSegment::Index(IndexKey::String(s))) => {
-                                (Some(LiteralKey::String(Arc::clone(s))), true)
+                                (Some(LiteralKey::String(s.clone())), true)
                             }
                             Some(PathSegment::Index(IndexKey::Number(n))) => {
                                 // G4.4: integer-convention recovery.
@@ -4468,7 +4561,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             Some(PathSegment::Index(IndexKey::Computed(node))) => {
                                 match self.dispatch.normalized_index_key_node(*node) {
                                     IndexKey::String(text) => {
-                                        (Some(LiteralKey::String(Arc::clone(&text))), true)
+                                        (Some(LiteralKey::String(text.clone())), true)
                                     }
                                     IndexKey::Number(number) => {
                                         // `normalized_index_key_node`
@@ -4514,7 +4607,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                             Some(SemanticNodeData::Literal(
                                                 crate::semantic_query::LiteralValue::String(s),
                                             )) => (
-                                                Some(LiteralKey::String(Arc::<str>::from(
+                                                Some(LiteralKey::String(verter_type_expr::OwnedStr::from(
                                                     s.as_str(),
                                                 ))),
                                                 true,
@@ -4594,7 +4687,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                     vec![current, *source, mapper.key_space].into_boxed_slice(),
                                 ),
                                 meta,
-                                Arc::clone(self.fence),
+                                self.fence.clone(),
                             );
                             current = narrowed;
                             index += 1;
@@ -4649,7 +4742,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             // under their canonical names.
                             let needle_key = match key {
                                 LiteralKey::String(s) => {
-                                    crate::semantic_query::PropertyKey::String(Arc::clone(s))
+                                    crate::semantic_query::PropertyKey::String(verter_type_expr::OwnedStr::from(s))
                                 }
                                 LiteralKey::Number(n) => {
                                     crate::semantic_query::PropertyKey::from_js_number(*n)
@@ -4981,7 +5074,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             edge_kind,
                             Arc::from(vec![current, *source, mapper.key_space].into_boxed_slice()),
                             meta,
-                            Arc::clone(self.fence),
+                            self.fence.clone(),
                         );
                         current = value;
                         index += 1;
@@ -5069,7 +5162,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     let typeof_context = self.context;
                     let typeof_key = self.dispatch.typeof_key_with_path(
                         value_root.clone(),
-                        Arc::clone(&typeof_path),
+                        typeof_path.clone(),
                         typeof_context,
                     );
                     let mut resolved = match self.execute_read_folding_partial(typeof_key) {
@@ -5104,10 +5197,10 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             return;
                         };
                         let mut extended = typeof_path.to_vec();
-                        extended.push(member);
+                        extended.push(verter_type_expr::OwnedStr::from(member));
                         let member_key = self.dispatch.typeof_key_with_path(
                             value_root,
-                            Arc::from(extended.into_boxed_slice()),
+                            verter_type_expr::OwnedSlice::from(extended.into_boxed_slice()),
                             typeof_context,
                         );
                         current = match self.execute_read_folding_partial(member_key) {
@@ -5162,7 +5255,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                     .collect::<Vec<_>>()
                                     .into_boxed_slice(),
                             );
-                            results.push(self.dispatch.opaque(QueryError::AliasCycle { chain }));
+                            results.push(self.dispatch.opaque(QueryError::AliasCycle { chain: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(chain) }));
                             return;
                         }
                         self.visited_aliases.push(identity);
@@ -5172,7 +5265,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         OriginEdgeKind::AliasResolve,
                         Arc::from(vec![current].into_boxed_slice()),
                         OriginMeta::None,
-                        Arc::clone(self.fence),
+                        self.fence.clone(),
                     );
                     current = target_id;
                     // Do not consume a segment; we unwrapped an alias.
@@ -5200,9 +5293,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     whole_hash: _,
                 }) => {
                     let base = self.dispatch.type_slot_for(
-                        Arc::clone(canonical_id),
+                        canonical_id.clone(),
                         *owner,
-                        Arc::clone(name),
+                        name.clone(),
                     );
                     let inst_ctx = self.dispatch.instantiate_context_for(
                         canonical_id,
@@ -5251,12 +5344,12 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 // site but transparent through alias chains during walk.
                 SemanticNodeData::DeclRef { identity } => {
                     let scope = ScopeId {
-                        canonical_id: Arc::clone(&identity.canonical_id),
+                        canonical_id: identity.canonical_id.clone(),
                         owner: identity.owner,
                         local_scope: None,
                         binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(identity.owner),
                     };
-                    let name = Arc::clone(&identity.decl_name);
+                    let name = identity.decl_name.clone();
                     drop(data);
                     let resolved = match self.execute_read_folding_partial(
                         SemanticQueryKey::ResolveDecl(ResolveDeclKey { scope, name }),
@@ -5344,9 +5437,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     let identity = self
                         .dispatch
                         .type_slot_for(
-                            Arc::clone(&base.canonical_id),
+                            base.canonical_id.clone(),
                             base.owner,
-                            Arc::clone(&base.decl_name),
+                            base.decl_name.clone(),
                         );
                     let args_clone = Arc::clone(args.as_arc());
                     drop(data);
@@ -5380,7 +5473,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                 edge_kind,
                                 Arc::from([current]),
                                 meta,
-                                Arc::clone(self.fence),
+                                self.fence.clone(),
                             );
                             current = member_node;
                             index += 1;
@@ -5489,7 +5582,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             edge_kind,
                             Arc::from(vec![current].into_boxed_slice()),
                             meta,
-                            Arc::clone(self.fence),
+                            self.fence.clone(),
                         );
                         current = length;
                         index += 1;
@@ -5613,7 +5706,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                 OriginEdgeKind::ProjectIndex,
                                 Arc::from(vec![current].into_boxed_slice()),
                                 meta,
-                                Arc::clone(self.fence),
+                                self.fence.clone(),
                             );
                             current = value;
                             index += 1;
@@ -5677,7 +5770,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                 OriginEdgeKind::ProjectIndex,
                                 Arc::from(vec![current].into_boxed_slice()),
                                 meta,
-                                Arc::clone(self.fence),
+                                self.fence.clone(),
                             );
                             current = element;
                             index += 1;
@@ -5903,14 +5996,14 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         match &*data {
             SemanticNodeData::DeclRef { identity } => {
                 let scope = ScopeId {
-                    canonical_id: Arc::clone(&identity.canonical_id),
+                    canonical_id: identity.canonical_id.clone(),
                     owner: identity.owner,
                     local_scope: None,
                     binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
                         identity.owner,
                     ),
                 };
-                let name = Arc::clone(&identity.decl_name);
+                let name = identity.decl_name.clone();
                 drop(data);
                 match self.execute_read_folding_partial(SemanticQueryKey::ResolveDecl(
                     ResolveDeclKey { scope, name },
@@ -5931,9 +6024,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 let carrier_mode = self.mode();
                 drop(data);
                 let inst_base = self.dispatch.type_slot_for(
-                    Arc::clone(&identity.canonical_id),
+                    identity.canonical_id.clone(),
                     identity.owner,
-                    Arc::clone(&identity.decl_name),
+                    identity.decl_name.clone(),
                 );
                 let inst_context = self.dispatch.instantiate_context_for(
                     &identity.canonical_id,
@@ -6123,7 +6216,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         let shape = match self.graph().node_data(value).as_deref() {
             Some(SemanticNodeData::Object(_)) => MemberShape::Inline,
             Some(data @ (SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_))) => {
-                let head_name = data.bare_ref_head().map(|(name, _)| Arc::clone(name));
+                let head_name = data.bare_ref_head().map(|(name, _)| Arc::<str>::from(name));
                 let args = data.carrier_type_args();
                 match (head_name, args.len()) {
                     (Some(name), 1)
@@ -6190,10 +6283,10 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         name,
                         whole_hash,
                     })) => crate::semantic_query::DeclIdentity {
-                        canonical_id: Arc::clone(canonical_id),
+                        canonical_id: canonical_id.clone(),
                         owner: *owner,
                         whole_hash: *whole_hash,
-                        decl_name: Arc::clone(name),
+                        decl_name: name.clone(),
                     },
                     _ => return value,
                 };
@@ -6260,10 +6353,10 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     return value;
                 }
                 let identity = crate::semantic_query::DeclIdentity {
-                    canonical_id: Arc::from(dep_canonical.as_str()),
+                    canonical_id: verter_type_expr::OwnedStr::from(dep_canonical.as_str()),
                     owner: *owner,
                     whole_hash: serve.indexed.whole_hash,
-                    decl_name: Arc::from(symbol_name.as_str()),
+                    decl_name: verter_type_expr::OwnedStr::from(symbol_name.as_str()),
                 };
                 self.graph()
                     .intern_preserving_scope(value, SemanticNodeData::DeclRef { identity })
@@ -6636,7 +6729,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             }) => {
                 let identity =
                     self.dispatch
-                        .type_slot_for(Arc::clone(canonical_id), *owner, Arc::clone(name));
+                        .type_slot_for(canonical_id.clone(), *owner, name.clone());
                 if let Some(alias_id) = self.alias_identity(node) {
                     if self.visited_aliases.iter().any(|a| a == &alias_id) {
                         drop(data);
@@ -7804,9 +7897,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 // structurally at the `Ref` arm, so only `Foo`'s own
                 // members carry the bit.
                 match self.dispatch.execute_type_node(SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(self.dispatch.type_slot_for(
-                        Arc::clone(&identity.canonical_id),
+                        identity.canonical_id.clone(),
                         identity.owner,
-                        Arc::clone(&identity.decl_name),
+                        identity.decl_name.clone(),
                     ), args_clone, self.dispatch.instantiate_context_for(
                         &identity.canonical_id,
                         source_context,
@@ -7918,10 +8011,10 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 whole_hash,
             }) => {
                 let identity = DeclIdentity {
-                    canonical_id: Arc::clone(canonical_id),
+                    canonical_id: canonical_id.clone(),
                     owner: *owner,
                     whole_hash: *whole_hash,
-                    decl_name: Arc::clone(name),
+                    decl_name: name.clone(),
                 };
                 drop(data);
                 // Preserve the walker's surface provenance onto the
@@ -7945,9 +8038,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 // unwrap so `Base`'s own-body members are NOT mis-stamped as
                 // the macro type argument's own body.
                 match self.dispatch.execute_type_node(SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(self.dispatch.type_slot_for(
-                        Arc::clone(&identity.canonical_id),
+                        identity.canonical_id.clone(),
                         identity.owner,
-                        Arc::clone(&identity.decl_name),
+                        identity.decl_name.clone(),
                     ), Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()), self.dispatch.instantiate_context_for(
                         &identity.canonical_id,
                         self.context
@@ -8208,13 +8301,13 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             }
             SemanticNodeData::DeclRef { identity } => {
                 let scope = ScopeId {
-                    canonical_id: Arc::clone(&identity.canonical_id),
+                    canonical_id: identity.canonical_id.clone(),
                     owner: identity.owner,
                     local_scope: None,
                     binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(identity.owner),
                 };
-                let name = Arc::clone(&identity.decl_name);
-                let target_canonical = Arc::clone(&identity.canonical_id);
+                let name = identity.decl_name.clone();
+                let target_canonical = identity.canonical_id.clone();
                 let target_owner = identity.owner;
                 drop(data);
                 // Declaring file of the AUTHORING reference (the interning
@@ -8233,7 +8326,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 match self.execute_read_folding_partial(SemanticQueryKey::ResolveDecl(
                     ResolveDeclKey {
                         scope,
-                        name: Arc::clone(&name),
+                        name: name.clone(),
                     },
                 )) {
                     QueryResult::Value(resolved) => {
@@ -8309,13 +8402,13 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 // the module specifier for a bare module reference.
                 let head_name = data
                     .bare_ref_head()
-                    .map(|(name, _)| Arc::clone(name))
+                    .map(|(name, _)| verter_type_expr::OwnedStr::from(name))
                     .or_else(|| {
                         data.import_type_head().map(|(specifier, qualifier, _)| {
                             qualifier
                                 .last()
                                 .cloned()
-                                .unwrap_or_else(|| Arc::clone(specifier))
+                                .unwrap_or_else(|| verter_type_expr::OwnedStr::from(specifier))
                         })
                     });
                 let bare_scope_owner = data.bare_ref_head().and_then(|(_, scope)| match scope {
@@ -8323,7 +8416,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         canonical_id,
                         owner,
                         ..
-                    } => Some((Arc::clone(canonical_id), *owner)),
+                    } => Some((canonical_id.clone(), *owner)),
                     crate::semantic_query::NodeScopeId::Global => None,
                 });
                 drop(data);
@@ -8655,8 +8748,11 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     fn note_unresolved_surface_arm(
         &mut self,
         target: BufferTarget,
-        name: Arc<str>,
-        owner: Option<(Arc<str>, verter_type_expr::TopLevelOwnerId)>,
+        name: verter_type_expr::OwnedStr,
+        owner: Option<(
+            verter_type_expr::OwnedStr,
+            verter_type_expr::TopLevelOwnerId,
+        )>,
     ) {
         if matches!(target, BufferTarget::Root) {
             return;
@@ -8799,7 +8895,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     ) -> Option<RemappedKeyNarrowing> {
         let demanded = match literal_key? {
             LiteralKey::String(text) => {
-                crate::semantic_query::PropertyKey::String(Arc::clone(text))
+                crate::semantic_query::PropertyKey::String(verter_type_expr::OwnedStr::from(text))
             }
             LiteralKey::Number(number) => {
                 crate::semantic_query::PropertyKey::from_js_number(*number)
@@ -9841,10 +9937,10 @@ struct MergedMemberAccum {
     first_spans: Option<verter_type_expr::MemberSpans>,
     /// Declaration file of the first `OwnBody` contributor — paired with
     /// `own_body_spans` so the shadow winner's spans index its own file.
-    own_body_origin: Option<Arc<str>>,
+    own_body_origin: Option<verter_type_expr::OwnedStr>,
     /// Declaration file of the first contributor of ANY role — paired with
     /// `first_spans`.
-    first_origin: Option<Arc<str>>,
+    first_origin: Option<verter_type_expr::OwnedStr>,
     /// MOST-RESTRICTIVE visibility across ALL `OwnBody` contributors (the shared
     /// merge rule: `Private` > `Protected` > `Public`), folded over the RAW
     /// contributor stream (NOT deduped value nodes) — two contributors sharing
@@ -10982,7 +11078,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> bool {
         let key = match index {
-            IndexKey::String(name) => PropertyKey::String(Arc::clone(name)),
+            IndexKey::String(name) => PropertyKey::String(verter_type_expr::OwnedStr::from(name)),
             IndexKey::Number(value) => PropertyKey::from_js_number(value.get() as f64),
             IndexKey::UniqueSymbol(identity) => PropertyKey::UniqueSymbol(identity.clone()),
             IndexKey::Computed(_) => return false,
@@ -11657,10 +11753,10 @@ mod overload_carrier_exclusion_tests {
 
         let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
         let identity = DeclIdentity {
-            canonical_id: Arc::from("/carrier.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/carrier.ts"),
             owner,
             whole_hash: Default::default(),
-            decl_name: Arc::from(name),
+            decl_name: verter_type_expr::OwnedStr::from(name),
         };
         let empty_args: Arc<[crate::semantic_query::SemanticNodeId]> =
             Arc::from(Vec::new().into_boxed_slice());
@@ -11678,21 +11774,23 @@ mod overload_carrier_exclusion_tests {
             }
             "ImportType" => SemanticNodeData::new_import_type(
                 Arc::from("./m"),
-                Arc::from(vec![Arc::<str>::from(name)].into_boxed_slice()),
+                verter_type_expr::OwnedSlice::from(
+                    vec![verter_type_expr::OwnedStr::from(name)].into_boxed_slice(),
+                ),
                 empty_args,
                 false,
             ),
             "TypeOf" => SemanticNodeData::new_typeof(
                 ValueRootKey {
                     scope: ScopeId {
-                        canonical_id: Arc::from("/carrier.ts"),
+                        canonical_id: verter_type_expr::OwnedStr::from("/carrier.ts"),
                         owner,
                         local_scope: None,
                         binder_scope_id: BinderScopeId::file_scope(owner),
                     },
-                    name: Arc::from(name),
+                    name: verter_type_expr::OwnedStr::from(name),
                 },
-                Arc::from(Vec::new().into_boxed_slice()),
+                verter_type_expr::OwnedSlice::default(),
                 empty_args,
             ),
             other => unreachable!("unknown reference carrier kind `{other}`"),
@@ -11754,8 +11852,6 @@ mod overload_carrier_exclusion_tests {
         kind: &str,
         terminal: PrimitiveKind,
     ) -> crate::semantic_query::SemanticNodeId {
-        use std::sync::Arc;
-
         let element = graph.intern_node(SemanticNodeData::Primitive(terminal));
         let data = match kind {
             "Array" => SemanticNodeData::Array {
@@ -11775,7 +11871,9 @@ mod overload_carrier_exclusion_tests {
                 readonly: false,
             },
             "TemplateLiteral" => SemanticNodeData::TemplateLiteral {
-                quasis: Arc::from(vec![Arc::<str>::from("hello-")].into_boxed_slice()),
+                quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+                    vec![verter_type_expr::OwnedStr::from("hello-")].into_boxed_slice(),
+                ),
                 expressions: crate::semantic_query::PayloadArray::from(
                     vec![element].into_boxed_slice(),
                 ),
@@ -11828,7 +11926,7 @@ mod overload_carrier_exclusion_tests {
                 param_index: 0,
                 constraint: None,
                 default: None,
-                display_name: std::sync::Arc::from(name),
+                display_name: verter_type_expr::OwnedStr::from(name),
             })
         };
         // Adversarial interning order: the SECOND authored contributor

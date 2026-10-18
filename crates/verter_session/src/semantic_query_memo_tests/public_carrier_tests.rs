@@ -39,14 +39,14 @@ fn host() -> VerterHost {
 fn key(name: &str) -> SemanticQueryKey {
     SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::from(FILE),
+            canonical_id: verter_type_expr::OwnedStr::from(FILE),
             owner: TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 TopLevelOwnerId::ordinary_file(),
             ),
         },
-        name: Arc::from(name),
+        name: verter_type_expr::OwnedStr::from(name),
     })
 }
 
@@ -58,7 +58,7 @@ fn literal(store: &SemanticGraphStore, text: &str) -> SemanticNodeId {
 fn object(store: &SemanticGraphStore, text: &str) -> SemanticNodeId {
     let value = literal(store, text);
     let member = SurfaceMember {
-        key: AuthoredPropertyKey::String(Arc::from("member")),
+        key: AuthoredPropertyKey::String(verter_type_expr::OwnedStr::from("member")),
         value,
         optional: false,
         readonly: false,
@@ -346,7 +346,7 @@ fn a_root_whose_slot_a_legacy_close_released_reads_as_stale() {
         let node = graph.intern_node_with_scope(
             SemanticNodeData::Literal(LiteralValue::String("closed".into())),
             NodeScopeId::File {
-                canonical_id: Arc::from(FILE),
+                canonical_id: verter_type_expr::OwnedStr::from(FILE),
                 owner: TopLevelOwnerId::ordinary_file(),
                 whole_hash: [0; 16],
                 local_scope: None,
@@ -500,7 +500,7 @@ fn a_deferred_substitutions_pending_operands_stay_owned_by_the_delivering_read()
                     true_branch_ref: literal(store, "true branch"),
                     false_branch_ref: literal(store, "false branch"),
                     distributive: false,
-                    pending: Some(Arc::new(
+                    pending: Some(verter_session_query::retention::owned::Owned::new(
                         ConditionalPendingSubstitution::empty().append_true(param, argument),
                     )),
                 });
@@ -537,14 +537,18 @@ fn construction_labels_are_owned_by_the_callers_builder_never_by_a_dispatcher() 
     let host = counted_host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let first = host.semantic_dispatch();
-    let unowned = first.opaque(QueryError::Other(Arc::from("no owner open")));
+    let unowned = first.opaque(QueryError::Other(verter_type_expr::OwnedStr::from(
+        "no owner open",
+    )));
     assert!(
         !graph.node_is_live(unowned),
         "the dispatcher's lane keeps nothing a caller does not own"
     );
     let builder = first.enter_construction_scope();
     let second = host.semantic_dispatch();
-    let owned = second.opaque(QueryError::Other(Arc::from("builder operand")));
+    let owned = second.opaque(QueryError::Other(verter_type_expr::OwnedStr::from(
+        "builder operand",
+    )));
     drop(first);
     assert!(
         graph.node_is_live(owned),
@@ -581,7 +585,9 @@ fn completed_receipts_release_when_the_callers_builder_closes() {
     let graph = Arc::clone(d.graph());
     let baseline = graph.node_ownership_counts().permanent_nodes;
     let builder = d.enter_construction_scope();
-    let operand = d.opaque(QueryError::Other(Arc::from("builder receipt")));
+    let operand = d.opaque(QueryError::Other(verter_type_expr::OwnedStr::from(
+        "builder receipt",
+    )));
     assert_eq!(
         d.evaluate_deferred_semantic_node_for_tests(operand),
         operand
@@ -625,7 +631,9 @@ fn construction_carriers_own_new_and_reused_results_past_every_builder() {
         ProjectionMode::Navigate,
     );
     for text in ["first construction", "second construction"] {
-        let result = d.owning().opaque(QueryError::Other(Arc::from(text)));
+        let result = d
+            .owning()
+            .opaque(QueryError::Other(verter_type_expr::OwnedStr::from(text)));
         assert!(result.node(*result.value()).unwrap().read().is_ok());
         drop(result);
         assert_eq!(
@@ -688,7 +696,9 @@ fn a_construction_handed_to_a_builder_lives_until_the_builder_closes() {
     // Built with no owner open, so only the carrier holds it.
     let carrier = d
         .owning()
-        .opaque(QueryError::Other(Arc::from("handed to a builder")));
+        .opaque(QueryError::Other(verter_type_expr::OwnedStr::from(
+            "handed to a builder",
+        )));
     let builder = d.enter_construction_scope();
     let label = carrier.into_value_in(&builder);
     graph.invalidate_all();
@@ -710,14 +720,14 @@ const DELIVERY_FILE: &str = "/public/deliveries.ts";
 fn delivery_decl_key(name: &str) -> ResolveDeclKey {
     ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::from(DELIVERY_FILE),
+            canonical_id: verter_type_expr::OwnedStr::from(DELIVERY_FILE),
             owner: TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 TopLevelOwnerId::ordinary_file(),
             ),
         },
-        name: Arc::from(name),
+        name: verter_type_expr::OwnedStr::from(name),
     }
 }
 
@@ -948,7 +958,7 @@ fn a_projected_one_level_surface_owns_its_members() {
             &host,
             &d,
             base.id(),
-            Arc::from([]),
+            verter_type_expr::OwnedSlice::from([]),
             ProjectionReductionContext::published(ProjectionMode::Shallow),
             None,
         )

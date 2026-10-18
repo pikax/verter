@@ -53,6 +53,7 @@ pub mod construction_copy;
 pub mod delivery_lease;
 pub mod derivation;
 pub mod family;
+mod family_footprint;
 mod family_intern;
 mod family_retention;
 mod fingerprint_hasher;
@@ -84,7 +85,7 @@ mod signature_epoch;
 pub mod union_views;
 pub mod unresolved_reach;
 
-pub use arena::UNALLOCATABLE_ID_FLOOR;
+pub use arena::{NodeData, UNALLOCATABLE_ID_FLOOR};
 pub(crate) use inflight::InlineMemberFlight;
 pub use intern_table::{IdentityIndexSnapshot, InternIndexOccupancy};
 pub use producer::{
@@ -198,7 +199,7 @@ pub(crate) fn cancelled_cache_read() -> CacheRead<QueryResult<SemanticQueryValue
         lease: Default::default(),
         value: QueryResult::Error(QueryError::Cancelled),
         dep_signature: empty_signature(),
-        walker_diagnostics: Arc::from([]),
+        walker_diagnostics: empty_diagnostics(),
         cache_suppress: true,
         fact_status: crate::semantic_query::FactStatus::unavailable(
             crate::semantic_query::PartialReasonSet::CANCELLED,
@@ -355,6 +356,13 @@ pub struct SemanticGraphStore {
     /// host-built store does, instead of retaining candidates that consume
     /// no aggregate headroom.
     retention_account: verter_session_query::retention::StoreAccount,
+    /// The shared charges of the allocations this store's candidates and
+    /// their readers alias — fact carriers, self-root lists, delivered
+    /// rails and values — keyed by allocation, so sibling candidates share
+    /// one charge per allocation and a reader that outlives its candidate
+    /// keeps that allocation charged. Holds one registration per allocation
+    /// still held, nothing more.
+    alias_charges: verter_session_query::retention::shared::AliasCharges,
     /// Per-store test trigger for the cold-abort sweep path. When a test
     /// sets this (via [`Self::test_force_cold_abort_sweep`]), the
     /// cold-winner re-check in [`Self::warm_publish_one`] marks its own
@@ -686,7 +694,7 @@ pub struct SemanticGraphStore {
         parking_lot::Mutex<std::collections::VecDeque<SemanticNodeId>>,
     pub(super) substitute_memo: DashMap<
         (SemanticNodeId, SemanticNodeId, SemanticNodeId),
-        (SemanticNodeId, node_roots::NodeRootSet),
+        hash_cons_memos::SubstituteMemoEntry,
         rustc_hash::FxBuildHasher,
     >,
     pub(super) substitute_memo_fifo: parking_lot::Mutex<
@@ -762,25 +770,44 @@ pub enum GraphOwnership {
 
 impl Default for SemanticGraphStore {
     fn default() -> Self {
-        Self::with_arena(Default::default())
+        Self::with_arena(Default::default(), Default::default())
     }
 }
 
 impl SemanticGraphStore {
-    /// Bind signature-token ownership to the final arena before publishing
-    /// the store, including the controlled counted fixture constructor.
-    /// A graph in `ownership`'s reclamation regime.
-    pub(crate) fn with_ownership(ownership: GraphOwnership) -> Self {
+    /// A store in `ownership`'s reclamation regime charging
+    /// `retention_account`.
+    pub(crate) fn with_ownership_and_account(
+        ownership: GraphOwnership,
+        retention_account: verter_session_query::retention::StoreAccount,
+    ) -> Self {
         match ownership {
-            GraphOwnership::Legacy => Self::default(),
+            GraphOwnership::Legacy => Self::with_arena(Default::default(), retention_account),
             #[cfg(any(test, feature = "test-support"))]
-            GraphOwnership::CountedForTests => Self::with_arena(NodeArena::counted_for_tests()),
+            GraphOwnership::CountedForTests => {
+                Self::with_arena(NodeArena::counted_for_tests(), retention_account)
+            }
         }
     }
 
-    fn with_arena(arena: NodeArena) -> Self {
+    /// The one store constructor: the store and its graph storage charge
+    /// the same account, bound before the first node is interned. Binds
+    /// signature-token ownership to the final arena before publishing the
+    /// store, including the controlled counted fixture constructor.
+    pub(super) fn with_arena(
+        storage: NodeArena,
+        retention_account: verter_session_query::retention::StoreAccount,
+    ) -> Self {
+        let arena = storage;
+        arena.core.bind_retention_account(retention_account.get());
         let signatures = crate::signature_kernel::SignatureStore::default();
         signatures.bind_graph(&arena.core);
+        signatures.bind_retention_account(retention_account.get());
+        let canonical_to_entries = CanonicalToEntries::charged(retention_account.get());
+        let reverse_index_pending = Mutex::new(reverse_index::PendingRegistrations::charged(
+            retention_account.get(),
+        ));
+        let dep_signature_interner = DepSignatureInterner::charged(retention_account.get());
         Self {
             operand_identity: Default::default(),
             arena,
@@ -789,10 +816,11 @@ impl SemanticGraphStore {
             inflight: Default::default(),
             task_registry: Default::default(),
             independent_inflight: Default::default(),
-            derivation: Default::default(),
+            derivation: parking_lot::Mutex::new(DerivationStore::charged(retention_account.get())),
             stats: Default::default(),
             provenance: Default::default(),
-            retention_account: Default::default(),
+            retention_account,
+            alias_charges: Default::default(),
             force_cold_abort_sweep: Default::default(),
             unresolved_reach: Default::default(),
             released_any: Default::default(),
@@ -828,9 +856,9 @@ impl SemanticGraphStore {
             joiner_on_condvar_count: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
             reverse_index_registration_visits: Default::default(),
-            canonical_to_entries: Default::default(),
-            reverse_index_pending: Default::default(),
-            dep_signature_interner: Default::default(),
+            canonical_to_entries,
+            reverse_index_pending,
+            dep_signature_interner,
             memo_budget: Default::default(),
             candidate_admission_seq: Default::default(),
             structural_domains: Default::default(),
@@ -938,7 +966,9 @@ pub fn semantic_operand_evidence(
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                 canonical_id,
                 hash,
-            } if canonical_id == canonical.as_ref() => Some((Arc::clone(canonical), *hash)),
+            } if canonical_id == canonical.as_ref() => {
+                Some((verter_type_expr::OwnedStr::from(canonical), *hash))
+            }
             _ => None,
         });
         let root = found?;
@@ -947,7 +977,7 @@ pub fn semantic_operand_evidence(
     Some(crate::semantic_query::operand::SemanticOperandEvidence {
         read_set: read_set.clone(),
         self_roots: Arc::from(self_roots.into_boxed_slice()),
-        dep_signatures: Arc::from([Arc::clone(dep_signature)]),
+        dep_signatures: Arc::from([dep_signature.clone()]),
     })
 }
 
@@ -970,11 +1000,7 @@ pub enum WarmPublishOutcome {
 /// per-candidate identity (NOT by `(family, slot)` alone), so a
 /// cross-canonical cleanup for one evicted candidate does NOT strip a
 /// surviving sibling candidate's registrations in the same slot.
-type CanonicalToEntries = DashMap<
-    Arc<str>,
-    Mutex<FxHashMap<(u64, ModeSlot), (Arc<FamilyKey>, RegisteredFacts)>>,
-    rustc_hash::FxBuildHasher,
->;
+use reverse_index::CanonicalToEntries;
 
 /// The `ReadSetSignature.facts` rail an entry registered under a
 /// canonical in [`CanonicalToEntries`] — the diagnostic stamp + the
@@ -1101,6 +1127,7 @@ impl SemanticGraphStore {
             .lock()
             .signature_pool
             .values()
+            .flatten()
             .filter(|weak| weak.strong_count() > 0)
             .count()
     }
@@ -1405,7 +1432,7 @@ impl SemanticGraphStore {
             // rail` map for `canonical_id`, UNDER the held `entries`
             // lock.
             let drained: Vec<((FamilyKey, ModeSlot, u64), RegisteredFacts)> =
-                match self.canonical_to_entries.remove(canonical_id) {
+                match self.canonical_to_entries.remove_shard(canonical_id) {
                     Some((_, mutex)) => {
                         let lock_start = if timing_on {
                             Some(Instant::now())
@@ -1475,10 +1502,9 @@ impl SemanticGraphStore {
                     let entry_facts = &entry.read_set_signature.facts;
                     let drop = Arc::ptr_eq(entry_facts, registered_facts)
                         || carrier_facts_reference_canonical(entry_facts, canonical_id)
-                        || entry
-                            .dispatch_dep_signature
-                            .iter()
-                            .any(|(c, _)| c.as_ref() == canonical_id);
+                        || entry.dispatch_dep_signature.iter().any(
+                            |crate::semantic_query::DepEntry(c, _)| c.as_ref() == canonical_id,
+                        );
                     if drop {
                         victims.push(entry.clone());
                         false
@@ -1491,7 +1517,7 @@ impl SemanticGraphStore {
                     evicted_entries.push((
                         (family.clone(), *slot, victim.admission_seq),
                         victim.read_set_signature.clone(),
-                        Arc::clone(&victim.dispatch_dep_signature),
+                        victim.dispatch_dep_signature.clone(),
                     ));
                 }
             }
@@ -1587,9 +1613,9 @@ impl SemanticGraphStore {
                     let mut state = inflight.state.lock();
                     state.aborted = true;
                     if state.completed.is_none() {
-                        state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
-                            "aborted by canonical invalidation",
-                        ))));
+                        state.completed = Some(QueryResult::Error(QueryError::Other(
+                            verter_type_expr::OwnedStr::from("aborted by canonical invalidation"),
+                        )));
                         state.dep_signature = Some(empty_signature());
                     }
                 }
@@ -1777,9 +1803,9 @@ impl SemanticGraphStore {
                     let mut state = inflight.state.lock();
                     state.aborted = true;
                     if state.completed.is_none() {
-                        state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
-                            "aborted by project-generation reset",
-                        ))));
+                        state.completed = Some(QueryResult::Error(QueryError::Other(
+                            verter_type_expr::OwnedStr::from("aborted by project-generation reset"),
+                        )));
                         state.dep_signature = Some(empty_signature());
                     }
                 }
@@ -1866,8 +1892,8 @@ impl SemanticGraphStore {
                     barrier.wait();
                 }
             }
-            self.canonical_to_entries.clear();
-            *self.reverse_index_pending.lock() = Default::default();
+            self.canonical_to_entries.clear_shards();
+            let _ = self.reverse_index_pending.lock().take();
             count
         };
         // Test-only injection point: a barrier armed by
@@ -2032,7 +2058,7 @@ impl SemanticGraphStore {
                 // fact identities. AND-gate validation happens at
                 // the outer fence revalidation point.
                 entry.read_set_signature.bubble_via_tls();
-                let dep_signature = Arc::clone(&entry.dispatch_dep_signature);
+                let dep_signature = entry.dispatch_dep_signature.clone();
                 CacheRead {
                     lease: entry.lease,
                     value: entry.result,
@@ -2192,7 +2218,7 @@ impl SemanticGraphStore {
                 Some(slot) => *slot = Some(entry.read_set_signature.clone()),
                 None => entry.read_set_signature.bubble(ctx),
             }
-            let dep_signature = Arc::clone(&entry.dispatch_dep_signature);
+            let dep_signature = entry.dispatch_dep_signature.clone();
             CacheRead {
                 lease: entry.lease,
                 value: entry.result,
@@ -2349,7 +2375,7 @@ impl SemanticGraphStore {
         let hit = CacheRead {
             lease: entry.lease,
             value: entry.result,
-            dep_signature: Arc::clone(&entry.dispatch_dep_signature),
+            dep_signature: entry.dispatch_dep_signature.clone(),
             walker_diagnostics: entry.walker_diagnostics,
             cache_suppress: false,
             fact_status: crate::semantic_query::FactStatus::Complete,
@@ -2521,7 +2547,7 @@ impl SemanticGraphStore {
         flags: &crate::resolver_core::resolver_context::RequestFlags,
         prepared: &PreparedKeyHandle,
         result: &QueryResult<SemanticQueryValue>,
-        walker_diagnostics: &Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
+        walker_diagnostics: &crate::project_semantic_dispatch::walk::WalkerDiagnostics,
         read_set_signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
         dispatch_dep_signature: &DepSignature,
         self_root_canonicals: &Arc<[Arc<str>]>,
@@ -2562,20 +2588,29 @@ impl SemanticGraphStore {
         // verbatim; it never reconstructs facts from the legacy fence.
         let read_set_signature = read_set_signature.clone();
         let dispatch_dep_signature = self.dep_signature_interner.intern(dispatch_dep_signature);
+        let registered_canonicals =
+            reverse_index::registered_canonical_count(&read_set_signature, &dispatch_dep_signature);
         let validated_at_generation = flags.current_project_generation();
         let admission_seq = self.alloc_candidate_admission_seq();
         let mut entry = MemoEntry {
-            lease: match self.lease_candidate(family, result, walker_diagnostics) {
+            lease: match self.lease_candidate(
+                family,
+                delivery_lease::DeliveredAllocations::read(
+                    result,
+                    walker_diagnostics,
+                    &dispatch_dep_signature,
+                ),
+            ) {
                 Ok(lease) => lease,
                 Err(_) => return WarmPublishOutcome::Skipped,
             },
             result: result.clone(),
             read_set_signature: read_set_signature.clone(),
-            dispatch_dep_signature: Arc::clone(&dispatch_dep_signature),
+            dispatch_dep_signature: dispatch_dep_signature.clone(),
             self_root_canonicals: Arc::clone(self_root_canonicals),
-            walker_diagnostics: Arc::clone(walker_diagnostics),
+            walker_diagnostics: walker_diagnostics.clone(),
             satisfied_projection: satisfied_projection.clone(),
-            retention_charge: None,
+            retention: None,
             validated_at_generation,
             admission_seq,
             reverse_indexed: false,
@@ -2586,10 +2621,18 @@ impl SemanticGraphStore {
         // for an entry the process then declines to keep. The refusal is
         // `Skipped`, which returns this winner's COMPLETE value to its
         // caller uncached — never a stale candidate, never a partial.
-        match self.reserve_memo_candidate(&entry) {
-            Ok(charge) => entry.retention_charge = Some(Arc::new(charge)),
+        let populated_slots =
+            family::publication_slot_bound(slot, satisfied_projection, requested_path);
+        let retention = match self.reserve_memo_candidate(
+            &entry,
+            family,
+            populated_slots,
+            registered_canonicals,
+        ) {
+            Ok(retention) => retention,
             Err(_) => return WarmPublishOutcome::Skipped,
-        }
+        };
+        entry.retention = Some(retention);
         // Per-family bounded retention: plan the cap eviction against the
         // publishing caller's stable view BEFORE the publish lock (the
         // plan releases `entries` before validating fact rails; the
@@ -2625,15 +2668,13 @@ impl SemanticGraphStore {
             return WarmPublishOutcome::Aborted;
         }
         // Record whether this family is newly entering the memo so the
-        // retention budget tracks one ledger record per family.
-        let family_was_new = !entries.contains_key(family);
-        let outcome = entries.entry(family.clone()).or_default().publish(
-            slot,
-            entry,
-            requested_path,
-            cap,
-            eviction,
-        );
+        // retention budget tracks one ledger record per family. A family the
+        // account refuses to key is not published.
+        let Some((slots, family_was_new)) = self.family_slots_locked(&mut entries, family) else {
+            drop(entries);
+            return WarmPublishOutcome::Skipped;
+        };
+        let outcome = slots.publish(slot, entry, requested_path, cap, eviction);
         let populated_slots = outcome.populated;
         // Per-request memo-insertion attribution. Each populated slot
         // (primary plus any backfilled narrower slots) counts as one
@@ -2805,6 +2846,8 @@ impl SemanticGraphStore {
         // result into an empty narrower sibling slot.
         verter_audit::attribute!(CacheCandidateCopy);
         let dispatch_dep_signature = self.dep_signature_interner.intern(&dispatch_dep_signature);
+        let registered_canonicals =
+            reverse_index::registered_canonical_count(&read_set_signature, &dispatch_dep_signature);
         let validated_at_generation = flags.current_project_generation();
         let admission_seq = self.alloc_candidate_admission_seq();
         let mut entry = MemoEntry {
@@ -2817,25 +2860,35 @@ impl SemanticGraphStore {
             read_set_signature: read_set_signature.clone(),
             dispatch_dep_signature,
             self_root_canonicals,
-            walker_diagnostics: Arc::from([]),
+            walker_diagnostics: empty_diagnostics(),
             satisfied_projection,
-            retention_charge: None,
+            retention: None,
             validated_at_generation,
             admission_seq,
             reverse_indexed: false,
             cost_receipt,
         };
-        entry.lease = match self.lease_candidate(family, &entry.result, &entry.walker_diagnostics) {
+        entry.lease = match self.lease_candidate(
+            family,
+            delivery_lease::DeliveredAllocations::read(
+                &entry.result,
+                &entry.walker_diagnostics,
+                &entry.dispatch_dep_signature,
+            ),
+        ) {
             Ok(lease) => lease,
             Err(_) => return false,
         };
-        // A narrower sibling slot is a fresh candidate with its own
-        // carriers, so it is charged like any other publish. Under
-        // pressure the backfill is simply declined — the broader entry
-        // it would have been cloned from stays warm and a later narrow
-        // request recomputes.
-        match self.reserve_memo_candidate(&entry) {
-            Ok(charge) => entry.retention_charge = Some(Arc::new(charge)),
+        // A narrower sibling slot is a fresh candidate: its own bookkeeping
+        // is charged like any other publish, while the carrier it shares
+        // with the broader entry is held through the same shared charge.
+        // Under pressure the backfill is simply declined — the broader
+        // entry it would have been cloned from stays warm and a later
+        // narrow request recomputes.
+        let populated_slots =
+            family::publication_slot_bound(slot, &entry.satisfied_projection, requested_path);
+        match self.reserve_memo_candidate(&entry, family, populated_slots, registered_canonicals) {
+            Ok(retention) => entry.retention = Some(retention),
             Err(_) => return false,
         }
         // Per-family bounded retention: plan the cap eviction against the
@@ -2867,14 +2920,11 @@ impl SemanticGraphStore {
             record_cold_abort_swept(&self.stats);
             return false;
         }
-        let family_was_new = !entries.contains_key(family);
-        let outcome = entries.entry(family.clone()).or_default().publish(
-            slot,
-            entry,
-            requested_path,
-            cap,
-            eviction,
-        );
+        let Some((slots, family_was_new)) = self.family_slots_locked(&mut entries, family) else {
+            drop(entries);
+            return false;
+        };
+        let outcome = slots.publish(slot, entry, requested_path, cap, eviction);
         let populated_slots = outcome.populated;
         // Per-request memo-insertion attribution — see
         // `warm_publish_one` for the full rationale; the prefix-backfill
@@ -2936,7 +2986,10 @@ impl SemanticGraphStore {
 /// current content inside the signature builder would reopen the publish
 /// race a concurrent `upsert` between value-compute and signature-build
 /// otherwise creates.
-pub type ObservedGraphSelfRoot = (Arc<str>, verter_session_query::analysis::types::Hash16);
+pub type ObservedGraphSelfRoot = (
+    verter_type_expr::OwnedStr,
+    verter_session_query::analysis::types::Hash16,
+);
 
 /// Build the [`ReadSetSignature`](verter_session_query::facts::fact_cache::ReadSetSignature)
 /// carrier for a [`SemanticGraphStore`] query-identity memo entry —
@@ -3014,7 +3067,10 @@ pub fn semantic_graph_carrier(
     // of roots, so they are compared linearly, in plain loops: this runs
     // once per cold build.
     let mut self_root_hashes: smallvec::SmallVec<
-        [(&Arc<str>, verter_session_query::analysis::types::Hash16); 4],
+        [(
+            &verter_type_expr::OwnedStr,
+            verter_session_query::analysis::types::Hash16,
+        ); 4],
     > = smallvec::SmallVec::new();
     for (canonical, observed_hash) in observed_self_roots {
         match root_position(&self_root_hashes, canonical) {
@@ -3069,7 +3125,7 @@ pub fn semantic_graph_carrier(
                 hash: *observed_hash,
             });
         }
-        self_root_canonicals.push(Arc::clone(canonical));
+        self_root_canonicals.push(Arc::<str>::from(*canonical));
     }
     crate::fact_signature_helpers::bound_completed_structural_carrier(
         view,
@@ -3084,7 +3140,10 @@ pub fn semantic_graph_carrier(
 
 /// The position of `canonical` among collapsed self-roots.
 fn root_position(
-    roots: &[(&Arc<str>, verter_session_query::analysis::types::Hash16)],
+    roots: &[(
+        &verter_type_expr::OwnedStr,
+        verter_session_query::analysis::types::Hash16,
+    )],
     canonical: &str,
 ) -> Option<usize> {
     for (index, (root, _)) in roots.iter().enumerate() {
@@ -3099,7 +3158,18 @@ fn root_position(
 /// result that depends on no dispatch fence costs no allocation.
 pub fn empty_signature() -> DepSignature {
     static EMPTY: std::sync::OnceLock<DepSignature> = std::sync::OnceLock::new();
-    Arc::clone(EMPTY.get_or_init(|| Arc::from(Vec::new().into_boxed_slice())))
+    EMPTY.get_or_init(DepSignature::static_empty).clone()
+}
+
+/// The one process-wide empty walker-diagnostic list. Like
+/// [`empty_signature`], it is process-static storage, never charged: a read
+/// with no diagnostics shares it instead of allocating its own.
+pub fn empty_diagnostics() -> crate::project_semantic_dispatch::walk::WalkerDiagnostics {
+    static EMPTY: std::sync::OnceLock<crate::project_semantic_dispatch::walk::WalkerDiagnostics> =
+        std::sync::OnceLock::new();
+    EMPTY
+        .get_or_init(crate::project_semantic_dispatch::walk::WalkerDiagnostics::static_empty)
+        .clone()
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -3157,3 +3227,5 @@ mod tests;
 
 #[cfg(test)]
 mod scc_publish_tests;
+#[cfg(test)]
+mod storage_charge_tests;

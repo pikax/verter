@@ -151,7 +151,7 @@ fn proof_reference_map(root: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> Option<
                 references.insert(
                     path.clone(),
                     ProofReferenceIdentity::Bare {
-                        name: std::sync::Arc::clone(name),
+                        name: std::sync::Arc::<str>::from(name),
                         scope: scope.clone(),
                     },
                 );
@@ -199,10 +199,10 @@ fn proof_reference_map(root: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> Option<
                 references.insert(
                     path,
                     ProofReferenceIdentity::Decl(DeclIdentity {
-                        canonical_id: std::sync::Arc::clone(canonical_id),
+                        canonical_id: canonical_id.clone(),
                         owner: *owner,
                         whole_hash: *whole_hash,
-                        decl_name: std::sync::Arc::clone(name),
+                        decl_name: name.clone(),
                     }),
                 );
             }

@@ -245,3 +245,90 @@ fn overflow_race_does_not_plant_unmapped_slots() {
         "overflow race planted a slot past max_index"
     );
 }
+
+/// Boxcar 0.2.14 opens bucket `b` (positions `[2^b, 2^(b+1))`, index `i`
+/// at position `i + 32`) by its first write, and opens bucket `b + 1`
+/// eagerly once a write lands on entry `2^b - 2^b / 8`. The bytes a table
+/// charges for its first `pushes` writes are therefore every bucket up to
+/// the last write's, plus the next one once its eager point is reached.
+#[test]
+fn an_epoch_table_charges_every_boxcar_bucket_once_including_the_eager_next_one() {
+    use super::records::GraphEpoch;
+    use super::storage::AppendInterner;
+    use verter_session_query::retention::allocation::heap_block_bytes;
+
+    let bucket =
+        |b: u32| heap_block_bytes((1_usize << b) * std::mem::size_of::<(u64, AtomicBool)>());
+    let expected = |pushes: usize| {
+        let last = pushes - 1 + 32;
+        let top = last.ilog2();
+        let eager = last - (1 << top) >= (1 << top) - ((1 << top) >> 3);
+        (5..=top).map(bucket).sum::<usize>() + if eager { bucket(top + 1) } else { 0 }
+    };
+    for pushes in [1, 28, 29, 88, 89, 90, 96, 97, 1_000] {
+        let table = AppendInterner::<u64>::new(GraphEpoch::FIRST);
+        let charged = (0..pushes)
+            .map(|index| table.opened_bucket_bytes(index))
+            .sum::<usize>();
+        assert_eq!(charged, expected(pushes), "{pushes} writes");
+    }
+    // Index 88 is bucket 6's eager point: bucket 7 exists before any write
+    // reaches position 128.
+    let table = AppendInterner::<u64>::new(GraphEpoch::FIRST);
+    let before = (0..88)
+        .map(|index| table.opened_bucket_bytes(index))
+        .sum::<usize>();
+    assert_eq!(table.opened_bucket_bytes(88), bucket(7));
+    assert_eq!(before, bucket(5) + bucket(6));
+}
+
+/// A settlement that read an older, smaller live total must not publish a
+/// charge below the total once growth that fitted the previous charge
+/// skipped its own settlement meanwhile.
+#[test]
+fn a_shrinking_settlement_racing_lock_free_growth_still_covers_the_live_total() {
+    use super::storage::EpochStorage;
+    use std::sync::atomic::Ordering;
+    use std::sync::{mpsc, OnceLock};
+    use std::time::Duration;
+    use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
+
+    const GRANULE: usize = 64 * 1024;
+    const WAIT: Duration = Duration::from_secs(30);
+    let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+    let storage = EpochStorage::new(Arc::new(OnceLock::from(Arc::clone(&account))));
+    storage.add(5 * GRANULE);
+    assert_eq!(storage.charged(), 5 * GRANULE);
+
+    let (parked_tx, parked_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel::<()>();
+    let resume_rx = parking_lot::Mutex::new(resume_rx);
+    let parked = AtomicBool::new(false);
+    storage.set_settle_hook(Some(Arc::new(move || {
+        if !parked.swap(true, Ordering::SeqCst) {
+            parked_tx.send(()).unwrap();
+            let _ = resume_rx.lock().recv_timeout(WAIT);
+        }
+    })));
+    thread::scope(|scope| {
+        let resume = resume_tx;
+        let shrink = scope.spawn(|| storage.sub(4 * GRANULE));
+        // The settlement read a live total of one granule and will shrink
+        // the charge to it.
+        parked_rx.recv_timeout(WAIT).unwrap();
+        // This growth fits the still-published five-granule charge, so it
+        // settles nothing itself.
+        storage.add(3 * GRANULE);
+        resume.send(()).unwrap();
+        shrink.join().unwrap();
+    });
+    storage.set_settle_hook(None);
+    assert_eq!(storage.used(), 4 * GRANULE);
+    assert!(
+        storage.charged() >= storage.used(),
+        "charged {} < live {}",
+        storage.charged(),
+        storage.used()
+    );
+    assert_eq!(account.snapshot().pinned_bytes, storage.charged());
+}

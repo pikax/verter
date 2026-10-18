@@ -54,10 +54,10 @@ fn decl_identity(host: &VerterHost, canonical: &str, name: &str) -> DeclIdentity
         .map(|s| s.whole_hash)
         .unwrap_or([0u8; 16]);
     DeclIdentity {
-        canonical_id: StdArc::from(canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(StdArc::from(canonical)),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash,
-        decl_name: StdArc::from(name),
+        decl_name: verter_type_expr::OwnedStr::from(StdArc::from(name)),
     }
 }
 
@@ -609,13 +609,15 @@ fn signature_covers(
     signature: &verter_type_engine::semantic_query::DepSignature,
     canonical: &str,
 ) -> bool {
-    signature.iter().any(|(c, version)| {
-        c.as_ref() == canonical
-            && matches!(
-                version,
-                verter_type_engine::semantic_query::DepVersion::WholeHash(_)
-            )
-    })
+    signature
+        .iter()
+        .any(|verter_type_engine::semantic_query::DepEntry(c, version)| {
+            c.as_ref() == canonical
+                && matches!(
+                    version,
+                    verter_type_engine::semantic_query::DepVersion::WholeHash(_)
+                )
+        })
 }
 
 /// Cold AND warm reads return the family dep signature — the consumer
@@ -686,15 +688,17 @@ fn cycle_gate_observed_self_roots_cover_root_and_every_visited_decl() {
     let output = dispatch.build_classify_materialization_cycle_gate_for_tests(&key);
 
     assert!(
-        output
-            .observed_self_roots
-            .contains(&(StdArc::from("/cg_roots_root.ts"), root_hash)),
+        output.observed_self_roots.contains(&(
+            verter_type_expr::OwnedStr::from(StdArc::from("/cg_roots_root.ts")),
+            root_hash
+        )),
         "the root declaration is an observed self-root with its observed hash"
     );
     assert!(
-        output
-            .observed_self_roots
-            .contains(&(StdArc::from("/cg_roots_helper.ts"), helper_hash)),
+        output.observed_self_roots.contains(&(
+            verter_type_expr::OwnedStr::from(StdArc::from("/cg_roots_helper.ts")),
+            helper_hash
+        )),
         "every visited declaration is an observed self-root with its observed hash"
     );
     assert!(
@@ -873,11 +877,7 @@ fn cycle_gate_classifier_invoked_around_relate_leaves_relation_frames_untouched(
     let instantiate = |name: &str| {
         let id = decl_identity(host, "/cg_relate.ts", name);
         let key = SemanticQueryKey::Instantiate(InstantiateKey::new(
-            dispatch.type_slot_for(
-                StdArc::clone(&id.canonical_id),
-                id.owner,
-                StdArc::clone(&id.decl_name),
-            ),
+            dispatch.type_slot_for(id.canonical_id.clone(), id.owner, id.decl_name.clone()),
             StdArc::from(Vec::new().into_boxed_slice()),
             dispatch.instantiate_context_for(
                 "/cg_relate.ts",
@@ -964,7 +964,7 @@ mod carrier_descent_tests {
     fn decl_identity(canonical: &str, name: &str) -> DeclIdentity {
         DeclIdentity::from_scope(
             &NodeScopeId::File {
-                canonical_id: Arc::from(canonical),
+                canonical_id: verter_type_expr::OwnedStr::from(canonical),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: [7u8; 16],
                 local_scope: None,
@@ -986,7 +986,7 @@ mod carrier_descent_tests {
             graph.intern_node(SemanticNodeData::new_typeof(
                 ValueRootKey {
                     scope: ScopeId {
-                        canonical_id: Arc::from("/v.ts"),
+                        canonical_id: verter_type_expr::OwnedStr::from("/v.ts"),
                         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         local_scope: None,
                         binder_scope_id:
@@ -994,14 +994,16 @@ mod carrier_descent_tests {
                                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                             ),
                     },
-                    name: Arc::from("factory"),
+                    name: verter_type_expr::OwnedStr::from("factory"),
                 },
-                Arc::from(Vec::new().into_boxed_slice()),
+                verter_type_expr::OwnedSlice::default(),
                 Arc::clone(&args),
             )),
             graph.intern_node(SemanticNodeData::new_import_type(
                 Arc::from("./m"),
-                Arc::from(vec![Arc::<str>::from("G")].into_boxed_slice()),
+                verter_type_expr::OwnedSlice::from(
+                    vec![verter_type_expr::OwnedStr::from("G")].into_boxed_slice(),
+                ),
                 Arc::clone(&args),
                 false,
             )),
@@ -1057,7 +1059,7 @@ mod carrier_descent_tests {
         let graph = SemanticGraphStore::new();
         let target: Arc<str> = Arc::from("SelfRef");
         let rec = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
-            name: Arc::clone(&target),
+            name: verter_type_expr::OwnedStr::from(target.clone()),
             args: Default::default(),
         }));
 
@@ -1073,7 +1075,7 @@ mod carrier_descent_tests {
         // DIFFERENT name does NOT match the target (proving the descent reads
         // the actual name, not a blanket true).
         let other = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
-            name: Arc::from("OtherName"),
+            name: verter_type_expr::OwnedStr::from("OtherName"),
             args: Default::default(),
         }));
         for carrier in carriers_wrapping(&graph, other) {

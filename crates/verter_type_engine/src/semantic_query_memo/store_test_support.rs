@@ -271,26 +271,43 @@ impl SemanticGraphStore {
             QueryResult::Recursive(node) => QueryResult::Recursive(node),
             QueryResult::Error(error) => QueryResult::Error(error),
         };
+        let walker_diagnostics = super::empty_diagnostics();
         let lease = self
-            .lease_candidate(&family, &result, &[])
+            .lease_candidate(
+                &family,
+                super::delivery_lease::DeliveredAllocations::read(
+                    &result,
+                    &walker_diagnostics,
+                    &dispatch_dep_signature,
+                ),
+            )
             .expect("fixture candidate operands are live");
-        let entry = MemoEntry {
+        let mut entry = MemoEntry {
             lease,
             result,
             read_set_signature: read_set_signature.clone(),
-            dispatch_dep_signature: Arc::clone(&dispatch_dep_signature),
+            dispatch_dep_signature: dispatch_dep_signature.clone(),
             self_root_canonicals,
-            walker_diagnostics: Arc::from([]),
+            walker_diagnostics,
             satisfied_projection,
-            // Test-support seeding runs against fixture stores that own
-            // no retention account; production publication always goes
-            // through a charged path.
-            retention_charge: None,
+            retention: None,
             validated_at_generation,
             admission_seq,
             reverse_indexed: false,
             cost_receipt: super::scc_publish::fixture_receipt(&family),
         };
+        // A seed is charged like every published candidate; one the account
+        // refuses is not seeded.
+        let populated_slots =
+            family::publication_slot_bound(slot, &entry.satisfied_projection, &requested_path);
+        let registered_canonicals =
+            reverse_index::registered_canonical_count(&read_set_signature, &dispatch_dep_signature);
+        let Ok(retention) =
+            self.reserve_memo_candidate(&entry, &family, populated_slots, registered_canonicals)
+        else {
+            return 0;
+        };
+        entry.retention = Some(retention);
         let cap = family.candidate_cap();
         let eviction = match view {
             Some(ctx) => {
@@ -299,14 +316,10 @@ impl SemanticGraphStore {
             None => family::EvictionVictim::LruFront,
         };
         let mut entries = self.entries_lock_diagnosed();
-        let family_was_new = !entries.contains_key(&family);
-        let outcome = entries.entry(family.clone()).or_default().publish(
-            slot,
-            entry,
-            &requested_path,
-            cap,
-            eviction,
-        );
+        let Some((slots, family_was_new)) = self.family_slots_locked(&mut entries, &family) else {
+            return 0;
+        };
+        let outcome = slots.publish(slot, entry, &requested_path, cap, eviction);
         let populated_slots = outcome.populated;
         for (displaced_slot, displaced_entry) in &outcome.displaced {
             reverse_index::drain_candidate_reverse_index_registrations(
@@ -494,7 +507,7 @@ impl SemanticGraphStore {
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
         prepared: &PreparedKeyHandle,
         result: &QueryResult<SemanticQueryValue>,
-        walker_diagnostics: &Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
+        walker_diagnostics: &crate::project_semantic_dispatch::walk::WalkerDiagnostics,
         read_set_signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
         dispatch_dep_signature: &DepSignature,
         self_root_canonicals: &Arc<[Arc<str>]>,

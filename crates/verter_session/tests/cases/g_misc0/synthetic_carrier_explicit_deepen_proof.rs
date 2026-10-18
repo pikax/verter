@@ -61,8 +61,6 @@
 //!     as value-side data: `from_carrier_key` drops it from the identity
 //!     and `to_carrier_key` re-attaches the CURRENT ordinal.
 
-use std::sync::Arc;
-
 use verter_type_engine::component_meta_caches::ShapeCacheDb;
 use verter_type_engine::semantic_query::{ProjectionMode, SyntheticBindingId};
 use verter_type_expr::{SyntheticCarrierKey, SyntheticCarrierSurfaceKind, TypeExpr};
@@ -72,10 +70,10 @@ use verter_type_expr::{SyntheticCarrierKey, SyntheticCarrierSurfaceKind, TypeExp
 /// content-free cache identity.
 fn make_carrier(scope: &str, slot: &str, binding: &str, value_node: u64) -> SyntheticCarrierKey {
     SyntheticCarrierKey {
-        scope_canonical_id: Arc::from(scope),
+        scope_canonical_id: From::from(scope),
         surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
-        slot_name: Some(Arc::from(slot)),
-        binding_name: Arc::from(binding),
+        slot_name: Some(From::from(slot)),
+        binding_name: From::from(binding),
         value_node,
     }
 }
@@ -205,7 +203,7 @@ fn synthetic_carrier_deepen_still_discriminates_identity_axes() {
 
     // Different scope_canonical_id MUST miss.
     let other_scope = SyntheticCarrierKey {
-        scope_canonical_id: Arc::from("/component-meta-cache-proof/OtherOwner.vue"),
+        scope_canonical_id: From::from("/component-meta-cache-proof/OtherOwner.vue"),
         ..carrier.clone()
     };
     assert!(
@@ -217,7 +215,7 @@ fn synthetic_carrier_deepen_still_discriminates_identity_axes() {
 
     // Different slot_name MUST miss.
     let other_slot = SyntheticCarrierKey {
-        slot_name: Some(Arc::from("footer")),
+        slot_name: Some(From::from("footer")),
         ..carrier.clone()
     };
     assert!(
@@ -229,7 +227,7 @@ fn synthetic_carrier_deepen_still_discriminates_identity_axes() {
 
     // Different binding_name MUST miss.
     let other_binding = SyntheticCarrierKey {
-        binding_name: Arc::from("rows"),
+        binding_name: From::from("rows"),
         ..carrier.clone()
     };
     assert!(
@@ -287,7 +285,7 @@ fn synthetic_binding_identity_drops_value_node_and_round_trips_provenance() {
     let id = SyntheticBindingId::from_carrier_key(&carrier);
     assert_eq!(id.scope_canonical_id, carrier.scope_canonical_id);
     assert_eq!(id.surface_kind, carrier.surface_kind);
-    assert_eq!(id.slot_name, carrier.slot_name);
+    assert_eq!(id.slot_name.as_deref(), carrier.slot_name.as_deref());
     assert_eq!(id.binding_name, carrier.binding_name);
 
     // Two carriers differing ONLY in `value_node` project to the SAME

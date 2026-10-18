@@ -37,9 +37,18 @@ disallowed-macros = [
 # clippy.toml for the full rationale).
 # Ownership attachments reach mutable storage without participating in key
 # equality/hashing. Keep the workspace's narrowly named lifetime exceptions.
+# An owned, self-charged handle (`Owned`, `OwnedSlice`, `OwnedStr`) reaches
+# its cell's charge slot solely to charge and release its allocation; its
+# `Eq`/`Ord`/`Hash` read only the immutable value.
 ignore-interior-mutability = [
   "bytes::Bytes",
   "verter_session_query::facts::receipt::ResultReceipt",
+  "verter_session_query::retention::RetentionCharge",
   "verter_type_engine::semantic_query_memo::node_roots::NodeRootSet",
   "verter_type_engine::signature_kernel::lifetime::SignatureEpochLease",
+  "verter_retention::owned::Owned",
+  "verter_retention::owned::OwnedSlice",
+  "verter_retention::owned::OwnedStr",
+  "verter_retention::RetentionCharge",
+  "verter_type_engine::semantic_query_memo::arena::NodeData",
 ]

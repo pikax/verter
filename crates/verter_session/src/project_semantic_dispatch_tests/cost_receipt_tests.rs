@@ -1482,7 +1482,7 @@ fn path_key(
     use verter_type_engine::semantic_query::{
         PathSegment, ProjectionMode, ProjectionReductionContext, PropertyKey, SemanticQueryKey,
     };
-    let path: Arc<[PathSegment]> = path
+    let path: verter_type_expr::OwnedSlice<PathSegment> = path
         .iter()
         .map(|member| PathSegment::Member(PropertyKey::identifier(Arc::from(*member))))
         .collect();
@@ -2151,14 +2151,14 @@ fn the_refusal_table_keeps_the_newest_and_refuses_torn_evaluations() {
     let key = |name: usize| {
         SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: ScopeId {
-                canonical_id: Arc::from("/refusals.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/refusals.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
                 binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
             },
-            name: Arc::from(format!("R{name}")),
+            name: verter_type_expr::OwnedStr::from(format!("R{name}")),
         })
     };
     let refusal = || {
@@ -2167,7 +2167,7 @@ fn the_refusal_table_keeps_the_newest_and_refuses_torn_evaluations() {
                 verter_type_engine::semantic_query::QueryError::Miss,
             ),
             verter_type_engine::semantic_query_memo::empty_signature(),
-            Arc::from([]),
+            verter_type_engine::project_semantic_dispatch::walk::WalkerDiagnostics::default(),
             true,
             verter_type_engine::semantic_query::FactStatus::unavailable(
                 PartialReasonSet::PROJECTION_WORK_LIMIT,

@@ -1569,7 +1569,9 @@ impl Default for CompileProfile {
 /// Each SFC is split into multiple virtual nodes that the bundler loads
 /// independently (script, template, styles, custom blocks), plus a `Main`
 /// node that assembles them into a single ES module.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, verter_retention::heap_size::HeapSize,
+)]
 pub enum VirtualNodeKind {
     /// The assembled main module (imports styles, binds render function, exports component).
     Main,
@@ -1859,7 +1861,7 @@ pub struct VirtualQuery {
 }
 
 /// Block-specific metadata attached to a [`VirtualFileResponse`].
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, verter_retention::heap_size::HeapSize)]
 pub struct VirtualMeta {
     /// Scoped style ID (e.g. `"data-v-abc123"`), present on Main nodes when styles are scoped.
     pub scope_id: Option<String>,
@@ -1882,9 +1884,9 @@ pub struct VirtualFileResponse {
     /// Rendered virtual ID (bundler or LSP format, matching the query).
     pub id: String,
     /// Compiled code for this virtual node.
-    pub code: Arc<str>,
+    pub code: verter_type_expr::OwnedStr,
     /// Source map (JSON string), if `source_map` was enabled in the profile.
-    pub source_map: Option<Arc<str>>,
+    pub source_map: Option<verter_type_expr::OwnedStr>,
     /// Output language (e.g. `"js"`, `"ts"`, `"css"`, `"scss"`).
     pub lang: Option<String>,
     /// `true` if this is last-known-good fallback output (current source has errors).
@@ -2399,7 +2401,7 @@ pub struct HostRemoveResult {
 }
 
 /// Severity level for a [`HostDiagnostic`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub enum HostSeverity {
     Error,
     Warning,
@@ -2407,7 +2409,7 @@ pub enum HostSeverity {
 }
 
 /// A single diagnostic (error, warning, or info) produced during parsing or compilation.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, verter_retention::heap_size::HeapSize)]
 pub struct HostDiagnostic {
     pub severity: HostSeverity,
     /// Machine-readable error code (e.g. `"HOST_MISSING_EXTERNAL_SOURCE"`).
@@ -2415,6 +2417,7 @@ pub struct HostDiagnostic {
     /// Human-readable diagnostic message.
     pub message: String,
     /// Canonically comparable semantic values used to render the message.
+    #[heap_size(with = "crate::heap_size_foreign::diagnostic_args")]
     pub arguments: Vec<verter_language::DiagnosticArg>,
     /// SFC-absolute byte offset span. Mandatory: a producer that cannot
     /// derive a real mapped location must fail closed at its own seam
@@ -2429,7 +2432,7 @@ pub struct HostDiagnostic {
 /// `append_advisory` can add an IDE-visible `Error` without flipping
 /// the compile-entry gate. `from_vec`/`merge` compute it from
 /// severity; see [`LanguageDiagnostic::blocks_compile`](verter_language::LanguageDiagnostic::blocks_compile).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, verter_retention::heap_size::HeapSize)]
 pub struct DiagnosticsSnapshot {
     /// All diagnostics (errors + warnings + info).
     pub diagnostics: Vec<HostDiagnostic>,
@@ -2840,34 +2843,61 @@ pub(crate) struct ParseSnapshot {
     pub(crate) refused: Option<verter_parser::oxc_parse::StackUnavailable>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub(crate) struct CachedVirtualFile {
-    pub(crate) code: Arc<str>,
-    pub(crate) source_map: Option<Arc<str>>,
+    pub(crate) code: verter_type_expr::OwnedStr,
+    pub(crate) source_map: Option<verter_type_expr::OwnedStr>,
     pub(crate) lang: Option<String>,
     pub(crate) meta: VirtualMeta,
 }
 
 /// Cached IDE output for LSP type checking, stored separately from virtual files.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub(crate) struct CachedTsx {
-    pub(crate) code: Arc<str>,
-    pub(crate) source_map: Option<Arc<str>>,
+    pub(crate) code: verter_type_expr::OwnedStr,
+    pub(crate) source_map: Option<verter_type_expr::OwnedStr>,
     pub(crate) is_jsx: bool,
+    #[heap_size(with = "crate::heap_size_foreign::destructured_block")]
     pub(crate) destructured_block: Option<verter_compiler::compile::types::DestructuredBlockMeta>,
+}
+
+/// A delivered text allocation is charged even when no cache accepted it.
+/// Already retained cells keep their existing shared charge.
+pub(crate) fn pin_generated_texts(
+    code: &verter_type_expr::OwnedStr,
+    source_map: Option<&verter_type_expr::OwnedStr>,
+    ctx: verter_session_query::retention::owned::ChargeCtx<'_>,
+) {
+    code.pin(ctx);
+    if let Some(map) = source_map {
+        map.pin(ctx);
+    }
 }
 
 /// Response from [`VerterHost::get_ide`].
 #[derive(Debug, Clone)]
 pub struct IdeResponse {
     /// The generated TSX/JSX code.
-    pub code: Arc<str>,
+    pub code: verter_type_expr::OwnedStr,
     /// JSON source map (if available).
-    pub source_map: Option<Arc<str>>,
+    pub source_map: Option<verter_type_expr::OwnedStr>,
     /// `true` for JavaScript SFCs (.jsx output), `false` for TypeScript (.tsx output).
     pub is_jsx: bool,
     /// Structured metadata for the destructured block region, if present.
     pub destructured_block: Option<verter_compiler::compile::types::DestructuredBlockMeta>,
+}
+
+impl IdeResponse {
+    /// The response for a compiled IDE output: its code and map are the
+    /// output's own text cells, so the response shares their charge.
+    pub(crate) fn from_cached(tsx: &CachedTsx) -> Self {
+        Self {
+            code: tsx.code.clone(),
+            source_map: tsx.source_map.clone(),
+            is_jsx: tsx.is_jsx,
+            destructured_block: tsx.destructured_block.clone(),
+        }
+    }
 }
 
 /// One separately addressed output of a compiled runtime product.
@@ -2883,10 +2913,10 @@ pub struct CompiledVirtualNode {
     /// Which node of the carrier this row is.
     pub node: VirtualNodeKind,
     /// Compiled code for this node.
-    pub code: Arc<str>,
+    pub code: verter_type_expr::OwnedStr,
     /// This node's own JSON source map, when the request asked for maps
     /// and the node has one.
-    pub source_map: Option<Arc<str>>,
+    pub source_map: Option<verter_type_expr::OwnedStr>,
     /// Output language (e.g. `"js"`, `"ts"`, `"css"`, `"scss"`).
     pub lang: Option<String>,
     /// Block-specific metadata (scope id, block type, index).
@@ -3180,7 +3210,7 @@ pub enum PublicApiMode {
 ///
 /// `large_enum_variant` is allowed: boxing the common produced arm
 /// would add a hop on every warm read.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum CompileProducts {
     /// The compile produced the requested product set.
@@ -3198,8 +3228,8 @@ pub(crate) enum CompileProducts {
     /// The reason is carried STRUCTURALLY, so no consumer recovers it by
     /// scanning diagnostic text for a framework-specific code prefix.
     RuntimeSurfaceRefused {
-        diagnostic_code: Arc<str>,
-        message: Arc<str>,
+        diagnostic_code: verter_type_expr::OwnedStr,
+        message: verter_type_expr::OwnedStr,
     },
 }
 
@@ -3298,8 +3328,9 @@ pub(crate) struct CompileSlot {
     /// zero-cost off the override path.
     pub(crate) css_hash_override: Option<Arc<str>>,
     /// What this transaction committed — the produced product set, OR a
-    /// payload-free runtime refusal. See [`CompileProducts`].
-    pub(crate) products: CompileProducts,
+    /// payload-free runtime refusal. See [`CompileProducts`]. One
+    /// self-charged allocation every warm hit shares.
+    pub(crate) products: verter_retention::heap_size::OwnedTree<CompileProducts>,
     pub(crate) diagnostics: DiagnosticsSnapshot,
     #[allow(dead_code)]
     pub(crate) last_access_tick: u64,
@@ -3322,6 +3353,52 @@ pub(crate) struct CompileSlot {
     /// falls back to the existing `semantic_hash`/override-hash
     /// pre-filter.
     pub(crate) fact_dep_signature: verter_session_query::facts::fact_cache::ReadSetSignature,
+    /// The slot's own allocations — its map slot, its diagnostics, its
+    /// override text, its fact slice and the evidence pages it reaches —
+    /// on one refusable reservation that also holds the products' cell.
+    pub(crate) _retention: Arc<verter_session_query::retention::RetentionCharge>,
+}
+
+/// A compile slot's fields, for a fixture that builds one directly.
+#[cfg(test)]
+pub(crate) struct CompileSlotFixture {
+    pub(crate) semantic_hash: Hash16,
+    pub(crate) content_override_hash: u64,
+    pub(crate) css_hash_override: Option<Arc<str>>,
+    pub(crate) products: CompileProducts,
+    pub(crate) diagnostics: DiagnosticsSnapshot,
+    pub(crate) last_access_tick: u64,
+    pub(crate) fact_dep_signature: verter_session_query::facts::fact_cache::ReadSetSignature,
+}
+
+#[cfg(test)]
+impl CompileSlotFixture {
+    /// The slot, charged to the process account like a published one.
+    pub(crate) fn into_slot(self) -> CompileSlot {
+        let value = crate::compile_output_node::CompileOutputValue::from_compile_record(
+            self.semantic_hash,
+            self.content_override_hash,
+            self.css_hash_override,
+            self.products,
+            self.diagnostics,
+        );
+        let retention = crate::compile_output_node::compile_slot_retention(
+            &value,
+            &self.fact_dep_signature,
+            &verter_session_query::retention::SemanticRetentionAccount::process_local(),
+        )
+        .expect("a fixture slot is admitted");
+        CompileSlot {
+            semantic_hash: value.semantic_hash,
+            content_override_hash: value.content_override_hash,
+            css_hash_override: value.css_hash_override,
+            products: value.products,
+            diagnostics: value.diagnostics,
+            last_access_tick: self.last_access_tick,
+            fact_dep_signature: self.fact_dep_signature,
+            _retention: Arc::new(retention),
+        }
+    }
 }
 
 /// Lightweight extract of FileEntry fields needed for compilation,
@@ -3464,6 +3541,12 @@ pub struct ProfileState {
     pub(crate) compile_slots: FxHashMap<u64, CompileSlot>,
     pub(crate) latest_diagnostics: FxHashMap<u64, DiagnosticsSnapshot>,
     pub(crate) diagnostics_generation: u64,
+    /// The IDE output the latest compile under one IDE profile delivered
+    /// when the account refused to retain its slot: the document's surface,
+    /// held for the IDE readers that cannot compute, charged to them —
+    /// pinned, never a cache entry a compile reuses. Replaced by the next
+    /// compile under that profile, dropped once a slot retains one.
+    delivered_ide: Option<(u64, crate::resolver_core::CachedValue<CachedTsx>)>,
 }
 
 #[allow(dead_code)]
@@ -3510,6 +3593,42 @@ impl ProfileState {
     /// invalidation callers and is left untouched here.
     pub(crate) fn compile_slots_clear_for_node(&mut self) {
         self.compile_slots.clear();
+        self.delivered_ide = None;
+    }
+
+    /// Keep `tsx` as the IDE surface the latest compile under `profile_hash`
+    /// delivered without a slot retaining it, charged to its readers.
+    pub(crate) fn deliver_unretained_ide(
+        &mut self,
+        profile_hash: u64,
+        tsx: CachedTsx,
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) {
+        let surface = crate::resolver_core::CachedValue::new(tsx);
+        surface.pin(verter_session_query::retention::owned::ChargeCtx::new(
+            account,
+        ));
+        self.delivered_ide = Some((profile_hash, surface));
+    }
+
+    /// Forget the surface delivered under `profile_hash`, if it is the one
+    /// held: a retained slot or an unservable compile supersedes it.
+    pub(crate) fn forget_unretained_ide(&mut self, profile_hash: u64) {
+        if self
+            .delivered_ide
+            .as_ref()
+            .is_some_and(|(held, _)| *held == profile_hash)
+        {
+            self.delivered_ide = None;
+        }
+    }
+
+    /// The surface delivered under `profile_hash` while no slot retains one.
+    pub(crate) fn unretained_ide(&self, profile_hash: u64) -> Option<&CachedTsx> {
+        self.delivered_ide
+            .as_ref()
+            .filter(|(held, _)| *held == profile_hash)
+            .map(|(_, surface)| &**surface)
     }
 }
 
@@ -3546,7 +3665,11 @@ impl ProfileState {
 /// can carry a generation the successor reaches again.
 #[derive(Debug)]
 pub(crate) struct RawTemplateAnalysisEntry {
-    pub(crate) template: Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
+    pub(crate) template: verter_session_query::retention::heap_size::OwnedValue<
+        verter_session_query::analysis::template::TemplateAnalysisSnapshot,
+    >,
+    /// The slot's cache hold on the template, refused with the slot.
+    _template_hold: verter_session_query::retention::owned::OwnedHold,
     /// Scheduler source version of the source read the template's
     /// inputs were captured from.
     pub(crate) source_version: verter_scheduler::node::SourceVersion,
@@ -3742,7 +3865,9 @@ impl DerivedRawState {
     /// newer-generation compute already installed.
     pub(crate) fn install_raw_template_analysis(
         &mut self,
-        template: Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
+        template: verter_session_query::retention::heap_size::OwnedValue<
+            verter_session_query::analysis::template::TemplateAnalysisSnapshot,
+        >,
         admission: RawTemplateSlotAdmission,
         account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) {
@@ -3765,8 +3890,17 @@ impl DerivedRawState {
             {
                 return;
             }
+            // The slot retains the template it serves, refusably: refused,
+            // the slot is left as it was and the template stays its
+            // callers' alone.
+            let Ok(template_hold) = template.hold(
+                verter_session_query::retention::owned::ChargeCtx::new(account),
+            ) else {
+                return;
+            };
             self.raw_template_analysis = Some(RawTemplateAnalysisEntry {
                 template,
+                _template_hold: template_hold,
                 source_version,
                 template_class_signature,
             });
@@ -3842,7 +3976,7 @@ pub(crate) struct ResolvedComponentMetaCacheEntry {
     /// validation clones the handle without copying the slice
     /// (R3/R26/R28 fact-validation substrate).
     pub fact_versions: Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
-    pub state: Arc<crate::meta_resolve::ResolvedComponentMetaState>,
+    pub state: crate::resolver_core::CachedValue<crate::meta_resolve::ResolvedComponentMetaState>,
 }
 
 #[derive(Debug, Clone)]
@@ -3999,6 +4133,14 @@ pub struct HostRetentionSnapshot {
     /// Bytes currently charged as PINNED (held by a live lease or handle)
     /// against the aggregate semantic retention account.
     pub pinned_bytes: usize,
+    /// The part of [`Self::pinned_bytes`] this host's semantic graph pins
+    /// for its own storage: its arena's chunks, payload blocks and dedup
+    /// tables, and its current signature epoch's tables.
+    pub semantic_graph_storage_bytes: usize,
+    /// The part of [`Self::pinned_bytes`] this host's semantic memo pins for
+    /// its own bookkeeping: its reverse index's shards, its shared-charge
+    /// registry's table and its dependency-rail interner.
+    pub semantic_bookkeeping_storage_bytes: usize,
     /// High-water mark of the aggregate account's charged bytes.
     pub peak_total_bytes: usize,
     /// Reservations the aggregate account refused for PRESSURE over its

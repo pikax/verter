@@ -260,7 +260,7 @@ pub struct SettledProducer<'s> {
     independent: bool,
     result: QueryResult<SemanticQueryValue>,
     dep_signature: DepSignature,
-    walker_diagnostics: Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
+    walker_diagnostics: crate::project_semantic_dispatch::walk::WalkerDiagnostics,
     carrier: verter_session_query::facts::fact_cache::ReadSetSignature,
     self_root_canonicals: Arc<[Arc<str>]>,
     satisfied_projection: MaterializedSet,
@@ -301,11 +301,13 @@ impl SemanticGraphStore {
     ) -> ValueRead {
         CacheRead {
             lease: self
-                .lease_delivery(&QueryResult::Recursive(sentinel), &[])
+                .lease_delivery(super::delivery_lease::DeliveredAllocations::value(
+                    &QueryResult::Recursive(sentinel),
+                ))
                 .expect("recursion sentinel is live"),
             value: QueryResult::Recursive(sentinel),
             dep_signature: empty_signature(),
-            walker_diagnostics: Arc::from([]),
+            walker_diagnostics: super::empty_diagnostics(),
             // A cross-task wait-cycle carrier is an operational escape,
             // never a warm fact; a same-path carrier is a partial the warm
             // gates already refuse.
@@ -528,7 +530,7 @@ impl SemanticGraphStore {
 
             // 3. Become the producer, or subscribe to the one another task owns.
             if attempt.independent {
-                let inflight = Arc::new(FlightCell::new());
+                let inflight = Arc::new(FlightCell::charged(self.retention_account()));
                 {
                     let mut state = inflight.state.lock();
                     state.claimed = true;
@@ -545,7 +547,7 @@ impl SemanticGraphStore {
                 let mut table = self.inflight.lock();
                 table
                     .entry(prepared.clone())
-                    .or_insert_with(|| Arc::new(FlightCell::new()))
+                    .or_insert_with(|| Arc::new(FlightCell::charged(self.retention_account())))
                     .clone()
             };
             {
@@ -679,9 +681,9 @@ impl Subscription<'_> {
                 completion,
                 super::test_support::ExhaustedJoinAbortForTests::OtherSentinel
             ) {
-                state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
-                    "aborted subscriber flight",
-                ))));
+                state.completed = Some(QueryResult::Error(QueryError::Other(
+                    verter_type_expr::OwnedStr::from("aborted subscriber flight"),
+                )));
             }
         }
         if state.aborted && attempt.retries < MAX_INFLIGHT_RETRIES {
@@ -708,7 +710,7 @@ impl Subscription<'_> {
                     crate::semantic_query::ExecutionAbort::Superseded,
                 )),
                 dep_signature: empty_signature(),
-                walker_diagnostics: Arc::from([]),
+                walker_diagnostics: super::empty_diagnostics(),
                 cache_suppress: true,
                 fact_status: crate::semantic_query::FactStatus::unavailable(
                     PartialReasonSet::SUPERSEDED_GENERATION,
@@ -717,7 +719,7 @@ impl Subscription<'_> {
             });
         }
         let result = state.completed.clone().unwrap_or_else(|| {
-            QueryResult::Error(QueryError::Other(Arc::from(
+            QueryResult::Error(QueryError::Other(verter_type_expr::OwnedStr::from(
                 "joiner woke without completion after retry budget exhausted",
             )))
         });
@@ -734,7 +736,7 @@ impl Subscription<'_> {
         let walker_diagnostics = state
             .walker_diagnostics
             .clone()
-            .unwrap_or_else(|| Arc::from([]));
+            .unwrap_or_else(super::empty_diagnostics);
         let cost_receipt = state.cost_receipt.clone();
         let delivery_lease = state.lease.clone();
         // Release the flight lock before any tracer fan-out.
@@ -833,7 +835,7 @@ impl Subscription<'_> {
 struct SettledOutput {
     result: QueryResult<SemanticQueryValue>,
     dep_signature: DepSignature,
-    walker_diagnostics: Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
+    walker_diagnostics: crate::project_semantic_dispatch::walk::WalkerDiagnostics,
     carrier: verter_session_query::facts::fact_cache::ReadSetSignature,
     self_root_canonicals: Arc<[Arc<str>]>,
     satisfied_projection: MaterializedSet,
@@ -882,8 +884,8 @@ fn settle_output(
         Some(abort) => partial_reasons.union(abort.reason_class()),
         None => partial_reasons,
     };
-    let walker_diagnostics: Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]> =
-        Arc::from(walker_diagnostics.into_boxed_slice());
+    let walker_diagnostics =
+        crate::project_semantic_dispatch::walk::WalkerDiagnostics::new(walker_diagnostics);
     // The carrier is always broadcast — bubbled into the producer's outer
     // tracers and recorded on the flight for subscribers — whether or not
     // the result is admitted.
@@ -931,11 +933,13 @@ fn settle_output(
     let admissible = !(cache_suppress || result_is_partial || !flow_proof_ok) && priced;
     let result = match result {
         QueryResult::Value(SemanticQueryValue::FlowReturn(value)) if result_is_partial => {
-            QueryResult::Value(SemanticQueryValue::FlowReturn(Arc::new(
-                (*value).clone().with_observed_completeness(
-                    crate::semantic_query::ResultCompleteness::partial(partial_reasons),
+            QueryResult::Value(SemanticQueryValue::FlowReturn(
+                verter_session_query::retention::owned::Owned::new(
+                    (*value).clone().with_observed_completeness(
+                        crate::semantic_query::ResultCompleteness::partial(partial_reasons),
+                    ),
                 ),
-            )))
+            ))
         }
         other => other,
     };
@@ -1003,7 +1007,11 @@ impl SemanticGraphStore {
         settled.carrier.bubble_via_tls();
         let read = CacheRead {
             lease: self
-                .lease_delivery(&settled.result, &settled.walker_diagnostics)
+                .lease_delivery(super::delivery_lease::DeliveredAllocations::read(
+                    &settled.result,
+                    &settled.walker_diagnostics,
+                    &settled.dep_signature,
+                ))
                 .expect("settled output owns live operands"),
             value: settled.result,
             dep_signature: settled.dep_signature,
@@ -1109,7 +1117,11 @@ impl<'s> ProducerLease<'s> {
         };
         Ok(SettledProducer {
             lease: store
-                .lease_delivery(&result, &walker_diagnostics)
+                .lease_delivery(super::delivery_lease::DeliveredAllocations::read(
+                    &result,
+                    &walker_diagnostics,
+                    &dep_signature,
+                ))
                 .expect("settled output owns live operands"),
             store,
             prepared,
@@ -1326,7 +1338,7 @@ impl SettledProducer<'_> {
                 state.self_root_canonicals = Arc::clone(&self_root_canonicals);
                 state.cache_suppress = cache_suppress;
                 state.fact_status = fact_status;
-                state.walker_diagnostics = Some(Arc::clone(&walker_diagnostics));
+                state.walker_diagnostics = Some(walker_diagnostics.clone());
                 state.cost_receipt = cost_receipt.clone();
                 false
             } else {

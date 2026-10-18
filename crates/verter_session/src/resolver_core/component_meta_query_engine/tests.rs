@@ -2271,16 +2271,16 @@ fn resolve_imported_registry_symbol_surfaces_concurrently_published_value() {
             classification: verter_type_expr::facts::TypeBodyClass::Interface,
             body_slot: verter_type_expr::locators::TypeBodySlot {
                 anchor: verter_type_expr::locators::AuthoredAnchor {
-                    canonical_id: Arc::from("/concurrent_pub/types.ts"),
+                    canonical_id: verter_type_expr::OwnedStr::from("/concurrent_pub/types.ts"),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    symbol: Arc::from("Props"),
+                    symbol: verter_type_expr::OwnedStr::from("Props"),
                     space: verter_type_expr::locators::LocatorSymbolSpace::Type,
                 },
-                path: Arc::from(Vec::new().into_boxed_slice()),
+                path: verter_type_expr::OwnedSlice::default(),
             },
             merged_contributor_slots: Arc::from(Vec::new().into_boxed_slice()),
         },
-        canonical_dependencies: std::collections::BTreeSet::new(),
+        canonical_dependencies: Box::default(),
     };
     let _publish =
         super::inject_imported_registry_concurrent_publish_for_tests(concurrent_symbol.clone());

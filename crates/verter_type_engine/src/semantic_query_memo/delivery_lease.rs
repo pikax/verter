@@ -15,11 +15,56 @@ impl Clone for SemanticDeliveryLease {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 struct DeliveryOwner {
     roots: NodeRootSet,
     signature: Option<SignatureEpochLease>,
     key_roots: NodeRootSet,
+    /// This owner's own block and root-owner metadata, charged
+    /// separately from the shared allocations it holds for exactly as long
+    /// as the owner lives: the owner is its caller-first holder, so it is
+    /// pinned while only readers keep it, and a cache retaining the owner
+    /// (a memo candidate whose warm reads share it) adopts the same charge
+    /// into retention for as long as it does ([`SemanticDeliveryLease::adopt_metadata`]).
+    _own: Option<verter_session_query::retention::shared::CallerHold>,
+}
+
+impl DeliveryOwner {
+    /// Pin this owner's own allocations against `account`: its `Arc` block.
+    /// Its two root owners are owned allocations a caller can clone out of
+    /// a delivered value, so each charges itself, pinned here for the
+    /// owner's readers. The rooted nodes are the arena's; the signature
+    /// epoch is its owner's; the allocations the delivery hands out carry
+    /// their own charges.
+    fn charged(
+        mut self,
+        account: &std::sync::Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) -> std::sync::Arc<Self> {
+        let footprint = self.own_footprint();
+        footprint
+            .handles
+            .pin(verter_session_query::retention::owned::ChargeCtx::new(
+                account,
+            ));
+        self._own = Some(verter_session_query::retention::shared::CallerHold::pin(
+            account,
+            footprint.bytes,
+        ));
+        std::sync::Arc::new(self)
+    }
+
+    /// This owner's own block and the root owners' handles.
+    fn own_footprint(&self) -> verter_session_query::retention::Footprint {
+        use verter_session_query::retention::allocation::{arc_block_bytes, AliasSet};
+        let mut aliases = AliasSet::new();
+        let bytes = arc_block_bytes(std::mem::size_of::<Self>())
+            + self.roots.owned_heap_bytes(&mut aliases)
+            + self.key_roots.owned_heap_bytes(&mut aliases);
+        verter_session_query::retention::Footprint {
+            bytes,
+            handles: aliases.take_handles(),
+        }
+    }
 }
 
 impl SemanticDeliveryLease {
@@ -69,23 +114,134 @@ impl SemanticDeliveryLease {
             .as_ref()
             .map(|owner| std::sync::Arc::as_ptr(owner) as usize)
     }
-    pub(crate) fn from_roots(roots: NodeRootSet) -> Self {
-        Self(Some(std::sync::Arc::new(DeliveryOwner {
-            roots,
-            ..Default::default()
-        })))
+    /// The bytes this delivery's own metadata is charged for: its owner's
+    /// block and the root owners it names, each by its own cell.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn own_charge_bytes_for_tests(&self) -> usize {
+        self.0.as_ref().map_or(0, |owner| {
+            owner._own.as_ref().map_or(
+                0,
+                verter_session_query::retention::shared::CallerHold::bytes,
+            ) + owner.own_footprint().handles.charged_bytes()
+        })
+    }
+
+    /// A cache's hold on this delivery's metadata charge, for a cache that
+    /// retains the delivery (its warm reads share the owner): retained while
+    /// the cache holds it, handed back to the owner's readers when it drains.
+    /// `None` for an empty delivery.
+    ///
+    /// # Errors
+    ///
+    /// The account's refusal: the cache must not retain the delivery, and
+    /// the metadata stays pinned to its readers.
+    pub(super) fn adopt_metadata(
+        &self,
+    ) -> Result<
+        Option<verter_session_query::retention::shared::CacheHold>,
+        verter_session_query::retention::RetentionRefusal,
+    > {
+        self.0
+            .as_ref()
+            .and_then(|owner| owner._own.as_ref())
+            .map(verter_session_query::retention::shared::CallerHold::adopt)
+            .transpose()
+    }
+
+    /// A cache's holds on the root owners this delivery's metadata names,
+    /// retained beside [`Self::adopt_metadata`]'s hold for as long as the
+    /// cache keeps the delivery.
+    ///
+    /// # Errors
+    ///
+    /// The account's refusal: nothing is held.
+    pub(super) fn hold_metadata_handles(
+        &self,
+        ctx: verter_session_query::retention::owned::ChargeCtx<'_>,
+    ) -> Result<
+        verter_session_query::retention::owned::HeldHandles,
+        verter_session_query::retention::RetentionRefusal,
+    > {
+        self.metadata_handles().hold(ctx)
+    }
+
+    /// The root owners this delivery's metadata names, for a cache that
+    /// holds them together with the other allocations it retains.
+    pub(super) fn metadata_handles(&self) -> verter_session_query::retention::owned::OwnedHandles {
+        self.0
+            .as_ref()
+            .map(|owner| owner.own_footprint().handles)
+            .unwrap_or_default()
+    }
+
+    /// A delivery rooting `roots` and holding no shared allocation, its own
+    /// metadata pinned against `account`.
+    pub(crate) fn from_roots(
+        roots: NodeRootSet,
+        account: &std::sync::Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) -> Self {
+        Self(Some(
+            DeliveryOwner {
+                roots,
+                ..Default::default()
+            }
+            .charged(account),
+        ))
+    }
+}
+
+/// The shared allocations a delivery hands its caller: its walker
+/// diagnostics, its dependency rail and its value's outermost allocation.
+pub(crate) struct DeliveredAllocations<'a> {
+    pub(crate) diagnostics: Option<&'a crate::project_semantic_dispatch::walk::WalkerDiagnostics>,
+    pub(crate) dep_signature: Option<&'a crate::semantic_query::DepSignature>,
+    pub(crate) result: &'a QueryResult<SemanticQueryValue>,
+}
+
+impl<'a> DeliveredAllocations<'a> {
+    /// A delivery of `result` alone.
+    pub(crate) fn value(result: &'a QueryResult<SemanticQueryValue>) -> Self {
+        Self {
+            diagnostics: None,
+            dep_signature: None,
+            result,
+        }
+    }
+
+    /// A delivery of `result` with its diagnostics and dependency rail.
+    pub(crate) fn read(
+        result: &'a QueryResult<SemanticQueryValue>,
+        diagnostics: &'a crate::project_semantic_dispatch::walk::WalkerDiagnostics,
+        dep_signature: &'a crate::semantic_query::DepSignature,
+    ) -> Self {
+        Self {
+            diagnostics: Some(diagnostics),
+            dep_signature: Some(dep_signature),
+            result,
+        }
     }
 }
 
 impl SemanticGraphStore {
     pub(crate) fn lease_delivery(
         &self,
-        result: &QueryResult<SemanticQueryValue>,
-        diagnostics: &[crate::project_semantic_dispatch::walk::ShallowDiagnostic],
+        delivered: DeliveredAllocations<'_>,
     ) -> Result<SemanticDeliveryLease, QueryError> {
+        self.mint_delivery(delivered, NodeRootSet::default())
+    }
+
+    /// Mint a delivery: root its operands, attach its signature-version
+    /// lease, charge the allocations it hands out to its caller (pinned
+    /// until a cache retains them), and pin its own metadata.
+    fn mint_delivery(
+        &self,
+        delivered: DeliveredAllocations<'_>,
+        key_roots: NodeRootSet,
+    ) -> Result<SemanticDeliveryLease, QueryError> {
+        let result = delivered.result;
         let mut nodes = super::node_roots::RootIds::new();
         result.for_each_retained_node(|node| nodes.push(node));
-        for diagnostic in diagnostics {
+        for diagnostic in delivered.diagnostics.map_or(&[][..], |d| &d[..]) {
             diagnostic.for_each_retained_node(|node| nodes.push(node));
         }
         nodes.retain(|node| node.0 < super::UNALLOCATABLE_ID_FLOOR);
@@ -108,13 +264,44 @@ impl SemanticGraphStore {
                 })
                 .transpose()?
         };
-        let lease = SemanticDeliveryLease(Some(std::sync::Arc::new(DeliveryOwner {
-            roots,
-            signature,
-            key_roots: Default::default(),
-        })));
-        lease.capture();
-        Ok(lease)
+        self.pin_delivered_allocations(&delivered);
+        let account = self.retention_account();
+        if key_roots.operands().is_empty() {
+            let lease = SemanticDeliveryLease(Some(
+                DeliveryOwner {
+                    roots,
+                    signature,
+                    key_roots,
+                    _own: None,
+                }
+                .charged(account),
+            ));
+            lease.capture();
+            return Ok(lease);
+        }
+        // A cache candidate's key operands are the cache's to keep, never
+        // the reader's: this thread's construction owner receives a
+        // delivery of the value alone, and the candidate keeps its own
+        // owner rooting both.
+        SemanticDeliveryLease(Some(
+            DeliveryOwner {
+                roots: roots.clone(),
+                signature: signature.clone(),
+                key_roots: NodeRootSet::default(),
+                _own: None,
+            }
+            .charged(account),
+        ))
+        .capture();
+        Ok(SemanticDeliveryLease(Some(
+            DeliveryOwner {
+                roots,
+                signature,
+                key_roots,
+                _own: None,
+            }
+            .charged(account),
+        )))
     }
 
     /// `lease` itself when it already roots, in this graph's arena, every
@@ -123,17 +310,21 @@ impl SemanticGraphStore {
     /// as a fresh lease would be; otherwise a fresh delivery lease. A value
     /// that carries a signature kernel epoch is always leased afresh, so its
     /// epoch lease is the one this read names.
+    ///
+    /// A reused lease still charges the allocations the delivery hands its
+    /// caller, exactly as a fresh lease would.
     pub(crate) fn redeliver(
         &self,
         lease: SemanticDeliveryLease,
-        result: &QueryResult<SemanticQueryValue>,
-        diagnostics: &[crate::project_semantic_dispatch::walk::ShallowDiagnostic],
+        delivered: DeliveredAllocations<'_>,
     ) -> Result<SemanticDeliveryLease, QueryError> {
-        if self.lease_covers(&lease, result, diagnostics) {
+        let diagnostics = delivered.diagnostics.map_or(&[][..], |d| &d[..]);
+        if self.lease_covers(&lease, delivered.result, diagnostics) {
+            self.pin_delivered_allocations(&delivered);
             lease.capture();
             return Ok(lease);
         }
-        self.lease_delivery(result, diagnostics)
+        self.lease_delivery(delivered)
     }
 
     /// Whether `lease` roots, in this graph's arena, every allocatable node
@@ -184,18 +375,15 @@ impl SemanticGraphStore {
     pub(super) fn lease_candidate(
         &self,
         family: &super::family::FamilyKey,
-        result: &QueryResult<SemanticQueryValue>,
-        diagnostics: &[crate::project_semantic_dispatch::walk::ShallowDiagnostic],
+        delivered: DeliveredAllocations<'_>,
     ) -> Result<SemanticDeliveryLease, QueryError> {
-        let mut lease = self.lease_delivery(result, diagnostics)?;
         let mut nodes = super::node_roots::RootIds::new();
         family.for_each_node_id(|node| {
             if node.0 < super::UNALLOCATABLE_ID_FLOOR {
                 nodes.push(node);
             }
         });
-        std::sync::Arc::make_mut(lease.0.as_mut().unwrap()).key_roots =
-            self.root_existing_nodes(nodes)?;
-        Ok(lease)
+        let key_roots = self.root_existing_nodes(nodes)?;
+        self.mint_delivery(delivered, key_roots)
     }
 }

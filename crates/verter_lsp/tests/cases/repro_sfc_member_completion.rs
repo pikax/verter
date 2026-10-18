@@ -78,7 +78,7 @@ fn open(source: &str) -> Opened {
     let tsx_li = LineIndex::new(&ide.code, registry.encoding());
     let mapper = registry.get_position_mapper(&uri);
     Opened {
-        ide_code: ide.code.clone(),
+        ide_code: std::sync::Arc::<str>::from(ide.code.as_str()),
         mapper,
         vue_li,
         tsx_li,

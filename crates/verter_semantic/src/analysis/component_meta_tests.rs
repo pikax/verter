@@ -31,9 +31,9 @@ pub(crate) fn closed_string(value: &str) -> SemanticTypeSource {
 pub(crate) fn test_payload(field_index: u32) -> MacroPayloadLocator {
     MacroPayloadLocator {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(""),
+            canonical_id: verter_type_expr::OwnedStr::from(""),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("default"),
+            symbol: verter_type_expr::OwnedStr::from("default"),
             space: LocatorSymbolSpace::Value,
         },
         macro_index: 0,
@@ -222,7 +222,7 @@ fn resolved_emit_input(
         id: verter_type_expr::facts::ResolvedEmitOccurrenceId::new(
             verter_type_expr::facts::CallableOccurrenceHandle::member(
                 0,
-                Arc::from([field.name.clone()]),
+                From::from([field.name.clone()]),
             ),
             0,
         ),
@@ -3680,9 +3680,9 @@ fn resolved_prop_callable_role_survives_component_meta_extraction() {
     let mut prop = resolved_prop_input(make_prop("row", Some("DisplayWasPerturbed"), false));
     let expected = verter_type_expr::PropCallableRole::SvelteSnippet {
         symbol: verter_type_expr::ResolvedSymbolIdentity {
-            canonical_id: Arc::from("/node_modules/svelte/index.d.ts"),
+            canonical_id: "/node_modules/svelte/index.d.ts".into(),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("Snippet"),
+            symbol: "Snippet".into(),
         },
         exactness: ResolutionExactness::ExactSymbolic,
         provenance: ResolutionProvenance::FrameworkSurface,
@@ -5800,7 +5800,7 @@ fn slot_merge_replaces_evidence_atomically_and_failed_authority_is_absorbing() {
     let old_locator = verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
         verter_type_expr::locators::TypeBodySlot {
             anchor: test_payload(1).anchor,
-            path: Arc::from([]),
+            path: verter_type_expr::OwnedSlice::from([]),
         },
     );
     // SAFETY: the fixture supplies one atomic authored locator/text row.
@@ -6125,16 +6125,16 @@ fn typed_slot_binding(
     flat_name: &str,
 ) -> verter_session_query::analysis::type_expand::ExpandedField {
     let key = verter_type_expr::SyntheticCarrierKey {
-        scope_canonical_id: Arc::from("test:component"),
+        scope_canonical_id: From::from("test:component"),
         surface_kind,
-        slot_name: slot.map(Arc::from),
-        binding_name: Arc::from(binding),
+        slot_name: slot.map(verter_type_expr::OwnedStr::from),
+        binding_name: From::from(binding),
         value_node: 0,
     };
     verter_session_query::analysis::type_expand::ExpandedField {
         name: flat_name.to_string(),
         authority: test_authority(
-            SourcePosition::Present(SemanticTypeSource::SyntheticSlotBinding(Arc::new(key))),
+            SourcePosition::Present(SemanticTypeSource::SyntheticSlotBinding(From::from(key))),
             verter_session_query::analysis::type_expand::ExpansionExactness::ExactSymbolic,
         ),
         ..test_slot_binding("unused", "unused", PrimitiveName::String)

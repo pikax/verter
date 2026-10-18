@@ -29,6 +29,7 @@ pub mod metadata;
 pub mod module_exports;
 
 use std::sync::Arc;
+use verter_type_expr::OwnedSlice;
 
 use rustc_hash::FxHashMap;
 
@@ -202,7 +203,7 @@ impl TypeDeclGroup {
                     .filter_map(|(ordinal, decl)| {
                         Some(TypeBodySlot {
                             anchor: decl.body.anchor.clone(),
-                            path: Arc::from([TypeBodyPathStep::MergedContributor {
+                            path: OwnedSlice::from([TypeBodyPathStep::MergedContributor {
                                 ordinal: u32::try_from(ordinal).ok()?,
                             }]),
                         })
@@ -274,7 +275,15 @@ impl TypeDeclBody {
 }
 
 /// What kind of type declaration this is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, verter_no_typeexpr::NoTypeExpr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum TypeDeclKind {
     Alias,
     Interface,
@@ -617,7 +626,15 @@ impl ValueDeclGroup {
 }
 
 /// What kind of value declaration this is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, verter_no_typeexpr::NoTypeExpr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum ValueDeclKind {
     Const,
     Let,
@@ -1070,7 +1087,7 @@ fn rebase_value_signature_ordinals(decl: &mut ValueDeclInfo, base: u32) -> bool 
         // step. A rebase typed to the slot alone would leave every merged
         // contributor's head addressing overload ordinal 0 — the wrong
         // overload.
-        let repoint_path = |path: &mut Arc<[TypeBodyPathStep]>| {
+        let repoint_path = |path: &mut verter_type_expr::OwnedSlice<TypeBodyPathStep>| {
             if let Some(TypeBodyPathStep::ValueSignature { .. }) = path.first() {
                 let mut rebased: Vec<TypeBodyPathStep> = path.to_vec();
                 rebased[0] = TypeBodyPathStep::ValueSignature { ordinal };
@@ -1110,7 +1127,7 @@ fn rebase_value_signature_ordinals(decl: &mut ValueDeclInfo, base: u32) -> bool 
 /// `ValueSignature`-rooted path and pass through untouched.
 fn rebase_authored_reference_head(
     head: &mut AuthoredReferenceHeadFact,
-    repoint_path: impl Fn(&mut Arc<[TypeBodyPathStep]>),
+    repoint_path: impl Fn(&mut verter_type_expr::OwnedSlice<TypeBodyPathStep>),
 ) {
     let args = match head {
         AuthoredReferenceHeadFact::Bare { args, .. }

@@ -3,8 +3,6 @@
 
 use crate::semantic_query::{ResultEvaluationContextId, SemanticContextId};
 
-use std::sync::Arc;
-
 use crate::semantic_query::SemanticNodeId;
 
 use super::records::{AppliedResultId, CallSubstitutionId, SignatureDescriptorId, SignatureSetRef};
@@ -60,7 +58,7 @@ pub struct SignatureSetValue {
     /// content-interned, so one descriptor outlives the file version that
     /// first published it; the node a consumer may read is the one this
     /// subject carries, which only the walk knows.
-    pub(crate) nodes: Arc<CandidateTable>,
+    pub(crate) nodes: verter_session_query::retention::owned::Owned<CandidateTable>,
 }
 
 /// A value's candidate nodes and the roots every copy of the value shares.
@@ -75,6 +73,37 @@ impl std::ops::Deref for CandidateTable {
     type Target = [SignatureCandidateNodes];
     fn deref(&self) -> &Self::Target {
         &self.candidates
+    }
+}
+
+impl crate::semantic_query::allocation_footprint::OwnedHeap for SignatureSetValue {
+    /// The shared candidate table, an owned allocation charged by its own
+    /// cell. The signature records live in the epoch's tables.
+    fn owned_heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        self.nodes.offer(aliases)
+    }
+}
+
+impl verter_session_query::retention::owned::Measured for CandidateTable {
+    /// The candidate slice, each composite's constituent list and the
+    /// table's root owner.
+    fn heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        use crate::semantic_query::allocation_footprint::OwnedHeap as _;
+        use verter_session_query::retention::allocation::heap_block_bytes;
+        heap_block_bytes(std::mem::size_of_val::<[SignatureCandidateNodes]>(
+            &self.candidates,
+        )) + self
+            .candidates
+            .iter()
+            .map(|candidate| candidate.constituents.owned_heap_bytes(aliases))
+            .sum::<usize>()
+            + self.roots.0.owned_heap_bytes(aliases)
     }
 }
 
@@ -95,11 +124,21 @@ impl SignatureSetValue {
         Self {
             version,
             set,
-            nodes: Arc::new(CandidateTable {
+            nodes: verter_session_query::retention::owned::Owned::new(CandidateTable {
                 candidates: nodes.into_boxed_slice(),
                 roots,
             }),
         }
+    }
+
+    /// Bytes the candidate table's own charge holds, and its class; `None`
+    /// while no owner has charged it.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn candidate_table_charge_for_tests(
+        &self,
+    ) -> Option<(usize, verter_session_query::retention::ChargeClass)> {
+        self.nodes.charge_bytes().zip(self.nodes.charge_class())
     }
 
     /// The interned candidate set.
@@ -142,7 +181,7 @@ pub struct SignatureCandidateNodes {
     /// For a composite, the authored node of each constituent in
     /// constituent-sequence order; empty for a leaf, and empty when the walk
     /// never published one of them.
-    pub(crate) constituents: Arc<[SemanticNodeId]>,
+    pub(crate) constituents: verter_type_expr::OwnedSlice<SemanticNodeId>,
 }
 
 impl SignatureCandidateNodes {

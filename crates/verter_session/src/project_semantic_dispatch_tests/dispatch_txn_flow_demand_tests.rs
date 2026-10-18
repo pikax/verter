@@ -28,9 +28,9 @@ fn flow_demand_carriers_default_none_and_round_trip() {
         function: FlowFunctionSlotIdentity {
             declaration_slot:
                 verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::value_slot(
-                    Arc::from("/flow_solve_fixture.ts"),
+                    verter_type_expr::OwnedStr::from("/flow_solve_fixture.ts"),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    Arc::from("carry_me"),
+                    verter_type_expr::OwnedStr::from("carry_me"),
                     0,
                     [0; 16],
                     [0; 16],
@@ -38,7 +38,7 @@ fn flow_demand_carriers_default_none_and_round_trip() {
             function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
             overload_ordinal: 0,
         },
-        normalized_type_args: Arc::from([]),
+        normalized_type_args: verter_type_expr::OwnedSlice::from([]),
         context: FlowReturnContext {
             parse_env_hash: [0; 16],
             resolve_env_hash: [0; 16],
@@ -149,9 +149,9 @@ fn zero_obligation_demand_never_converges_or_seals() {
         function: FlowFunctionSlotIdentity {
             declaration_slot:
                 verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::value_slot(
-                    Arc::from("/flow_solve_fixture.ts"),
+                    verter_type_expr::OwnedStr::from("/flow_solve_fixture.ts"),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    Arc::from("seal_me"),
+                    verter_type_expr::OwnedStr::from("seal_me"),
                     0,
                     [0; 16],
                     [0; 16],
@@ -159,7 +159,7 @@ fn zero_obligation_demand_never_converges_or_seals() {
             function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
             overload_ordinal: 0,
         },
-        normalized_type_args: Arc::from([]),
+        normalized_type_args: verter_type_expr::OwnedSlice::from([]),
         context: FlowReturnContext {
             parse_env_hash: [0; 16],
             resolve_env_hash: [0; 16],

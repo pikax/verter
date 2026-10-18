@@ -74,6 +74,7 @@
 
 use std::sync::Arc;
 use verter_session_query::source::demand::ExpressionSourceDemand as _;
+use verter_type_expr::OwnedStr;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -824,7 +825,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let infer = graph.intern_node(SemanticNodeData::Infer {
-            name: Arc::from("CyclicBinding"),
+            name: verter_type_expr::OwnedStr::from("CyclicBinding"),
             binder: graph.alloc_infer_binder_id(),
             constraint: None,
         });
@@ -879,7 +880,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         (
             payload.outcome,
-            Arc::clone(&payload.bindings),
+            Arc::from(&payload.bindings[..]),
             redischarge_execute_visits_for_tests() - before,
         )
     }
@@ -895,7 +896,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let infer = graph.intern_node(SemanticNodeData::Infer {
-            name: Arc::from("MixedCyclicBinding"),
+            name: verter_type_expr::OwnedStr::from("MixedCyclicBinding"),
             binder: graph.alloc_infer_binder_id(),
             constraint: None,
         });
@@ -930,7 +931,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let result = (
             payload.outcome,
-            Arc::clone(&payload.bindings),
+            Arc::from(&payload.bindings[..]),
             redischarge_execute_visits_for_tests() - before,
         );
         self.relation_abort_completed_members();
@@ -947,7 +948,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let unknown = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
         let infer = graph.intern_node(SemanticNodeData::Infer {
-            name: Arc::from("SubstitutionEdgeBinding"),
+            name: verter_type_expr::OwnedStr::from("SubstitutionEdgeBinding"),
             binder: graph.alloc_infer_binder_id(),
             constraint: None,
         });
@@ -988,7 +989,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let occurrence = InferenceOccurrence::ARGUMENT_COVARIANT;
         let binding = InferBinding {
             param: infer,
-            name: Arc::from("SubstitutionEdgeBinding"),
+            name: verter_type_expr::OwnedStr::from("SubstitutionEdgeBinding"),
             bound: string,
         };
         let fixed = Arc::from(vec![binding].into_boxed_slice());
@@ -2261,12 +2262,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 identities: (!recursion.repeats[0].identities.is_empty()
                     || !recursion.repeats[1].identities.is_empty())
                 .then(|| {
-                    Arc::new(crate::semantic_query::RecursionIdentities {
-                        sides: [
-                            recursion.repeats[0].published_identities(),
-                            recursion.repeats[1].published_identities(),
-                        ],
-                    })
+                    verter_session_query::retention::owned::Owned::new(
+                        crate::semantic_query::RecursionIdentities {
+                            sides: [
+                                recursion.repeats[0].published_identities(),
+                                recursion.repeats[1].published_identities(),
+                            ],
+                        },
+                    )
                 }),
             },
             frames: recursion.frames,
@@ -3770,7 +3773,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 ..
             }) => match payload.outcome {
                 RelationOutcome::Assignable => PendingVerdict::Assignable {
-                    bindings: Arc::clone(&payload.bindings),
+                    bindings: Arc::from(&payload.bindings[..]),
                 },
                 RelationOutcome::NotAssignable => PendingVerdict::NotAssignable,
                 RelationOutcome::BudgetExceeded(_) => PendingVerdict::Unknown,
@@ -4442,7 +4445,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let graph = self.graph();
         if let Some(spec) = self.reverse_homomorphic_spec(target) {
             let name = match graph.node_data(spec.base_infer).as_deref() {
-                Some(SemanticNodeData::Infer { name, .. }) => Arc::clone(name),
+                Some(SemanticNodeData::Infer { name, .. }) => Arc::<str>::from(name),
                 _ => return None,
             };
             return Some(InferPatternInfo::new(
@@ -4460,7 +4463,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 graph,
                 vec![InferParamSite {
                     node: target,
-                    name: Arc::clone(name),
+                    name: Arc::<str>::from(name),
                     priority: InferenceCandidatePriority::NakedTypeParameter,
                 }],
                 None,
@@ -4474,7 +4477,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .filter_map(|node| match graph.node_data(node).as_deref() {
                 Some(SemanticNodeData::Infer { name, .. }) => Some(InferParamSite {
                     node,
-                    name: Arc::clone(name),
+                    name: Arc::<str>::from(name),
                     priority: InferenceCandidatePriority::Argument,
                 }),
                 _ => None,
@@ -5531,9 +5534,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let read = self.execute_read(SemanticQueryKey::Instantiate(
                 crate::semantic_query::InstantiateKey::new(
                     self.type_slot_for(
-                        Arc::clone(&identity.canonical_id),
+                        identity.canonical_id.clone(),
                         identity.owner,
-                        Arc::clone(&identity.decl_name),
+                        identity.decl_name.clone(),
                     ),
                     args,
                     self.instantiate_context_for(
@@ -7270,14 +7273,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let (canonical, owner, name) = match data.as_ref() {
             SemanticNodeData::DeclRef { identity } => (
-                Arc::clone(&identity.canonical_id),
+                identity.canonical_id.clone(),
                 identity.owner,
-                Arc::clone(&identity.decl_name),
+                identity.decl_name.clone(),
             ),
             SemanticNodeData::InstantiationRef { base, .. } => (
-                Arc::clone(&base.canonical_id),
+                base.canonical_id.clone(),
                 base.owner,
-                Arc::clone(&base.decl_name),
+                base.decl_name.clone(),
             ),
             SemanticNodeData::Opaque(QueryError::RecursiveRef { name, .. }) => {
                 match graph.node_scope(node) {
@@ -7285,7 +7288,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         canonical_id,
                         owner,
                         ..
-                    }) => (canonical_id, owner, Arc::clone(name)),
+                    }) => (canonical_id, owner, name.clone()),
                     _ => return false,
                 }
             }
@@ -8294,7 +8297,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> RelationPayload {
         RelationPayload {
             outcome,
-            bindings,
+            bindings: bindings.to_vec().into(),
             recursion: crate::semantic_query::RelationRecursionFootprint::default(),
         }
     }
@@ -8445,11 +8448,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if let Some(SemanticNodeData::InstantiationRef { base, args }) =
             graph.node_data(resolved).as_deref()
         {
-            let owner_canonical = Arc::clone(&base.canonical_id);
+            let owner_canonical = base.canonical_id.clone();
             let slot = self.type_slot_for(
-                Arc::clone(&base.canonical_id),
+                base.canonical_id.clone(),
                 base.owner,
-                Arc::clone(&base.decl_name),
+                base.decl_name.clone(),
             );
             let args: Arc<[SemanticNodeId]> = Arc::from(
                 args.iter()
@@ -8945,7 +8948,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // the general path so a batch never charges the wrong entry cost.
         let default_canonical = self.wrapper_demand_canonical();
         let mut apparent_keys: FxHashMap<
-            Arc<str>,
+            verter_type_expr::OwnedStr,
             (FxHashSet<crate::semantic_query::PropertyKey>, usize),
         > = FxHashMap::default();
         let mut pair_units = None;
@@ -9671,7 +9674,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// The file whose library an apparent type is read from while relating
     /// to `target`: the demand's, else the one the target was declared in.
-    fn relation_wrapper_canonical(&self, target: SemanticNodeId) -> Option<Arc<str>> {
+    fn relation_wrapper_canonical(
+        &self,
+        target: SemanticNodeId,
+    ) -> Option<verter_type_expr::OwnedStr> {
         self.wrapper_demand_canonical().or_else(|| {
             self.graph()
                 .node_scope(target)
@@ -9711,7 +9717,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         target_data: &SemanticNodeData,
         bindings: &[InferBinding],
     ) -> Option<RelationResult> {
-        fn skeleton_comparable(quasis: &[Arc<str>], expressions: &[SemanticNodeId]) -> bool {
+        fn skeleton_comparable(quasis: &[OwnedStr], expressions: &[SemanticNodeId]) -> bool {
             quasis.len() == expressions.len() + 1
         }
         /// Whether `text` is producible from the quasi skeleton with
@@ -9719,7 +9725,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         /// string. Leftmost placement of each middle quasi is complete:
         /// both candidate remainders are suffixes of the same text, so
         /// the final `ends_with` verdict is placement-independent.
-        fn skeleton_matches(text: &str, quasis: &[Arc<str>]) -> bool {
+        fn skeleton_matches(text: &str, quasis: &[OwnedStr]) -> bool {
             let first = quasis.first().map(|q| q.as_ref()).unwrap_or("");
             let last = quasis.last().map(|q| q.as_ref()).unwrap_or("");
             if quasis.len() == 1 {
@@ -9905,10 +9911,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 whole_hash,
             }) => (
                 DeclIdentity {
-                    canonical_id: Arc::clone(canonical_id),
+                    canonical_id: canonical_id.clone(),
                     owner: *owner,
                     whole_hash: *whole_hash,
-                    decl_name: Arc::clone(name),
+                    decl_name: name.clone(),
                 },
                 Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             ),
@@ -9938,9 +9944,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
             self.type_slot_for(
-                Arc::clone(&identity.canonical_id),
+                identity.canonical_id.clone(),
                 identity.owner,
-                Arc::clone(&identity.decl_name),
+                identity.decl_name.clone(),
             ),
             args,
             self.instantiate_context_for(&identity.canonical_id, transit),
@@ -10060,10 +10066,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         whole_hash,
                     }) => (
                         DeclIdentity {
-                            canonical_id: Arc::clone(canonical_id),
+                            canonical_id: canonical_id.clone(),
                             owner: *owner,
                             whole_hash: *whole_hash,
-                            decl_name: Arc::clone(name),
+                            decl_name: name.clone(),
                         },
                         Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                     ),
@@ -10093,7 +10099,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 canonical_id,
                                 owner,
                                 whole_hash,
-                                decl_name: Arc::clone(name),
+                                decl_name: name.clone(),
                             },
                             Arc::from(args.operands()),
                         )
@@ -10203,9 +10209,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
                 let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
                     self.type_slot_for(
-                        Arc::clone(&identity.canonical_id),
+                        identity.canonical_id.clone(),
                         identity.owner,
-                        Arc::clone(&identity.decl_name),
+                        identity.decl_name.clone(),
                     ),
                     args,
                     self.instantiate_context_for(&identity.canonical_id, transit),
@@ -10421,8 +10427,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let data = graph.node_data(key)?;
             match &*data {
                 SemanticNodeData::Literal(LiteralValue::String(text)) => {
-                    let property =
-                        crate::semantic_query::PropertyKey::String(Arc::from(text.as_str()));
+                    let property = crate::semantic_query::PropertyKey::String(
+                        verter_type_expr::OwnedStr::from(text.as_str()),
+                    );
                     drop(data);
                     members.push(crate::semantic_query::SurfaceMember {
                         key: crate::semantic_query::AuthoredPropertyKey::from_known(property),
@@ -10503,10 +10510,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 name,
                 whole_hash,
             }) => Some(DeclIdentity {
-                canonical_id: Arc::clone(canonical_id),
+                canonical_id: canonical_id.clone(),
                 owner: *owner,
                 whole_hash: *whole_hash,
-                decl_name: Arc::clone(name),
+                decl_name: name.clone(),
             }),
             SemanticNodeData::DeclRef { identity } => Some(identity.clone()),
             SemanticNodeData::Object(_) => None,
@@ -10521,9 +10528,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(identity) => match self.execute_type_node(SemanticQueryKey::Instantiate(
                 crate::semantic_query::InstantiateKey::new(
                     self.type_slot_for(
-                        Arc::clone(&identity.canonical_id),
+                        identity.canonical_id.clone(),
                         identity.owner,
-                        Arc::clone(&identity.decl_name),
+                        identity.decl_name.clone(),
                     ),
                     Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                     self.instantiate_context_for(&identity.canonical_id, transit),
@@ -10564,11 +10571,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if let Some(SemanticNodeData::InstantiationRef { base, args }) =
             graph.node_data(normalised).as_deref()
         {
-            let owner_canonical = Arc::clone(&base.canonical_id);
+            let owner_canonical = base.canonical_id.clone();
             let slot = self.type_slot_for(
-                Arc::clone(&base.canonical_id),
+                base.canonical_id.clone(),
                 base.owner,
-                Arc::clone(&base.decl_name),
+                base.decl_name.clone(),
             );
             let args: Arc<[SemanticNodeId]> = Arc::from(
                 args.iter()
@@ -11007,13 +11014,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     fn resolve_recursive_member_value(
         &self,
         value: SemanticNodeId,
-        origin: Option<&Arc<str>>,
+        origin: Option<&verter_type_expr::OwnedStr>,
     ) -> SemanticNodeId {
         let graph = self.graph();
         let name = match graph.node_data(value).as_deref() {
-            Some(SemanticNodeData::Opaque(QueryError::RecursiveRef { name, .. })) => {
-                Arc::clone(name)
-            }
+            Some(SemanticNodeData::Opaque(QueryError::RecursiveRef { name, .. })) => name.clone(),
             _ => return value,
         };
         let Some(origin) = origin else {
@@ -11023,7 +11028,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         match self.execute_type_node(SemanticQueryKey::Instantiate(
             crate::semantic_query::InstantiateKey::new(
                 self.type_slot_for(
-                    Arc::clone(origin),
+                    origin.clone(),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     name,
                 ),
@@ -11987,9 +11992,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             _ => return Some(verter_type_expr::MemberVisibility::Public),
         };
         let mut current = (
-            Arc::clone(&class.canonical_id),
+            class.canonical_id.clone(),
             class.owner,
-            Arc::clone(&class.decl_name),
+            class.decl_name.clone(),
         );
         let mut seen = rustc_hash::FxHashSet::default();
         while seen.insert(current.clone()) {
@@ -12212,7 +12217,7 @@ pub(super) fn relation_step_from_pending(pending: &PendingVerdict) -> RelationSt
 fn relation_step_from_payload(payload: &RelationPayload) -> RelationStep {
     match &payload.outcome {
         RelationOutcome::Assignable => RelationStep::Assignable {
-            bindings: Arc::clone(&payload.bindings),
+            bindings: Arc::from(&payload.bindings[..]),
         },
         RelationOutcome::NotAssignable => RelationStep::NotAssignable,
         RelationOutcome::BudgetExceeded(kind) => {
@@ -12522,7 +12527,7 @@ impl ClassLink {
 /// the class index resolved. A chain longer than `remaining` classes (a
 /// circular `extends`) is unresolved.
 fn class_owner(
-    file: &Arc<str>,
+    file: &str,
     whole_hash: crate::semantic_query::HashValue,
     headers: &verter_session_query::declarations::header_index::DeclHeaderIndex,
     class: verter_session_query::function_program::ClassIndexMatch<'_>,
@@ -12547,13 +12552,13 @@ fn class_owner(
         let declared = file_scope.is_some();
         links.push(match file_scope {
             Some((key, _)) => ClassLink::Declared(crate::semantic_query::DeclIdentity {
-                canonical_id: Arc::clone(file),
+                canonical_id: verter_type_expr::OwnedStr::from(file),
                 owner: key.owner,
                 whole_hash,
-                decl_name: Arc::clone(&key.name),
+                decl_name: verter_type_expr::OwnedStr::from(key.name.clone()),
             }),
             None => ClassLink::Syntactic {
-                file: Arc::clone(file),
+                file: Arc::from(file),
                 span: record.span,
             },
         });
@@ -12917,7 +12922,7 @@ trait RelationDemandDriver {
     ) -> Option<Vec<SemanticNodeId>>;
     fn reduce_template_literal_nodes(
         &self,
-        quasis: &[Arc<str>],
+        quasis: &[OwnedStr],
         args: &[SemanticNodeId],
         eval_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Result<SemanticNodeId, crate::semantic_query::PartialReasonSet>;
@@ -13168,7 +13173,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> RelationDemandDriver
     }
     fn reduce_template_literal_nodes(
         &self,
-        quasis: &[Arc<str>],
+        quasis: &[OwnedStr],
         args: &[SemanticNodeId],
         eval_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Result<SemanticNodeId, crate::semantic_query::PartialReasonSet> {
@@ -13575,7 +13580,7 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
     }
     fn reduce_template_literal_nodes(
         &self,
-        quasis: &[Arc<str>],
+        quasis: &[OwnedStr],
         args: &[SemanticNodeId],
         eval_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Result<SemanticNodeId, crate::semantic_query::PartialReasonSet> {

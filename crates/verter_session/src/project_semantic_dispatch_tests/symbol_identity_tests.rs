@@ -18,9 +18,9 @@ use verter_type_expr::ResolvedSymbolIdentity;
 
 fn expected() -> ResolvedSymbolIdentity {
     ResolvedSymbolIdentity {
-        canonical_id: Arc::from("/node_modules/svelte/index.d.ts"),
+        canonical_id: "/node_modules/svelte/index.d.ts".into(),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        symbol: Arc::from("Snippet"),
+        symbol: "Snippet".into(),
     }
 }
 
@@ -37,7 +37,7 @@ fn demand_error(error: QueryError) -> SymbolIdentityDemandOutcome {
 fn partial_identity_reasons_are_typed_and_carry_no_node() {
     assert_eq!(
         demand_error(QueryError::RecursiveRef {
-            name: Arc::from("Cycle"),
+            name: verter_type_expr::OwnedStr::from("Cycle"),
             args: Default::default(),
         }),
         SymbolIdentityDemandOutcome::Partial(PropCallableRoleUnresolvedReason::Cycle)
@@ -47,7 +47,7 @@ fn partial_identity_reasons_are_typed_and_carry_no_node() {
             domain: BudgetDomain::ProjectionOperation,
             limit: 1,
             actual: 2,
-            context: "identity-demand".to_string(),
+            context: "identity-demand".into(),
         })),
         SymbolIdentityDemandOutcome::Partial(PropCallableRoleUnresolvedReason::BudgetExceeded)
     );

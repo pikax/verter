@@ -904,6 +904,14 @@ impl VerterHost {
                 .carrier_publication
                 .publication_store
                 .retained_lane_count(),
+            semantic_graph_storage_bytes: self
+                .project_type_store
+                .semantic_graph()
+                .graph_storage_charge_bytes(),
+            semantic_bookkeeping_storage_bytes: self
+                .project_type_store
+                .semantic_graph()
+                .bookkeeping_storage_charge_bytes(),
             semantic_nodes: self.project_type_store.semantic_graph().node_count(),
             semantic_node_ownership: self
                 .project_type_store

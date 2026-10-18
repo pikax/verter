@@ -76,11 +76,10 @@ fn a_build_without_a_value_is_unavailable_even_when_the_read_was_clean() {
 #[test]
 fn cancellation_and_torn_views_abort_instead_of_publishing() {
     use crate::semantic_query::{CacheRead, QueryError, QueryResult};
-    use std::sync::Arc;
     for abort in [ExecutionAbort::Cancelled, ExecutionAbort::Superseded] {
         let read = CacheRead::<QueryResult<u8>>::from_value_and_signature(
             QueryResult::Error(QueryError::ExecutionAborted(abort)),
-            Arc::from([]),
+            crate::semantic_query::DepSignature::default(),
         );
         assert_eq!(read.into_fact(), Err(abort));
     }

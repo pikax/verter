@@ -180,11 +180,11 @@ pub struct ResolveRequest {
 }
 
 pub use verter_session_query::facts::fact_cache::{
-    DerivedFactKind, FactVersionRef, ParseFactRef, ProgramAnalysisFactRef,
+    DerivedFactKind, FactVersionRef, OwnedFactSignature, ParseFactRef, ProgramAnalysisFactRef,
     ProgramAnalysisFunctionRef, ResolveImportsFactRef, RouteSurfaceFactRef,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum TraversalLens {
     StructuralObject,
     KeySpace,
@@ -194,7 +194,7 @@ pub enum TraversalLens {
     MemberProjection,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum ResolutionNodeKind {
     /// Importer-side import-edge node: keyed by owner + import source +
     /// requested symbol + binding context.
@@ -212,7 +212,7 @@ pub enum ResolutionNodeKind {
     Assemble,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct ResolutionNodeKey {
     pub symbol_id: String,
     pub node_kind: ResolutionNodeKind,
@@ -235,7 +235,7 @@ pub struct ResolutionNodeKey {
 /// `(project_anchor, tag)` axes instead of overloading the override field to
 /// also smuggle the intrinsic cache generation. That generation rides on the
 /// VALUE, never in this key (R6).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum FallthroughNodeKey {
     ComponentRootFollow {
         canonical: String,
@@ -300,7 +300,7 @@ impl FallthroughNodeKey {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct ResolverDiagnostic {
     pub code: String,
     pub message: String,
@@ -784,10 +784,23 @@ where
 /// ([`verter_session_query::facts::receipt::reserve_retained_with_evidence`]),
 /// held by the candidate for its life. A refused reservation admits
 /// nothing: the caller keeps its complete value, uncached.
+///
+/// **Candidate retention**: the same reservation charges the candidate's
+/// own allocations — its slot, its block, its fact slice and the heap its
+/// key keeps reachable ([`verter_retention::heap_size::HeapSize`]) — and
+/// holds its value's cell ([`CachedValue`]), which charges the value's
+/// block and every allocation it keeps. The owned cells a candidate
+/// reaches are held with it and keep their own charge.
+///
+/// **Reader ownership**: every read hands out an owning clone of the
+/// value's cell, never a raw `Arc`. A reader that keeps the value past
+/// the candidate — displaced, removed or cleared — keeps the cell's one
+/// charge, pinned, until its own last clone drops.
 #[derive(Debug)]
 pub struct ValidatedFactCache<K, V>
 where
     K: Eq + Hash,
+    V: CachedData,
 {
     entries: DashMap<K, Arc<CacheEntry<V>>>,
     /// The account a candidate's evidence pages are claimed into.
@@ -822,6 +835,7 @@ where
 impl<K, V> Default for ValidatedFactCache<K, V>
 where
     K: Eq + Hash,
+    V: CachedData,
 {
     fn default() -> Self {
         Self {
@@ -842,11 +856,11 @@ where
 /// per-slot lock; the write path is an `ArcSwap::rcu` that races
 /// against concurrent writers via copy-on-write.
 #[derive(Debug)]
-pub struct CacheEntry<V> {
+pub struct CacheEntry<V: CachedData> {
     candidates: arc_swap::ArcSwap<smallvec::SmallVec<[Arc<Candidate<V>>; CANDIDATE_CAP]>>,
 }
 
-impl<V> Default for CacheEntry<V> {
+impl<V: CachedData> Default for CacheEntry<V> {
     fn default() -> Self {
         Self {
             candidates: arc_swap::ArcSwap::from_pointee(smallvec::SmallVec::new()),
@@ -863,20 +877,35 @@ impl<V> Default for CacheEntry<V> {
 /// Substrate spec:
 /// - `signature_fingerprint`: short structural digest of the
 ///   `fact_dep_signature`, used for quick discriminator comparison.
-/// - `value`: the actual cached value.
+/// - `value`: the actual cached value, a self-charged cell.
 /// - `fact_dep_signature`: the ordered list of `FactVersionRef`
-///   facts the candidate observed. Validation iterates this list
-///   and short-circuits on the first miss.
+///   facts the candidate observed, a self-charged list readers share.
+///   Validation iterates this list and short-circuits on the first miss.
 #[derive(Debug)]
-pub struct Candidate<V> {
+pub struct Candidate<V: CachedData> {
     pub signature_fingerprint: [u8; 16],
-    pub value: Arc<V>,
-    pub fact_dep_signature: Arc<[FactVersionRef]>,
-    /// This candidate's share of the evidence pages its signature claimed,
-    /// released when the candidate's last holder drops; `None` for a
-    /// signature that holds no receipt, so reaches no page.
-    _evidence_retention: Option<verter_session_query::retention::RetentionCharge>,
+    pub value: CachedValue<V>,
+    pub fact_dep_signature: OwnedFactSignature,
+    /// This candidate's own allocations and its share of the evidence pages
+    /// its signature claimed, with the holds on its value's and its
+    /// signature's cells and the other owned cells it reaches; released
+    /// when the candidate's last holder drops, each cell passing to the
+    /// readers still keeping it.
+    _retention: verter_session_query::retention::RetentionCharge,
 }
+
+/// A value a [`ValidatedFactCache`] can retain: a plain data tree measured
+/// exhaustively ([`verter_retention::heap_size::HeapSize`]).
+pub trait CachedData: verter_retention::heap_size::HeapSize + Send + Sync + 'static {}
+
+impl<T: verter_retention::heap_size::HeapSize + Send + Sync + 'static> CachedData for T {}
+
+/// A value a [`ValidatedFactCache`] retains and hands its readers: one
+/// self-charged cell holding the value's whole data tree. The cache holds
+/// it while a candidate keeps it; every reader's clone shares its one
+/// charge, which passes, pinned, to the readers when the cache lets go and
+/// is released by the last of them.
+pub type CachedValue<V> = verter_retention::heap_size::OwnedValue<V>;
 
 /// Call-owned identity of one exact [`ValidatedFactCache`] candidate.
 ///
@@ -886,13 +915,13 @@ pub struct Candidate<V> {
 /// admission from an equal-but-unadmitted value.
 #[derive(Debug, Clone)]
 #[doc(hidden)]
-pub struct ValidatedFactAdmission<V> {
+pub struct ValidatedFactAdmission<V: CachedData> {
     candidate: Arc<Candidate<V>>,
 }
 
-impl<V> ValidatedFactAdmission<V> {
+impl<V: CachedData> ValidatedFactAdmission<V> {
     #[must_use]
-    pub(crate) fn value(&self) -> &Arc<V> {
+    pub(crate) fn value(&self) -> &CachedValue<V> {
         &self.candidate.value
     }
 }
@@ -905,11 +934,14 @@ pub use verter_session_query::facts::fact_cache::CANDIDATE_CAP;
 
 /// Seal an admitted candidate's facts: kept as recorded while they fit one
 /// evidence page, paged (never truncated, never refused) when wider.
-fn seal_admitted_signature(facts: Vec<FactVersionRef>) -> Arc<[FactVersionRef]> {
+fn seal_admitted_signature(facts: Vec<FactVersionRef>) -> OwnedFactSignature {
     if facts.len() > verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH {
         verter_session_query::facts::fact_read_set::seal_canonical_signature(facts)
+            .iter()
+            .cloned()
+            .collect()
     } else {
-        Arc::from(facts.into_boxed_slice())
+        OwnedFactSignature::from(facts)
     }
 }
 
@@ -960,8 +992,9 @@ pub fn compute_signature_fingerprint_for_tests(facts: &[FactVersionRef]) -> [u8;
 impl<K, V> ValidatedFactCache<K, V>
 where
     K: Eq + Hash + Clone,
+    V: CachedData,
 {
-    pub fn get_if_valid<TView>(&self, key: &K, view: &TView) -> Option<Arc<V>>
+    pub fn get_if_valid<TView>(&self, key: &K, view: &TView) -> Option<CachedValue<V>>
     where
         TView: StoreView + ?Sized,
     {
@@ -975,7 +1008,7 @@ where
         &self,
         key: &K,
         view: &TView,
-    ) -> Option<(Arc<V>, ValidatedFactAdmission<V>)>
+    ) -> Option<(CachedValue<V>, ValidatedFactAdmission<V>)>
     where
         TView: StoreView + ?Sized,
     {
@@ -1025,7 +1058,7 @@ where
         key: &K,
         view: &TView,
         self_root_canonicals: &[&str],
-    ) -> Option<Arc<V>>
+    ) -> Option<CachedValue<V>>
     where
         TView: StoreView + ?Sized,
     {
@@ -1050,7 +1083,7 @@ where
 
     /// Attributed sibling of [`Self::get_if_valid_self_rooted`].
     ///
-    /// On a warm hit returns `Ok(Arc<V>)` (counters bumped identically).
+    /// On a warm hit returns `Ok(CachedValue<V>)` (counters bumped identically).
     /// On a rejection returns `Err((rejected_fact, candidate_count))`
     /// where `rejected_fact` is a clone of the FIRST fact in the
     /// MOST-RECENT candidate (the back of the multi-candidate vec — the
@@ -1078,7 +1111,7 @@ where
         key: &K,
         view: &TView,
         self_root_canonicals: &[&str],
-    ) -> Result<Arc<V>, (Option<FactVersionRef>, usize)>
+    ) -> Result<CachedValue<V>, (Option<FactVersionRef>, usize)>
     where
         TView: StoreView + ?Sized,
     {
@@ -1127,7 +1160,7 @@ where
         &self,
         key: &K,
         view: &TView,
-    ) -> Option<(Arc<V>, Arc<[FactVersionRef]>)>
+    ) -> Option<(CachedValue<V>, OwnedFactSignature)>
     where
         TView: StoreView + ?Sized,
     {
@@ -1141,7 +1174,7 @@ where
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return Some((
                     candidate.value.clone(),
-                    Arc::clone(&candidate.fact_dep_signature),
+                    candidate.fact_dep_signature.clone(),
                 ));
             }
         }
@@ -1152,41 +1185,55 @@ where
 
     /// Admit `value` under `key`; `false` when the retention account refused
     /// the evidence it would retain, so nothing was admitted.
-    pub fn insert(&self, key: K, value: V, facts: Vec<FactVersionRef>) -> bool {
-        self.insert_arc(key, Arc::new(value), facts)
+    pub fn insert(&self, key: K, value: V, facts: Vec<FactVersionRef>) -> bool
+    where
+        K: verter_retention::heap_size::HeapSize,
+    {
+        self.insert_value(key, CachedValue::new(value), facts)
     }
 
-    /// [`Self::insert`] for a shared value.
-    pub fn insert_arc(&self, key: K, value: Arc<V>, facts: Vec<FactVersionRef>) -> bool {
+    /// [`Self::insert`] for a value cell the caller keeps too: the cache
+    /// shares its one charge, and a refused admission leaves it charged to
+    /// the caller, pinned.
+    pub fn insert_value(&self, key: K, value: CachedValue<V>, facts: Vec<FactVersionRef>) -> bool
+    where
+        K: verter_retention::heap_size::HeapSize,
+    {
         // Loose admission. The fact-completeness empty-signature
-        // guard is opt-in via `insert_arc_with_kind`; stable-miss
+        // guard is opt-in via `insert_value_with_kind`; stable-miss
         // producers (e.g. `route_db`, `imported_root_db`) admit
         // through this path.
-        self.insert_arc_inner(key, value, facts, None).is_some()
+        self.insert_value_inner(key, value, facts, None).is_some()
     }
 
     /// Admit with the fact-completeness guard ENABLED. R20 strict
     /// contract: empty signature → refuse + `FactSignatureAdmissionRefused`.
     /// `cache_kind` is the `'static str` discriminator on the refusal event.
-    pub fn insert_arc_with_kind(
+    pub fn insert_value_with_kind(
         &self,
         key: K,
-        value: Arc<V>,
+        value: CachedValue<V>,
         facts: Vec<FactVersionRef>,
         cache_kind: &'static str,
-    ) -> Option<ValidatedFactAdmission<V>> {
-        self.insert_arc_inner(key, value, facts, Some(cache_kind))
+    ) -> Option<ValidatedFactAdmission<V>>
+    where
+        K: verter_retention::heap_size::HeapSize,
+    {
+        self.insert_value_inner(key, value, facts, Some(cache_kind))
     }
 
-    fn insert_arc_inner(
+    fn insert_value_inner(
         &self,
         key: K,
-        value: Arc<V>,
+        value: CachedValue<V>,
         facts: Vec<FactVersionRef>,
         strict_cache_kind: Option<&'static str>,
-    ) -> Option<ValidatedFactAdmission<V>> {
+    ) -> Option<ValidatedFactAdmission<V>>
+    where
+        K: verter_retention::heap_size::HeapSize,
+    {
         // R20 fact-completeness guard. Strict callers
-        // (`insert_arc_with_kind`) refuse empty signatures so
+        // (`insert_value_with_kind`) refuse empty signatures so
         // producers must observe at least one fact before admit.
         if let Some(cache_kind) = strict_cache_kind {
             if facts.is_empty() {
@@ -1198,17 +1245,18 @@ where
                         reason: verter_audit::AdmissionRefusalReason::EmptySignature,
                     },
                 );
+                self.charge_to_caller(&value);
                 return None;
             }
         }
         let fact_arc = seal_admitted_signature(facts);
-        let evidence_retention = self.claim_evidence(&fact_arc).ok()?;
+        let retention = self.reserve_candidate(&key, &value, &fact_arc).ok()?;
         let fingerprint = compute_signature_fingerprint(&fact_arc);
         let candidate = Arc::new(Candidate {
             signature_fingerprint: fingerprint,
             value,
             fact_dep_signature: fact_arc,
-            _evidence_retention: evidence_retention,
+            _retention: retention,
         });
 
         // Insert-or-update via DashMap. `entry().or_insert_with` is
@@ -1237,7 +1285,7 @@ where
         Some(ValidatedFactAdmission { candidate })
     }
 
-    /// A cache whose candidates claim their evidence pages into `account`.
+    /// A cache whose candidates are charged to `account`.
     #[cfg(test)]
     fn with_retention_account(account: verter_session_query::retention::StoreAccount) -> Self {
         Self {
@@ -1246,30 +1294,70 @@ where
         }
     }
 
-    /// Claim the evidence pages a sealed candidate signature reaches into a
-    /// refusable reservation, held by the candidate: `Ok(None)` when it
-    /// holds no receipt, so reaches no page; the refusal when the account
-    /// refuses the reservation.
-    fn claim_evidence(
+    /// A value no cache retains stays with its caller: charged to it,
+    /// pinned, whatever the pressure.
+    pub(crate) fn charge_to_caller(&self, value: &CachedValue<V>) {
+        value.pin(self.charge_ctx());
+    }
+
+    /// A fact signature this cache hands a caller without retaining it,
+    /// charged to that caller, pinned, until its last clone drops.
+    pub(crate) fn deliver_signature(&self, facts: Vec<FactVersionRef>) -> OwnedFactSignature {
+        let signature = OwnedFactSignature::from(facts);
+        signature.pin(self.charge_ctx());
+        signature
+    }
+
+    fn charge_ctx(&self) -> verter_session_query::retention::owned::ChargeCtx<'_> {
+        verter_session_query::retention::owned::ChargeCtx::new(self.retention_account.get())
+    }
+
+    /// Reserve one candidate's charge, held by the candidate: its own
+    /// allocations and the evidence pages its sealed signature reaches, in
+    /// one refusable reservation, holding its value's and its signature's
+    /// cells and the owned cells its key reaches. The refusal when the
+    /// account refuses either; the value is then charged to the caller
+    /// keeping it.
+    fn reserve_candidate(
         &self,
-        signature: &[FactVersionRef],
+        key: &K,
+        value: &CachedValue<V>,
+        signature: &OwnedFactSignature,
     ) -> Result<
-        Option<verter_session_query::retention::RetentionCharge>,
+        verter_session_query::retention::RetentionCharge,
         verter_session_query::retention::RetentionRefusal,
-    > {
-        if !signature
-            .iter()
-            .any(|fact| matches!(fact, FactVersionRef::Receipt(_)))
-        {
-            return Ok(None);
-        }
+    >
+    where
+        K: verter_retention::heap_size::HeapSize,
+    {
+        use verter_session_query::retention::allocation::arc_block_bytes;
+        let account = self.retention_account.get();
+        let ctx = verter_session_query::retention::owned::ChargeCtx::new(account);
+        // The key's slot and its entry with its candidate list, the
+        // candidate's block and its key's heap. A key and entry the slot's
+        // candidates share are counted with each of them: an over-estimate,
+        // never a gap. The value and the signature are their own cells,
+        // held.
+        let footprint = verter_retention::heap_size::footprint(key);
+        let cells = verter_session_query::retention::owned::OwnedHandles::of(|aliases| {
+            value.offer(aliases) + signature.offer(aliases)
+        });
+        let own = verter_session_query::retention::ENTRY_OVERHEAD_BYTES
+            + std::mem::size_of::<(K, Arc<CacheEntry<V>>)>()
+            + arc_block_bytes(std::mem::size_of::<CacheEntry<V>>())
+            + arc_block_bytes(std::mem::size_of::<
+                smallvec::SmallVec<[Arc<Candidate<V>>; CANDIDATE_CAP]>,
+            >())
+            + arc_block_bytes(std::mem::size_of::<Candidate<V>>())
+            + footprint.bytes;
+        let holds = footprint.handles.merge(cells).hold_or_pin(ctx)?;
         match verter_session_query::facts::receipt::reserve_retained_with_evidence(
-            self.retention_account.get(),
-            0,
-            &[signature],
+            account,
+            own,
+            &[&signature[..]],
         ) {
             verter_session_query::retention::RetentionAdmission::Admitted(charge) => {
-                Ok(Some(charge))
+                Ok(charge.holding(holds))
             }
             verter_session_query::retention::RetentionAdmission::Refused(refusal) => Err(refusal),
         }
@@ -1278,14 +1366,17 @@ where
     /// Re-sign only the exact candidate named by `admission` under `key`.
     /// If the candidate was displaced or the slot was cleared, this is a
     /// no-op; the method never creates a candidate from a stale proof.
-    pub(crate) fn resign_arc_with_kind(
+    pub(crate) fn resign_value_with_kind(
         &self,
         key: &K,
         admission: &ValidatedFactAdmission<V>,
-        value: Arc<V>,
+        value: CachedValue<V>,
         facts: Vec<FactVersionRef>,
         cache_kind: &'static str,
-    ) -> bool {
+    ) -> bool
+    where
+        K: verter_retention::heap_size::HeapSize,
+    {
         if facts.is_empty() {
             self.admission_refused
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1295,18 +1386,19 @@ where
                     reason: verter_audit::AdmissionRefusalReason::EmptySignature,
                 },
             );
+            self.charge_to_caller(&value);
             return false;
         }
 
         let fact_arc = seal_admitted_signature(facts);
-        let Ok(evidence_retention) = self.claim_evidence(&fact_arc) else {
+        let Ok(retention) = self.reserve_candidate(key, &value, &fact_arc) else {
             return false;
         };
         let replacement = Arc::new(Candidate {
             signature_fingerprint: compute_signature_fingerprint(&fact_arc),
             value,
             fact_dep_signature: fact_arc,
-            _evidence_retention: evidence_retention,
+            _retention: retention,
         });
         let Some(entry) = self.entries.get(key) else {
             return false;
@@ -1331,10 +1423,10 @@ where
         candidates_slot
             .load()
             .iter()
-            .any(|candidate| Arc::ptr_eq(&candidate.value, &replacement.value))
+            .any(|candidate| CachedValue::ptr_eq(&candidate.value, &replacement.value))
     }
 
-    pub fn values(&self) -> Vec<Arc<V>> {
+    pub fn values(&self) -> Vec<CachedValue<V>> {
         let mut out = Vec::new();
         for entry in self.entries.iter() {
             let candidates = entry.value().candidates.load();
@@ -1393,20 +1485,20 @@ where
     {
         match self.entries.get(key) {
             Some(entry) => entry.candidates.load().iter().any(|candidate| {
-                candidate.fact_dep_signature.as_ref() == facts && candidate.value.as_ref() == value
+                candidate.fact_dep_signature.as_ref() == facts && *candidate.value == *value
             }),
             None => false,
         }
     }
 
     #[cfg(test)]
-    pub fn candidate_signatures_for_key(&self, key: &K) -> Vec<Arc<[FactVersionRef]>> {
+    pub fn candidate_signatures_for_key(&self, key: &K) -> Vec<OwnedFactSignature> {
         match self.entries.get(key) {
             Some(entry) => entry
                 .candidates
                 .load()
                 .iter()
-                .map(|c| Arc::clone(&c.fact_dep_signature))
+                .map(|c| c.fact_dep_signature.clone())
                 .collect(),
             None => Vec::new(),
         }
@@ -1418,7 +1510,7 @@ where
     /// empty fact signature, so `get_if_valid` cannot distinguish "gone" from
     /// "still warm but superseded". Retirement tests need the raw slot.
     #[cfg(test)]
-    pub(crate) fn peek_any_candidate(&self, key: &K) -> Option<Arc<V>> {
+    pub(crate) fn peek_any_candidate(&self, key: &K) -> Option<CachedValue<V>> {
         let entry = self.entries.get(key)?;
         let candidates = entry.candidates.load();
         candidates.last().map(|candidate| candidate.value.clone())
@@ -1491,7 +1583,7 @@ where
         self.entries.is_empty()
     }
 
-    pub fn snapshot_all(&self) -> Vec<(K, Arc<V>)> {
+    pub fn snapshot_all(&self) -> Vec<(K, CachedValue<V>)> {
         let mut out = Vec::new();
         for entry in self.entries.iter() {
             let candidates = entry.value().candidates.load();
@@ -1510,7 +1602,7 @@ where
     ///
     /// Returns `None` when the slot has no entries.
     #[must_use]
-    pub fn lookup_any_candidate(&self, key: &K) -> Option<Arc<V>> {
+    pub fn lookup_any_candidate(&self, key: &K) -> Option<CachedValue<V>> {
         let entry = self.entries.get(key)?;
         let candidates = entry.candidates.load();
         candidates.last().map(|c| c.value.clone())
@@ -2556,7 +2648,7 @@ mod tests {
 
         assert_eq!(
             cache.get_if_valid(&"node".to_string(), &view),
-            Some(Arc::new(42))
+            Some(CachedValue::new(42))
         );
     }
 
@@ -2564,7 +2656,7 @@ mod tests {
     fn validated_cache_resigns_only_the_exact_admitted_candidate() {
         let cache = ValidatedFactCache::<String, usize>::default();
         let key = "node".to_string();
-        let shared_value = Arc::new(42);
+        let shared_value = CachedValue::new(42);
         let first_fact = FactVersionRef::FileWholeHash {
             canonical_id: "/src/first.ts".to_string(),
             hash: [1; 16],
@@ -2579,15 +2671,15 @@ mod tests {
         };
 
         let first_admission = cache
-            .insert_arc_with_kind(
+            .insert_value_with_kind(
                 key.clone(),
-                Arc::clone(&shared_value),
+                shared_value.clone(),
                 vec![first_fact.clone()],
                 "test.validated-cache",
             )
             .expect("the first non-empty candidate must be admitted");
         cache
-            .insert_arc_with_kind(
+            .insert_value_with_kind(
                 key.clone(),
                 shared_value,
                 vec![second_fact.clone()],
@@ -2595,10 +2687,10 @@ mod tests {
             )
             .expect("the second non-empty candidate must be admitted");
 
-        assert!(cache.resign_arc_with_kind(
+        assert!(cache.resign_value_with_kind(
             &key,
             &first_admission,
-            Arc::new(84),
+            crate::resolver_core::CachedValue::new(84),
             vec![resigned_fact.clone()],
             "test.validated-cache",
         ));
@@ -2613,11 +2705,11 @@ mod tests {
         };
         assert_eq!(
             cache.get_if_valid(&key, &view(resigned_fact)),
-            Some(Arc::new(84))
+            Some(CachedValue::new(84))
         );
         assert_eq!(
             cache.get_if_valid(&key, &view(second_fact)),
-            Some(Arc::new(42))
+            Some(CachedValue::new(42))
         );
         assert!(cache.get_if_valid(&key, &view(first_fact)).is_none());
     }
@@ -5179,6 +5271,231 @@ mod receipt_validation_tests {
             .collect()
     }
 
+    /// A candidate is charged the heap its key and value keep reachable, not
+    /// a fixed figure: a value holding a long text costs that text's
+    /// capacity more than one holding a short one, and evicting either gives
+    /// its whole charge back. A key-only cache still charges its key.
+    #[test]
+    fn a_candidate_is_charged_its_key_and_value_heap_until_it_is_evicted() {
+        use verter_session_query::retention::{
+            RetentionLimits, SemanticRetentionAccount, StoreAccount,
+        };
+        const LONG: usize = 64 * 1024;
+        let facts = || vec![whole_hash("/value.ts", 1)];
+        let charged = |value: String| {
+            let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+            let cache: ValidatedFactCache<&'static str, String> =
+                ValidatedFactCache::with_retention_account(StoreAccount::new(Arc::clone(&account)));
+            assert!(cache.insert("value", value, facts()));
+            let retained = account.snapshot().retained_bytes;
+            cache.clear();
+            assert_eq!(
+                account.snapshot().retained_bytes,
+                0,
+                "eviction releases the candidate's whole charge"
+            );
+            retained
+        };
+        let short = charged("s".to_owned());
+        let long = charged("l".repeat(LONG));
+        use verter_session_query::retention::allocation::heap_block_bytes;
+        assert_eq!(
+            long - short,
+            heap_block_bytes(LONG) - heap_block_bytes(1),
+            "each value's text is charged by its capacity"
+        );
+
+        let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+        let keyed: ValidatedFactCache<String, u32> =
+            ValidatedFactCache::with_retention_account(StoreAccount::new(Arc::clone(&account)));
+        assert!(keyed.insert("k".repeat(LONG), 7, facts()));
+        assert!(
+            account.snapshot().retained_bytes >= LONG,
+            "a candidate charges its key's heap"
+        );
+        keyed.clear();
+        assert_eq!(account.snapshot().retained_bytes, 0);
+    }
+
+    /// A value a reader keeps past its candidate stays charged: the value's
+    /// cell carries its one charge, which passes, pinned, to the reader when
+    /// the cache lets go and is released by the reader's last drop — in
+    /// either release order. The candidate's own bookkeeping goes with the
+    /// candidate.
+    #[test]
+    fn a_value_a_reader_keeps_stays_charged_after_the_cache_lets_go() {
+        use verter_session_query::retention::allocation::heap_block_bytes;
+        use verter_session_query::retention::{
+            ChargeClass, RetentionLimits, SemanticRetentionAccount, StoreAccount,
+        };
+        const LONG: usize = 64 * 1024;
+        let value_charge = CachedValue::<String>::cell_block_bytes() + heap_block_bytes(LONG);
+        let facts = || vec![whole_hash("/value.ts", 1)];
+        let admitted = || {
+            let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+            let cache: ValidatedFactCache<&'static str, String> =
+                ValidatedFactCache::with_retention_account(StoreAccount::new(Arc::clone(&account)));
+            assert!(cache.insert("value", "v".repeat(LONG), facts()));
+            let read = cache
+                .get_if_valid(&"value", &CountingView::default())
+                .expect("the admitted value validates");
+            (account, cache, read)
+        };
+
+        // The cache lets go first.
+        let (account, cache, read) = admitted();
+        assert_eq!(read.charge_class(), Some(ChargeClass::Retained));
+        assert_eq!(
+            read.charge_bytes(),
+            Some(value_charge),
+            "the value's cell is charged its block and its whole text"
+        );
+        assert!(account.snapshot().retained_bytes > value_charge);
+        cache.clear();
+        let kept = account.snapshot();
+        assert_eq!(kept.retained_bytes, 0, "the candidate's bookkeeping goes");
+        assert_eq!(
+            kept.pinned_bytes, value_charge,
+            "the reader keeps exactly the value's charge"
+        );
+        assert_eq!(read.charge_class(), Some(ChargeClass::Pinned));
+        drop(read);
+        assert_eq!(account.snapshot().pinned_bytes, 0);
+
+        // The reader lets go first.
+        let (account, cache, read) = admitted();
+        let retained = account.snapshot().retained_bytes;
+        drop(read);
+        assert_eq!(
+            account.snapshot().retained_bytes,
+            retained,
+            "a reader's drop leaves the cache's charge whole"
+        );
+        cache.clear();
+        let gone = account.snapshot();
+        assert_eq!((gone.retained_bytes, gone.pinned_bytes), (0, 0));
+    }
+
+    /// A value admitted under two keys is one cell with one charge; a
+    /// second, equal value is a second cell with its own.
+    #[test]
+    fn a_value_two_candidates_share_is_charged_once() {
+        use verter_session_query::retention::allocation::heap_block_bytes;
+        use verter_session_query::retention::{
+            RetentionLimits, SemanticRetentionAccount, StoreAccount,
+        };
+        const LONG: usize = 16 * 1024;
+        let value_charge = CachedValue::<String>::cell_block_bytes() + heap_block_bytes(LONG);
+        let facts = || vec![whole_hash("/value.ts", 1)];
+        let retained_with = |second_is_shared: bool| {
+            let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+            let cache: ValidatedFactCache<&'static str, String> =
+                ValidatedFactCache::with_retention_account(StoreAccount::new(Arc::clone(&account)));
+            let value = CachedValue::new("s".repeat(LONG));
+            assert!(cache.insert_value("a", value.clone(), facts()));
+            let second = if second_is_shared {
+                value.clone()
+            } else {
+                CachedValue::new("s".repeat(LONG))
+            };
+            assert!(cache.insert_value("b", second, facts()));
+            drop(value);
+            let retained = account.snapshot().retained_bytes;
+            cache.clear();
+            assert_eq!(account.snapshot().retained_bytes, 0);
+            retained
+        };
+        assert_eq!(
+            retained_with(false) - retained_with(true),
+            value_charge,
+            "a shared value is charged once, a distinct one twice"
+        );
+    }
+
+    /// A value the account refuses to retain is returned to its caller
+    /// complete and charged to it, pinned, until the caller's last drop.
+    #[test]
+    fn a_value_refused_admission_is_charged_to_the_caller_keeping_it() {
+        use verter_session_query::retention::allocation::heap_block_bytes;
+        use verter_session_query::retention::{
+            ChargeClass, RetentionLimits, SemanticRetentionAccount, StoreAccount,
+        };
+        const LONG: usize = 8 * 1024;
+        let account = SemanticRetentionAccount::new(RetentionLimits {
+            aggregate_ceiling_bytes: 0,
+            ..RetentionLimits::defaults()
+        });
+        let cache: ValidatedFactCache<&'static str, String> =
+            ValidatedFactCache::with_retention_account(StoreAccount::new(Arc::clone(&account)));
+        let value = CachedValue::new("r".repeat(LONG));
+        assert!(!cache.insert_value("value", value.clone(), vec![whole_hash("/value.ts", 1)]));
+        assert!(cache
+            .get_if_valid(&"value", &CountingView::default())
+            .is_none());
+        assert_eq!(value.len(), LONG, "the caller keeps the complete value");
+        assert_eq!(value.charge_class(), Some(ChargeClass::Pinned));
+        let snapshot = account.snapshot();
+        assert_eq!(snapshot.retained_bytes, 0);
+        assert_eq!(
+            snapshot.pinned_bytes,
+            CachedValue::<String>::cell_block_bytes() + heap_block_bytes(LONG)
+        );
+        drop(value);
+        assert_eq!(account.snapshot().pinned_bytes, 0);
+    }
+
+    /// A fact signature a reader keeps past its candidate stays charged:
+    /// the signature is a self-charged list whose charge passes, pinned, to
+    /// the reader when the cache lets go and is released by the reader's
+    /// last drop — in either release order, the value long gone.
+    #[test]
+    fn a_signature_a_reader_keeps_stays_charged_after_the_cache_lets_go() {
+        use verter_session_query::retention::{
+            ChargeClass, RetentionLimits, SemanticRetentionAccount, StoreAccount,
+        };
+        let canonical = format!("/{}.ts", "signature_canonical_".repeat(1024));
+        let admitted = || {
+            let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+            let cache: ValidatedFactCache<&'static str, u32> =
+                ValidatedFactCache::with_retention_account(StoreAccount::new(Arc::clone(&account)));
+            assert!(cache.insert("value", 7, vec![whole_hash(&canonical, 1)]));
+            let (value, signature) = cache
+                .get_if_valid_with_facts(&"value", &CountingView::default())
+                .expect("the admitted candidate validates");
+            drop(value);
+            (account, cache, signature)
+        };
+
+        // The cache lets go first.
+        let (account, cache, signature) = admitted();
+        assert_eq!(signature.charge_class(), Some(ChargeClass::Retained));
+        let signature_charge = signature
+            .charge_bytes()
+            .expect("an admitted signature is charged");
+        assert!(
+            signature_charge >= canonical.len(),
+            "the signature is charged its canonical: {signature_charge}"
+        );
+        cache.clear();
+        let kept = account.snapshot();
+        assert_eq!(kept.retained_bytes, 0, "the candidate's bookkeeping goes");
+        assert_eq!(
+            kept.pinned_bytes, signature_charge,
+            "the reader keeps exactly the signature's charge"
+        );
+        assert_eq!(signature.charge_class(), Some(ChargeClass::Pinned));
+        drop(signature);
+        assert_eq!(account.snapshot().total_bytes(), 0);
+
+        // The reader lets go first.
+        let (account, cache, signature) = admitted();
+        let retained = account.snapshot().retained_bytes;
+        drop(signature);
+        assert_eq!(account.snapshot().retained_bytes, retained);
+        cache.clear();
+        assert_eq!(account.snapshot().total_bytes(), 0);
+    }
+
     /// A wide candidate's admission claims the pages its sealing minted into
     /// the cache's refusable reservation, and evicting it drains them; an
     /// account that refuses that footprint admits nothing.
@@ -5206,13 +5523,17 @@ mod receipt_validation_tests {
             .iter()
             .all(|page| page.retained_charge_class() == Some(ChargeClass::Retained)));
         let page_bytes: usize = pages.iter().map(|page| page.retained_charge_bytes()).sum();
-        assert_eq!(account.snapshot().retained_bytes, page_bytes);
+        let retained = account.snapshot().retained_bytes;
+        assert!(
+            retained > page_bytes,
+            "the candidate's own allocations ride its pages: {retained} <= {page_bytes}"
+        );
         drop((pages, signature));
         cache.clear();
         assert_eq!(
             account.snapshot().retained_bytes,
             0,
-            "evicting the candidate drains its pages"
+            "evicting the candidate drains its pages and its own charge"
         );
 
         let tight = SemanticRetentionAccount::new(RetentionLimits {

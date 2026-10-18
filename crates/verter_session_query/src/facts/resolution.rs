@@ -329,6 +329,40 @@ impl ResolutionFactKey {
         }
     }
 
+    /// Heap this key owns beyond its inline bytes: its canonical and
+    /// specifier strings by capacity, and a decision's boxed query identity
+    /// with that identity's own strings (see
+    /// [`crate::retention::allocation`]).
+    #[must_use]
+    pub fn owned_heap_bytes(&self) -> usize {
+        use crate::retention::allocation::{box_bytes, string_bytes};
+        let entry = |entry: &ResolutionEntry| match entry {
+            ResolutionEntry::Importer(canonical) => string_bytes(&canonical.0),
+            ResolutionEntry::ExplicitProject(_) => 0,
+        };
+        match self {
+            Self::PathProbe { canonical, .. }
+            | Self::Manifest { canonical, .. }
+            | Self::DirectoryMembers { canonical, .. } => string_bytes(&canonical.0),
+            Self::Realpath { requested, .. } => string_bytes(&requested.0),
+            Self::RecoveryScope {
+                canonical_prefix, ..
+            } => string_bytes(&canonical_prefix.0),
+            Self::OwnerResolutionSet { owner, .. } => string_bytes(&owner.0),
+            Self::ExactResolution {
+                entry: owner,
+                specifier,
+                ..
+            } => entry(owner) + string_bytes(&specifier.0),
+            Self::ContextSelection { entry: owner, .. } => entry(owner),
+            Self::Decision { query } => {
+                box_bytes::<ResolutionQueryKey>()
+                    + entry(&query.entry)
+                    + string_bytes(&query.normalized_specifier.0)
+            }
+        }
+    }
+
     /// Whether this key names a derived DAG node rather than a primitive
     /// resolution input.
     #[must_use]

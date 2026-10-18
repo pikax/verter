@@ -51,7 +51,10 @@ fn resolved_meta_reuses_resolver_cache_after_legacy_slot_is_cleared() {
     )
     .expect("resolver-owned cache hit should mirror back into the legacy slot");
 
-    assert!(Arc::ptr_eq(&first_cache, &second_cache));
+    assert!(verter_retention::heap_size::OwnedValue::ptr_eq(
+        &first_cache,
+        &second_cache
+    ));
     assert_eq!(
         provenance(&project).component_meta_resolved_state_recomputes,
         0,
@@ -565,7 +568,7 @@ defineSlots<OpenMappedSlots<T>>()
             param_index: 0,
             constraint: None,
             default: None,
-            display_name: Arc::from("T"),
+            display_name: verter_type_expr::OwnedStr::from("T"),
         },
     );
     let carrier = match dispatch
@@ -2937,7 +2940,7 @@ fn output_memo_hash_work_is_one_traversal_per_lane_slot() {
         })
         .collect();
     let large = verter_type_expr::facts::SemanticTypeSource::Synthesized(
-        ResolvedLocalShape::Object(Arc::from(members)),
+        ResolvedLocalShape::Object(From::from(members)),
     );
     let distinct = closed_ref_source("DistinctAlias");
 

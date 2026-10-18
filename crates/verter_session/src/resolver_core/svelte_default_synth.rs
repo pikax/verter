@@ -16,8 +16,6 @@
 //! resolved-validation-validated snippet classification surfaces ONLY through query-time
 //! consumers, never through shallow state.
 
-use std::sync::Arc;
-
 use verter_semantic::analysis::framework_facts::svelte::SvelteScriptCandidates;
 use verter_type_expr::facts::{
     FactOrLocator, LeafTypeFact, ResolvedLocalShape, SemanticTypeSource, SynthesizedLeafMember,
@@ -90,18 +88,18 @@ pub fn synthesise_svelte_default_value_symbol(
             false,
             FactOrLocator::Locator(TypeBodySlot {
                 anchor: AuthoredAnchor {
-                    canonical_id: Arc::from(""),
+                    canonical_id: verter_type_expr::OwnedStr::from(""),
                     owner: export.binding_key.owner,
-                    symbol: Arc::clone(&export.binding_key.name),
+                    symbol: verter_type_expr::OwnedStr::from(export.binding_key.name.clone()),
                     space: LocatorSymbolSpace::Value,
                 },
-                path: Arc::from([]),
+                path: verter_type_expr::OwnedSlice::from([]),
             }),
         ));
     }
 
     lowered_value_decl_for_synthesised_default(SemanticTypeSource::Synthesized(
-        ResolvedLocalShape::Object(Arc::from(members.into_boxed_slice())),
+        ResolvedLocalShape::Object(From::from(members.into_boxed_slice())),
     ))
 }
 
@@ -147,7 +145,7 @@ fn props_instance_fact(candidates: &SvelteScriptCandidates) -> FactOrLocator {
         // depth-closed leaf-object surface (member refs preserved
         // un-inlined; the dispatch-free api projector renders it shallowly).
         if let Some(members) = &props.props_leaf_members {
-            return FactOrLocator::LeafObject(Arc::from(members.clone().into_boxed_slice()));
+            return FactOrLocator::LeafObject(From::from(members.clone().into_boxed_slice()));
         }
         // Runes mode: the `$props()` authored payload stays a content-free
         // LOCATOR carrier (shallow-by-default — never eagerly inlined). An
@@ -155,7 +153,7 @@ fn props_instance_fact(candidates: &SvelteScriptCandidates) -> FactOrLocator {
         // synthesized as an empty object surface so `$props` exists.
         return match props.props_type.as_ref() {
             Some(payload) => payload_ref_fact(payload),
-            None => FactOrLocator::LeafObject(Arc::from(Vec::new().into_boxed_slice())),
+            None => FactOrLocator::LeafObject(From::from(Vec::new().into_boxed_slice())),
         };
     }
     if !candidates.legacy_props.is_empty() {
@@ -172,9 +170,9 @@ fn props_instance_fact(candidates: &SvelteScriptCandidates) -> FactOrLocator {
                 ty: LeafTypeFact::Primitive(PrimitiveName::Any),
             })
             .collect();
-        return FactOrLocator::LeafObject(Arc::from(props.into_boxed_slice()));
+        return FactOrLocator::LeafObject(From::from(props.into_boxed_slice()));
     }
-    FactOrLocator::LeafObject(Arc::from(Vec::new().into_boxed_slice()))
+    FactOrLocator::LeafObject(From::from(Vec::new().into_boxed_slice()))
 }
 
 #[cfg(test)]
@@ -191,9 +189,9 @@ mod tests {
         AuthoredTypePayloadRef {
             locator: AuthoredBodyLocator::MacroPayload(MacroPayloadLocator {
                 anchor: AuthoredAnchor {
-                    canonical_id: Arc::from(""),
+                    canonical_id: verter_type_expr::OwnedStr::from(""),
                     owner: TopLevelOwnerId::instance(0),
-                    symbol: Arc::from("default"),
+                    symbol: verter_type_expr::OwnedStr::from("default"),
                     space: LocatorSymbolSpace::Value,
                 },
                 macro_index,

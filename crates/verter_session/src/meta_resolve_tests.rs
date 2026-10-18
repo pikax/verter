@@ -163,7 +163,7 @@ fn imported_registry_seed_refresh_does_not_engage_skip_under_graph_only_authorit
         text: Some("export interface Props { label?: string }".to_string()),
     };
     let object = verter_type_expr::facts::SemanticTypeSource::Synthesized(
-        verter_type_expr::facts::ResolvedLocalShape::Object(Arc::from(vec![
+        verter_type_expr::facts::ResolvedLocalShape::Object(From::from(vec![
             verter_type_expr::facts::SynthesizedMemberFact {
                 name: "label".to_string(),
                 optional: true,
@@ -205,14 +205,14 @@ fn imported_registry_seed_refresh_keeps_symbolic_imported_surfaces_refreshable()
             verter_type_expr::facts::IndexedAccessFact {
                 object: verter_type_expr::locators::TypeBodySlot {
                     anchor: verter_type_expr::locators::AuthoredAnchor {
-                        canonical_id: Arc::from("/src/types.ts"),
+                        canonical_id: verter_type_expr::OwnedStr::from("/src/types.ts"),
                         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                        symbol: Arc::from("Button"),
+                        symbol: verter_type_expr::OwnedStr::from("Button"),
                         space: verter_type_expr::locators::LocatorSymbolSpace::Type,
                     },
-                    path: Arc::from(Vec::new().into_boxed_slice()),
+                    path: verter_type_expr::OwnedSlice::default(),
                 },
-                index_path: Arc::from(vec!["variants".to_string()]),
+                index_path: From::from(vec!["variants".to_string()]),
             },
         ),
     );
@@ -5302,7 +5302,10 @@ defineProps<Props>()
         "repeated DB-backed resolutions should preserve tracked dependencies"
     );
     assert!(
-        result1.canonical_dependencies.contains("/src/types.ts"),
+        result1
+            .canonical_dependencies
+            .iter()
+            .any(|dependency| dependency == "/src/types.ts"),
         "registry resolution should track the defining file as a dependency"
     );
     assert_eq!(
@@ -6573,7 +6576,7 @@ defineProps<Props<T>>()
 
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: lowered,
-        path: StdArc::from(vec![PathSegment::Member(
+        path: verter_type_expr::OwnedSlice::from(vec![PathSegment::Member(
             verter_type_engine::semantic_query::PropertyKey::identifier("items"),
         )]),
         context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
@@ -6988,9 +6991,10 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
 
     // Project ["badge"] off the lowered shell. After Step 1.5 dispatch
     // can navigate the Mapped+Conditional pair to extract the badge slot.
-    let badge_path: StdArc<[PathSegment]> = StdArc::from(vec![PathSegment::Member(
-        verter_type_engine::semantic_query::PropertyKey::identifier("badge"),
-    )]);
+    let badge_path: verter_type_expr::OwnedSlice<PathSegment> =
+        verter_type_expr::OwnedSlice::from(vec![PathSegment::Member(
+            verter_type_engine::semantic_query::PropertyKey::identifier("badge"),
+        )]);
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: lowered,
         path: badge_path,
@@ -7504,7 +7508,7 @@ defineEmits<Emits>()
         assert_eq!(tuple.elements[0].label.as_deref(), Some("payload"));
         assert_eq!(
             tuple.elements[0].ty,
-            FactOrLocator::LeafUnion(std::sync::Arc::from(
+            FactOrLocator::LeafUnion(From::from(
                 vec![
                     LeafTypeFact::Primitive(verter_type_expr::PrimitiveName::String),
                     LeafTypeFact::Primitive(verter_type_expr::PrimitiveName::Number),
@@ -8324,7 +8328,7 @@ fn emit_branch_merge_with_open_program_branch_keeps_the_conditional_carrier() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let open_branch = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {

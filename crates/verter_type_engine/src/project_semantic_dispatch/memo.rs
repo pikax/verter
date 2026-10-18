@@ -70,6 +70,8 @@ pub(crate) struct SingleEntryAttachment<'a, K: Eq + std::hash::Hash + Clone, V> 
     inflight: &'a InflightTable<QueryFlightKey<K>>,
     live_counter: &'a AtomicU64,
     schema_version: u32,
+    /// The account an entry of this cache is charged to.
+    account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
 }
 impl<'a, K: Eq + std::hash::Hash + Clone, V> SingleEntryAttachment<'a, K, V> {
     pub(crate) fn new(
@@ -77,15 +79,21 @@ impl<'a, K: Eq + std::hash::Hash + Clone, V> SingleEntryAttachment<'a, K, V> {
         inflight: &'a InflightTable<QueryFlightKey<K>>,
         live_counter: &'a AtomicU64,
         schema_version: u32,
+        account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) -> Self {
         Self {
             entries,
             inflight,
             live_counter,
             schema_version,
+            account,
         }
     }
 }
+/// What a candidate keeping a value under a key pays for beyond their inline
+/// bytes (see [`crate::cache_runtime::Candidate::admit`]).
+pub(crate) type CandidateFootprint<K, V> = fn(&K, &V) -> verter_session_query::retention::Footprint;
+
 pub(crate) struct CandidateAttachment<
     'a,
     K: Eq + std::hash::Hash + Clone + Send + Sync + 'static,
@@ -93,6 +101,9 @@ pub(crate) struct CandidateAttachment<
 > {
     store: &'a crate::cache_runtime::ReverseIndexedCandidateStore<K, V>,
     inflight: &'a InflightTable<QueryFlightKey<K>>,
+    /// The account a published candidate is charged to.
+    account: &'a Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    footprint: CandidateFootprint<K, V>,
 }
 impl<
         'a,
@@ -103,8 +114,15 @@ impl<
     pub(crate) fn new(
         store: &'a crate::cache_runtime::ReverseIndexedCandidateStore<K, V>,
         inflight: &'a InflightTable<QueryFlightKey<K>>,
+        account: &'a Arc<verter_session_query::retention::SemanticRetentionAccount>,
+        footprint: CandidateFootprint<K, V>,
     ) -> Self {
-        Self { store, inflight }
+        Self {
+            store,
+            inflight,
+            account,
+            footprint,
+        }
     }
 }
 /// Read-only typed output operations; no source services or mutation escape.
@@ -196,6 +214,8 @@ where
     entries: &'a DashMap<K, Arc<CacheEntry<V>>>,
     inflight: &'a InflightTable<QueryFlightKey<K>>,
     live_counter: &'a AtomicU64,
+    /// The account the cache's entries are charged to.
+    account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
     /// The canonicals the warm-read validator checks STRICTLY. Owned by
     /// the funnel (it derives them from the key), not by the per-call
     /// closure.
@@ -208,8 +228,14 @@ where
 
 impl<'a, K, V, F> ArtifactNode for SingleEntryArtifactNode<'a, K, V, F>
 where
-    K: Eq + std::hash::Hash + Clone + Send + Sync + 'static,
-    V: Clone + Send + Sync + 'static,
+    K: Eq
+        + std::hash::Hash
+        + Clone
+        + Send
+        + Sync
+        + 'static
+        + verter_session_query::retention::heap_size::HeapSize,
+    V: Clone + Send + Sync + 'static + verter_session_query::retention::heap_size::HeapSize,
     F: FnOnce() -> SingleEntryOutcome<V>,
 {
     type Key = K;
@@ -243,6 +269,18 @@ where
                 reason: NonAdmissionReason::ComputeFailed,
             },
         }
+    }
+
+    fn entry_footprint(
+        &self,
+        key: &Self::Key,
+        value: &Self::Value,
+    ) -> verter_session_query::retention::Footprint {
+        verter_session_query::retention::heap_size::footprint(&(key, value))
+    }
+
+    fn retention_account(&self) -> Arc<verter_session_query::retention::SemanticRetentionAccount> {
+        Arc::clone(&self.account)
     }
 
     fn validate(
@@ -310,6 +348,9 @@ where
     store: &'a crate::cache_runtime::ReverseIndexedCandidateStore<K, V>,
     inflight: &'a InflightTable<QueryFlightKey<K>>,
     ctx: &'a dyn FactValidation,
+    /// The account a published candidate is charged to.
+    account: &'a Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    footprint: CandidateFootprint<K, V>,
     /// `FnOnce` carried in a `RefCell<Option<_>>` so the `&self` `compute`
     /// method can `take()` it exactly once on the cold winner's call.
     compute: std::cell::RefCell<Option<F>>,
@@ -390,6 +431,18 @@ where
             validated_at_generation,
             facts: Arc::clone(&signature.facts),
         }
+    }
+
+    fn candidate_footprint(
+        &self,
+        key: &Self::Key,
+        value: &Self::Value,
+    ) -> verter_session_query::retention::Footprint {
+        (self.footprint)(key, value)
+    }
+
+    fn retention_account(&self) -> Arc<verter_session_query::retention::SemanticRetentionAccount> {
+        Arc::clone(self.account)
     }
 
     fn publish_fence(&self) -> Option<&parking_lot::RwLock<()>> {
@@ -570,7 +623,7 @@ impl MemoRead<'_, ImportedRegistryDb> {
         let storage = self.db.attach_output();
         let ctx = self.facts;
 
-        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&key.0)]);
+        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(&key.0)]);
         let generation = self.flags.current_project_generation();
         crate::project_semantic_dispatch::memo::read_candidate(storage.store, key, |candidate| {
             // The carrier validates only file-content whole-hashes; a
@@ -729,7 +782,7 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
         // The keyed canonical is the candidate's self-root — validated
         // strictly on warm read (same-canonical edit / untracked keyed
         // canonical → miss).
-        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&key.0)]);
+        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(&key.0)]);
         // Unpack the producer's domain `ComputeAdmission<V, Entry>` into a
         // node-level `CacheAdmission<V>` — the cold-build closure the
         // `QueryCandidateNode` adapter runs. The producer keeps its
@@ -776,6 +829,8 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
             store: storage.store,
             inflight: storage.inflight,
             ctx,
+            account: storage.account,
+            footprint: storage.footprint,
             compute: std::cell::RefCell::new(Some(node_compute)),
             unadmitted: None,
         };
@@ -831,7 +886,7 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
         key: &DeclarationLookupKey,
         prepare: Prepare,
         compute: F,
-    ) -> Option<Arc<ResolvedTypeDeclaration>>
+    ) -> Option<verter_session_query::retention::heap_size::OwnedTree<ResolvedTypeDeclaration>>
     where
         Prepare: FnOnce() -> P,
         F: FnOnce(P) -> ComputedEntry<ResolvedTypeDeclaration>,
@@ -853,7 +908,7 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
         ctx: &dyn FactValidation,
         probe: &crate::fact_signature_helpers::CacheabilityProbe<'_, W>,
         compute: F,
-    ) -> Option<Arc<ResolvedTypeDeclaration>>
+    ) -> Option<verter_session_query::retention::heap_size::OwnedTree<ResolvedTypeDeclaration>>
     where
         F: FnOnce() -> ComputedEntry<ResolvedTypeDeclaration>,
     {
@@ -864,20 +919,23 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
         // a same-canonical content edit (or a keyed canonical that
         // became untracked) rejects the entry instead of riding the
         // lazy "untracked → accept" rule.
-        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&key.0)]);
+        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(&key.0)]);
         let node = SingleEntryArtifactNode {
             entries: storage.entries,
             inflight: storage.inflight,
             live_counter: storage.live_counter,
+            account: Arc::clone(&storage.account),
             self_root_canonicals: self_roots,
             compute: std::cell::RefCell::new(Some(move || {
                 let computed = match compute() {
-                    ComputedEntry::Rooted(value, facts) => {
-                        ComputedEntry::Rooted(Arc::new(value), facts)
-                    }
-                    ComputedEntry::Unrooted(value, reason) => {
-                        ComputedEntry::Unrooted(Arc::new(value), reason)
-                    }
+                    ComputedEntry::Rooted(value, facts) => ComputedEntry::Rooted(
+                        verter_session_query::retention::heap_size::owned_tree(value),
+                        facts,
+                    ),
+                    ComputedEntry::Unrooted(value, reason) => ComputedEntry::Unrooted(
+                        verter_session_query::retention::heap_size::owned_tree(value),
+                        reason,
+                    ),
                     ComputedEntry::Failed => ComputedEntry::Failed,
                 };
                 single_entry_admission(probe, computed)
@@ -899,7 +957,7 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
         &self,
         key: &DeclarationLookupKey,
         compute: F,
-    ) -> Option<Arc<ResolvedTypeDeclaration>>
+    ) -> Option<verter_session_query::retention::heap_size::OwnedTree<ResolvedTypeDeclaration>>
     where
         F: FnOnce() -> ComputedEntry<ResolvedTypeDeclaration>,
     {
@@ -957,11 +1015,12 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
         // The keyed source canonical is the entry's self-root — strict
         // warm-read validation rejects a same-canonical edit or an
         // untracked keyed canonical.
-        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&key.0)]);
+        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(&key.0)]);
         let node = SingleEntryArtifactNode {
             entries: storage.entries,
             inflight: storage.inflight,
             live_counter: storage.live_counter,
+            account: Arc::clone(&storage.account),
             self_root_canonicals: self_roots,
             compute: std::cell::RefCell::new(Some(move || {
                 single_entry_admission(probe, compute())
@@ -1051,11 +1110,12 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
         // against the owner content version the producer observed, so
         // strict self-root validation remains the correctness floor — a
         // content edit to the owner file invalidates the cached locator.
-        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&key.0)]);
+        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(&key.0)]);
         let node = SingleEntryArtifactNode {
             entries: storage.entries,
             inflight: storage.inflight,
             live_counter: storage.live_counter,
+            account: Arc::clone(&storage.account),
             self_root_canonicals: self_roots,
             compute: std::cell::RefCell::new(Some(move || {
                 single_entry_admission(probe, compute())
@@ -1155,11 +1215,12 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
 
         // The subject's scope canonical is the entry's self-root —
         // strict warm-read validation rejects a same-scope content edit.
-        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(key.scope_canonical())]);
+        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(key.scope_canonical())]);
         let node = SingleEntryArtifactNode {
             entries: storage.entries,
             inflight: storage.inflight,
             live_counter: storage.live_counter,
+            account: Arc::clone(&storage.account),
             self_root_canonicals: self_roots,
             compute: std::cell::RefCell::new(Some(move || {
                 // Central partial gate, folded through the SAME `ReturnOnly`
@@ -1708,7 +1769,7 @@ fn release_shape_entries(
         .iter()
         .filter_map(|entry| {
             let key = entry.key();
-            let rooted_here = key.scope_canonical().as_ref() == canonical_id;
+            let rooted_here = key.scope_canonical() == canonical_id;
             let subject_released = match key.member_value_subject_node() {
                 Some(node) => !node_is_live(node),
                 None => false,

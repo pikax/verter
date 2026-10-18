@@ -1552,13 +1552,54 @@ fn every_page_is_charged_for_what_it_stores() {
         0,
         "the last holder's drop releases the page's charge"
     );
+}
 
-    let result = crate::facts::fact_cache::ResultReceipt::new(facts[..2].to_vec());
-    assert_eq!(
-        result.retained_charge_bytes(),
-        0,
-        "a result's evidence is not a page and holds no page charge"
+/// A completed result's receipt is charged like a page: for every byte its
+/// own facts keep alive — an oversized canonical in full — once, however
+/// many candidates retain it, from its birth until its last holder drops.
+#[test]
+fn a_result_receipt_is_charged_once_for_its_variable_text_until_its_last_holder_drops() {
+    use crate::retention::{ChargeClass, RetentionAdmission};
+    const CANONICAL_LEN: usize = 20_000;
+    let account = isolated_account();
+    let facts = long_named_whole_hashes(1, CANONICAL_LEN);
+    let receipt = crate::facts::fact_cache::ResultReceipt::new_on(facts, &account);
+    let charged = receipt.retained_charge_bytes();
+    assert!(
+        charged > CANONICAL_LEN,
+        "the oversized canonical is charged in full: {charged}"
     );
+    assert_eq!(account.snapshot().pinned_bytes, charged);
+    assert_eq!(receipt.retained_charge_class(), Some(ChargeClass::Pinned));
+
+    let signature = vec![FactVersionRef::Receipt(receipt.clone())];
+    let RetentionAdmission::Admitted(first) =
+        crate::facts::receipt::reserve_retained_with_evidence(&account, 0, &[&signature])
+    else {
+        panic!("the first candidate retains the receipt");
+    };
+    let RetentionAdmission::Admitted(second) =
+        crate::facts::receipt::reserve_retained_with_evidence(&account, 0, &[&signature])
+    else {
+        panic!("the second candidate shares it");
+    };
+    assert_eq!(
+        (
+            account.snapshot().retained_bytes,
+            account.snapshot().pinned_bytes
+        ),
+        (charged, 0),
+        "two candidates, one charge, claimed into retention"
+    );
+    drop((first, second));
+    assert_eq!(
+        account.snapshot().retained_bytes,
+        charged,
+        "the receipt still lives, so its charge does"
+    );
+    drop(signature);
+    drop(receipt);
+    assert_eq!(account.snapshot().total_bytes(), 0);
 }
 
 /// A signature's pages, sealed against `account`, in their top-level order.
@@ -1689,11 +1730,18 @@ fn pages_behind_a_result_receipt_join_the_retaining_reservation() {
     let probe_pages = pages_on(wide_whole_hashes(2 * FACT_PAGE_WIDTH + 3), &probe);
     let page_bytes = probe.snapshot().pinned_bytes;
     drop(probe_pages);
-    let wrapped = |pages: &[FactVersionRef]| {
-        let inner = crate::facts::fact_cache::ResultReceipt::new(pages.to_vec());
-        vec![FactVersionRef::Receipt(
-            crate::facts::fact_cache::ResultReceipt::new(vec![FactVersionRef::Receipt(inner)]),
-        )]
+    // The two result receipts wrapping the pages are charged too: the
+    // admission claims them with the pages.
+    let wrapped = |pages: &[FactVersionRef],
+                   account: &Arc<crate::retention::SemanticRetentionAccount>| {
+        let inner = crate::facts::fact_cache::ResultReceipt::new_on(pages.to_vec(), account);
+        let inner_bytes = inner.retained_charge_bytes();
+        let outer = crate::facts::fact_cache::ResultReceipt::new_on(
+            vec![FactVersionRef::Receipt(inner)],
+            account,
+        );
+        let bytes = inner_bytes + outer.retained_charge_bytes();
+        (vec![FactVersionRef::Receipt(outer)], bytes)
     };
 
     let tight = crate::retention::SemanticRetentionAccount::new(RetentionLimits {
@@ -1701,10 +1749,10 @@ fn pages_behind_a_result_receipt_join_the_retaining_reservation() {
         ..RetentionLimits::defaults()
     });
     let pages = pages_on(wide_whole_hashes(2 * FACT_PAGE_WIDTH + 3), &tight);
-    let signature = wrapped(&pages);
+    let (signature, wrapper_bytes) = wrapped(&pages, &tight);
     match crate::facts::receipt::reserve_retained_with_evidence(&tight, 1, &[&signature]) {
         RetentionAdmission::Refused(RetentionRefusal::Oversized { requested, .. }) => {
-            assert_eq!(requested, 1 + page_bytes);
+            assert_eq!(requested, 1 + page_bytes + wrapper_bytes);
         }
         other => panic!("a result-wrapped over-limit footprint is refused: {other:?}"),
     }
@@ -1714,7 +1762,7 @@ fn pages_behind_a_result_receipt_join_the_retaining_reservation() {
 
     let account = isolated_account();
     let pages = pages_on(wide_whole_hashes(2 * FACT_PAGE_WIDTH + 3), &account);
-    let signature = wrapped(&pages);
+    let (signature, wrapper_bytes) = wrapped(&pages, &account);
     let charge =
         crate::facts::receipt::reserve_retained_with_evidence(&account, 100, &[&signature])
             .admitted()
@@ -1722,8 +1770,8 @@ fn pages_behind_a_result_receipt_join_the_retaining_reservation() {
     let claimed = account.snapshot();
     assert_eq!(
         (claimed.retained_bytes, claimed.pinned_bytes),
-        (100 + page_bytes, 0),
-        "every page behind the receipt is claimed, once"
+        (100 + page_bytes + wrapper_bytes, 0),
+        "every page and receipt behind the signature is claimed, once"
     );
     assert!(page_classes(&pages)
         .iter()

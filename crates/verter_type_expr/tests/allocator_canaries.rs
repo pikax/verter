@@ -92,7 +92,6 @@ mod canary_absolutize_already_absolute_zero_alloc {
     //! reads a per-member allocation delta there and zero here.
 
     use std::hint::black_box;
-    use std::sync::Arc;
 
     use verter_type_expr::facts::{
         ClosedTypeFact, ObjectMemberFact, ObjectPropertyFact, ObjectShapeFact, SemanticTypeSource,
@@ -112,12 +111,12 @@ mod canary_absolutize_already_absolute_zero_alloc {
             ty: TypeBodySlot {
                 // ALREADY-ABSOLUTE anchor: nothing to rewrite.
                 anchor: AuthoredAnchor {
-                    canonical_id: Arc::from("/already/absolute.ts"),
+                    canonical_id: verter_type_expr::OwnedStr::from("/already/absolute.ts"),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    symbol: Arc::from("Anchored"),
+                    symbol: verter_type_expr::OwnedStr::from("Anchored"),
                     space: LocatorSymbolSpace::Type,
                 },
-                path: Arc::from(Vec::new().into_boxed_slice()),
+                path: verter_type_expr::OwnedSlice::default(),
             },
             span_origin: MemberSpansOrigin::Synthetic(SourceSynthetic),
         })
@@ -128,7 +127,7 @@ mod canary_absolutize_already_absolute_zero_alloc {
         const MEMBERS: usize = 256;
         let members: Vec<ObjectMemberFact> = (0..MEMBERS).map(absolute_member).collect();
         let source = SemanticTypeSource::Closed(ClosedTypeFact::Object(ObjectShapeFact {
-            members: Arc::from(members.into_boxed_slice()),
+            members: From::from(members.into_boxed_slice()),
         }));
 
         // Warm any lazy init, then measure the walk alone.

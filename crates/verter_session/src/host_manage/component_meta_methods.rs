@@ -2742,7 +2742,7 @@ impl VerterHost {
         // admission rather than caching a phantom-fact entry — the
         // cached state is still returned. The mirror's read guard is
         // released first: the admission updates the mirror itself.
-        let state = Arc::clone(&cached.state);
+        let state = cached.state.clone();
         let fact_versions = cached.fact_versions.to_vec();
         drop(entry);
         let admission = if !fact_versions.is_empty() {
@@ -2750,7 +2750,7 @@ impl VerterHost {
                 canonical,
                 mode,
                 view_fingerprint,
-                Some((Arc::clone(&state), fact_versions)),
+                Some((state.clone(), fact_versions)),
                 None,
             )
         } else {
@@ -2812,7 +2812,7 @@ impl VerterHost {
                 state.evaluated_types.is_some(),
             ),
         );
-        let state = Arc::new(state.clone());
+        let state = crate::resolver_core::CachedValue::new(state.clone());
         // Drop the owner's own non-round-tripping `DerivedFactHash{Route}`
         // fact before admission, mirroring the `ComponentMetaResultDb`
         // publish path (see `component_meta_entry::strip_owner_route_fact`).
@@ -2843,7 +2843,7 @@ impl VerterHost {
         // overwrite the base slot. A later base `resolve_component_meta`
         // (view_fingerprint == 0) does NOT fall through to an overlay-
         // derived entry. The state and its mirror are admitted together.
-        let mirror = self.resolved_meta_mirror_entry(canonical, Arc::clone(&state));
+        let mirror = self.resolved_meta_mirror_entry(canonical, state.clone());
         let admission = self.admit_resolved_meta_view(
             canonical,
             mode,
@@ -2910,14 +2910,18 @@ impl VerterHost {
             canonical,
             &resolved.fact_versions,
         );
-        let replacement = Arc::new(resolved.clone());
-        if !self.resolver_runtime().component_meta.resign_arc_with_kind(
-            &admission.cache_key,
-            &admission.candidate,
-            replacement.clone(),
-            fact_versions.to_vec(),
-            "component_meta.results",
-        ) {
+        let replacement = crate::resolver_core::CachedValue::new(resolved.clone());
+        if !self
+            .resolver_runtime()
+            .component_meta
+            .resign_value_with_kind(
+                &admission.cache_key,
+                &admission.candidate,
+                replacement.clone(),
+                fact_versions.to_vec(),
+                "component_meta.results",
+            )
+        {
             return;
         }
 
@@ -2926,7 +2930,10 @@ impl VerterHost {
                 .cached_resolved_meta
                 .get_mut(&(mode, view_fingerprint))
             {
-                if Arc::ptr_eq(&cached.state, admission.candidate.value()) {
+                if crate::resolver_core::CachedValue::ptr_eq(
+                    &cached.state,
+                    admission.candidate.value(),
+                ) {
                     *cached = crate::types::ResolvedComponentMetaCacheEntry {
                         fact_versions,
                         state: replacement,
@@ -2942,7 +2949,7 @@ impl VerterHost {
         canonical: &str,
         mode: ProjectionMode,
         view_fingerprint: u64,
-        state: Arc<ResolvedComponentMetaState>,
+        state: crate::resolver_core::CachedValue<ResolvedComponentMetaState>,
     ) {
         if let Some(mirror) = self.resolved_meta_mirror_entry(canonical, state) {
             self.admit_resolved_meta_view(canonical, mode, view_fingerprint, None, Some(mirror));
@@ -2963,7 +2970,7 @@ impl VerterHost {
         mode: ProjectionMode,
         view_fingerprint: u64,
         state: Option<(
-            Arc<ResolvedComponentMetaState>,
+            crate::resolver_core::CachedValue<ResolvedComponentMetaState>,
             Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
         )>,
         mirror: Option<crate::types::ResolvedComponentMetaCacheEntry>,
@@ -3001,7 +3008,7 @@ impl VerterHost {
     fn resolved_meta_mirror_entry(
         &self,
         canonical: &str,
-        state: Arc<ResolvedComponentMetaState>,
+        state: crate::resolver_core::CachedValue<ResolvedComponentMetaState>,
     ) -> Option<crate::types::ResolvedComponentMetaCacheEntry> {
         if state.completeness.is_partial() {
             return None;

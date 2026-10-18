@@ -75,6 +75,7 @@ mod carrier_publication_store_tests;
 mod cold_artifact_dedup_tests;
 mod compile;
 mod component_meta_delivery;
+mod heap_size_foreign;
 #[cfg(test)]
 mod request_view_reuse_tests;
 pub use compile::VueMainAssemblyFailure;
@@ -323,6 +324,7 @@ mod test_worker_pools;
 mod artifact_root_retention_tests;
 pub(crate) mod compile_output_node;
 pub(crate) mod component_meta_cached_result;
+mod component_meta_footprint;
 pub mod input_basis;
 /// Asynchronous input acquisition to committed-snapshot handoff: one
 /// immutable committed `InputBasis` per acquisition wave, typed

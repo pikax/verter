@@ -178,7 +178,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
-    ) -> Option<std::sync::Arc<verter_session_query::type_solver::PreparedTypeDecl>> {
+    ) -> Option<
+        verter_retention::heap_size::OwnedValue<
+            verter_session_query::type_solver::PreparedTypeDecl,
+        >,
+    > {
         let key = (canonical_id.to_string(), owner, symbol_name.to_string());
         if let Some(cached) = self.prepared_type_decls.get(&key) {
             return cached.clone();
@@ -320,12 +324,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // `ResolvedDeclSlotIdentity` slot (built via `type_slot_for`); the
         // cold build re-sources the live whole_hash from
         // `ensure_indexed_ready_serve`.
-        let root_canonical: std::sync::Arc<str> =
-            std::sync::Arc::clone(&resolved_root.canonical_id);
+        let root_canonical = resolved_root.canonical_id.clone();
         let base = dispatch.type_slot_for(
-            std::sync::Arc::clone(&root_canonical),
+            root_canonical.clone(),
             resolved_root.owner,
-            std::sync::Arc::clone(&resolved_root.symbol_name),
+            resolved_root.symbol_name.clone(),
         );
         let root_inst_ctx = dispatch.instantiate_context_for(
             &root_canonical,
@@ -501,9 +504,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 .as_deref()
             {
                 Some(SemanticNodeData::DeclRef { identity }) => heritage.push((
-                    std::sync::Arc::clone(&identity.canonical_id),
+                    std::sync::Arc::<str>::from(identity.canonical_id.as_str()),
                     identity.owner,
-                    std::sync::Arc::clone(&identity.decl_name),
+                    std::sync::Arc::<str>::from(identity.decl_name.as_str()),
                 )),
                 Some(SemanticNodeData::Object(_)) => own_object_arms += 1,
                 _ => return None,
@@ -567,10 +570,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             });
         }
         Some(ProjectedSurfaceFact {
-            members: std::sync::Arc::from(members.into_boxed_slice()),
-            call_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
-            construct_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
-            index_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+            members: From::from(members.into_boxed_slice()),
+            call_signatures: From::from(Vec::new().into_boxed_slice()),
+            construct_signatures: From::from(Vec::new().into_boxed_slice()),
+            index_signatures: From::from(Vec::new().into_boxed_slice()),
             has_index_signature: false,
         })
     }
@@ -598,13 +601,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 let _scope = self.semantic_dispatch().enter_construction_scope();
                 let root =
                     self.dispatch_root_instantiated(scope_canonical_id, scope_owner, root_symbol)?;
-                let query_path: std::sync::Arc<[PathSegment]> = std::sync::Arc::from(
-                    path.iter()
-                        .cloned()
-                        .map(PathSegment::Member)
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                );
+                let query_path: verter_type_expr::OwnedSlice<PathSegment> =
+                    verter_type_expr::OwnedSlice::from(
+                        path.iter()
+                            .cloned()
+                            .map(PathSegment::Member)
+                            .collect::<Vec<_>>()
+                            .into_boxed_slice(),
+                    );
                 let dispatch = self.semantic_dispatch();
                 match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
                     base: root,

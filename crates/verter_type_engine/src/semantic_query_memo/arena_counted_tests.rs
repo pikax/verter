@@ -58,7 +58,11 @@ fn arena_wait_counter_includes_hit_and_both_miss_acquisitions() {
 #[test]
 fn multiset_guard_distinguishes_planted_omission_and_duplicate() {
     let data = SemanticNodeData::TemplateLiteral {
-        quasis: Arc::from([Arc::from(""), Arc::from(""), Arc::from("")]),
+        quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from([
+            verter_type_expr::OwnedStr::from(""),
+            verter_type_expr::OwnedStr::from(""),
+            verter_type_expr::OwnedStr::from(""),
+        ]),
         expressions: crate::semantic_query::PayloadArray::from([
             SemanticNodeId(3),
             SemanticNodeId(3),
@@ -113,7 +117,11 @@ fn counted_last_root_releases_repeated_internal_edges() {
     );
     let parent = arena.intern_owned(
         SemanticNodeData::TemplateLiteral {
-            quasis: Arc::from([Arc::from(""), Arc::from(""), Arc::from("")]),
+            quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from([
+                verter_type_expr::OwnedStr::from(""),
+                verter_type_expr::OwnedStr::from(""),
+                verter_type_expr::OwnedStr::from(""),
+            ]),
             expressions: crate::semantic_query::PayloadArray::from([child.id(), child.id()]),
         },
         NodeScopeId::Global,
@@ -273,7 +281,7 @@ fn production_constructor_keeps_sweeps_authoritative_and_old_drops_safe() {
     let root = arena.intern_owned(
         SemanticNodeData::Literal(LiteralValue::String("closed".into())),
         NodeScopeId::File {
-            canonical_id: Arc::from("/closed.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/closed.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: [7; 16],
             local_scope: None,
@@ -331,5 +339,67 @@ fn chunk_table_storage_follows_live_chunks_not_allocation_history() {
         Some(&SemanticNodeData::Literal(LiteralValue::String(
             "pinned".into()
         )))
+    );
+}
+
+/// A storage snapshot taken while an interner holds a shard and waits for
+/// `inner` must not hold `inner` while it waits for that shard: both finish.
+#[test]
+fn storage_snapshot_completes_beside_an_interner_holding_a_shard() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    const WAIT: Duration = Duration::from_secs(30);
+    let arena = Arc::new(NodeArena::counted_for_tests());
+    let (parked_tx, parked_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel::<()>();
+    let resume_rx = parking_lot::Mutex::new(resume_rx);
+    let (snapshot_tx, snapshot_rx) = mpsc::channel();
+    let parked = AtomicBool::new(false);
+    let snapshotting = AtomicBool::new(false);
+    *arena.race_hook.lock() = Some(Arc::new(move |event| match event {
+        ArenaRaceEvent::BeforeDedupLookup if !parked.swap(true, Ordering::SeqCst) => {
+            parked_tx.send(()).unwrap();
+            let _ = resume_rx.lock().recv_timeout(WAIT);
+        }
+        ArenaRaceEvent::BeforeShardStorageSnapshot
+            if !snapshotting.swap(true, Ordering::SeqCst) =>
+        {
+            snapshot_tx.send(()).unwrap();
+        }
+        _ => {}
+    }));
+    // Detached workers: a regression deadlocks them, and the assertions
+    // below then fail on their timeouts instead of hanging on a join.
+    let (interned_tx, interned_rx) = mpsc::channel();
+    let interner = Arc::clone(&arena);
+    std::thread::spawn(move || {
+        let root = interner.intern_owned(
+            SemanticNodeData::Literal(LiteralValue::String("snapshot".into())),
+            NodeScopeId::Global,
+        );
+        interned_tx.send(root.id()).unwrap();
+    });
+    parked_rx.recv_timeout(WAIT).unwrap();
+    let (charged_tx, charged_rx) = mpsc::channel();
+    let snapshot = Arc::clone(&arena);
+    std::thread::spawn(move || {
+        charged_tx.send(snapshot.storage_charge_bytes()).unwrap();
+    });
+    // The snapshot has read its slot figure and is about to wait for the
+    // parked interner's shard; the interner now needs `inner`.
+    snapshot_rx.recv_timeout(WAIT).unwrap();
+    resume_tx.send(()).unwrap();
+    let interned = interned_rx.recv_timeout(WAIT);
+    let charged = charged_rx.recv_timeout(WAIT);
+    *arena.race_hook.lock() = None;
+    assert!(
+        interned.is_ok(),
+        "the interner acquires `inner` and finishes"
+    );
+    assert!(
+        charged.is_ok(),
+        "the snapshot acquires the shard and finishes"
     );
 }

@@ -592,7 +592,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             hash_key: site.slice_key,
             slice_hash: planned.hash(),
         };
-        let Some(lowered) = self.flow_slice_driver().lookup_lowered(lowered_key) else {
+        let Some(lowered) = self
+            .flow_slice_driver()
+            .lookup_lowered(lowered_key, &planned)
+        else {
             return Vec::new();
         };
         self.callees_of(key, &index, entry, &lowered)
@@ -717,7 +720,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if let Some(identity) = identity {
                 out.push(NamedCall {
                     span,
-                    name: Arc::clone(name),
+                    name: Arc::<str>::from(name),
                     identity,
                 });
             }
@@ -1002,7 +1005,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 continue;
             };
             let mut instantiated = demand;
-            instantiated.normalized_type_args = Arc::from(arguments.into_boxed_slice());
+            instantiated.normalized_type_args =
+                verter_type_expr::OwnedSlice::from(arguments.into_boxed_slice());
             instantiated.context.type_substitution =
                 crate::semantic_query::CanonicalTypeSubstitution::new(self.graph(), bindings);
             push_unique(out, instantiated);
@@ -1403,9 +1407,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .unwrap_or_else(|| {
                 verter_type_expr::facts::FunctionReturnSource::Flow(FlowFunctionReturnIdentity {
                     anchor: verter_type_expr::locators::AuthoredAnchor {
-                        canonical_id: Arc::from(canonical),
+                        canonical_id: verter_type_expr::OwnedStr::from(canonical),
                         owner: target.declaration.owner,
-                        symbol: Arc::clone(&target.declaration.name),
+                        symbol: target.declaration.name.clone(),
                         space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                     },
                     function_part: target.part.clone(),
@@ -1561,7 +1565,8 @@ pub(super) fn is_uninstantiated(key: &FlowReturnKey) -> bool {
 /// demand, its own binders unbound.
 pub(super) fn uninstantiated(key: &FlowReturnKey) -> FlowReturnKey {
     let mut uninstantiated = key.clone();
-    uninstantiated.normalized_type_args = Arc::from(Vec::new().into_boxed_slice());
+    uninstantiated.normalized_type_args =
+        verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice());
     uninstantiated.context.type_substitution =
         crate::semantic_query::CanonicalTypeSubstitution::empty();
     uninstantiated

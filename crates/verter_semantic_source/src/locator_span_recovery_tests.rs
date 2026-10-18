@@ -58,7 +58,7 @@ fn member_origin(ordinals: &[u32]) -> MemberSpansOrigin {
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             owner_local_ordinal: 0,
         },
-        member_path: path(ordinals),
+        member_path: path(ordinals).into(),
     }
 }
 
@@ -175,7 +175,7 @@ fn stale_authored_origin_fails_closed_never_default() {
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 owner_local_ordinal: 42,
             },
-            member_path: path(&[0]),
+            member_path: path(&[0]).into(),
         },
     );
     assert_eq!(
@@ -351,7 +351,7 @@ fn recovers_method_member_and_function_spans_and_exercises_optional() {
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             owner_local_ordinal: 0,
         },
-        member_path: path(&[0]),
+        member_path: path(&[0]).into(),
     };
     let recovered_member = recover_member_spans(&service, &key, &member_origin(&[0]))
         .expect("method member spans recover");
@@ -429,7 +429,7 @@ fn recovers_index_signature_spans_for_string_and_number_keys() {
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 owner_local_ordinal: 0,
             },
-            member_path: path(&[0]),
+            member_path: path(&[0]).into(),
         };
         let recovered = recover_index_signature_spans(&service, &key, &origin)
             .expect("index signature spans recover");

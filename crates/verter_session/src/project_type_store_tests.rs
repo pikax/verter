@@ -114,9 +114,7 @@ fn compile_cache_db_present_with_accessor_post_tier_1c_alpha() {
 /// after the trigger discriminates "entry survived" vs "entry dropped".
 #[cfg(not(target_arch = "wasm32"))]
 fn seed_all_three_sub_states(host: &super::VerterHost, canonical: &str) {
-    use super::types::{
-        CompileSlot, DependencyResolution, DependencyState, DerivedRawState, ProfileState,
-    };
+    use super::types::{DependencyResolution, DependencyState, DerivedRawState, ProfileState};
     use std::collections::BTreeSet;
 
     // ProfileState — populate compile_slots so the test can observe
@@ -129,7 +127,7 @@ fn seed_all_three_sub_states(host: &super::VerterHost, canonical: &str) {
         let p: &mut ProfileState = profile.value_mut();
         p.compile_slots.insert(
             42,
-            CompileSlot {
+            crate::types::CompileSlotFixture {
                 semantic_hash: [0u8; 16],
                 content_override_hash: 0,
                 css_hash_override: None,
@@ -143,7 +141,8 @@ fn seed_all_three_sub_states(host: &super::VerterHost, canonical: &str) {
                 last_access_tick: 0,
                 fact_dep_signature:
                     verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
-            },
+            }
+            .into_slot(),
         );
     }
     // DerivedRawState — populate import_routes so the test can observe

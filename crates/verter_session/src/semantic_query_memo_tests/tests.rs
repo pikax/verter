@@ -59,7 +59,7 @@ fn ctx_host() -> VerterHost {
 
 fn scope(canonical: &str) -> ScopeId {
     ScopeId {
-        canonical_id: Arc::from(canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical),
         owner: TopLevelOwnerId::ordinary_file(),
         local_scope: None,
         binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
@@ -127,14 +127,14 @@ fn resolve_decl_memo_key_discriminates_top_level_owner() {
     let key = |owner| {
         SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: ScopeId {
-                canonical_id: Arc::from("/w/Component.vue"),
+                canonical_id: verter_type_expr::OwnedStr::from("/w/Component.vue"),
                 owner,
                 local_scope: None,
                 binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                     owner,
                 ),
             },
-            name: Arc::from("Shared"),
+            name: verter_type_expr::OwnedStr::from("Shared"),
         })
     };
     let module = key(TopLevelOwnerId::module(0));
@@ -167,7 +167,7 @@ fn execute_cooperative_memoizes_winner_result() {
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/a.ts"),
-        name: Arc::from("Foo"),
+        name: verter_type_expr::OwnedStr::from("Foo"),
     });
 
     let mut call_count = 0u32;
@@ -213,7 +213,7 @@ fn same_path_recursion_returns_sentinel_not_deadlock() {
     let store = Arc::new(SemanticGraphStore::new());
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/a.ts"),
-        name: Arc::from("Recursive"),
+        name: verter_type_expr::OwnedStr::from("Recursive"),
     });
 
     let store_ref = Arc::clone(&store);
@@ -259,7 +259,7 @@ fn errors_do_not_warm_shared_memo() {
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/a.ts"),
-        name: Arc::from("BadBudget"),
+        name: verter_type_expr::OwnedStr::from("BadBudget"),
     });
 
     let first = store.execute_cooperative(
@@ -296,11 +296,11 @@ fn dep_signature_is_returned_with_warm_hits() {
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/a.ts"),
-        name: Arc::from("Foo"),
+        name: verter_type_expr::OwnedStr::from("Foo"),
     });
-    let sig: DepSignature = Arc::from(
-        vec![(
-            Arc::<str>::from("/w/a.ts"),
+    let sig: DepSignature = verter_type_engine::semantic_query::DepSignature::new(
+        vec![verter_type_engine::semantic_query::DepEntry::new(
+            "/w/a.ts",
             verter_type_engine::semantic_query::DepVersion::WholeHash([1u8; 16]),
         )]
         .into_boxed_slice(),
@@ -334,7 +334,7 @@ fn panic_in_cold_build_does_not_deadlock_future_callers() {
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/a.ts"),
-        name: Arc::from("Explodes"),
+        name: verter_type_expr::OwnedStr::from("Explodes"),
     });
 
     // Cold build panics; `catch_unwind` turns it into an `Err`.
@@ -397,7 +397,7 @@ fn invalidate_canonical_removes_only_matching_scope_keys() {
     // Warm `ResolveDecl(a.ts::Foo)` with a dep-sig referencing /w/a.ts.
     let a_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/a.ts"),
-        name: Arc::from("Foo"),
+        name: verter_type_expr::OwnedStr::from("Foo"),
     });
     let _ = store.execute_cooperative(
         &host,
@@ -412,7 +412,7 @@ fn invalidate_canonical_removes_only_matching_scope_keys() {
     // Warm `ResolveDecl(b.ts::Foo)` with a dep-sig referencing /w/b.ts.
     let b_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/b.ts"),
-        name: Arc::from("Foo"),
+        name: verter_type_expr::OwnedStr::from("Foo"),
     });
     let _ = store.execute_cooperative(
         &host,
@@ -455,7 +455,7 @@ fn family_map_publish_registers_canonical_to_entries_reverse_index() {
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/a.ts"),
-        name: Arc::from("Foo"),
+        name: verter_type_expr::OwnedStr::from("Foo"),
     });
     let _ = store.execute_cooperative(
         &host,
@@ -500,7 +500,7 @@ fn warm_publish_one_inserts_warm_map_and_registers_reverse_index() {
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/helper_test.ts"),
-        name: Arc::from("Helper"),
+        name: verter_type_expr::OwnedStr::from("Helper"),
     });
     let value = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let dep_sig = dep_sig_for("/w/helper_test.ts", 7);
@@ -519,9 +519,8 @@ fn warm_publish_one_inserts_warm_map_and_registers_reverse_index() {
     );
 
     // Direct invocation of the extracted helper.
-    let walker_diagnostics: std::sync::Arc<
-        [verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic],
-    > = std::sync::Arc::from([]);
+    let walker_diagnostics: verter_type_engine::project_semantic_dispatch::walk::WalkerDiagnostics =
+        verter_type_engine::project_semantic_dispatch::walk::WalkerDiagnostics::default();
     // The carrier's fact rail names the test canonical via a
     // `FileWholeHash` fact — `register_reverse_index` registers under
     // every canonical `read_set_signature.canonical_ids()` yields.
@@ -592,17 +591,17 @@ fn family_map_invalidate_canonical_propagates_cross_canonical_cleanup() {
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/a.ts"),
-        name: Arc::from("Bar"),
+        name: verter_type_expr::OwnedStr::from("Bar"),
     });
     // Compose a dep_sig referencing two canonicals.
-    let dep_sig: DepSignature = Arc::from(
+    let dep_sig: DepSignature = verter_type_engine::semantic_query::DepSignature::new(
         vec![
-            (
-                Arc::<str>::from("/w/a.ts"),
+            verter_type_engine::semantic_query::DepEntry::new(
+                "/w/a.ts",
                 DepVersion::WholeHash([1u8; 16]),
             ),
-            (
-                Arc::<str>::from("/w/b.ts"),
+            verter_type_engine::semantic_query::DepEntry::new(
+                "/w/b.ts",
                 DepVersion::WholeHash([2u8; 16]),
             ),
         ]
@@ -614,7 +613,7 @@ fn family_map_invalidate_canonical_propagates_cross_canonical_cleanup() {
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || {
             let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
-            (QueryResult::Value(id), Arc::clone(&dep_sig))
+            (QueryResult::Value(id), dep_sig.clone())
         },
     );
     assert!(
@@ -661,11 +660,11 @@ fn family_map_invalidate_canonical_uses_reverse_index_to_find_affected_pairs() {
     let store = SemanticGraphStore::new();
     let a_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/a.ts"),
-        name: Arc::from("FooA"),
+        name: verter_type_expr::OwnedStr::from("FooA"),
     });
     let b_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/b.ts"),
-        name: Arc::from("FooB"),
+        name: verter_type_expr::OwnedStr::from("FooB"),
     });
     let _ = store.execute_cooperative(
         &host,
@@ -828,7 +827,7 @@ fn invalidate_canonical_evicts_project_path_entries_through_touched_subtree() {
     let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let path: Arc<[PathSegment]> = Arc::from(
+    let path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(
         vec![
             PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                 "a",
@@ -841,7 +840,7 @@ fn invalidate_canonical_evicts_project_path_entries_through_touched_subtree() {
     );
     let key = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::clone(&path),
+        path: path.clone(),
         context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Shallow,
         ),
@@ -911,7 +910,7 @@ pub(crate) fn cache_satisfaction_is_materialized_point_not_nominal_demand() {
     let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let path: Arc<[PathSegment]> = Arc::from(
+    let path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(
         vec![PathSegment::Member(
             verter_type_engine::semantic_query::PropertyKey::identifier("foo"),
         )]
@@ -923,14 +922,14 @@ pub(crate) fn cache_satisfaction_is_materialized_point_not_nominal_demand() {
 
     let key_expanded = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::clone(&path),
+        path: path.clone(),
         context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
     };
     let key_navigate = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::clone(&path),
+        path: path.clone(),
         context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Navigate,
         ),
@@ -1007,7 +1006,7 @@ fn warm_publish_one_debug_asserts_against_sub_slot_mode_terminal() {
     let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let path: Arc<[PathSegment]> = Arc::from(
+    let path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(
         vec![PathSegment::Member(
             verter_type_engine::semantic_query::PropertyKey::identifier("foo"),
         )]
@@ -1024,9 +1023,8 @@ fn warm_publish_one_debug_asserts_against_sub_slot_mode_terminal() {
         ),
     };
     let value = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
-    let walker_diagnostics: std::sync::Arc<
-        [verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic],
-    > = std::sync::Arc::from([]);
+    let walker_diagnostics: verter_type_engine::project_semantic_dispatch::walk::WalkerDiagnostics =
+        verter_type_engine::project_semantic_dispatch::walk::WalkerDiagnostics::default();
     let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(
         verter_type_engine::fact_signature_helpers::empty_fact_signature(),
     );
@@ -1069,7 +1067,7 @@ fn cold_build_default_records_slot_mode_terminal_not_sub_slot() {
     let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let path: Arc<[PathSegment]> = Arc::from(
+    let path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(
         vec![PathSegment::Member(
             verter_type_engine::semantic_query::PropertyKey::identifier("foo"),
         )]
@@ -1128,7 +1126,7 @@ fn navigate_compute_does_not_serve_or_backfill_shallow_request() {
     let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let path: Arc<[PathSegment]> = Arc::from(
+    let path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(
         vec![PathSegment::Member(
             verter_type_engine::semantic_query::PropertyKey::identifier("foo"),
         )]
@@ -1136,7 +1134,7 @@ fn navigate_compute_does_not_serve_or_backfill_shallow_request() {
     );
     let mk = |mode| SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::clone(&path),
+        path: path.clone(),
         context: verter_type_engine::semantic_query::ProjectionReductionContext::published(mode),
     };
     let key_navigate = mk(ProjectionMode::Navigate);
@@ -1200,7 +1198,7 @@ pub(crate) fn backfill_writes_only_recorded_materialized_points() {
     let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let path: Arc<[PathSegment]> = Arc::from(
+    let path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(
         vec![PathSegment::Member(
             verter_type_engine::semantic_query::PropertyKey::identifier("foo"),
         )]
@@ -1212,7 +1210,7 @@ pub(crate) fn backfill_writes_only_recorded_materialized_points() {
 
     let mk = |mode| SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::clone(&path),
+        path: path.clone(),
         context: verter_type_engine::semantic_query::ProjectionReductionContext::published(mode),
     };
     let key_shallow = mk(ProjectionMode::Shallow);
@@ -1277,7 +1275,7 @@ fn invalidate_canonical_evicts_in_flight_entries_per_mode_slot_and_joiners_retry
     let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let path: Arc<[PathSegment]> = Arc::from(
+    let path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(
         vec![PathSegment::Member(
             verter_type_engine::semantic_query::PropertyKey::identifier("foo"),
         )]
@@ -1286,14 +1284,14 @@ fn invalidate_canonical_evicts_in_flight_entries_per_mode_slot_and_joiners_retry
 
     let key_identity = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::clone(&path),
+        path: path.clone(),
         context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Identity,
         ),
     };
     let key_expanded = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::clone(&path),
+        path: path.clone(),
         context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
@@ -1371,7 +1369,7 @@ fn backfilled_slot_with_wider_dep_sig_over_invalidates_conservatively_not_incorr
     let host = ctx_host();
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let path: Arc<[PathSegment]> = Arc::from(
+    let path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(
         vec![PathSegment::Member(
             verter_type_engine::semantic_query::PropertyKey::identifier("foo"),
         )]
@@ -1380,14 +1378,14 @@ fn backfilled_slot_with_wider_dep_sig_over_invalidates_conservatively_not_incorr
 
     // Expanded build reads both /w/wide.ts and /w/narrow.ts —
     // its dep-sig spans both canonicals.
-    let wide_dep_sig: DepSignature = Arc::from(
+    let wide_dep_sig: DepSignature = verter_type_engine::semantic_query::DepSignature::new(
         vec![
-            (
-                Arc::<str>::from("/w/wide.ts"),
+            verter_type_engine::semantic_query::DepEntry::new(
+                "/w/wide.ts",
                 verter_type_engine::semantic_query::DepVersion::WholeHash([1u8; 16]),
             ),
-            (
-                Arc::<str>::from("/w/narrow.ts"),
+            verter_type_engine::semantic_query::DepEntry::new(
+                "/w/narrow.ts",
                 verter_type_engine::semantic_query::DepVersion::WholeHash([2u8; 16]),
             ),
         ]
@@ -1395,7 +1393,7 @@ fn backfilled_slot_with_wider_dep_sig_over_invalidates_conservatively_not_incorr
     );
     let key_expanded = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::clone(&path),
+        path: path.clone(),
         context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
@@ -1431,7 +1429,7 @@ fn backfilled_slot_with_wider_dep_sig_over_invalidates_conservatively_not_incorr
     ] {
         let key = SemanticQueryKey::ProjectPath {
             base,
-            path: Arc::clone(&path),
+            path: path.clone(),
             context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
                 mode,
             ),
@@ -1447,7 +1445,7 @@ fn backfilled_slot_with_wider_dep_sig_over_invalidates_conservatively_not_incorr
     // is NOT evicted by an invalidation of /w/wide.ts.
     let key_navigate = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::clone(&path),
+        path: path.clone(),
         context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Navigate,
         ),
@@ -1517,7 +1515,7 @@ fn winner_skips_warm_publish_when_aborted_by_invalidation_during_build() {
     use std::thread;
     let store = Arc::new(SemanticGraphStore::new());
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let path: Arc<[PathSegment]> = Arc::from(
+    let path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(
         vec![PathSegment::Member(
             verter_type_engine::semantic_query::PropertyKey::identifier("foo"),
         )]
@@ -1526,14 +1524,14 @@ fn winner_skips_warm_publish_when_aborted_by_invalidation_during_build() {
 
     let key_identity = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::clone(&path),
+        path: path.clone(),
         context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Identity,
         ),
     };
     let key_expanded = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::clone(&path),
+        path: path.clone(),
         context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
@@ -1631,7 +1629,7 @@ fn invalidate_all_clears_every_memo_entry() {
     for name in ["X", "Y", "Z"] {
         let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: scope("/w/a.ts"),
-            name: Arc::from(name),
+            name: verter_type_expr::OwnedStr::from(name),
         });
         let _ = store.execute_cooperative(
             &host,
@@ -2184,7 +2182,7 @@ fn invalidating_an_scc_root_before_member_publish_cannot_resurrect_the_member() 
         store.intern_node_with_scope(
             SemanticNodeData::Primitive(kind),
             verter_type_engine::semantic_query::NodeScopeId::File {
-                canonical_id: Arc::clone(&canonical),
+                canonical_id: verter_type_expr::OwnedStr::from(canonical.clone()),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash,
                 local_scope: None,
@@ -2615,7 +2613,7 @@ fn invalidate_all_aborts_pending_inflight_and_skips_aborted_publish() {
     let store = Arc::new(SemanticGraphStore::new());
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/a.ts"),
-        name: Arc::from("W"),
+        name: verter_type_expr::OwnedStr::from("W"),
     });
 
     // Barrier 1: winner signals it is inside the cold-build closure
@@ -2722,7 +2720,7 @@ fn invalidate_all_inflight_abort_loop_releases_table_lock_before_state() {
     let store = Arc::new(SemanticGraphStore::new());
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/abortlock.ts"),
-        name: Arc::from("W"),
+        name: verter_type_expr::OwnedStr::from("W"),
     });
 
     // Park a cold winner mid-build so exactly one in-flight entry is
@@ -2832,7 +2830,7 @@ fn invalidate_canonical_inflight_abort_loop_releases_table_lock_before_state() {
 
     let store = Arc::new(SemanticGraphStore::new());
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let path: Arc<[PathSegment]> = Arc::from(
+    let path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(
         vec![PathSegment::Member(
             verter_type_engine::semantic_query::PropertyKey::identifier("foo"),
         )]
@@ -2841,14 +2839,14 @@ fn invalidate_canonical_inflight_abort_loop_releases_table_lock_before_state() {
 
     let key_identity = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::clone(&path),
+        path: path.clone(),
         context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Identity,
         ),
     };
     let key_expanded = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::clone(&path),
+        path: path.clone(),
         context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
@@ -3000,7 +2998,7 @@ fn invalidate_all_closes_torn_publish_window_against_cold_winner() {
     let store = Arc::new(SemanticGraphStore::new());
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/torn.ts"),
-        name: Arc::from("W"),
+        name: verter_type_expr::OwnedStr::from("W"),
     });
 
     // winner_in_build: winner signals it is inside the cold-build closure
@@ -3122,11 +3120,11 @@ fn warm_publish_one_if_absent_skips_publish_when_parent_inflight_aborted() {
 
     let aborted_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/backfill_aborted.ts"),
-        name: Arc::from("Stale"),
+        name: verter_type_expr::OwnedStr::from("Stale"),
     });
     let healthy_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/backfill_healthy.ts"),
-        name: Arc::from("Fresh"),
+        name: verter_type_expr::OwnedStr::from("Fresh"),
     });
     let node = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
@@ -3139,7 +3137,7 @@ fn warm_publish_one_if_absent_skips_publish_when_parent_inflight_aborted() {
         aborted_key.clone(),
         QueryResult::Value(node),
         verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
-        Arc::from(Vec::new()),
+        verter_type_engine::semantic_query::DepSignature::default(),
         Arc::from([]),
         verter_type_engine::semantic_query::demand::MaterializedSet::single(
             super::family::requested_point_for_key(&aborted_key),
@@ -3169,7 +3167,7 @@ fn warm_publish_one_if_absent_skips_publish_when_parent_inflight_aborted() {
         healthy_key.clone(),
         QueryResult::Value(node),
         verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
-        Arc::from(Vec::new()),
+        verter_type_engine::semantic_query::DepSignature::default(),
         Arc::from([]),
         verter_type_engine::semantic_query::demand::MaterializedSet::single(
             super::family::requested_point_for_key(&healthy_key),
@@ -3219,11 +3217,11 @@ fn prefix_backfill_loop_skips_all_backfills_when_winner_aborted_mid_loop() {
     let store = Arc::new(SemanticGraphStore::new());
     let parent_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/backfill_parent.ts"),
-        name: Arc::from("Parent"),
+        name: verter_type_expr::OwnedStr::from("Parent"),
     });
     let backfill_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/backfill_child.ts"),
-        name: Arc::from("Child"),
+        name: verter_type_expr::OwnedStr::from("Child"),
     });
 
     // Park the winner AFTER `warm_publish_one` and BEFORE the backfill
@@ -3339,7 +3337,7 @@ fn recursive_sentinel_does_not_promote_to_warm_memo() {
     let store = Arc::new(SemanticGraphStore::new());
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/a.ts"),
-        name: Arc::from("R"),
+        name: verter_type_expr::OwnedStr::from("R"),
     });
 
     let id = store.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
@@ -3366,7 +3364,7 @@ fn cross_thread_joiner_waits_on_winner_publish() {
     let store = Arc::new(SemanticGraphStore::new());
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/a.ts"),
-        name: Arc::from("Shared"),
+        name: verter_type_expr::OwnedStr::from("Shared"),
     });
 
     // Bounded entry rendezvous: the winner sends one signal as the first
@@ -3445,8 +3443,8 @@ fn cross_thread_joiner_waits_on_winner_publish() {
 // Family-memo backfill matrix
 // ──────────────────────────────────────────────────────────────────
 
-fn family_test_path() -> Arc<[PathSegment]> {
-    Arc::from(
+fn family_test_path() -> verter_type_expr::OwnedSlice<PathSegment> {
+    verter_type_expr::OwnedSlice::from(
         vec![PathSegment::Member(
             verter_type_engine::semantic_query::PropertyKey::identifier("foo"),
         )]
@@ -3463,9 +3461,9 @@ fn family_test_key(base: SemanticNodeId, mode: ProjectionMode) -> SemanticQueryK
 }
 
 fn family_test_dep_signature() -> DepSignature {
-    Arc::from(
-        vec![(
-            Arc::<str>::from("/w/family.ts"),
+    verter_type_engine::semantic_query::DepSignature::new(
+        vec![verter_type_engine::semantic_query::DepEntry::new(
+            "/w/family.ts",
             verter_type_engine::semantic_query::DepVersion::WholeHash([7u8; 16]),
         )]
         .into_boxed_slice(),
@@ -3769,9 +3767,9 @@ fn family_cancelled_does_not_backfill_any_slot() {
 // ──────────────────────────────────────────────────────────────────
 
 fn dep_sig_for(canonical: &str, hash: u8) -> DepSignature {
-    Arc::from(
-        vec![(
-            Arc::<str>::from(canonical),
+    verter_type_engine::semantic_query::DepSignature::new(
+        vec![verter_type_engine::semantic_query::DepEntry::new(
+            canonical,
             verter_type_engine::semantic_query::DepVersion::WholeHash([hash; 16]),
         )]
         .into_boxed_slice(),
@@ -3785,7 +3783,7 @@ fn stats_counters_increment_on_hit_and_miss() {
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/stats.ts"),
-        name: Arc::from("Foo"),
+        name: verter_type_expr::OwnedStr::from("Foo"),
     });
 
     let stats0 = store.stats_snapshot();
@@ -3831,7 +3829,7 @@ fn stats_snapshot_is_consistent_mid_request() {
         &host,
         SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: scope("/w/snap.ts"),
-            name: Arc::from("Foo"),
+            name: verter_type_expr::OwnedStr::from("Foo"),
         }),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || {
@@ -3859,7 +3857,7 @@ fn panic_in_cold_build_does_not_leak_in_flight_stats_counter() {
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/leak.ts"),
-        name: Arc::from("Boom"),
+        name: verter_type_expr::OwnedStr::from("Boom"),
     });
 
     // First call panics inside build — guard must drop and
@@ -3883,7 +3881,7 @@ fn panic_in_cold_build_does_not_leak_in_flight_stats_counter() {
     // would observe `current = 1` and bump peak to 2.
     let key2 = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/leak.ts"),
-        name: Arc::from("Foo"),
+        name: verter_type_expr::OwnedStr::from("Foo"),
     });
     let _ = store.execute_cooperative(
         &host,
@@ -3981,7 +3979,7 @@ fn semantic_graph_stats_joined_waits_increments_on_cooperative_join() {
     let store = Arc::new(SemanticGraphStore::new());
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/dep.ts"),
-        name: Arc::from("Foo"),
+        name: verter_type_expr::OwnedStr::from("Foo"),
     });
 
     let (tx_in_build, rx_in_build) = mpsc::channel::<()>();
@@ -4063,7 +4061,7 @@ fn semantic_graph_stats_inflight_aborted_retries_increments_on_retry_loop() {
     let store = Arc::new(SemanticGraphStore::new());
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/dep.ts"),
-        name: Arc::from("Foo"),
+        name: verter_type_expr::OwnedStr::from("Foo"),
     });
 
     let (tx_in_build, rx_in_build) = mpsc::channel::<()>();
@@ -4157,7 +4155,7 @@ fn semantic_graph_stats_cold_aborts_swept_increments_when_forced() {
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/dep.ts"),
-        name: Arc::from("Foo"),
+        name: verter_type_expr::OwnedStr::from("Foo"),
     });
 
     let _guard = store.test_force_cold_abort_sweep();
@@ -4228,7 +4226,7 @@ fn cold_abort_trigger_is_scoped_to_its_store_not_process_global() {
     let store_b = Arc::new(SemanticGraphStore::new());
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/dep.ts"),
-        name: Arc::from("Foo"),
+        name: verter_type_expr::OwnedStr::from("Foo"),
     });
 
     let (tx_in_build, rx_in_build) = mpsc::channel::<()>();
@@ -4349,7 +4347,7 @@ fn concurrent_stress_16_threads_retry_counters_consistent() {
                     let name = format!("Foo{}", call % 3);
                     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                         scope: scope("/w/stress.ts"),
-                        name: Arc::from(name.as_str()),
+                        name: verter_type_expr::OwnedStr::from(name.as_str()),
                     });
                     let _ = store.execute_cooperative(
                         &host,
@@ -4388,7 +4386,7 @@ fn concurrent_stress_16_threads_retry_counters_consistent() {
                     let name = format!("Foo{name_ix}");
                     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                         scope: scope("/w/stress.ts"),
-                        name: Arc::from(name.as_str()),
+                        name: verter_type_expr::OwnedStr::from(name.as_str()),
                     });
                     if store.test_trigger_inflight_abort_impl(&key) {
                         abort_count.fetch_add(1, Ordering::Relaxed);
@@ -4476,7 +4474,7 @@ fn execute_cooperative_warm_hit_skips_admission_overhead() {
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/fast_path.ts"),
-        name: Arc::from("Foo"),
+        name: verter_type_expr::OwnedStr::from("Foo"),
     });
 
     let ctx = RequestContext::new(7777, Arc::from("/w/fast_path.ts"), false, None);
@@ -4594,7 +4592,7 @@ fn prefix_backfill_carries_traced_facts() {
 
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let path: Arc<[PathSegment]> = Arc::from(
+    let path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(
         vec![
             PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                 "outer",
@@ -4607,7 +4605,7 @@ fn prefix_backfill_carries_traced_facts() {
     );
     let parent_key = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::clone(&path),
+        path: path.clone(),
         context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Navigate,
         ),
@@ -4616,7 +4614,7 @@ fn prefix_backfill_carries_traced_facts() {
     // The PREFIX key the backfill will publish — `path[..1]` =
     // [Member("outer")]. This is the entry whose carrier we'll
     // inspect for the discriminating signal.
-    let prefix_path: Arc<[PathSegment]> = Arc::from(
+    let prefix_path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(
         vec![PathSegment::Member(
             verter_type_engine::semantic_query::PropertyKey::identifier("outer"),
         )]
@@ -4675,7 +4673,7 @@ fn prefix_backfill_carries_traced_facts() {
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || QueryBuildOutput {
             result: QueryResult::Value(parent_value),
-            dep_signature: Arc::clone(&parent_dep_signature),
+            dep_signature: parent_dep_signature.clone(),
             walker_diagnostics: Vec::new(),
             cache_suppress: false,
             completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
@@ -4763,7 +4761,7 @@ fn cold_abort_sweep_global_counter_increments_without_request_context() {
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/dep.ts"),
-        name: Arc::from("Foo"),
+        name: verter_type_expr::OwnedStr::from("Foo"),
     });
 
     let _force_guard = store.test_force_cold_abort_sweep();
@@ -4814,7 +4812,7 @@ fn cold_abort_sweep_attributes_to_per_request_context() {
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/dep.ts"),
-        name: Arc::from("Foo"),
+        name: verter_type_expr::OwnedStr::from("Foo"),
     });
 
     // Install a request context on the calling thread. The cold-abort
@@ -4874,7 +4872,7 @@ fn inflight_aborted_retry_attributes_to_per_request_context() {
     let store = Arc::new(SemanticGraphStore::new());
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/dep.ts"),
-        name: Arc::from("Foo"),
+        name: verter_type_expr::OwnedStr::from("Foo"),
     });
 
     let ctx = RequestContext::new(11, Arc::from("/r.vue"), false, None);
@@ -4977,7 +4975,7 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
     let store = Arc::new(SemanticGraphStore::new());
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/cross_thread_joiner/site.ts"),
-        name: Arc::from("Target"),
+        name: verter_type_expr::OwnedStr::from("Target"),
     });
 
     // The winner's fact: a `FileWholeHash` over a synthetic canonical
@@ -5018,7 +5016,9 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
                 );
                 verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Value(id),
-                    dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+                    dep_signature: verter_type_engine::semantic_query::DepSignature::new(
+                        Vec::new().into_boxed_slice(),
+                    ),
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
                     completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
@@ -5057,7 +5057,7 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
                             .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
                         (
                             QueryResult::Value(id),
-                            Arc::from(Vec::new().into_boxed_slice()),
+                            verter_type_engine::semantic_query::DepSignature::default(),
                         )
                     },
                 );
@@ -5179,7 +5179,7 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
     let store = Arc::new(SemanticGraphStore::new());
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope(keyed_canonical),
-        name: Arc::from("Target"),
+        name: verter_type_expr::OwnedStr::from("Target"),
     });
 
     // The suppressed winner's carrier self-root: a `FileWholeHash` for
@@ -5229,7 +5229,9 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
                 );
                 verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Value(id),
-                    dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+                    dep_signature: verter_type_engine::semantic_query::DepSignature::new(
+                        Vec::new().into_boxed_slice(),
+                    ),
                     walker_diagnostics: Vec::new(),
                     cache_suppress: true,
                     // A2 taxonomy: this is a BENIGN non-cacheable winner — a
@@ -5276,7 +5278,7 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
                                 .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
                             (
                                 QueryResult::Value(id),
-                                Arc::from(Vec::new().into_boxed_slice()),
+                                verter_type_engine::semantic_query::DepSignature::default(),
                             )
                         },
                     );
@@ -5444,7 +5446,7 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
     let store = Arc::new(SemanticGraphStore::new());
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope(keyed_canonical),
-        name: Arc::from("Keyed"),
+        name: verter_type_expr::OwnedStr::from("Keyed"),
     });
 
     // The winner's carrier self-roots on the keyed canonical at its
@@ -5485,7 +5487,9 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
                 let carrier = ReadSetSignature::new(Arc::from(vec![winner_fact_for_build.clone()]));
                 verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Value(id),
-                    dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+                    dep_signature: verter_type_engine::semantic_query::DepSignature::new(
+                        Vec::new().into_boxed_slice(),
+                    ),
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
                     completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
@@ -5558,7 +5562,7 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
                 follower_cold_flag.store(true, Ordering::SeqCst);
                 (
                     QueryResult::Value(recompute_id),
-                    Arc::from(Vec::new().into_boxed_slice()),
+                    verter_type_engine::semantic_query::DepSignature::default(),
                 )
             },
         );
@@ -5668,7 +5672,7 @@ fn same_view_joiner_still_coalesces_onto_winner() {
     let store = Arc::new(SemanticGraphStore::new());
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope(keyed_canonical),
-        name: Arc::from("Keyed"),
+        name: verter_type_expr::OwnedStr::from("Keyed"),
     });
     let winner_fact = FactVersionRef::FileWholeHash {
         canonical_id: keyed_canonical.to_string(),
@@ -5701,7 +5705,9 @@ fn same_view_joiner_still_coalesces_onto_winner() {
                 let carrier = ReadSetSignature::new(Arc::from(vec![winner_fact_for_build.clone()]));
                 verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Value(winner_node),
-                    dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+                    dep_signature: verter_type_engine::semantic_query::DepSignature::new(
+                        Vec::new().into_boxed_slice(),
+                    ),
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
                     completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
@@ -5741,7 +5747,7 @@ fn same_view_joiner_still_coalesces_onto_winner() {
                 follower_cold_flag.store(true, Ordering::SeqCst);
                 (
                     QueryResult::Value(recompute_id),
-                    Arc::from(Vec::new().into_boxed_slice()),
+                    verter_type_engine::semantic_query::DepSignature::default(),
                 )
             },
         );
@@ -5857,7 +5863,7 @@ fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
     let store = Arc::new(SemanticGraphStore::new());
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope(keyed_canonical),
-        name: Arc::from("Keyed"),
+        name: verter_type_expr::OwnedStr::from("Keyed"),
     });
 
     let (tx_winner_in_build, rx_winner_in_build) = mpsc::channel::<()>();
@@ -5899,7 +5905,9 @@ fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
                 // warms a component-meta final cache).
                 verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Value(winner_node),
-                    dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+                    dep_signature: verter_type_engine::semantic_query::DepSignature::new(
+                        Vec::new().into_boxed_slice(),
+                    ),
                     walker_diagnostics: Vec::new(),
                     cache_suppress: true,
                     completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
@@ -5970,7 +5978,7 @@ fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
                 follower_cold_flag.store(true, Ordering::SeqCst);
                 (
                     QueryResult::Value(recompute_id),
-                    Arc::from(Vec::new().into_boxed_slice()),
+                    verter_type_engine::semantic_query::DepSignature::default(),
                 )
             },
         );
@@ -6124,7 +6132,7 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
     let store = Arc::new(SemanticGraphStore::new());
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope(keyed_canonical),
-        name: Arc::from("Keyed"),
+        name: verter_type_expr::OwnedStr::from("Keyed"),
     });
 
     // The suppressed winner's carrier holds ONE cross-file *dependency*
@@ -6178,7 +6186,9 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
                     ReadSetSignature::new(Arc::from(vec![winner_dep_fact_for_build.clone()]));
                 verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Value(winner_node),
-                    dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+                    dep_signature: verter_type_engine::semantic_query::DepSignature::new(
+                        Vec::new().into_boxed_slice(),
+                    ),
                     walker_diagnostics: Vec::new(),
                     cache_suppress: true,
                     completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
@@ -6245,7 +6255,7 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
                 follower_cold_flag.store(true, Ordering::SeqCst);
                 (
                     QueryResult::Value(recompute_id),
-                    Arc::from(Vec::new().into_boxed_slice()),
+                    verter_type_engine::semantic_query::DepSignature::default(),
                 )
             },
         );
@@ -6423,7 +6433,7 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
     // cannot self-root the keyed file for this query.
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope(keyed_canonical),
-        name: Arc::from("Keyed"),
+        name: verter_type_expr::OwnedStr::from("Keyed"),
     });
 
     // The NON-suppressed winner's carrier holds ONE cross-file
@@ -6471,7 +6481,9 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
                     ReadSetSignature::new(Arc::from(vec![winner_dep_fact_for_build.clone()]));
                 verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Error(QueryError::Miss),
-                    dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+                    dep_signature: verter_type_engine::semantic_query::DepSignature::new(
+                        Vec::new().into_boxed_slice(),
+                    ),
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
                     completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
@@ -6541,7 +6553,7 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
                 follower_cold_flag.store(true, Ordering::SeqCst);
                 (
                     QueryResult::Value(recompute_id),
-                    Arc::from(Vec::new().into_boxed_slice()),
+                    verter_type_engine::semantic_query::DepSignature::default(),
                 )
             },
         );
@@ -6673,7 +6685,7 @@ fn budget_eviction_prunes_empty_canonical_to_entries_shards() {
         // publish creates its own outer reverse-index shard.
         let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: scope(&format!("/w/scope{i}.ts")),
-            name: Arc::from(format!("Decl{i}")),
+            name: verter_type_expr::OwnedStr::from(format!("Decl{i}")),
         });
         let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let carrier =
@@ -6741,7 +6753,7 @@ fn invalidate_canonical_prunes_emptied_cross_canonical_shard() {
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/scope.ts"),
-        name: Arc::from("Multi"),
+        name: verter_type_expr::OwnedStr::from("Multi"),
     });
     let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     // Carrier fact rail names two canonicals — the entry registers a
@@ -6812,7 +6824,7 @@ fn memo_admission_debug_asserts_against_partial_without_suppress() {
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/launder.ts"),
-        name: Arc::from("Laundered"),
+        name: verter_type_expr::OwnedStr::from("Laundered"),
     });
     let _ = store.execute_cooperative(
         &host,
@@ -6853,7 +6865,7 @@ fn partial_value_leaves_no_memo_entry_and_fresh_request_cold_rebuilds() {
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/partial.ts"),
-        name: Arc::from("GenuinePartial"),
+        name: verter_type_expr::OwnedStr::from("GenuinePartial"),
     });
 
     let mut first_ran = false;
@@ -6953,7 +6965,7 @@ fn memo_admission_or_gate_refuses_partial_without_suppress_in_release() {
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/release_launder.ts"),
-        name: Arc::from("ReleaseLaundered"),
+        name: verter_type_expr::OwnedStr::from("ReleaseLaundered"),
     });
 
     let first = store.execute_cooperative(
@@ -7024,7 +7036,7 @@ fn memo_admission_or_gate_refuses_benign_cache_suppress() {
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/benign_suppress.ts"),
-        name: Arc::from("BenignSuppress"),
+        name: verter_type_expr::OwnedStr::from("BenignSuppress"),
     });
 
     let first = store.execute_cooperative(
@@ -7305,12 +7317,12 @@ mod env_scoped_key_identity_guards {
         );
         let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
             anchor: AuthoredAnchor {
-                canonical_id: Arc::clone(&canonical),
+                canonical_id: verter_type_expr::OwnedStr::from(canonical.clone()),
                 owner: TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::clone(&name),
+                symbol: verter_type_expr::OwnedStr::from(name.clone()),
                 space: LocatorSymbolSpace::Type,
             },
-            path: Arc::from([TypeBodyPathStep::Member { ordinal: 0 }]),
+            path: verter_type_expr::OwnedSlice::from([TypeBodyPathStep::Member { ordinal: 0 }]),
         });
         let split_env_axes = (
             ParseEnvHash::from_env_hash([0u8; 16]),
@@ -7362,7 +7374,9 @@ mod env_scoped_key_identity_guards {
         // DIFFERENT value for the same (decl, args, context), so warm-hitting
         // one on another would hand back a foreign answer.
         let member = |name: &str| {
-            let path: Arc<[verter_type_engine::semantic_query::PathSegment]> = Arc::from(
+            let path: verter_type_expr::OwnedSlice<
+                verter_type_engine::semantic_query::PathSegment,
+            > = verter_type_expr::OwnedSlice::from(
                 vec![verter_type_engine::semantic_query::PathSegment::Member(
                     verter_type_engine::semantic_query::PropertyKey::identifier(Arc::from(name)),
                 )]
@@ -7375,9 +7389,13 @@ mod env_scoped_key_identity_guards {
         // path vocabulary carries index segments (including computed
         // ones), so the table covers them alongside member segments.
         let index = |name: &str| {
-            let path: Arc<[verter_type_engine::semantic_query::PathSegment]> = Arc::from(
+            let path: verter_type_expr::OwnedSlice<
+                verter_type_engine::semantic_query::PathSegment,
+            > = verter_type_expr::OwnedSlice::from(
                 vec![verter_type_engine::semantic_query::PathSegment::Index(
-                    verter_type_engine::semantic_query::IndexKey::String(Arc::from(name)),
+                    verter_type_engine::semantic_query::IndexKey::String(
+                        verter_type_expr::OwnedStr::from(name),
+                    ),
                 )]
                 .into_boxed_slice(),
             );
@@ -7730,7 +7748,7 @@ mod env_scoped_key_identity_guards {
     ) -> SemanticQueryKey {
         SemanticQueryKey::TypeOf {
             value_root: slot,
-            path: Arc::from([]),
+            path: verter_type_expr::OwnedSlice::from([]),
             context: verter_type_engine::semantic_query::TypeOfContext::new(prc, resolve_env),
         }
     }
@@ -7748,7 +7766,7 @@ mod env_scoped_key_identity_guards {
                     Arc::clone(canonical),
                     TopLevelOwnerId::ordinary_file(),
                 ),
-                name: Arc::clone(name),
+                name: verter_type_expr::OwnedStr::from(name),
             },
             project_identity,
             type_env,
@@ -8277,12 +8295,12 @@ mod lower_locator_family_identity {
     fn locator(path: &[TypeBodyPathStep]) -> AuthoredBodyLocator {
         AuthoredBodyLocator::DeclBody(TypeBodySlot {
             anchor: AuthoredAnchor {
-                canonical_id: Arc::from("/w/a.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/w/a.ts"),
                 owner: TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from("Foo"),
+                symbol: verter_type_expr::OwnedStr::from("Foo"),
                 space: LocatorSymbolSpace::Type,
             },
-            path: Arc::from(path.to_vec().into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::from(path.to_vec().into_boxed_slice()),
         })
     }
 
@@ -8670,7 +8688,7 @@ mod prepared_identity_bijection {
         ValueRootSlotIdentity::new(
             ValueRootKey {
                 scope: ScopeId::file(Arc::from("/w/a.ts"), TopLevelOwnerId::ordinary_file()),
-                name: Arc::from(name),
+                name: verter_type_expr::OwnedStr::from(name),
             },
             0,
             h16(0),
@@ -8691,7 +8709,7 @@ mod prepared_identity_bijection {
 
     fn program_point(offset: u32) -> ProgramPointId {
         ProgramPointId {
-            canonical_id: Arc::from("/w/a.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/w/a.ts"),
             offset,
         }
     }
@@ -8700,12 +8718,12 @@ mod prepared_identity_bijection {
         let slot = type_slot("Foo");
         let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
             anchor: AuthoredAnchor {
-                canonical_id: Arc::from("/w/a.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/w/a.ts"),
                 owner: TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from("Foo"),
+                symbol: verter_type_expr::OwnedStr::from("Foo"),
                 space: LocatorSymbolSpace::Type,
             },
-            path: Arc::from(path.to_vec().into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::from(path.to_vec().into_boxed_slice()),
         });
         SemanticQueryKey::LowerLocator {
             key: LocatorLoweringKey::new_unsubstituted(
@@ -8727,35 +8745,35 @@ mod prepared_identity_bijection {
             SemanticQueryKeyTag::ResolveDecl => (
                 SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                     scope: ScopeId::file(Arc::from("/w/a.ts"), TopLevelOwnerId::ordinary_file()),
-                    name: Arc::from("Foo"),
+                    name: verter_type_expr::OwnedStr::from("Foo"),
                 }),
                 SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                     scope: ScopeId::file(Arc::from("/w/a.ts"), TopLevelOwnerId::ordinary_file()),
-                    name: Arc::from("Bar"),
+                    name: verter_type_expr::OwnedStr::from("Bar"),
                 }),
             ),
             SemanticQueryKeyTag::Instantiate => (inst_key("Foo"), inst_key("Bar")),
             SemanticQueryKeyTag::ProjectMember => (
                 SemanticQueryKey::ProjectMember {
                     base: node(1),
-                    member: Arc::from("m"),
+                    member: verter_type_expr::OwnedStr::from("m"),
                     mode: ProjectionMode::Navigate,
                 },
                 SemanticQueryKey::ProjectMember {
                     base: node(1),
-                    member: Arc::from("n"),
+                    member: verter_type_expr::OwnedStr::from("n"),
                     mode: ProjectionMode::Navigate,
                 },
             ),
             SemanticQueryKeyTag::IndexedAccess => (
                 SemanticQueryKey::IndexedAccess {
                     base: node(1),
-                    index: IndexKey::String(Arc::from("i")),
+                    index: IndexKey::String(verter_type_expr::OwnedStr::from("i")),
                     mode: ProjectionMode::Navigate,
                 },
                 SemanticQueryKey::IndexedAccess {
                     base: node(1),
-                    index: IndexKey::String(Arc::from("j")),
+                    index: IndexKey::String(verter_type_expr::OwnedStr::from("j")),
                     mode: ProjectionMode::Navigate,
                 },
             ),
@@ -8802,7 +8820,7 @@ mod prepared_identity_bijection {
             SemanticQueryKeyTag::TypeOf => (
                 SemanticQueryKey::TypeOf {
                     value_root: value_root("v"),
-                    path: Arc::from([]),
+                    path: verter_type_expr::OwnedSlice::from([]),
                     context: TypeOfContext::new(
                         ProjectionReductionContext::published(ProjectionMode::Shallow),
                         h16(0),
@@ -8810,7 +8828,7 @@ mod prepared_identity_bijection {
                 },
                 SemanticQueryKey::TypeOf {
                     value_root: value_root("w"),
-                    path: Arc::from([]),
+                    path: verter_type_expr::OwnedSlice::from([]),
                     context: TypeOfContext::new(
                         ProjectionReductionContext::published(ProjectionMode::Shallow),
                         h16(0),
@@ -8868,14 +8886,14 @@ mod prepared_identity_bijection {
             SemanticQueryKeyTag::ProjectPath => (
                 SemanticQueryKey::ProjectPath {
                     base: node(1),
-                    path: Arc::from([PathSegment::Member(
+                    path: verter_type_expr::OwnedSlice::from([PathSegment::Member(
                         verter_type_engine::semantic_query::PropertyKey::identifier("p"),
                     )]),
                     context: ProjectionReductionContext::published(ProjectionMode::Navigate),
                 },
                 SemanticQueryKey::ProjectPath {
                     base: node(1),
-                    path: Arc::from([PathSegment::Member(
+                    path: verter_type_expr::OwnedSlice::from([PathSegment::Member(
                         verter_type_engine::semantic_query::PropertyKey::identifier("q"),
                     )]),
                     context: ProjectionReductionContext::published(ProjectionMode::Navigate),
@@ -9049,7 +9067,9 @@ mod prepared_identity_bijection {
             ),
             SemanticQueryKeyTag::TemplateLiteralReduce => (
                 SemanticQueryKey::TemplateLiteralReduce {
-                    pattern: Arc::from([Arc::from("a")]),
+                    pattern: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from([
+                        verter_type_expr::OwnedStr::from("a"),
+                    ]),
                     args: nodes(&[]),
                     context: TemplateLiteralReduceContext {
                         resolve_env_hash: h16(0),
@@ -9059,7 +9079,9 @@ mod prepared_identity_bijection {
                     },
                 },
                 SemanticQueryKey::TemplateLiteralReduce {
-                    pattern: Arc::from([Arc::from("b")]),
+                    pattern: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from([
+                        verter_type_expr::OwnedStr::from("b"),
+                    ]),
                     args: nodes(&[]),
                     context: TemplateLiteralReduceContext {
                         resolve_env_hash: h16(0),
@@ -9202,7 +9224,7 @@ mod prepared_identity_bijection {
         SemanticQueryKey::ResolveCall(Box::new(
             verter_type_engine::semantic_query::ResolveCallKey {
                 point: verter_type_engine::semantic_query::ProgramPointId {
-                    canonical_id: Arc::from(canonical),
+                    canonical_id: verter_type_expr::OwnedStr::from(canonical),
                     offset,
                 },
                 callee: SemanticNodeId(1),
@@ -9231,7 +9253,7 @@ mod prepared_identity_bijection {
                 function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
                 overload_ordinal,
             },
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: verter_type_engine::semantic_query::FlowReturnContext {
                 parse_env_hash: h16(0),
                 resolve_env_hash: h16(0),
@@ -9399,7 +9421,7 @@ fn operand_evidence_refuses_a_root_without_its_whole_hash_fact() {
         .expect("a backed root must reconstruct");
     assert_eq!(
         evidence.self_roots(),
-        &[(Arc::clone(&root_owner), [1u8; 16])]
+        &[(verter_type_expr::OwnedStr::from(&root_owner), [1u8; 16])]
     );
 
     // A listed root with NO matching whole-hash fact refuses outright.
@@ -9440,7 +9462,7 @@ fn operand_evidence_refuses_a_root_without_its_whole_hash_fact() {
         .expect("a root backed on a page reconstructs");
     assert_eq!(
         evidence.self_roots(),
-        &[(Arc::clone(&root_producer), [4u8; 16])]
+        &[(verter_type_expr::OwnedStr::from(&root_producer), [4u8; 16])]
     );
 }
 
@@ -9450,7 +9472,7 @@ fn operand_evidence_refuses_a_root_without_its_whole_hash_fact() {
 
 fn release_file_scope(canonical: &str, hash: u8) -> NodeScopeId {
     NodeScopeId::File {
-        canonical_id: Arc::from(canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: [hash; 16],
         local_scope: None,
@@ -9460,15 +9482,15 @@ fn release_file_scope(canonical: &str, hash: u8) -> NodeScopeId {
 fn release_type_param(canonical: &str, hash: u8, name: &str) -> SemanticNodeData {
     SemanticNodeData::TypeParam {
         decl: DeclIdentity {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner: TopLevelOwnerId::ordinary_file(),
             whole_hash: [hash; 16],
-            decl_name: Arc::from(name),
+            decl_name: verter_type_expr::OwnedStr::from(name),
         },
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from(name),
+        display_name: verter_type_expr::OwnedStr::from(name),
     }
 }
 
@@ -9538,7 +9560,7 @@ fn release_intern_document(
 fn release_decl_key(canonical: &str, name: &str) -> SemanticQueryKey {
     SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope(canonical),
-        name: Arc::from(name),
+        name: verter_type_expr::OwnedStr::from(name),
     })
 }
 
@@ -9809,8 +9831,10 @@ mod release_embedded_node_family_tests {
         [byte; 16]
     }
 
-    fn computed_index_path(node: SemanticNodeId) -> Arc<[PathSegment]> {
-        Arc::from([PathSegment::Index(AuthoredPropertyKey::Computed(node))])
+    fn computed_index_path(node: SemanticNodeId) -> verter_type_expr::OwnedSlice<PathSegment> {
+        verter_type_expr::OwnedSlice::from([PathSegment::Index(AuthoredPropertyKey::Computed(
+            node,
+        ))])
     }
 
     fn slot(canonical: &str, name: &str) -> ResolvedDeclSlotIdentity {
@@ -9832,7 +9856,7 @@ mod release_embedded_node_family_tests {
         SemanticQueryKey::ResolveCall(Box::new(
             verter_type_engine::semantic_query::ResolveCallKey {
                 point: ProgramPointId {
-                    canonical_id: Arc::from("/w/consumer.vue"),
+                    canonical_id: verter_type_expr::OwnedStr::from("/w/consumer.vue"),
                     offset: 3,
                 },
                 callee,
@@ -9863,7 +9887,7 @@ mod release_embedded_node_family_tests {
                 function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
                 overload_ordinal: 0,
             },
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: verter_type_engine::semantic_query::FlowReturnContext {
                 parse_env_hash: h16(0),
                 resolve_env_hash: h16(0),
@@ -9899,7 +9923,7 @@ mod release_embedded_node_family_tests {
 
     fn consumer_point() -> ProgramPointId {
         ProgramPointId {
-            canonical_id: Arc::from("/w/consumer.vue"),
+            canonical_id: verter_type_expr::OwnedStr::from("/w/consumer.vue"),
             offset: 5,
         }
     }
@@ -9915,12 +9939,12 @@ mod release_embedded_node_family_tests {
         };
         let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
             anchor: AuthoredAnchor {
-                canonical_id: Arc::from("/w/authored.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/w/authored.ts"),
                 owner: TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from("Ctx"),
+                symbol: verter_type_expr::OwnedStr::from("Ctx"),
                 space: LocatorSymbolSpace::Type,
             },
-            path: Arc::from([TypeBodyPathStep::Member { ordinal: 0 }]),
+            path: verter_type_expr::OwnedSlice::from([TypeBodyPathStep::Member { ordinal: 0 }]),
         });
         verter_type_engine::project_semantic_dispatch::semantic_operand::authored_instantiate_key_fixture(
             slot("/w/authored.ts", "Ctx"),
@@ -10028,7 +10052,7 @@ mod release_embedded_node_family_tests {
                     true_branch: live,
                     false_branch: live,
                     distributive: false,
-                    pending: Some(Arc::new(
+                    pending: Some(verter_session_query::retention::owned::Owned::new(
                         ConditionalPendingSubstitution::empty().append_both(node, live),
                     )),
                 }),

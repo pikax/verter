@@ -15,21 +15,21 @@ fn host() -> VerterHost {
 fn key(name: &'static str) -> SemanticQueryKey {
     SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::from("/w/cancel.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/w/cancel.ts"),
             owner: TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 TopLevelOwnerId::ordinary_file(),
             ),
         },
-        name: Arc::from(name),
+        name: verter_type_expr::OwnedStr::from(name),
     })
 }
 
 fn dep_signature(canonical: &'static str, hash: u8) -> DepSignature {
-    Arc::from(
-        vec![(
-            Arc::<str>::from(canonical),
+    verter_type_engine::semantic_query::DepSignature::new(
+        vec![verter_type_engine::semantic_query::DepEntry::new(
+            canonical,
             verter_type_engine::semantic_query::DepVersion::WholeHash([hash; 16]),
         )]
         .into_boxed_slice(),

@@ -555,7 +555,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return self
                 .graph()
                 .intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
-                    name: Arc::clone(&k.base().merged_symbol_name),
+                    name: k.base().merged_symbol_name.clone(),
                     args: Arc::clone(k.args()).into(),
                 }));
         }

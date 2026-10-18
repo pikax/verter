@@ -18,8 +18,6 @@
 //! is a `#[cfg(test)]` parity suite, so its whole reachable PRODUCTION scope is
 //! output-only.
 
-use std::sync::Arc;
-
 use verter_type_engine::semantic_query::ProjectionMode;
 
 /// A session-local node-bearing expansion result: the produced
@@ -265,8 +263,11 @@ pub(crate) fn expand_define_model_output(
         return DefineModelOutputExpansion::CarrierMiss;
     };
     let base_id = *base.value();
-    let artifact =
-        AdmittedExpansionNode::new(base_id, Arc::from(Vec::new().into_boxed_slice()), false);
+    let artifact = AdmittedExpansionNode::new(
+        base_id,
+        verter_type_engine::semantic_query::DepSignature::new(Vec::new().into_boxed_slice()),
+        false,
+    );
     match materialize_admitted_expansion_node(dispatch, &artifact, fallback_source) {
         Some(normalized) => DefineModelOutputExpansion::Materialized {
             produced_node_id: base_id,
@@ -296,7 +297,7 @@ pub(crate) fn expand_generic_project_path_output(
     owner_canonical: &str,
     macro_index: usize,
     carrier_lower_mode: ProjectionMode,
-    terminal_path: Arc<[verter_type_engine::semantic_query::PathSegment]>,
+    terminal_path: verter_type_expr::OwnedSlice<verter_type_engine::semantic_query::PathSegment>,
     fallback_source: &verter_type_expr::facts::SemanticTypeSource,
 ) -> MacroPathOutputExpansion {
     use verter_type_engine::semantic_query::{
@@ -326,7 +327,9 @@ pub(crate) fn expand_generic_project_path_output(
         QueryResult::Value(SemanticQueryOutput { value: node_id, .. }) => {
             let artifact = AdmittedExpansionNode::new(
                 node_id,
-                Arc::from(Vec::new().into_boxed_slice()),
+                verter_type_engine::semantic_query::DepSignature::new(
+                    Vec::new().into_boxed_slice(),
+                ),
                 false,
             );
             match materialize_admitted_expansion_node(dispatch, &artifact, fallback_source) {

@@ -994,7 +994,9 @@ fn shape_value_and_fact_sig_for_scope(
     let value = MaterializedOutputTypeExpr::from_type_expr_for_test(
         None,
         verter_type_expr::TypeExpr::string_literal("ok".to_string()),
-        Arc::from([] as [(Arc<str>, verter_type_engine::semantic_query::DepVersion); 0]),
+        verter_type_engine::semantic_query::DepSignature::new(
+            [] as [verter_type_engine::semantic_query::DepEntry; 0]
+        ),
         result_is_partial,
     );
     let fact_sig =
@@ -1369,9 +1371,9 @@ fn unrootable_declaration_is_returned_to_the_winner_and_computed_once() {
     // CONTROL — a rootable compute admits, and the SECOND read is served warm
     // (its closure never runs).
     let control_key = (
-        Arc::<str>::from("/m6_refusal.ts"),
+        verter_type_expr::OwnedStr::from("/m6_refusal.ts"),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::<str>::from("Probe"),
+        verter_type_expr::OwnedStr::from("Probe"),
     );
     let control_computes = Cell::new(0usize);
     let control_before = db.live_count();
@@ -1412,9 +1414,9 @@ fn unrootable_declaration_is_returned_to_the_winner_and_computed_once() {
 
     // SUBJECT — the same funnel, an UNROOTABLE compute.
     let key = (
-        Arc::<str>::from("/m6_refusal.ts"),
+        verter_type_expr::OwnedStr::from("/m6_refusal.ts"),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::<str>::from("Unrootable"),
+        verter_type_expr::OwnedStr::from("Unrootable"),
     );
     let computes = Cell::new(0usize);
     let before = db.live_count();
@@ -1678,7 +1680,7 @@ fn shape_cache_release_canonical_drops_rooted_released_node_and_dependent_entrie
     let graph = store.semantic_graph();
 
     let file_scope = |canonical: &str, hash: u8| NodeScopeId::File {
-        canonical_id: Arc::from(canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [hash; 16],
         local_scope: None,
@@ -1927,4 +1929,358 @@ defineProps<{
         live_scoped_to("/types/buttons.ts") > 0,
         "the reopen re-interned the closed document's declarations"
     );
+}
+
+/// Retained footprint of the cached component-meta payload: admission is
+/// charged by the allocations the payload keeps alive, so two results with
+/// equal record counts but different payload sizes must cost differently.
+mod cached_result_footprint {
+    use std::sync::Arc;
+
+    use verter_session_query::analysis::component_meta::{
+        AcceptedSurfaceCompleteness, ComponentMetaAnalysis, ComponentMetaFlags, FallthroughSurface,
+        NoFallthroughReason, PropAnalysis, RootReachability, StyleAnalysis,
+    };
+    use verter_session_query::retention::allocation::heap_block_bytes;
+    use verter_session_query::retention::RetainedFootprint;
+    use verter_type_expr::facts::{SemanticTypeSource, SourcePosition, TopLevelOwnerId};
+    use verter_type_expr::locators::{
+        AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodySlot,
+    };
+    use verter_type_expr::publication::{
+        PublicationPolicy, ResolutionExactness, ResolutionProvenance, TypePublication,
+    };
+
+    use crate::component_meta_cached_result::{CachedComponentMetaResult, ResolutionTemplate};
+
+    const LARGE: usize = 50_000;
+
+    fn authored_source(canonical_id: Arc<str>) -> SourcePosition {
+        SourcePosition::Present(SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(
+            TypeBodySlot {
+                anchor: AuthoredAnchor {
+                    canonical_id: canonical_id.into(),
+                    owner: TopLevelOwnerId::default(),
+                    symbol: verter_type_expr::OwnedStr::from("Props"),
+                    space: LocatorSymbolSpace::Type,
+                },
+                path: verter_type_expr::OwnedSlice::from(Vec::new()),
+            },
+        )))
+    }
+
+    fn publication(canonical_id: Arc<str>) -> TypePublication {
+        TypePublication::from_source_position(
+            &authored_source(canonical_id),
+            ResolutionExactness::ExactConcrete,
+            ResolutionProvenance::SemanticEvaluator,
+            Arc::from(Vec::new()),
+            None,
+            &PublicationPolicy::exact_only(),
+        )
+    }
+
+    fn prop(description: String, publication: TypePublication) -> PropAnalysis {
+        PropAnalysis {
+            name: "label".to_string(),
+            callable_role: verter_type_expr::PropCallableRole::Other,
+            publication,
+            type_expansion: None,
+            required: true,
+            has_default: false,
+            default_value: None,
+            description: Some(description),
+            tags: Vec::new(),
+            declared_in_macro_type_arg: true,
+        }
+    }
+
+    fn style(class: String) -> StyleAnalysis {
+        StyleAnalysis {
+            lang: verter_session_query::analysis::style::StyleAnalysisLang::Css,
+            scoped: false,
+            is_module: false,
+            module_name: None,
+            block_ref: None,
+            classes: vec![class],
+            ids: Vec::new(),
+            custom_properties: Vec::new(),
+            v_binds: Vec::new(),
+            selectors: Vec::new(),
+        }
+    }
+
+    fn registry_meta(text: String) -> crate::meta_resolve::ResolvedTypeRegistryMeta {
+        crate::meta_resolve::ResolvedTypeRegistryMeta {
+            name: "Props".to_string(),
+            declaration: verter_session_query::declarations::metadata::ResolvedTypeDeclaration {
+                requested_name: "Props".to_string(),
+                declaration_id: None,
+                resolved_name: "Props".to_string(),
+                canonical_source: "/src/types.ts".to_string(),
+                owner: TopLevelOwnerId::default(),
+                span: verter_span::Span::new(0, 0),
+                kind:
+                    verter_session_query::declarations::metadata::ResolvedDeclarationKind::Interface,
+                text: Some(text),
+            },
+        }
+    }
+
+    /// A result's analysis and resolution template, before the analysis
+    /// becomes its shared cell.
+    type Parts = (ComponentMetaAnalysis, ResolutionTemplate);
+
+    fn assemble((analysis, resolution_template): Parts) -> CachedComponentMetaResult {
+        CachedComponentMetaResult {
+            analysis: crate::component_meta_cached_result::shared_component_meta_analysis(analysis),
+            resolution_template,
+            canonical_id: Arc::from("/src/Owner.vue"),
+            whole_hash: [0u8; 16],
+        }
+    }
+
+    fn result(props: Vec<PropAnalysis>) -> CachedComponentMetaResult {
+        assemble(parts(props))
+    }
+
+    fn parts(props: Vec<PropAnalysis>) -> Parts {
+        (
+            ComponentMetaAnalysis {
+                domain_guarantees: Default::default(),
+                props,
+                events: Vec::new(),
+                slots: Vec::new(),
+                models: Vec::new(),
+                exposed: Vec::new(),
+                public_instance: None,
+                ordered_sfc_structure: None,
+                type_registry: Vec::new(),
+                components: Vec::new(),
+                template_refs: Vec::new(),
+                imports: Vec::new(),
+                bindings: Vec::new(),
+                vue_api_calls: Vec::new(),
+                styles: vec![style("c".to_string())],
+                flags: ComponentMetaFlags::default(),
+                root_reachability: RootReachability::NoFallthrough {
+                    reason: NoFallthroughReason::NoTemplate,
+                },
+                accepted_props: Vec::new(),
+                accepted_events: Vec::new(),
+                accepted_surface_completeness: AcceptedSurfaceCompleteness::Exact,
+                fallthrough_surface: FallthroughSurface::None {
+                    reason: NoFallthroughReason::NoTemplate,
+                },
+                macro_expansion_diagnostics: Vec::new(),
+                options_api: false,
+                file_path: "/src/Owner.vue".to_string(),
+            },
+            ResolutionTemplate {
+                mode: verter_type_engine::semantic_query::ProjectionMode::Expanded,
+                whole_hash: [0u8; 16],
+                resolved_macros: Vec::new(),
+                resolved_type_registry: Vec::new(),
+                resolved_type_registry_meta: vec![registry_meta("t".to_string())],
+                evaluated_types: None,
+                fact_versions: Vec::new(),
+                surface_identities: None,
+                origin_graph: None,
+                completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
+                synthesis_should_suppress: false,
+            },
+        )
+    }
+
+    fn base_parts() -> Parts {
+        parts(vec![prop("d".to_string(), publication(Arc::from("/a.ts")))])
+    }
+
+    fn base() -> CachedComponentMetaResult {
+        assemble(base_parts())
+    }
+
+    /// Enlarging one owned string anywhere in the payload — a surface
+    /// record, a structural record, a resolution-template record — grows
+    /// the charge by at least that string's backing, with every record
+    /// count unchanged.
+    #[test]
+    fn enlarged_payload_text_is_charged_by_its_backing_at_equal_record_counts() {
+        type Enlarge = fn(&mut Parts, String) -> usize;
+        let cases: [(&str, Enlarge); 3] = [
+            ("prop description", |(analysis, _), text| {
+                let slot = analysis.props[0].description.as_mut().unwrap();
+                let small = slot.capacity();
+                *slot = text;
+                small
+            }),
+            ("style class", |(analysis, _), text| {
+                let slot = &mut analysis.styles[0].classes[0];
+                let small = slot.capacity();
+                *slot = text;
+                small
+            }),
+            ("registry declaration text", |(_, template), text| {
+                let slot = template.resolved_type_registry_meta[0]
+                    .declaration
+                    .text
+                    .as_mut()
+                    .unwrap();
+                let small = slot.capacity();
+                *slot = text;
+                small
+            }),
+        ];
+        for (label, enlarge) in cases {
+            let small_result = base();
+            let mut large_parts = base_parts();
+            let text = "x".repeat(LARGE);
+            let large_capacity = text.capacity();
+            let small_capacity = enlarge(&mut large_parts, text);
+            let large_result = assemble(large_parts);
+            let expected = heap_block_bytes(large_capacity) - heap_block_bytes(small_capacity);
+            let small = charged(&small_result);
+            let large = charged(&large_result);
+            assert!(
+                large >= small + expected,
+                "{label}: a {LARGE}-byte string must add at least its {expected}-byte \
+                 backing ({small} -> {large})"
+            );
+        }
+    }
+
+    /// Everything retaining `result` charges: its own bytes and the owned
+    /// allocations it reaches, each charged once by its own cell.
+    fn charged(result: &CachedComponentMetaResult) -> usize {
+        let account = verter_session_query::retention::SemanticRetentionAccount::new(
+            verter_session_query::retention::RetentionLimits {
+                aggregate_ceiling_bytes: usize::MAX,
+                active_ceiling_bytes: usize::MAX,
+                max_entry_bytes: usize::MAX,
+                pin_threshold_bytes: usize::MAX,
+            },
+        );
+        let footprint = result.retained_footprint();
+        let holds = footprint
+            .handles
+            .hold(verter_session_query::retention::owned::ChargeCtx::new(
+                &account,
+            ))
+            .expect("unbounded");
+        let total = footprint.bytes + account.snapshot().retained_bytes;
+        drop(holds);
+        total
+    }
+
+    /// Nested type data counts: a long canonical id inside a prop's
+    /// published source is an owned name charged by its own cell, and a
+    /// second prop that shares the same published source does not charge
+    /// it again.
+    #[test]
+    fn nested_type_text_is_charged_once_per_shared_allocation() {
+        use verter_session_query::retention::owned::OwnedStr;
+        let small = charged(&base());
+        // Each result names its own copy of the source: a charged cell
+        // stays charged where it was first charged.
+        let long: Arc<str> = Arc::from("y".repeat(LARGE));
+        let one = result(vec![prop("d".to_string(), publication(Arc::clone(&long)))]);
+        let shared = publication(long);
+        let two = result(vec![
+            prop("d".to_string(), shared.clone()),
+            prop("d".to_string(), shared),
+        ]);
+        let one_bytes = charged(&one);
+        let expected = OwnedStr::charge_for_len(LARGE) - OwnedStr::charge_for_len("/a.ts".len());
+        assert!(
+            one_bytes >= small + expected,
+            "a {LARGE}-byte canonical in the published source must add at least \
+             {expected} bytes ({small} -> {one_bytes})"
+        );
+        let two_bytes = charged(&two);
+        assert!(
+            two_bytes > one_bytes && two_bytes - one_bytes < OwnedStr::charge_for_len(LARGE),
+            "a second prop sharing the published source must not recharge its \
+             {LARGE}-byte canonical ({one_bytes} -> {two_bytes})"
+        );
+    }
+
+    /// A JSDoc tag's resolved type graph is charged by its tables: a long
+    /// literal in the captured string table adds its backing to the cached
+    /// result's footprint.
+    #[test]
+    fn a_jsdoc_type_graph_is_charged_by_its_tables() {
+        use verter_type_expr::{LiteralValue, TypeExpr};
+        let with_tag = |literal: String| {
+            let ty = TypeExpr::Literal(LiteralValue::String(literal));
+            let mut builder = verter_protocol::graph::GraphBuilder::new();
+            let root = builder.node_id(&ty);
+            let graph = verter_protocol::graph::snapshot::ResolvedTypeGraphSnapshot::from_builder(
+                builder, root,
+            )
+            .expect("a literal captures");
+            let mut result = base();
+            let declaration = registry_meta("t".to_string()).declaration;
+            result.resolution_template.resolved_macros.push(
+                crate::meta_resolve::ResolvedMacroMeta {
+                    macro_index: 0,
+                    macro_kind:
+                        verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps,
+                    type_name: "Props".to_string(),
+                    import_source: String::new(),
+                    surface_is_authoritative: true,
+                    declaration,
+                    native_props: Vec::new(),
+                    jsdoc: Some(crate::resolver_core::ResolvedJsdocBlock {
+                        description: None,
+                        tags: vec![crate::resolver_core::ResolvedJsdocTag {
+                            name: "type".to_string(),
+                            text: None,
+                            raw_type: None,
+                            subject_name: None,
+                            resolved_type: Some(
+                                verter_protocol::graph::snapshot::ResolvedJsdocTypeOutput {
+                                    display: None,
+                                    graph,
+                                },
+                            ),
+                        }],
+                    }),
+                },
+            );
+            result
+        };
+        let small = with_tag("s".to_string()).retained_footprint_bytes();
+        let large = with_tag("s".repeat(LARGE)).retained_footprint_bytes();
+        let expected = heap_block_bytes(LARGE) - heap_block_bytes(1);
+        assert!(
+            large >= small + expected,
+            "a {LARGE}-byte literal in the tag's type graph must add at least its \
+             {expected}-byte backing ({small} -> {large})"
+        );
+    }
+
+    /// A collection costs its backing capacity, not its length.
+    #[test]
+    fn record_collection_is_charged_by_capacity() {
+        let small_result = base();
+        let mut large_parts = base_parts();
+        let small_capacity = small_result.analysis.props.capacity();
+        large_parts.0.props.reserve_exact(4096);
+        let large_result = assemble(large_parts);
+        let large_capacity = large_result.analysis.props.capacity();
+        assert_eq!(
+            large_result.analysis.props.len(),
+            small_result.analysis.props.len()
+        );
+        let slot = std::mem::size_of::<PropAnalysis>();
+        let expected =
+            heap_block_bytes(large_capacity * slot) - heap_block_bytes(small_capacity * slot);
+        let small = charged(&small_result);
+        let large = charged(&large_result);
+        assert!(
+            large >= small + expected,
+            "reserving {large_capacity} prop slots must add at least {expected} bytes \
+             ({small} -> {large})"
+        );
+    }
 }

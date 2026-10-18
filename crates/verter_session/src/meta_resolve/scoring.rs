@@ -111,7 +111,7 @@ pub(crate) fn node_root_is_explicit_selector_operator(
         }
         Some(data) if data.bare_ref_head().is_some() => data
             .bare_ref_head()
-            .is_some_and(|head| is_selector_util(head.0.as_ref())),
+            .is_some_and(|head| is_selector_util(head.0)),
         _ => false,
     }
 }

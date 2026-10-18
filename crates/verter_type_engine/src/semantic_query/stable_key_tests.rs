@@ -597,9 +597,9 @@ fn function_occurrence(
     crate::semantic_query::SignatureNodeOccurrence {
         function: FlowFunctionReturnIdentity {
             anchor: AuthoredAnchor {
-                canonical_id: Arc::from("/src/f.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/src/f.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from(symbol),
+                symbol: verter_type_expr::OwnedStr::from(symbol),
                 space: LocatorSymbolSpace::Value,
             },
             function_part: FunctionPartIdentity::DeclarationBody,
@@ -714,10 +714,10 @@ fn synthetic_binding(
     let value = prim(graph, value);
     graph.intern_node(SemanticNodeData::SyntheticBinding {
         id: crate::semantic_query::SyntheticBindingId {
-            scope_canonical_id: Arc::from(scope),
+            scope_canonical_id: verter_type_expr::OwnedStr::from(scope),
             surface_kind,
-            slot_name: slot_name.map(Arc::from),
-            binding_name: Arc::from(binding_name),
+            slot_name: slot_name.map(verter_type_expr::OwnedStr::from),
+            binding_name: verter_type_expr::OwnedStr::from(binding_name),
         },
         value_node: value.0,
     })
@@ -827,7 +827,7 @@ fn import_type(graph: &SemanticGraphStore, importer: Option<&str>) -> SemanticNo
     use crate::semantic_query::NodeScopeId;
     let data = SemanticNodeData::new_import_type(
         Arc::from("./m"),
-        Arc::from([Arc::<str>::from("G")]),
+        verter_type_expr::OwnedSlice::from([verter_type_expr::OwnedStr::from("G")]),
         Arc::from(Vec::new()),
         false,
     );
@@ -836,7 +836,7 @@ fn import_type(graph: &SemanticGraphStore, importer: Option<&str>) -> SemanticNo
         Some(canonical) => graph.intern_node_with_scope(
             data,
             NodeScopeId::File {
-                canonical_id: Arc::from(canonical),
+                canonical_id: verter_type_expr::OwnedStr::from(canonical),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: [3u8; 16],
                 local_scope: None,
@@ -909,12 +909,12 @@ fn import_type_at(
     graph.intern_node_with_scope(
         SemanticNodeData::new_import_type(
             Arc::from(specifier),
-            Arc::from([Arc::<str>::from("G")]),
+            verter_type_expr::OwnedSlice::from([verter_type_expr::OwnedStr::from("G")]),
             Arc::from(Vec::new()),
             false,
         ),
         crate::semantic_query::NodeScopeId::File {
-            canonical_id: Arc::from(importer),
+            canonical_id: verter_type_expr::OwnedStr::from(importer),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash,
             local_scope: None,
@@ -1056,7 +1056,7 @@ fn generic_signature(
         )]),
         return_type: binder,
         type_parameters: crate::semantic_query::PayloadArray::from([TypeParamDecl {
-            name: Arc::from("T"),
+            name: verter_type_expr::OwnedStr::from("T"),
             param: binder,
             constraint,
             default,
@@ -1078,7 +1078,7 @@ fn bound_free_binder(graph: &SemanticGraphStore) -> SemanticNodeId {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     })
 }
 
@@ -1151,7 +1151,7 @@ fn deferred_callable_keys_carry_binder_bounds_and_constness() {
                 SignatureKind::Call,
                 Arc::from([FunctionParam::synthetic(None, binder, false, false)]),
                 Arc::from([TypeParamDecl {
-                    name: Arc::from("T"),
+                    name: verter_type_expr::OwnedStr::from("T"),
                     param: binder,
                     constraint,
                     default,
@@ -1246,7 +1246,7 @@ fn shared_subtrees_are_decided_by_structure_not_node_identity() {
         let mut node = graph.intern_node_with_scope(
             SemanticNodeData::Primitive(PrimitiveKind::Number),
             crate::semantic_query::NodeScopeId::File {
-                canonical_id: Arc::from(scope),
+                canonical_id: verter_type_expr::OwnedStr::from(scope),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: [5u8; 16],
                 local_scope: None,
@@ -1382,7 +1382,7 @@ fn union_reducer_keeps_homomorphic_and_concrete_mappings_apart() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
     let value = prim(&graph, PrimitiveKind::Number);
     let mapped = |over_type_variable| {
@@ -1467,7 +1467,7 @@ fn a_return_carrier_keys_by_structure_not_node_sharing() {
     let number_elsewhere = graph.intern_node_with_scope(
         SemanticNodeData::Primitive(PrimitiveKind::Number),
         crate::semantic_query::NodeScopeId::File {
-            canonical_id: Arc::from("/elsewhere.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/elsewhere.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: [6u8; 16],
             local_scope: None,
@@ -1504,10 +1504,10 @@ fn slot_binding_mapper_name(padding: usize) -> Arc<str> {
     let source = Arc::new(TypeExpr::Literal(LiteralValue::String("a".into())));
     let value = Arc::new(TypeExpr::SyntheticSlotBinding(Arc::new(
         SyntheticCarrierKey {
-            scope_canonical_id: Arc::from("/c.vue"),
+            scope_canonical_id: From::from("/c.vue"),
             surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
-            slot_name: Some(Arc::from("default")),
-            binding_name: Arc::from("item"),
+            slot_name: Some(From::from("default")),
+            binding_name: From::from("item"),
             value_node: backing.0,
         },
     )));
@@ -1591,10 +1591,10 @@ fn a_synthetic_binding_over_a_future_node_fails_closed() {
     let graph = SemanticGraphStore::new();
     let backing = prim(&graph, PrimitiveKind::Number);
     let key = |value_node: u64| SyntheticCarrierKey {
-        scope_canonical_id: Arc::from("/c.vue"),
+        scope_canonical_id: From::from("/c.vue"),
         surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
-        slot_name: Some(Arc::from("default")),
-        binding_name: Arc::from("item"),
+        slot_name: Some(From::from("default")),
+        binding_name: From::from("item"),
         value_node,
     };
     let count = graph.node_count();
@@ -1863,7 +1863,7 @@ fn the_retention_walk_visits_every_retained_id() {
     let graph = SemanticGraphStore::new();
     let argument = prim(&graph, PrimitiveKind::Number);
     let back_edge = SemanticNodeData::Opaque(QueryError::RecursiveRef {
-        name: Arc::from("Tree"),
+        name: verter_type_expr::OwnedStr::from("Tree"),
         args: [argument].into(),
     });
     let mut semantic = Vec::new();
@@ -1884,11 +1884,11 @@ fn the_retention_walk_visits_every_retained_id() {
     let surface = prim(&graph, PrimitiveKind::Boolean);
     let instance = SemanticNodeData::ClassExpressionInstance {
         identity: Arc::new(crate::semantic_query::ClassExpressionIdentity {
-            canonical_id: Arc::from("file:///a.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("file:///a.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             offset: 0,
-            name: Arc::from("C"),
-            outer_clauses: Arc::from([]),
+            name: verter_type_expr::OwnedStr::from("C"),
+            outer_clauses: verter_type_expr::OwnedSlice::from([]),
             own_arity: 0,
             constructor_visibility: None,
             prototype: Some(prototype),
@@ -1913,7 +1913,7 @@ fn the_retention_walk_visits_every_retained_id() {
         true_branch_ref: argument,
         false_branch_ref: argument,
         distributive: false,
-        pending: Some(Arc::new(pending)),
+        pending: Some(verter_session_query::retention::owned::Owned::new(pending)),
     };
     let mut retained = Vec::new();
     conditional.for_each_retained_child(|child| retained.push(child));
@@ -1923,7 +1923,7 @@ fn the_retention_walk_visits_every_retained_id() {
     );
 
     let forward = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
-        name: Arc::from("Tree"),
+        name: verter_type_expr::OwnedStr::from("Tree"),
         args: [SemanticNodeId(graph.node_count() as u64 + 3)].into(),
     }));
     assert!(
@@ -2021,7 +2021,7 @@ fn closing_a_document_releases_a_recovery_holding_its_type() {
     };
     let graph = SemanticGraphStore::new();
     let scope = crate::semantic_query::NodeScopeId::File {
-        canonical_id: Arc::from("/w/closed.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/w/closed.ts"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [0u8; 16],
         local_scope: None,
@@ -2055,7 +2055,7 @@ fn closing_a_document_releases_a_recovery_holding_its_type() {
 fn closing_a_document_releases_its_key_classes() {
     let graph = SemanticGraphStore::new();
     let scope = crate::semantic_query::NodeScopeId::File {
-        canonical_id: Arc::from("/w/closed.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/w/closed.ts"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [0u8; 16],
         local_scope: None,

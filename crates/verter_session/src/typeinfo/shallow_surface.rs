@@ -104,14 +104,14 @@ impl VerterHost {
         // class vs alias) and classifies its heritage arms.
         let base = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: ScopeId {
-                canonical_id: Arc::clone(&request.canonical_id),
+                canonical_id: verter_type_expr::OwnedStr::from(request.canonical_id.clone()),
                 owner: default_owner,
                 local_scope: None,
                 binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                     default_owner,
                 ),
             },
-            name: Arc::clone(&request.name),
+            name: verter_type_expr::OwnedStr::from(request.name.clone()),
         })) {
             QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
             QueryResult::Recursive(node) => node,
@@ -126,7 +126,7 @@ impl VerterHost {
                 &host_ctx,
                 &dispatch,
                 base,
-                Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
                 ProjectionReductionContext::published(ProjectionMode::Shallow),
                 None,
             ),
@@ -176,7 +176,7 @@ impl VerterHost {
         >,
         dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
         base: SemanticNodeId,
-        path: Arc<[PathSegment]>,
+        path: verter_type_expr::OwnedSlice<PathSegment>,
         context: ProjectionReductionContext,
         walker_diagnostics: Option<
             &mut Vec<verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic>,
@@ -197,7 +197,7 @@ pub(crate) fn project_shallow_surface_graph_only<
     ctx: &dyn verter_type_engine::resolver_core::ResolverContext<C>,
     dispatch: &ProjectSemanticDispatch<'_, C>,
     base: SemanticNodeId,
-    path: Arc<[PathSegment]>,
+    path: verter_type_expr::OwnedSlice<PathSegment>,
     context: ProjectionReductionContext,
     walker_diagnostics: Option<
         &mut Vec<verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic>,
@@ -220,7 +220,7 @@ pub(crate) fn project_shallow_surface_from_base<
     ctx: &dyn verter_type_engine::resolver_core::ResolverContext<C>,
     dispatch: &ProjectSemanticDispatch<'_, C>,
     base: SemanticNodeId,
-    path: Arc<[PathSegment]>,
+    path: verter_type_expr::OwnedSlice<PathSegment>,
     context: ProjectionReductionContext,
     walker_diagnostics: Option<
         &mut Vec<verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic>,
@@ -317,7 +317,7 @@ pub(crate) fn callable_first_param_object_surface<
         ctx,
         dispatch,
         first_param,
-        Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
         ProjectionReductionContext::published(ProjectionMode::Shallow),
         None,
     ))

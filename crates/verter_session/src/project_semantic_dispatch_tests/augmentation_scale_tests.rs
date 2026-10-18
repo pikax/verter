@@ -511,7 +511,7 @@ fn finite_batch_reads_match_single_keys_across_projection_modes() {
             .map(|key| {
                 read(SemanticQueryKey::IndexedAccess {
                     base,
-                    index: IndexKey::String(Arc::from(*key)),
+                    index: IndexKey::String(verter_type_expr::OwnedStr::from(*key)),
                     mode,
                 })
             })
@@ -718,9 +718,9 @@ fn merged_global_instantiation_preserves_approximation_from_every_declaration() 
         for file in ["/a.ts", "/b.ts", "/a.ts"] {
             let key = SemanticQueryKey::Instantiate(InstantiateKey::new(
                 dispatch.type_slot_for(
-                    Arc::from(file),
+                    verter_type_expr::OwnedStr::from(file),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    Arc::from("Shared"),
+                    verter_type_expr::OwnedStr::from("Shared"),
                 ),
                 Arc::from([]),
                 dispatch.instantiate_context_for(file, context),
@@ -846,7 +846,13 @@ fn retained(host: &VerterHost) -> Retained {
     let snapshot = host.retention_snapshot();
     Retained {
         retained_bytes: snapshot.retained_bytes,
-        pinned_bytes: snapshot.pinned_bytes,
+        // Parse-snapshot pins: the graph's own storage pin grows with the
+        // nodes each answer interned, and the memo's bookkeeping pin with
+        // the candidates it indexes, both of which the candidate bounds
+        // cover.
+        pinned_bytes: snapshot.pinned_bytes
+            - snapshot.semantic_graph_storage_bytes
+            - snapshot.semantic_bookkeeping_storage_bytes,
         live_artifacts: snapshot.live_artifacts,
         retired_versions: snapshot.retained_retired_versions,
         snapshot_leases: snapshot.snapshot_leases,
@@ -897,9 +903,17 @@ fn growing_merged_contributors_between_answers_retains_only_the_answers() {
             "superseded versions must not stay retained: {label}"
         );
         assert!(
-            grown.snapshot_leases <= baseline.snapshot_leases
-                && grown.pinned_bytes <= baseline.pinned_bytes,
+            grown.snapshot_leases <= baseline.snapshot_leases,
             "superseded parse snapshots must not stay pinned: {label}"
+        );
+        // A cell the first step's surviving answers still reach — a name a
+        // superseded declaration charged — passes from that declaration's
+        // bundle to the answers keeping it, pinned, when the bundle is
+        // superseded; nothing else may stay.
+        assert!(
+            grown.pinned_bytes <= baseline.pinned_bytes + (first.pinned_bytes - setup.pinned_bytes),
+            "pinned bytes may exceed a fresh engine's only by what the first step handed out: \
+             first={first:?}, {label}"
         );
         let first_answers = first
             .memo_candidates

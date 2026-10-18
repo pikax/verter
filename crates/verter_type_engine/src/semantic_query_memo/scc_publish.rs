@@ -162,6 +162,10 @@ struct PreparedMember {
 /// `entries` lock, so the batch's single hold does no planning work.
 struct StagedMember {
     family: FamilyKey,
+    /// The family's container charge, reserved before the batch lock for
+    /// every member, so keying it under the lock never refuses a member
+    /// halfway through the batch.
+    family_charge: Option<verter_session_query::retention::RetentionCharge>,
     entry: MemoEntry,
     eviction: family::EvictionVictim,
     /// The value a waiting joiner receives when the flight completes.
@@ -309,7 +313,6 @@ impl SemanticGraphStore {
                 ),
             };
             let entry = self.stage_entry(
-                None,
                 SemanticQueryValue::Relation(member.payload),
                 relation_satisfied_projection(),
                 carrier,
@@ -318,6 +321,7 @@ impl SemanticGraphStore {
                 validated_at_generation,
                 cost_receipt,
             );
+            let entry = self.with_candidate_lease(&family, entry);
             prepared.push(PreparedMember {
                 family,
                 entry,
@@ -335,8 +339,9 @@ impl SemanticGraphStore {
             // The published payload is extracted from the proof token —
             // the member's value is admissible only as the proven one.
             let entry = self.stage_entry(
-                None,
-                SemanticQueryValue::FlowReturn(Arc::new(member.result.value().clone())),
+                SemanticQueryValue::FlowReturn(verter_session_query::retention::owned::Owned::new(
+                    member.result.value().clone(),
+                )),
                 member.materialized,
                 carrier,
                 self_root_canonicals,
@@ -344,6 +349,7 @@ impl SemanticGraphStore {
                 validated_at_generation,
                 cost_receipt,
             );
+            let entry = self.with_candidate_lease(&family, entry);
             prepared.push(PreparedMember {
                 family,
                 entry,
@@ -362,8 +368,9 @@ impl SemanticGraphStore {
                 ),
             };
             let entry = self.stage_entry(
-                None,
-                SemanticQueryValue::ResolveCall(Arc::new(member.result.into_inner())),
+                SemanticQueryValue::ResolveCall(
+                    verter_session_query::retention::owned::Owned::new(member.result.into_inner()),
+                ),
                 resolve_call_satisfied_projection(),
                 carrier,
                 self_root_canonicals,
@@ -371,6 +378,7 @@ impl SemanticGraphStore {
                 validated_at_generation,
                 cost_receipt,
             );
+            let entry = self.with_candidate_lease(&family, entry);
             prepared.push(PreparedMember {
                 family,
                 entry,
@@ -378,10 +386,14 @@ impl SemanticGraphStore {
             });
         }
 
-        let staged_entries: Vec<_> = prepared.iter().map(|member| &member.entry).collect();
-        let batch_charge = self.reserve_scc_batch(&staged_entries);
-        let batch_charge = match batch_charge {
-            Ok(charge) => Some(std::sync::Arc::new(charge)),
+        let staged_entries: Vec<_> = prepared
+            .iter()
+            .map(|member| (&member.family, &member.entry))
+            .collect();
+        let registered_canonicals =
+            reverse_index::registered_canonical_count(carrier, &dispatch_dep_signature);
+        let retentions = match self.reserve_scc_batch(&staged_entries, registered_canonicals) {
+            Ok(retentions) => retentions,
             Err(_) => {
                 for member in &prepared {
                     self.abort_inline_member_flight(&member.flight);
@@ -390,9 +402,17 @@ impl SemanticGraphStore {
             }
         };
         let mut staged: Vec<StagedMember> = Vec::with_capacity(prepared.len());
-        for mut member in prepared {
-            member.entry.retention_charge = batch_charge.clone();
+        for (mut member, retention) in prepared.into_iter().zip(retentions) {
+            member.entry.retention = Some(retention);
             staged.push(self.stage_member(member.family, member.entry, member.flight, ctx));
+        }
+        // Key every family the batch would newly key before taking the
+        // batch lock, all or nothing, like the members' own charges.
+        if self.prepay_member_families(&mut staged).is_err() {
+            for member in &staged {
+                self.abort_inline_member_flight(&member.flight);
+            }
+            return false;
         }
 
         // Test-only injection point — parked immediately before the
@@ -459,6 +479,7 @@ impl SemanticGraphStore {
             let NewlyKeyedFamily(is_new) = self.publish_staged_locked(
                 &mut entries,
                 &member.family,
+                member.family_charge,
                 member.entry,
                 member.eviction,
             );
@@ -492,7 +513,7 @@ impl SemanticGraphStore {
                 state.graph_carrier = Some(Box::new(carrier.clone()));
                 state.cost_receipt = Some(Arc::clone(cost_receipt));
                 state.self_root_canonicals = Arc::clone(self_root_canonicals);
-                state.walker_diagnostics = Some(Arc::from([]));
+                state.walker_diagnostics = Some(super::empty_diagnostics());
                 state.cache_suppress = false;
                 state.fact_status = crate::semantic_query::FactStatus::Complete;
             }
@@ -505,7 +526,6 @@ impl SemanticGraphStore {
     /// no eviction planning.
     pub(super) fn stage_entry(
         &self,
-        retention_charge: Option<Arc<verter_session_query::retention::RetentionCharge>>,
         value: SemanticQueryValue,
         satisfied_projection: MaterializedSet,
         carrier: &verter_session_query::facts::fact_cache::ReadSetSignature,
@@ -515,17 +535,22 @@ impl SemanticGraphStore {
         cost_receipt: &Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
     ) -> MemoEntry {
         let result = QueryResult::Value(value);
+        let walker_diagnostics = super::empty_diagnostics();
         MemoEntry {
             lease: self
-                .lease_delivery(&result, &[])
+                .lease_delivery(super::delivery_lease::DeliveredAllocations::read(
+                    &result,
+                    &walker_diagnostics,
+                    dispatch_dep_signature,
+                ))
                 .expect("staged component operands are live"),
             result,
             read_set_signature: carrier.clone(),
-            dispatch_dep_signature: Arc::clone(dispatch_dep_signature),
+            dispatch_dep_signature: dispatch_dep_signature.clone(),
             self_root_canonicals: Arc::clone(self_root_canonicals),
-            walker_diagnostics: Arc::from([]),
+            walker_diagnostics,
             satisfied_projection,
-            retention_charge,
+            retention: None,
             validated_at_generation,
             admission_seq: 0,
             reverse_indexed: false,
@@ -533,57 +558,127 @@ impl SemanticGraphStore {
         }
     }
 
-    /// Reserve ONE aggregate charge covering a whole staged component.
+    /// Reserve the charges of a whole staged component, all or nothing.
     ///
     /// `Err` means the process declined to retain the component, and the
     /// caller must refuse the WHOLE batch — a component that published
     /// only the members that fit would be exactly the torn component the
     /// root-witness fence forbids. There is no uncharged arm: every store
     /// owns an account.
+    ///
+    /// Each member gets its own charges: its own bookkeeping as its share
+    /// of one batch reservation (so an evicted member releases its share
+    /// while the rest stay), and holds on the carrier, self-root list and
+    /// delivered allocations it shares with the published root and its
+    /// siblings — one shared charge per allocation, whoever holds it last.
     pub(super) fn reserve_scc_batch(
         &self,
-        members: &[&MemoEntry],
+        members: &[(&FamilyKey, &MemoEntry)],
+        registered_canonicals: usize,
     ) -> Result<
-        verter_session_query::retention::RetentionCharge,
+        Vec<Arc<super::retention::MemoRetention>>,
         verter_session_query::retention::RetentionRefusal,
     > {
         use verter_session_query::retention::RetentionAdmission;
         let account = self.retention_account();
+        let refuse = |refusal: verter_session_query::retention::RetentionRefusal| {
+            crate::cache_runtime::admission::propagate_non_admission(
+                refusal.non_admission_reason(),
+            );
+            refusal
+        };
         // Each member's receipt is charged once, for as long as it lives.
-        for entry in members {
-            if let Err(refusal) = entry.cost_receipt.reserve_retention(account) {
-                crate::cache_runtime::admission::propagate_non_admission(
-                    refusal.non_admission_reason(),
-                );
-                return Err(refusal);
-            }
+        for (_, entry) in members {
+            entry
+                .cost_receipt
+                .reserve_retention(account)
+                .map_err(refuse)?;
         }
-        // The published root already owns the SCC carrier and self-root
-        // allocations. The member batch therefore reserves only each
-        // member's distinct allocation; including the first member's
-        // shared portion here would charge the root-owned allocations a
-        // second time and create a spurious pressure refusal.
-        let bytes = members
+        let shared = members
             .iter()
-            .map(|entry| entry.unique_retained_footprint_bytes())
-            .sum();
+            .map(|(_, entry)| {
+                self.hold_shared_allocations(super::retention::SharedParts::of(entry))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(refuse)?;
+        let own: Vec<verter_session_query::retention::Footprint> = members
+            .iter()
+            .map(|(family, entry)| {
+                super::retention::own_reservation(entry, family, 1, registered_canonicals)
+            })
+            .collect();
         // A shared carrier's evidence pages were claimed with the root; a
         // page only a member's carrier holds is claimed here.
         let carriers: Vec<&[verter_session_query::facts::fact_cache::FactVersionRef]> = members
             .iter()
-            .map(|entry| &*entry.read_set_signature.facts)
+            .map(|(_, entry)| &*entry.read_set_signature.facts)
             .collect();
-        match verter_session_query::facts::receipt::reserve_retained_with_evidence(
-            account, bytes, &carriers,
+        let mut batch = match verter_session_query::facts::receipt::reserve_retained_with_evidence(
+            account,
+            own.iter().map(|footprint| footprint.bytes).sum(),
+            &carriers,
         ) {
-            RetentionAdmission::Admitted(charge) => Ok(charge),
-            RetentionAdmission::Refused(refusal) => {
-                crate::cache_runtime::admission::propagate_non_admission(
-                    refusal.non_admission_reason(),
-                );
-                Err(refusal)
+            RetentionAdmission::Admitted(charge) => charge,
+            RetentionAdmission::Refused(refusal) => return Err(refuse(refusal)),
+        };
+        shared
+            .into_iter()
+            .zip(own)
+            .map(|(holds, own)| {
+                let charge = batch.split_off(own.bytes);
+                let charge = own
+                    .handles
+                    .retained_with(charge, self.charge_ctx())
+                    .map_err(refuse)?;
+                Ok(Arc::new(holds.with_own(charge)))
+            })
+            .collect()
+    }
+
+    /// Reserve the container charge of EVERY staged member's family, keyed
+    /// or not. `Err` is the account's refusal: the batch keeps nothing.
+    ///
+    /// Whether a family is keyed can change between any snapshot taken
+    /// here and the batch's single `entries` hold — another publisher may
+    /// evict it and spend the freed headroom — so a member whose family
+    /// looked keyed could still need keying under the lock, where a refusal
+    /// would tear the component. Prepaying every member makes keying under
+    /// the lock infallible; a family still keyed at publication releases
+    /// its unused prepayment there.
+    fn prepay_member_families(
+        &self,
+        staged: &mut [StagedMember],
+    ) -> Result<(), verter_session_query::retention::RetentionRefusal> {
+        use verter_session_query::retention::RetentionAdmission;
+        for member in staged.iter_mut() {
+            match self.reserve_family_container(&member.family) {
+                RetentionAdmission::Admitted(charge) => member.family_charge = Some(charge),
+                RetentionAdmission::Refused(refusal) => {
+                    crate::cache_runtime::admission::propagate_non_admission(
+                        refusal.non_admission_reason(),
+                    );
+                    return Err(refusal);
+                }
             }
         }
+        Ok(())
+    }
+
+    /// `entry` with its candidate delivery: the lease its warm reads will
+    /// share, rooting the family key's operands. Minted before the batch is
+    /// charged, so the batch retains this lease's metadata.
+    fn with_candidate_lease(&self, family: &FamilyKey, mut entry: MemoEntry) -> MemoEntry {
+        entry.lease = self
+            .lease_candidate(
+                family,
+                super::delivery_lease::DeliveredAllocations::read(
+                    &entry.result,
+                    &entry.walker_diagnostics,
+                    &entry.dispatch_dep_signature,
+                ),
+            )
+            .expect("component candidate operands are live");
+        entry
     }
 
     /// Finish staging one member: allocate its admission token and plan
@@ -597,9 +692,6 @@ impl SemanticGraphStore {
         flight: InlineMemberFlight,
         ctx: Option<&dyn crate::resolver_core::ResolverContext<C>>,
     ) -> StagedMember {
-        entry.lease = self
-            .lease_candidate(&family, &entry.result, &entry.walker_diagnostics)
-            .expect("component candidate operands are live");
         entry.admission_seq = self.alloc_candidate_admission_seq();
         let QueryResult::Value(value) = &entry.result else {
             unreachable!("a staged SCC member always carries a decided value")
@@ -619,6 +711,7 @@ impl SemanticGraphStore {
         };
         StagedMember {
             family,
+            family_charge: None,
             entry,
             eviction,
             completed,
@@ -635,10 +728,12 @@ impl SemanticGraphStore {
     /// step that could select the batch's own root as its FIFO victim, so
     /// the answer is returned and the caller settles every newly-keyed
     /// family in one exempting step.
+    #[allow(clippy::too_many_arguments)]
     fn publish_staged_locked(
         &self,
         entries: &mut FxHashMap<FamilyKey, FamilySlots>,
         family: &FamilyKey,
+        family_charge: Option<verter_session_query::retention::RetentionCharge>,
         entry: MemoEntry,
         eviction: family::EvictionVictim,
     ) -> NewlyKeyedFamily {
@@ -649,9 +744,13 @@ impl SemanticGraphStore {
             return NewlyKeyedFamily(false);
         }
         let cap = family.candidate_cap();
-        let family_was_new = !entries.contains_key(family);
+        let Some((slots, family_was_new)) =
+            self.family_slots_prepaid_locked(entries, family, family_charge)
+        else {
+            return NewlyKeyedFamily(false);
+        };
         let admission_seq = entry.admission_seq;
-        let outcome = entries.entry(family.clone()).or_default().publish(
+        let outcome = slots.publish(
             ModeSlot::Single,
             entry,
             &ProjectionPath::empty(),
@@ -690,7 +789,6 @@ impl SemanticGraphStore {
     ) {
         let dispatch_dep_signature = self.dep_signature_interner.intern(&empty_signature());
         let entry = self.stage_entry(
-            None,
             value,
             satisfied_projection,
             &carrier,
@@ -714,9 +812,18 @@ impl SemanticGraphStore {
         };
         let mut entry = entry;
         entry.admission_seq = admission_seq;
+        // A seed is charged like every published candidate; one the account
+        // refuses is not seeded.
+        let registered_canonicals =
+            reverse_index::registered_canonical_count(&carrier, &dispatch_dep_signature);
+        let Ok(retention) = self.reserve_memo_candidate(&entry, &family, 1, registered_canonicals)
+        else {
+            return;
+        };
+        entry.retention = Some(retention);
         let mut entries = self.entries_lock_diagnosed();
         let NewlyKeyedFamily(is_new) =
-            self.publish_staged_locked(&mut entries, &family, entry, eviction);
+            self.publish_staged_locked(&mut entries, &family, None, entry, eviction);
         // A seeded ROOT is a lone family, not a component: it takes the
         // ordinary unexempted admission, exactly like `warm_publish_one`.
         if is_new {

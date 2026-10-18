@@ -1871,7 +1871,7 @@ defineProps<{
         .expect("dependency update should keep component meta available");
 
     assert!(
-        !Arc::ptr_eq(&first_cache, &second_cache),
+        !verter_retention::heap_size::OwnedValue::ptr_eq(&first_cache, &second_cache),
         "dependency change must invalidate the owner's resolved-meta cache",
     );
     assert!(

@@ -18,11 +18,10 @@
 
 use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
 
-use std::sync::Arc;
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use verter_type_engine::semantic_query::{LiteralValue, SemanticNodeData};
     use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
     use verter_type_expr::PropertyKey;
@@ -58,7 +57,7 @@ mod tests {
             let read = dispatch.execute_read(
                 verter_type_engine::semantic_query::SemanticQueryKey::ProjectPath {
                     base: node,
-                    path: Arc::from([]),
+                    path: verter_type_expr::OwnedSlice::from([]),
                     context:
                         verter_type_engine::semantic_query::ProjectionReductionContext::published(
                             verter_type_engine::semantic_query::ProjectionMode::Navigate,
@@ -236,7 +235,10 @@ pub(crate) fn node_package_backed_object_like_root_with_fence(
         node_root_identity(dispatch, node, 0)
     };
     let Some(root_identity) = root_identity else {
-        return (false, Some(Arc::from(Vec::new())));
+        return (
+            false,
+            Some(verter_type_engine::semantic_query::DepSignature::default()),
+        );
     };
     crate::meta_resolve::materialize::package_backed_object_like_root_identity_with_fence(
         query_engine,
@@ -386,9 +388,12 @@ pub(crate) fn node_root_reaches_transitive_cycle_with_fence(
             // fail-open Continue, and the request goes partial.
             verter_type_engine::request_context::mark_request_result_partial();
         }
-        return (false, Arc::from(Vec::new()));
+        return (
+            false,
+            verter_type_engine::semantic_query::DepSignature::default(),
+        );
     }
-    let mut fence: Vec<(Arc<str>, verter_type_engine::semantic_query::DepVersion)> = Vec::new();
+    let mut fence: Vec<verter_type_engine::semantic_query::DepEntry> = Vec::new();
     let mut outcomes: Vec<MaterializationCycleGateOutcome> = Vec::with_capacity(roots.len() + 1);
     if truncated {
         verter_type_engine::request_context::mark_request_result_partial();
@@ -405,8 +410,8 @@ pub(crate) fn node_root_reaches_transitive_cycle_with_fence(
             && identity.canonical_id.as_ref() != "__builtin__"
             && identity.canonical_id.as_ref() != scope_canonical_id
         {
-            fence.push((
-                Arc::clone(&identity.canonical_id),
+            fence.push(verter_type_engine::semantic_query::DepEntry::new(
+                &identity.canonical_id,
                 verter_type_engine::semantic_query::DepVersion::WholeHash(identity.whole_hash),
             ));
         }
@@ -420,7 +425,7 @@ pub(crate) fn node_root_reaches_transitive_cycle_with_fence(
     }
     let aggregate = MaterializationCycleGateOutcome::aggregate(outcomes);
     let fence_signature: verter_type_engine::semantic_query::DepSignature =
-        Arc::from(fence.into_boxed_slice());
+        verter_type_engine::semantic_query::DepSignature::new(fence.into_boxed_slice());
     verter_type_engine::meta_resolve::dep_signature::emit_dispatch_dep_signature_facts(
         dispatch,
         &fence_signature,

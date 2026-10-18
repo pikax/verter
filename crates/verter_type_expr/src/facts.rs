@@ -14,6 +14,8 @@
 //! Adding an arm to any family is a reviewed schema event.
 
 use std::sync::Arc;
+
+use crate::{OwnedSlice, OwnedStr};
 use verter_no_storedspan::NoStoredSpan;
 use verter_no_typeexpr::NoTypeExpr;
 
@@ -53,6 +55,8 @@ pub type FactAuthoredPropertyKey = AuthoredPropertyKey<TypeBodySlot, ValueDeclId
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 pub enum TopLevelOwnerKind {
     Module,
@@ -81,6 +85,8 @@ pub enum TopLevelOwnerKind {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 pub struct TopLevelOwnerId {
     kind: TopLevelOwnerKind,
@@ -143,6 +149,7 @@ impl Default for TopLevelOwnerId {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct DeclBindingKey {
     pub owner: TopLevelOwnerId,
@@ -176,6 +183,7 @@ impl DeclBindingKey {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum ConstructorBindingOutcome {
     /// No runtime-surviving local declaration binds this name — the spelling
@@ -216,6 +224,7 @@ pub enum ConstructorBindingOutcome {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum RuntimeConstructorIdentity {
     String,
@@ -351,6 +360,7 @@ impl RuntimeConstructorIdentity {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct ConstructorBindingEntry {
     pub identity: RuntimeConstructorIdentity,
@@ -541,7 +551,6 @@ mod top_level_owner_identity_tests {
     use crate::span_origins::DeclContributorAnchor;
     use std::collections::HashSet;
     use std::hash::{DefaultHasher, Hash, Hasher};
-    use std::sync::Arc;
 
     fn hash_of(value: &impl Hash) -> u64 {
         let mut hasher = DefaultHasher::new();
@@ -588,15 +597,15 @@ mod top_level_owner_identity_tests {
         let module = TopLevelOwnerId::module(0);
         let instance = TopLevelOwnerId::instance(0);
         let value = |owner| ValueDeclIdentityPart {
-            canonical_id: Arc::from("/src/App.vue"),
+            canonical_id: crate::OwnedStr::from("/src/App.vue"),
             owner,
-            symbol: Arc::from("shared"),
-            member_path: Arc::from([]),
+            symbol: crate::OwnedStr::from("shared"),
+            member_path: crate::OwnedSlice::from([]),
         };
         let anchor = |owner| AuthoredAnchor {
-            canonical_id: Arc::from("/src/App.vue"),
+            canonical_id: crate::OwnedStr::from("/src/App.vue"),
             owner,
-            symbol: Arc::from("Shared"),
+            symbol: crate::OwnedStr::from("Shared"),
             space: LocatorSymbolSpace::Type,
         };
         let contributor = |owner| DeclContributorAnchor {
@@ -774,10 +783,11 @@ impl TypeDependencyPathFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum DeclarationOrigin {
     /// The member's declaration lives in this canonical file.
-    Declared(Arc<str>),
+    Declared(crate::OwnedStr),
     /// Genuinely synthetic or multi-origin — no single declaring file (the
     /// `None`/empty case in the untyped `declaration_origin` carriers).
     Synthetic,
@@ -798,16 +808,32 @@ pub enum DeclarationOrigin {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 pub struct ValueDeclIdentityPart {
     /// Canonical id of the file declaring the value symbol.
-    pub canonical_id: Arc<str>,
+    pub canonical_id: OwnedStr,
     /// Top-level lexical owner of the value declaration.
     pub owner: TopLevelOwnerId,
     /// The value symbol name (`typeof x` → `x`).
-    pub symbol: Arc<str>,
+    pub symbol: OwnedStr,
     /// Member path for `typeof x.y.z` (empty = the bare value symbol).
-    pub member_path: Arc<[String]>,
+    pub member_path: OwnedSlice<String>,
+}
+
+impl verter_retention::owned::Measured for ValueDeclIdentityPart {
+    /// Its names and member path are owned allocations, each charged by its
+    /// own cell.
+    fn heap_bytes(&self, aliases: &mut verter_retention::allocation::AliasSet) -> usize {
+        let Self {
+            canonical_id,
+            owner: _,
+            symbol,
+            member_path,
+        } = self;
+        canonical_id.offer(aliases) + symbol.offer(aliases) + member_path.offer(aliases)
+    }
 }
 
 // ===========================================================================
@@ -829,6 +855,7 @@ pub struct ValueDeclIdentityPart {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct HeritageBaseFact {
     /// The base name exactly as written.
@@ -856,6 +883,7 @@ pub struct HeritageBaseFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct VueIgnoredHeritageFact {
     /// Source-order contributor within a same-owner, same-name declaration
@@ -988,6 +1016,7 @@ pub struct FollowLocatorPayload {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 #[no_typeexpr(recursive_self)]
 #[no_storedspan(recursive_self)]
@@ -1075,6 +1104,7 @@ pub enum ClosednessRecipe {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct KeyDomainClosednessFact {
     /// Whether EVERY contributor body is a closed-object SHAPE (an `Object`,
@@ -1861,6 +1891,7 @@ pub struct EnumMemberNamesFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum ValueAnnotationClass {
     /// A `typeof X` peel target (paired with `typeof_alias_target`).
@@ -1887,6 +1918,7 @@ pub enum ValueAnnotationClass {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum InferenceUnavailableReason {
     DepthBudgetExceeded,
@@ -1906,6 +1938,7 @@ pub enum InferenceUnavailableReason {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct ValueTypeAnnotationFact {
     /// Whether the declaration carries the nominal `unique symbol` type.
@@ -1970,6 +2003,7 @@ pub struct ValueTypeAnnotationFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum DeclaredLiteralFreshness {
     /// The declared type's literals are regular.
@@ -2011,6 +2045,7 @@ pub enum DeclaredLiteralFreshness {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum AuthoredReferenceArgLocator {
     Value(TypeArgLocator),
@@ -2047,22 +2082,23 @@ pub enum AuthoredReferenceArgLocator {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum AuthoredReferenceHeadFact {
     NotReference,
     Bare {
-        local_name: Arc<str>,
-        args: Arc<[AuthoredReferenceArgLocator]>,
+        local_name: OwnedStr,
+        args: OwnedSlice<AuthoredReferenceArgLocator>,
     },
     Qualified {
-        local_root: Arc<str>,
-        member_path: Arc<[Arc<str>]>,
-        args: Arc<[AuthoredReferenceArgLocator]>,
+        local_root: OwnedStr,
+        member_path: OwnedSlice<OwnedStr>,
+        args: OwnedSlice<AuthoredReferenceArgLocator>,
     },
     ImportType {
-        specifier: Arc<str>,
-        member_path: Arc<[Arc<str>]>,
-        args: Arc<[AuthoredReferenceArgLocator]>,
+        specifier: OwnedStr,
+        member_path: OwnedSlice<OwnedStr>,
+        args: OwnedSlice<AuthoredReferenceArgLocator>,
     },
     Unavailable,
 }
@@ -2078,6 +2114,7 @@ pub enum AuthoredReferenceHeadFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct ProgramExpressionIdentity {
     /// Canonical file containing the parsed expression record.
@@ -2097,6 +2134,7 @@ pub struct ProgramExpressionIdentity {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum SemanticExpressionSource {
     /// A parsed expression record in the retained program index.
@@ -2117,6 +2155,7 @@ pub enum SemanticExpressionSource {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct NarrowTypeParam {
     /// The type-parameter name.
@@ -2151,6 +2190,7 @@ pub struct NarrowTypeParam {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum TypeParamVariance {
     /// No annotation: the checker measures the variance.
@@ -2198,6 +2238,7 @@ pub struct TypeParamDeclFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum TypeBodyClass {
     /// `type X = ...`.
@@ -2222,6 +2263,7 @@ pub enum TypeBodyClass {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct PreparedTypeBodyFacts {
     /// The body classification.
@@ -2244,6 +2286,7 @@ pub struct PreparedTypeBodyFacts {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct FunctionParamFact {
     /// The parameter name, if any.
@@ -2284,6 +2327,8 @@ pub struct FunctionParamFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 pub enum FunctionPartIdentity {
     /// The declaration's own callable body (`function f` declarations and
@@ -2296,7 +2341,7 @@ pub enum FunctionPartIdentity {
     /// the declaration surface.
     Member {
         /// Member ordinal path from the declaration to the callable member.
-        member_path: Arc<[u32]>,
+        member_path: OwnedSlice<u32>,
     },
     /// The arrow / function expression that IS the declaration's
     /// initializer (`const f = () => { .. }`, `const f = function () { .. }`).
@@ -2325,6 +2370,8 @@ pub enum FunctionPartIdentity {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 pub struct FlowFunctionReturnIdentity {
     /// The owning declaration's content-free anchor.
@@ -2354,6 +2401,7 @@ pub struct FlowFunctionReturnIdentity {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum FunctionReturnSource {
     /// A declared return (an authored TS annotation or a JSDoc recovery).
@@ -2377,12 +2425,13 @@ pub enum FunctionReturnSource {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct FunctionSignatureFact {
     /// The function's own type parameters.
-    pub type_parameters: Arc<[NarrowTypeParam]>,
+    pub type_parameters: OwnedSlice<NarrowTypeParam>,
     /// Ordered parameter facts.
-    pub parameters: Arc<[FunctionParamFact]>,
+    pub parameters: OwnedSlice<FunctionParamFact>,
     /// Where the return type comes from. A DECLARED return (authored TS
     /// annotation or JSDoc recovery) replays its content-free locator; a
     /// body-derived return names the served function position the session's
@@ -2428,6 +2477,7 @@ fn authored_reference_head_unavailable() -> AuthoredReferenceHeadFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct ObjectPropertyFact {
     /// The authored property key.
@@ -2463,6 +2513,7 @@ impl ObjectPropertyFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct ObjectMethodFact {
     /// The authored method or accessor key.
@@ -2499,6 +2550,7 @@ impl ObjectMethodFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum KeyTypeShape {
     /// `[k: string]`.
@@ -2523,6 +2575,7 @@ pub enum KeyTypeShape {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct IndexSignatureFact {
     /// The index key parameter name (`k`).
@@ -2550,6 +2603,7 @@ pub struct IndexSignatureFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct SpreadMemberFact {
     /// The spread OPERAND's type body locator (content-free; the operand type
@@ -2568,6 +2622,7 @@ pub struct SpreadMemberFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum ObjectMemberFact {
     /// A property member.
@@ -2596,10 +2651,11 @@ pub enum ObjectMemberFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct ObjectShapeFact {
     /// The ordered object members.
-    pub members: Arc<[ObjectMemberFact]>,
+    pub members: OwnedSlice<ObjectMemberFact>,
 }
 
 /// A folded/sound enum member scalar. Numeric values are stored as the
@@ -2621,6 +2677,7 @@ pub struct ObjectShapeFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum EnumScalar {
     /// A folded numeric literal, as the canonical `f64` display string
@@ -2654,6 +2711,7 @@ pub enum EnumScalar {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum EnumPrimitiveDomain {
     /// A numeric enum member domain.
@@ -2679,6 +2737,7 @@ pub enum EnumPrimitiveDomain {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct EnumMemberEntry {
     /// The member name.
@@ -2708,6 +2767,7 @@ pub struct EnumMemberEntry {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct EnumConstantExpr {
     /// The program's steps, in evaluation order.
@@ -2725,6 +2785,7 @@ pub struct EnumConstantExpr {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum EnumConstantStep {
     /// A number literal, as the canonical `f64` display string.
@@ -2759,6 +2820,7 @@ pub enum EnumConstantStep {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum EnumConstantUnaryOp {
     /// `+x`.
@@ -2781,6 +2843,7 @@ pub enum EnumConstantUnaryOp {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum EnumConstantBinaryOp {
     /// `|`.
@@ -2820,6 +2883,7 @@ pub enum EnumConstantBinaryOp {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct EnumMemberFact {
     /// The ordered enum members.
@@ -2838,6 +2902,7 @@ pub struct EnumMemberFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct PreparedMemberFact {
     /// Whether the member is optional.
@@ -2885,6 +2950,7 @@ pub struct PreparedMemberFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct PreparedValueMemberFact {
     /// Whether the value member is a method.
@@ -2905,6 +2971,7 @@ pub struct PreparedValueMemberFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum PreparedCaseTransformKind {
     /// `Capitalize<K>`.
@@ -2928,6 +2995,7 @@ pub enum PreparedCaseTransformKind {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum PreparedKeyFilterShapeFact {
     /// No key filter.
@@ -2951,6 +3019,7 @@ pub enum PreparedKeyFilterShapeFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum PreparedKeyRemapShapeFact {
     /// Identity remap.
@@ -2977,6 +3046,7 @@ pub enum PreparedKeyRemapShapeFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum PreparedValueRuleShapeFact {
     /// The value passes through unchanged.
@@ -2997,6 +3067,7 @@ pub enum PreparedValueRuleShapeFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum PreparedForwardingKind {
     /// Identity type parameters are forwarded unchanged.
@@ -3017,6 +3088,7 @@ pub enum PreparedForwardingKind {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct PreparedForwardPayloadFact {
     /// The forwarded target name.
@@ -3040,6 +3112,7 @@ pub struct PreparedForwardPayloadFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum PreparedWrapperKindFact {
     /// Not a wrapper.
@@ -3067,6 +3140,7 @@ pub enum PreparedWrapperKindFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct PreparedSurfaceModifiersFact {
     /// Optionality overlay (`Some(true)` add `?`, `Some(false)` remove, `None`
@@ -3090,6 +3164,7 @@ pub struct PreparedSurfaceModifiersFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct PreparedWrapperShapeFact {
     /// The wrapper kind discriminant.
@@ -3119,6 +3194,7 @@ pub struct PreparedWrapperShapeFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum PreparedProjectionClassFact {
     /// The decl projects its own directly-declared members.
@@ -3383,6 +3459,7 @@ pub struct AnalyzedMacroFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct SynthesizedLeafMember {
     /// The member name.
@@ -3408,6 +3485,7 @@ pub struct SynthesizedLeafMember {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum FactOrLocator {
     /// A closed scalar/leaf fact.
@@ -3417,7 +3495,7 @@ pub enum FactOrLocator {
     /// nested mirror of [`ClosedTypeFact::LeafUnion`]. Ordered as produced;
     /// leaf members only, so the arm stays non-recursive and the fact is
     /// complete by itself (never a union of unions, never a locator arm).
-    LeafUnion(Arc<[LeafTypeFact]>),
+    LeafUnion(OwnedSlice<LeafTypeFact>),
     /// The escape: any non-leaf structure addressed by a body locator.
     Locator(TypeBodySlot),
     /// The authored macro / field payload escape (`define*<T>()`, `$props<T>()`,
@@ -3431,8 +3509,24 @@ pub enum FactOrLocator {
     /// default's empty / legacy-prop `$props` map and its snippet `$slots`
     /// map): named LEAF members only — closed and finite by construction,
     /// never an open recursive arm.
-    LeafObject(Arc<[SynthesizedLeafMember]>),
+    LeafObject(OwnedSlice<SynthesizedLeafMember>),
 }
+
+// List items held in owned lists: measured through their `HeapSize`.
+verter_retention::measured_by_heap_size!(
+    LeafTypeFact,
+    SynthesizedLeafMember,
+    SynthesizedMemberFact,
+    TupleElementFact,
+    ProjectedMemberFact,
+    ProjectedIndexSignatureFact,
+    FunctionSignatureFact,
+    FunctionParamFact,
+    NarrowTypeParam,
+    ObjectMemberFact,
+    AuthoredReferenceArgLocator,
+    SemanticTypeSource,
+);
 
 /// A closed leaf type fact (a primitive, a literal, or a bare named reference).
 #[derive(
@@ -3445,6 +3539,7 @@ pub enum FactOrLocator {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum LeafTypeFact {
     /// A primitive type.
@@ -3472,6 +3567,7 @@ pub enum LeafTypeFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct SynthesizedMemberFact {
     /// The member name.
@@ -3495,6 +3591,7 @@ pub struct SynthesizedMemberFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct TupleElementFact {
     /// The element label, if a named tuple member.
@@ -3518,12 +3615,13 @@ pub struct TupleElementFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct TuplePayloadFact {
     /// Whether the tuple is readonly.
     pub readonly: bool,
     /// The ordered tuple elements.
-    pub elements: Arc<[TupleElementFact]>,
+    pub elements: OwnedSlice<TupleElementFact>,
 }
 
 /// An indexed-access fact (`Obj['a']['b']`) — path-precise, graph-free.
@@ -3537,12 +3635,13 @@ pub struct TuplePayloadFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct IndexedAccessFact {
     /// The object body locator.
     pub object: TypeBodySlot,
     /// The ordered index-key path.
-    pub index_path: Arc<[String]>,
+    pub index_path: OwnedSlice<String>,
 }
 
 /// The synthesized shape of a `ResolvedLocalType`.
@@ -3556,10 +3655,11 @@ pub struct IndexedAccessFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum ResolvedLocalShape {
     /// A synthesized object surface.
-    Object(Arc<[SynthesizedMemberFact]>),
+    Object(OwnedSlice<SynthesizedMemberFact>),
     /// A tuple payload.
     Tuple(TuplePayloadFact),
     /// An indexed access.
@@ -3603,6 +3703,7 @@ pub struct ResolvedLocalTypeFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct ProjectedMemberFact {
     /// Exact authored key, including a retained computed-key locator.
@@ -3638,6 +3739,7 @@ pub struct ProjectedMemberFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct ProjectedIndexSignatureFact {
     /// The index key parameter name.
@@ -3665,16 +3767,17 @@ pub struct ProjectedIndexSignatureFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct ProjectedSurfaceFact {
     /// The projected members.
-    pub members: Arc<[ProjectedMemberFact]>,
+    pub members: OwnedSlice<ProjectedMemberFact>,
     /// Ordered call signatures.
-    pub call_signatures: Arc<[FunctionSignatureFact]>,
+    pub call_signatures: OwnedSlice<FunctionSignatureFact>,
     /// Ordered construct signatures.
-    pub construct_signatures: Arc<[FunctionSignatureFact]>,
+    pub construct_signatures: OwnedSlice<FunctionSignatureFact>,
     /// Concrete declared index signatures.
-    pub index_signatures: Arc<[ProjectedIndexSignatureFact]>,
+    pub index_signatures: OwnedSlice<ProjectedIndexSignatureFact>,
     /// Open-surface flag (distinct from concrete `index_signatures`).
     pub has_index_signature: bool,
 }
@@ -3823,6 +3926,7 @@ pub struct SvelteScriptFactsFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum ClosedTypeFact {
     /// A primitive / literal / bare-named leaf.
@@ -3831,7 +3935,7 @@ pub enum ClosedTypeFact {
     /// result of a fully-closed reduction (e.g. a distributive
     /// `Exclude`/`Extract` over literal unions). Ordered as produced; leaf
     /// members only, so the fact is complete by itself.
-    LeafUnion(Arc<[LeafTypeFact]>),
+    LeafUnion(OwnedSlice<LeafTypeFact>),
     /// A closed object surface.
     Object(ObjectShapeFact),
     /// A function / call-shape.
@@ -3855,6 +3959,7 @@ pub enum ClosedTypeFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum ProjectedTypeFact {
     /// A projected object property member.
@@ -3886,7 +3991,7 @@ pub enum ProjectedTypeFact {
         /// The authored base body the projection starts from.
         base: AuthoredBodyLocator,
         /// The ordered member-name path off the base.
-        path: Arc<[FactPropertyKey]>,
+        path: OwnedSlice<FactPropertyKey>,
     },
     /// A projected callable occurrence route. `occurrence` is minted by the
     /// resolver from the exact instantiated semantic subject, so replay never
@@ -3944,10 +4049,11 @@ pub enum ProjectedTypeFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct CallableOccurrenceHandle {
     semantic_subject: u64,
-    path: Arc<[String]>,
+    path: OwnedSlice<String>,
 }
 
 impl CallableOccurrenceHandle {
@@ -3956,13 +4062,13 @@ impl CallableOccurrenceHandle {
     pub fn root(semantic_subject: u64) -> Self {
         Self {
             semantic_subject,
-            path: Arc::from([]),
+            path: OwnedSlice::default(),
         }
     }
 
     /// Mint a callable member occurrence.
     #[must_use]
-    pub fn member(semantic_subject: u64, path: Arc<[String]>) -> Self {
+    pub fn member(semantic_subject: u64, path: OwnedSlice<String>) -> Self {
         Self {
             semantic_subject,
             path,
@@ -4069,6 +4175,7 @@ impl ResolvedEmitOccurrenceId {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum CallableOccurrenceProjection {
     /// Payload parameters beginning at the given semantic parameter index.
@@ -4091,6 +4198,7 @@ pub enum CallableOccurrenceProjection {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum IndexSignaturePosition {
     /// The declared key type (`[key: K]`).
@@ -4147,6 +4255,7 @@ pub type SynthesizedTypeFact = ResolvedLocalShape;
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum SemanticTypeSource {
     /// (a) an authored parse-backed body addressed by a content-free locator.
@@ -4160,7 +4269,7 @@ pub enum SemanticTypeSource {
     Closed(ClosedTypeFact),
     /// (s) a synthetic slot-binding / `defineSlots` binding carrier source
     /// (the no-parser graph-native binding row's publication source).
-    SyntheticSlotBinding(Arc<crate::SyntheticCarrierKey>),
+    SyntheticSlotBinding(verter_retention::owned::Owned<crate::SyntheticCarrierKey>),
 }
 
 /// A PROVEN structural reason a schema position carries no semantic type
@@ -4179,6 +4288,7 @@ pub enum SemanticTypeSource {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum SchemaAbsence {
     /// The position carries no semantic type annotation in the producing
@@ -4210,6 +4320,7 @@ pub enum SchemaAbsence {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum SemanticSourceFailure {
     /// A REQUIRED payload/value position (a realized emit signature's payload
@@ -4256,6 +4367,7 @@ pub enum SemanticSourceFailure {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 // `Present` dominates the payload by design: the faithful source carrier IS
 // the common case, and the wire schema round-trips the enum by value — boxing
@@ -4427,10 +4539,10 @@ pub struct ExpansionResultFact<T> {
 /// already-absolute case (a source re-absolutized under a consuming scope)
 /// returns `None` allocation-free. On the first change the unchanged
 /// prefix is copied once and the remainder rebuilt.
-fn absolutize_fact_slice<T: Clone>(
-    items: &Arc<[T]>,
+fn absolutize_fact_slice<T: Clone, S: From<Vec<T>>>(
+    items: &[T],
     absolutize: impl Fn(&T) -> Option<T>,
-) -> Option<Arc<[T]>> {
+) -> Option<S> {
     // Allocation-free scan to the first changed element; an unchanged
     // slice exits here without touching the heap.
     let (first_changed, first_value) = items
@@ -4444,7 +4556,7 @@ fn absolutize_fact_slice<T: Clone>(
     for item in &items[first_changed + 1..] {
         rebuilt.push(absolutize(item).unwrap_or_else(|| item.clone()));
     }
-    Some(Arc::from(rebuilt.into_boxed_slice()))
+    Some(S::from(rebuilt))
 }
 
 /// Absolutize an optional slot position in place-style (None = unchanged).
@@ -4517,7 +4629,7 @@ impl AuthoredReferenceHeadFact {
         if prefix.is_empty() {
             return self.clone();
         }
-        let prefixed = |args: &Arc<[AuthoredReferenceArgLocator]>| {
+        let prefixed = |args: &OwnedSlice<AuthoredReferenceArgLocator>| {
             args.iter()
                 .map(|arg| match arg {
                     AuthoredReferenceArgLocator::Value(locator) => {
@@ -4537,8 +4649,8 @@ impl AuthoredReferenceHeadFact {
         match self {
             AuthoredReferenceHeadFact::Bare { local_name, args } => {
                 AuthoredReferenceHeadFact::Bare {
-                    local_name: Arc::clone(local_name),
-                    args: Arc::from(prefixed(args)),
+                    local_name: local_name.clone(),
+                    args: prefixed(args).into(),
                 }
             }
             AuthoredReferenceHeadFact::Qualified {
@@ -4546,18 +4658,18 @@ impl AuthoredReferenceHeadFact {
                 member_path,
                 args,
             } => AuthoredReferenceHeadFact::Qualified {
-                local_root: Arc::clone(local_root),
-                member_path: Arc::clone(member_path),
-                args: Arc::from(prefixed(args)),
+                local_root: local_root.clone(),
+                member_path: member_path.clone(),
+                args: prefixed(args).into(),
             },
             AuthoredReferenceHeadFact::ImportType {
                 specifier,
                 member_path,
                 args,
             } => AuthoredReferenceHeadFact::ImportType {
-                specifier: Arc::clone(specifier),
-                member_path: Arc::clone(member_path),
-                args: Arc::from(prefixed(args)),
+                specifier: specifier.clone(),
+                member_path: member_path.clone(),
+                args: prefixed(args).into(),
             },
             AuthoredReferenceHeadFact::NotReference => AuthoredReferenceHeadFact::NotReference,
             AuthoredReferenceHeadFact::Unavailable => AuthoredReferenceHeadFact::Unavailable,
@@ -4570,7 +4682,7 @@ impl AuthoredReferenceHeadFact {
     /// The authored LOCAL SPELLING is never rewritten; only the argument
     /// locators' anchors absolutize.
     fn absolutize(&self, canonical_id: &str) -> Option<Self> {
-        let args = |args: &Arc<[AuthoredReferenceArgLocator]>| {
+        let args = |args: &OwnedSlice<AuthoredReferenceArgLocator>| {
             absolutize_fact_slice(args, |arg| arg.absolutize(canonical_id))
         };
         match self {
@@ -4578,7 +4690,7 @@ impl AuthoredReferenceHeadFact {
                 local_name,
                 args: a,
             } => args(a).map(|args| AuthoredReferenceHeadFact::Bare {
-                local_name: Arc::clone(local_name),
+                local_name: local_name.clone(),
                 args,
             }),
             AuthoredReferenceHeadFact::Qualified {
@@ -4586,8 +4698,8 @@ impl AuthoredReferenceHeadFact {
                 member_path,
                 args: a,
             } => args(a).map(|args| AuthoredReferenceHeadFact::Qualified {
-                local_root: Arc::clone(local_root),
-                member_path: Arc::clone(member_path),
+                local_root: local_root.clone(),
+                member_path: member_path.clone(),
                 args,
             }),
             AuthoredReferenceHeadFact::ImportType {
@@ -4595,8 +4707,8 @@ impl AuthoredReferenceHeadFact {
                 member_path,
                 args: a,
             } => args(a).map(|args| AuthoredReferenceHeadFact::ImportType {
-                specifier: Arc::clone(specifier),
-                member_path: Arc::clone(member_path),
+                specifier: specifier.clone(),
+                member_path: member_path.clone(),
                 args,
             }),
             AuthoredReferenceHeadFact::NotReference | AuthoredReferenceHeadFact::Unavailable => {
@@ -4621,8 +4733,8 @@ impl FunctionSignatureFact {
             return None;
         }
         Some(Self {
-            type_parameters: type_parameters.unwrap_or_else(|| Arc::clone(&self.type_parameters)),
-            parameters: parameters.unwrap_or_else(|| Arc::clone(&self.parameters)),
+            type_parameters: type_parameters.unwrap_or_else(|| Clone::clone(&self.type_parameters)),
+            parameters: parameters.unwrap_or_else(|| Clone::clone(&self.parameters)),
             return_source: return_source.unwrap_or_else(|| self.return_source.clone()),
             return_reference_head: return_reference_head
                 .unwrap_or_else(|| self.return_reference_head.clone()),
@@ -4755,7 +4867,7 @@ impl IndexedAccessFact {
     fn absolutize(&self, canonical_id: &str) -> Option<Self> {
         self.object.absolutize(canonical_id).map(|object| Self {
             object,
-            index_path: Arc::clone(&self.index_path),
+            index_path: Clone::clone(&self.index_path),
         })
     }
 }
@@ -4820,7 +4932,7 @@ impl ProjectedTypeFact {
                 base.absolutize(canonical_id)
                     .map(|base| ProjectedTypeFact::MemberPath {
                         base,
-                        path: Arc::clone(path),
+                        path: Clone::clone(path),
                     })
             }
             ProjectedTypeFact::CallableOccurrence {
@@ -4882,13 +4994,13 @@ impl ProjectedTypeFact {
                     return None;
                 }
                 Some(ProjectedTypeFact::Surface(ProjectedSurfaceFact {
-                    members: members.unwrap_or_else(|| Arc::clone(&surface.members)),
+                    members: members.unwrap_or_else(|| Clone::clone(&surface.members)),
                     call_signatures: call_signatures
-                        .unwrap_or_else(|| Arc::clone(&surface.call_signatures)),
+                        .unwrap_or_else(|| Clone::clone(&surface.call_signatures)),
                     construct_signatures: construct_signatures
-                        .unwrap_or_else(|| Arc::clone(&surface.construct_signatures)),
+                        .unwrap_or_else(|| Clone::clone(&surface.construct_signatures)),
                     index_signatures: index_signatures
-                        .unwrap_or_else(|| Arc::clone(&surface.index_signatures)),
+                        .unwrap_or_else(|| Clone::clone(&surface.index_signatures)),
                     has_index_signature: surface.has_index_signature,
                 }))
             }

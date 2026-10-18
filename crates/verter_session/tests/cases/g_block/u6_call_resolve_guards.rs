@@ -56,7 +56,7 @@ fn count_for_b_after_publishing_a(a: &SemanticQueryKey, b: &SemanticQueryKey) ->
         QueryResult::Value(node),
         ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
-        Arc::from(Vec::new().into_boxed_slice()),
+        verter_type_engine::semantic_query::DepSignature::new(Vec::new().into_boxed_slice()),
         100,
     );
     graph.slot_candidate_count_for_tests(b)
@@ -86,7 +86,7 @@ fn assert_distinct_identity(a: &SemanticQueryKey, b: &SemanticQueryKey) {
 
 fn point(canonical: &str, offset: u32) -> ProgramPointId {
     ProgramPointId {
-        canonical_id: Arc::from(canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical),
         offset,
     }
 }
@@ -480,7 +480,7 @@ fn resolve_call_value_domain_is_resolve_call() {
 #[test]
 fn type_param_decl_carries_exact_param_node_and_per_parameter_const() {
     let decl = TypeParamDecl {
-        name: Arc::from("T"),
+        name: verter_type_expr::OwnedStr::from("T"),
         param: SemanticNodeId(41),
         constraint: Some(SemanticNodeId(42)),
         default: Some(SemanticNodeId(43)),

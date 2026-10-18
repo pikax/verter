@@ -120,7 +120,11 @@ the cache-runtime overhaul and any feature admitting cache entries.
 
 ## Aggregate retention account
 
-`crates/verter_session_query/src/retention/mod.rs` owns
+`crates/verter_retention` owns `SemanticRetentionAccount` and its charge
+primitives (re-exported unchanged as `verter_session_query::retention`). The
+crate sits below both `verter_type_expr` and `verter_session_query`, so the
+type-expression DTO and every identity type carry its owned handles directly.
+It owns
 `SemanticRetentionAccount` — the single process-local byte account every
 host-owned semantic store charges. One account per PROCESS (not per
 project): `ProjectTypeStore::retention_account()` hands back
@@ -163,6 +167,155 @@ component's co-resident members). A charge stored beside a cache entry
 outlives an eviction for as long as a reader snapshot holds the entry —
 which is correct, because the bytes are still resident.
 
+**What a charge measures.** A charge covers the allocations its owner
+keeps reachable, by CAPACITY, under the declared conventions of
+`verter_retention/src/allocation.rs` (heap block = payload rounded to 16 B plus a
+16 B header; `Arc` blocks include their counters; inline field bytes ride
+the block that embeds them) — never a fixed per-item proxy. Fact rails are
+measured by `allocation::fact_slice_bytes` (every fact's owned canonical
+`String` and leaf names), engine carriers (diagnostics and their errors,
+materialised points, dependency rails, query values, request prefixes,
+cost identities) by `semantic_query/allocation_footprint.rs`'s
+`OwnedHeap`. Each distinct `Arc` counts once per charge (`AliasSet`); an
+allocation that carries its own charge (an evidence page, a cost receipt,
+a pooled identity string, a graph node) is never charged by a holder.
+
+**Self-charged delivered allocations** (`verter_retention/src/owned.rs`). Everything
+a read hands its caller — the dependency rail (`DepSignature`, whose
+canonicals are `OwnedStr`s), the walker-diagnostic list
+(`WalkerDiagnostics`, whose names are `OwnedStr`s), and a value's
+outermost allocation with the lists nested in it (`OwnedSlice` /
+`Owned<T>`: flow-return and call results, candidate table, relation
+bindings, overload list, projection alternatives, runtime kinds, cycle-gate
+reasons) — and every identity string any of them, a graph payload, an error
+or a diagnostic names (declaration, slot, scope, locator-anchor, function,
+root and property identities, `QueryError` names, budget contexts) — is a
+sealed `Owned` cell (`OwnedSlice`, `OwnedStr`) that carries its charge inside
+the allocation. An empty `OwnedSlice` allocates nothing and holds nothing. Every owning clone shares the one charge and the charge is
+released in the step that frees the allocation, so a clone a caller keeps
+past every read, cache and store stays charged until its own drop, with no
+sweep. No accessor exposes the raw `Arc`. A delivery pins the cells it
+mints (`Owned::pin`, never refused); a cache retaining them takes an
+`OwnedHold` (`Owned::hold`), refusable, which adopts the pin into
+`Retained` together with every nested cell, and hands the charge back
+(`Retained → Pinned`, one step at the account's linearization point) when
+its last hold drops. A nested cell is offered to its parent's measurement,
+never counted in it, so a cell several parents share is charged once.
+A measurement returns `Footprint { bytes, handles }`: the bytes the owner
+charges itself and the handles it pins (caller) or holds (cache). A debug
+build panics when an owned cell's value reaches a raw `Arc`
+(`AliasSet::for_cell`), when a measurement drops the handles it collected,
+and when a delivered carrier counts heap outside its handles
+(`OwnedHandles::of`). The arena pins the owned handles its payloads reach,
+so a name cloned out of a node payload stays charged after the arena lets
+go; a released slot whose payload a reader still holds keeps the payload's
+block and heap charged until the last reader drops. `NodePayload::drop`
+releases that charge immediately; no arena mutation or reap is required.
+
+The cell's `Nested` box and child-registration slice are included in its
+charge. Cache holds additionally charge their backing slice for exactly
+the holds' lifetime (`HeldHandles`, also used by `RetentionCharge::holding`).
+Dropping the cache holds releases that bookkeeping while surviving cells
+return to `Pinned`. A weak view (`WeakOwned`) exists only for a cell built
+for one (`Owned::new_with_shared_block`, e.g. an interned dependency rail):
+the cell and every view share a `BlockShare`, so the block stays charged
+until both its strong owners and every view let go, in either order;
+`Owned::downgrade` of any other cell is `None`. Owned strings are named
+without a view by `OwnedStr::identity`, a never-reused stamp that keeps
+nothing allocated (the arena's thread-local scope digest uses it).
+
+**Shared registered allocations** (`verter_retention/src/shared.rs`). An allocation
+cache owners alias without handing it out — a build's fact carrier shared
+by its root, prefix backfills and SCC members; the self-root list; a raw leaf
+string a registered carrier still reaches (a fact's canonical, a self-root) — is charged ONCE through the
+store's `AliasCharges` registry, keyed by allocation address (the
+registered charge co-owns the allocation, so the address cannot be reused
+while it lives). Cache owners hold `CacheHold`s, callers `CallerHold`s;
+the same `Retained → Pinned` transfer and refusable re-adoption apply, and
+a holder reviving a charge whose last holder is releasing it keeps the
+charge's leaf holds in the reviver's class. A memo candidate's charges are
+`MemoRetention { own, carrier, delivered }`: `own` is cache-only
+bookkeeping (its entry in every slot it may populate, its point record,
+its lease metadata, its reverse-index registrations) and is released the
+moment the candidate drains; `delivered` are its `OwnedHold`s; a refusal
+summary uses the same split.
+
+**Graph storage is pinned** (`verter_retention/src/granular.rs`). The arena's live
+chunks, payload blocks and dedup tables, every signature epoch's tables
+(boxcar buckets, record heap, dedup indexes, side maps), and every flight
+cell are liveness obligations of the graph: `Pinned`, charged through
+`GranularPin`s settled in whole granules (never below the live total, by
+less than two granules), released with the storage — a retired epoch with
+its last holder. `HostRetentionSnapshot::semantic_graph_storage_bytes`
+reports the arena's and current epoch's part of `pinned_bytes`. A memo
+family's container (key, slot lists, budget-ledger record) is charged when
+the family is keyed and released with it. The origin-edge store's tables,
+edge lists, source lists and pooled fence blocks are part of the memo's
+bookkeeping pin, settled on every mutation.
+
+**Artifact and request caches.** The content-addressed artifact caches driven by
+`cache_runtime::lookup` (`ArtifactNode`: the component-meta shape,
+declaration-lookup, owner-collection and resolvability caches, the
+flow-slice stores, the compile-output caches) reserve entry metadata, key,
+facts, roots and measured payloads as well as their evidence pages.
+Direct compile publication uses the same reservation path. Independently
+delivered generated code and source maps are `OwnedStr` cells.
+Fresh delivery pins them through `pin_generated_texts`, including stateless,
+refused or fenced publication, runtime-render batches, and caller-supplied
+runtime/IDE product requests. Pinning a cell already retained by a cache
+shares its existing charge.
+Flow graph publication and peeks deliver `FlowGraphBundleRef` (`OwnedValue`):
+the bundle's payload pin follows readers past store teardown, while its
+map slot and separately allocated key backing release with the entry.
+The bundle's skeleton, binding map and graph are its own data, borrowed
+only and not `Clone`; a holder keeping one past a borrow keeps the bundle's
+handle (`SkeletonRef` / `BindingsRef` / `GraphRef`), the skeleton
+observation port included. Every table and name a borrow reaches — the
+skeleton's name, region, binding, site, return, write and closure tables
+and their nested rails, edge and read paths, binding identities, the
+function declaration name and the key's canonical — is an `OwnedSlice` /
+`OwnedStr` charged by its own cell, so a clone of one keeps exactly that
+allocation charged past the bundle. `OwnedSlice::make_mut` edits a fresh,
+uncharged list in place and copies a shared or charged one.
+Key measurement primes its alias set with the bundle's entire payload: shared backing
+counts once, while independently allocated equal strings and deep copies
+are charged separately.
+`ValidatedFactCache` delivers `OwnedValue` cells and its fact signatures as
+`OwnedFactSignature` (`OwnedSlice<FactVersionRef>`) cells; its candidate
+reservation holds both and keeps cache bookkeeping separate from the
+reader-shared charges. A value or signature the route and imported-root
+drivers deliver without admitting it is pinned to the caller.
+Stable component-meta requests measure their resolved state, and prepared
+bundles measure their tables and retain each lazily committed declaration
+and name-resolution table as a separate cell. Reverse-indexed candidates
+reserve their metadata and hold their owned values.
+
+`OwnedTree` measures the raw allocations reachable through a plain tree;
+it does not by itself seal independently clonable inner `Arc` fields, so
+an allocation several owners share, or a caller can keep, is its own
+owned cell. A published type source (`SharedTypeSource`) and a lowered
+flow slice (`SharedFlowSliceIR`) are strict `Owned` cells, not trees:
+every list and name their values keep is an `OwnedSlice` / `OwnedStr`, and
+a debug build fails the `HeapSize` measurement of such a cell that reaches
+a raw `Arc` (`HeapMeter::first`). Further owned cells: a file analysis snapshot's lists (`SharedList`, shared with the
+host analysis lists and the artifact's export signatures), template
+analyses (the raw template slot holds the one it serves, refusably with
+its evidence), module-export names, namespace targets and proofs (a
+table's retention record holds the strings its own bindings introduce
+before it claims its record and evidence; the HAMT backing keeps a
+declared per-written-slot convention), and the import-type carrier's
+specifier, and a component-meta analysis (`SharedComponentMetaAnalysis`:
+the final-result cache holds it and every `ComponentMetaDelivery` shares
+it). A terminal output unwrap (`OutputPayload::into_type_expr`)
+moves the tree out of its cell when the carrier is the cell's last holder
+(`Owned::try_unwrap`, releasing the charge as the tree leaves) and
+otherwise hands the caller an unshared deep copy
+(`verter_retention::unshared::Unshared`, `#[derive(Unshared)]`), never an
+alias of a retained payload. The parse-artifact layer (`FileArtifactStore`
+entries, `DeclBodyMemo`, scheduler snapshots) stays outside the account;
+a prepared-declaration bundle counts what it reaches of it while it lives
+and charges none of the layer's own storage.
+
 **Refusal routing.** `RetentionRefusal::{Oversized, Pressure,
 ActiveExhausted}` all map to `NonAdmissionReason::RetentionPressure`,
 whose propagation is `LocalOnly`: the value is complete and correct, so
@@ -172,13 +325,19 @@ from `BudgetExceeded`, which means the compute stopped early and its
 value may be partial.
 
 **Participants** (each charges the account, none keeps a parallel byte
-quota): `IdentityInterner` (exact payload bytes; sheds pool-only entries
-and retries once on refusal, else returns the string un-pooled),
+quota): `IdentityInterner` (each pooled `OwnedStr` is held by the pool and
+charged by its own cell, its map slot is a separate charge,
+`pooled_entry_bytes`; sheds pool-only entries and retries once on refusal,
+else returns the string un-pooled; when the pool lets go, the string's
+charge passes to the identities still holding it),
 `ComponentMetaResultDb` via `BoundedCandidateMap` (the charge rides the
-`RetentionCandidate`), the `SemanticGraphStore` family memo (the charge
-rides `MemoEntry`; `warm_publish_one` refusal returns
-`WarmPublishOutcome::Skipped`, and an SCC batch is charged once as a
-whole so a component can never publish torn), `DeclLoweringService`/`SnapshotShard` (one `Pinned` charge per retained
+`RetentionCandidate`), the `SemanticGraphStore` family memo (the charges
+ride `MemoEntry::retention`; `warm_publish_one` refusal returns
+`WarmPublishOutcome::Skipped`, and an SCC batch is reserved all or
+nothing — members' own shares, their shared holds and every newly keyed
+family's container — so a component can never publish torn), the
+substitution and deferred-evaluation memos, refusal summaries, the arena,
+the signature kernel and flight cells (see above), `DeclLoweringService`/`SnapshotShard` (one `Pinned` charge per retained
 snapshot, owned by the `ShardEntry` so a second lease on the same
 snapshot never charges twice), and — outside `verter_session` —
 `verter_lsp`'s `ProviderSurfaceStore` (one `Pinned` charge per synced

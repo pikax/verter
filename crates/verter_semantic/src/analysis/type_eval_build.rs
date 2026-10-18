@@ -1003,9 +1003,9 @@ fn decl_anchor(
     space: LocatorSymbolSpace,
 ) -> AuthoredAnchor {
     AuthoredAnchor {
-        canonical_id: canonical_id.clone(),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical_id.clone()),
         owner,
-        symbol: Arc::from(name),
+        symbol: verter_type_expr::OwnedStr::from(name),
         space,
     }
 }
@@ -1143,7 +1143,7 @@ fn annotation_source(
 fn shape_member_span_origin(contributor: DeclContributorAnchor, ordinal: u32) -> MemberSpansOrigin {
     MemberSpansOrigin::Authored {
         anchor: contributor,
-        member_path: Arc::from(vec![ordinal]),
+        member_path: From::from(vec![ordinal]),
     }
 }
 
@@ -1159,7 +1159,7 @@ fn signature_spans_origin(
         },
         LoweredSignatureOrigin::ShapeMember { ordinal } => FunctionSpansOrigin::Member {
             anchor: contributor,
-            member_path: Arc::from(vec![ordinal]),
+            member_path: From::from(vec![ordinal]),
         },
         LoweredSignatureOrigin::Synthetic => FunctionSpansOrigin::Synthetic(SourceSynthetic),
     }
@@ -1421,7 +1421,7 @@ fn object_shape_fact(
                         readonly: index_sig.readonly,
                         span_origin: IndexSignatureSpansOrigin::Authored {
                             anchor: contributor,
-                            member_path: Arc::from(vec![ordinal]),
+                            member_path: From::from(vec![ordinal]),
                         },
                     })
                 }
@@ -2844,13 +2844,15 @@ fn class_method_flow_identity(
     }
     Some(FlowFunctionReturnIdentity {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(""),
+            canonical_id: verter_type_expr::OwnedStr::from(""),
             owner: TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(class_name),
+            symbol: verter_type_expr::OwnedStr::from(class_name),
             space: LocatorSymbolSpace::Value,
         },
         function_part: FunctionPartIdentity::Member {
-            member_path: Arc::from(vec![raw_member_ordinal].into_boxed_slice()),
+            member_path: verter_type_expr::OwnedSlice::from(
+                vec![raw_member_ordinal].into_boxed_slice(),
+            ),
         },
         overload_ordinal,
     })
@@ -2884,13 +2886,13 @@ fn mark_variable_object_flow_returns(shape: &mut ObjectExpr, name: &str) {
         };
         method.function.flow_return = Some(Box::new(FlowFunctionReturnIdentity {
             anchor: AuthoredAnchor {
-                canonical_id: Arc::from(""),
+                canonical_id: verter_type_expr::OwnedStr::from(""),
                 owner: TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from(name),
+                symbol: verter_type_expr::OwnedStr::from(name),
                 space: LocatorSymbolSpace::Value,
             },
             function_part: FunctionPartIdentity::Member {
-                member_path: Arc::from(vec![ordinal].into_boxed_slice()),
+                member_path: verter_type_expr::OwnedSlice::from(vec![ordinal].into_boxed_slice()),
             },
             overload_ordinal: 0,
         }));
@@ -3022,13 +3024,13 @@ fn collect_named_class_selecting(
                         function_expr.flow_return = static_property_key_name(&prop.key).map(|_| {
                             Box::new(FlowFunctionReturnIdentity {
                                 anchor: AuthoredAnchor {
-                                    canonical_id: Arc::from(""),
+                                    canonical_id: verter_type_expr::OwnedStr::from(""),
                                     owner: TopLevelOwnerId::ordinary_file(),
-                                    symbol: Arc::from(name.as_str()),
+                                    symbol: verter_type_expr::OwnedStr::from(name.as_str()),
                                     space: LocatorSymbolSpace::Value,
                                 },
                                 function_part: FunctionPartIdentity::Member {
-                                    member_path: Arc::from(
+                                    member_path: verter_type_expr::OwnedSlice::from(
                                         vec![raw_member_ordinal].into_boxed_slice(),
                                     ),
                                 },
@@ -3056,13 +3058,13 @@ fn collect_named_class_selecting(
                         function_expr.flow_return = static_property_key_name(&prop.key).map(|_| {
                             Box::new(FlowFunctionReturnIdentity {
                                 anchor: AuthoredAnchor {
-                                    canonical_id: Arc::from(""),
+                                    canonical_id: verter_type_expr::OwnedStr::from(""),
                                     owner: TopLevelOwnerId::ordinary_file(),
-                                    symbol: Arc::from(name.as_str()),
+                                    symbol: verter_type_expr::OwnedStr::from(name.as_str()),
                                     space: LocatorSymbolSpace::Value,
                                 },
                                 function_part: FunctionPartIdentity::Member {
-                                    member_path: Arc::from(
+                                    member_path: verter_type_expr::OwnedSlice::from(
                                         vec![raw_member_ordinal].into_boxed_slice(),
                                     ),
                                 },
@@ -4767,9 +4769,9 @@ fn lower_identifier_variable_parts(
                     Arc::make_mut(function).flow_return =
                         Some(Box::new(FlowFunctionReturnIdentity {
                             anchor: AuthoredAnchor {
-                                canonical_id: Arc::from(""),
+                                canonical_id: verter_type_expr::OwnedStr::from(""),
                                 owner: TopLevelOwnerId::ordinary_file(),
-                                symbol: Arc::from(name.as_str()),
+                                symbol: verter_type_expr::OwnedStr::from(name.as_str()),
                                 space: LocatorSymbolSpace::Value,
                             },
                             function_part: FunctionPartIdentity::Initializer,
@@ -6140,15 +6142,14 @@ fn expanded_field_authority(
     exactness: verter_session_query::analysis::type_expand::ExpansionExactness,
     diagnostics: &[verter_session_query::analysis::type_expand::ExpansionDiagnostic],
 ) -> verter_type_expr::ResolvedTypeAuthority {
-    let diagnostics: Arc<[verter_type_expr::ResolutionDiagnostic]> = diagnostics
+    let diagnostics: verter_type_expr::ResolutionDiagnostics = diagnostics
         .iter()
         .map(|diagnostic| verter_type_expr::ResolutionDiagnostic {
             kind: publication_diagnostic_kind(diagnostic.reason),
-            context: Arc::from(diagnostic.context.as_str()),
-            property_name: diagnostic.property_name.as_deref().map(Arc::from),
+            context: diagnostic.context.as_str().into(),
+            property_name: diagnostic.property_name.as_deref().map(Into::into),
         })
-        .collect::<Vec<_>>()
-        .into();
+        .collect();
     verter_type_expr::ResolvedTypeAuthority::present(
         source,
         publication_exactness(exactness),

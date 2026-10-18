@@ -433,7 +433,7 @@ pub fn project_one_level_surface<C: crate::resolver_core::ResolverCapabilities>(
     ctx: &dyn crate::resolver_core::ResolverContext<C>,
     dispatch: &ProjectSemanticDispatch<'_, C>,
     base: SemanticNodeId,
-    path: Arc<[PathSegment]>,
+    path: verter_type_expr::OwnedSlice<PathSegment>,
     context: ProjectionReductionContext,
     walker_diagnostics: Option<&mut Vec<super::walk::ShallowDiagnostic>>,
 ) -> SurfaceResolution<OneLevelSurface> {
@@ -483,7 +483,9 @@ pub fn project_one_level_surface<C: crate::resolver_core::ResolverCapabilities>(
                     ctx,
                     dispatch,
                     constraint,
-                    Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                    verter_type_expr::OwnedSlice::from(
+                        Vec::<PathSegment>::new().into_boxed_slice(),
+                    ),
                     context,
                     walker_diagnostics,
                 )
@@ -613,7 +615,9 @@ pub fn project_one_level_surface<C: crate::resolver_core::ResolverCapabilities>(
                     ctx,
                     dispatch,
                     constraint,
-                    Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                    verter_type_expr::OwnedSlice::from(
+                        Vec::<PathSegment>::new().into_boxed_slice(),
+                    ),
                     context,
                     None,
                 )
@@ -818,9 +822,9 @@ pub fn read_positive_surface_members<C: crate::resolver_core::ResolverCapabiliti
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnresolvedSurfaceArm {
     /// The reference's head name as written (`NotFound` in `extends NotFound`).
-    pub(crate) name: Arc<str>,
+    pub(crate) name: verter_session_query::retention::owned::OwnedStr,
     /// Canonical id of the file whose declaration authored the arm.
-    pub(crate) owner_canonical: Arc<str>,
+    pub(crate) owner_canonical: verter_session_query::retention::owned::OwnedStr,
     /// Exact top-level lexical owner that authored the arm.
     pub(crate) owner: verter_type_expr::TopLevelOwnerId,
 }
@@ -887,8 +891,8 @@ fn unresolved_surface_arms_from_diags(
                 owner_canonical,
                 owner,
             } => Some(UnresolvedSurfaceArm {
-                name: Arc::clone(name),
-                owner_canonical: Arc::clone(owner_canonical),
+                name: name.clone(),
+                owner_canonical: owner_canonical.clone(),
                 owner: *owner,
             }),
             _ => None,
@@ -1121,13 +1125,15 @@ fn runtime_object_macro_surface<C: crate::resolver_core::ResolverCapabilities>(
 ) -> Option<MacroArgumentSurface> {
     use crate::semantic_query::{AuthoredPropertyKey, MacroOwnBodyStamp, MergeRoleStamp};
 
-    let declaration_origin = Some(Arc::clone(owner_canonical));
+    let declaration_origin = Some(verter_type_expr::OwnedStr::from(owner_canonical));
     let mut entries: Vec<SurfaceEntry> = Vec::new();
     match macro_kind {
         AnalyzedMacroKind::DefineExpose => {
             for field in &mac.expose_fields {
                 entries.push(SurfaceEntry::Member(SurfaceMember {
-                    key: AuthoredPropertyKey::String(Arc::from(field.name.as_str())),
+                    key: AuthoredPropertyKey::String(verter_type_expr::OwnedStr::from(
+                        field.name.as_str(),
+                    )),
                     // The exposed value's real type is not re-derived
                     // here (see the doc comment above) — `unknown` is
                     // the honest placeholder, never a fabricated shape.
@@ -1150,7 +1156,9 @@ fn runtime_object_macro_surface<C: crate::resolver_core::ResolverCapabilities>(
         AnalyzedMacroKind::DefineProps => {
             for field in &mac.prop_fields {
                 entries.push(SurfaceEntry::Member(SurfaceMember {
-                    key: AuthoredPropertyKey::String(Arc::from(field.name.as_str())),
+                    key: AuthoredPropertyKey::String(verter_type_expr::OwnedStr::from(
+                        field.name.as_str(),
+                    )),
                     value: unknown_member_value_node(dispatch),
                     optional: field.is_optional,
                     readonly: false,
@@ -1187,7 +1195,7 @@ fn runtime_object_macro_surface<C: crate::resolver_core::ResolverCapabilities>(
         ctx,
         dispatch,
         base,
-        Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
         ProjectionReductionContext::published(ProjectionMode::Shallow),
         None,
     )
@@ -1216,7 +1224,7 @@ fn decompose_indexed_access_chain_node<C: crate::resolver_core::ResolverCapabili
     node: crate::semantic_query::SemanticNodeId,
 ) -> (
     crate::semantic_query::SemanticNodeId,
-    Arc<[crate::semantic_query::PathSegment]>,
+    verter_type_expr::OwnedSlice<PathSegment>,
 ) {
     use crate::semantic_query::{IndexKey, PathSegment, SemanticNodeData};
 
@@ -1229,7 +1237,7 @@ fn decompose_indexed_access_chain_node<C: crate::resolver_core::ResolverCapabili
         match data.as_ref() {
             SemanticNodeData::IndexedAccess { object, index } => match index {
                 IndexKey::String(s) => {
-                    rev_path.push(PathSegment::Index(IndexKey::String(Arc::clone(s))));
+                    rev_path.push(PathSegment::Index(IndexKey::String(s.clone())));
                     current = *object;
                 }
                 IndexKey::Number(n) => {
@@ -1244,5 +1252,8 @@ fn decompose_indexed_access_chain_node<C: crate::resolver_core::ResolverCapabili
         }
     }
     rev_path.reverse();
-    (current, Arc::from(rev_path.into_boxed_slice()))
+    (
+        current,
+        verter_type_expr::OwnedSlice::from(rev_path.into_boxed_slice()),
+    )
 }

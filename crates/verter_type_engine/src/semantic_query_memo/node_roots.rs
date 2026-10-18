@@ -26,6 +26,28 @@ pub(crate) fn construction_root_bytes() -> usize {
         + 2 * std::mem::size_of::<NodeRoot>()
 }
 
+impl verter_session_query::retention::owned::Measured for RootOwner {
+    /// Its operand list. The arena it roots in is the graph's storage,
+    /// charged with it.
+    fn heap_bytes(
+        &self,
+        _aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        root_ids_bytes(&self.ids)
+    }
+}
+
+/// The heap an operand list holds once it spills past its inline ids.
+fn root_ids_bytes(ids: &RootIds) -> usize {
+    if ids.spilled() {
+        verter_session_query::retention::allocation::heap_block_bytes(
+            ids.capacity() * std::mem::size_of::<SemanticNodeId>(),
+        )
+    } else {
+        0
+    }
+}
+
 impl Drop for RootOwner {
     fn drop(&mut self) {
         self.arena.release_roots(&self.ids);
@@ -34,13 +56,13 @@ impl Drop for RootOwner {
 
 /// One immutable retained operand multiset. Clones share one root reservation;
 /// separate owners acquire separate counts, including repeated operands.
-#[derive(Clone, Default)]
-pub struct NodeRootSet(Option<Arc<RootOwner>>);
+#[derive(Clone, Default, verter_retention::heap_size::HeapSize)]
+pub struct NodeRootSet(Option<verter_session_query::retention::owned::Owned<RootOwner>>);
 
 /// An ownership attachment is transport, never semantic key identity.
 /// Each wrapper holds its issuing arena's reservation even when the weak
 /// process-wide interner shares equal content with another arena.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, verter_retention::heap_size::HeapSize)]
 pub(crate) struct IdentityNodeRoots(pub(crate) NodeRootSet);
 
 impl IdentityNodeRoots {
@@ -108,6 +130,29 @@ impl std::fmt::Debug for NodeRootSet {
 }
 
 impl NodeRootSet {
+    /// The root owner's block and operand list this set holds, counted
+    /// without alias tracking: for a holder that is the set's only charged
+    /// owner.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        use verter_session_query::retention::allocation::heap_block_bytes;
+        self.0.as_ref().map_or(0, |owner| {
+            verter_session_query::retention::owned::Owned::<RootOwner>::cell_block_bytes()
+                .max(heap_block_bytes(0))
+                + root_ids_bytes(&owner.ids)
+        })
+    }
+
+    /// The root owner's block and operand list, once per `aliases`: the
+    /// ownership metadata a retained holder of this set keeps alive. The
+    /// rooted nodes themselves are the arena's.
+    pub(crate) fn owned_heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        // The root owner is an owned allocation, charged by its own cell.
+        self.0.as_ref().map_or(0, |owner| owner.offer(aliases))
+    }
+
     /// Keep a cache hit alive in the active issuing graph construction scope.
     pub fn retain_for_construction(&self) {
         self.capture_in_scope();
@@ -140,7 +185,9 @@ impl NodeRootSet {
             return Ok(Self::default());
         }
         arena.retain(&ids)?;
-        Ok(Self(Some(Arc::new(RootOwner { arena, ids }))))
+        Ok(Self(Some(
+            verter_session_query::retention::owned::Owned::new(RootOwner { arena, ids }),
+        )))
     }
 
     /// Retain the live operands of `ids` from `arena`, dropping any id that
@@ -153,7 +200,9 @@ impl NodeRootSet {
         if ids.is_empty() {
             return Self::default();
         }
-        Self(Some(Arc::new(RootOwner { arena, ids })))
+        Self(Some(verter_session_query::retention::owned::Owned::new(
+            RootOwner { arena, ids },
+        )))
     }
 
     pub fn operands(&self) -> &[SemanticNodeId] {
@@ -256,10 +305,12 @@ impl NodeRoot {
     pub(crate) fn adopt(arena: Arc<NodeArenaCore>, id: SemanticNodeId) -> Self {
         Self {
             id,
-            roots: NodeRootSet(Some(Arc::new(RootOwner {
-                arena,
-                ids: smallvec::smallvec![id],
-            }))),
+            roots: NodeRootSet(Some(verter_session_query::retention::owned::Owned::new(
+                RootOwner {
+                    arena,
+                    ids: smallvec::smallvec![id],
+                },
+            ))),
         }
     }
     pub fn id(&self) -> SemanticNodeId {

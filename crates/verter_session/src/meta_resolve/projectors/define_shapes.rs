@@ -408,8 +408,8 @@ pub(crate) fn slot_field_function_source(
         }]
     };
     SemanticTypeSource::Closed(ClosedTypeFact::Function(FunctionSignatureFact {
-        type_parameters: std::sync::Arc::from(Vec::new().into_boxed_slice()),
-        parameters: std::sync::Arc::from(parameters.into_boxed_slice()),
+        type_parameters: From::from(Vec::new().into_boxed_slice()),
+        parameters: From::from(parameters.into_boxed_slice()),
         // The return position has no addressable authored slot on a
         // payload-less slot — the typed miss, recovered on demand.
         return_source: verter_type_expr::facts::FunctionReturnSource::Absent,

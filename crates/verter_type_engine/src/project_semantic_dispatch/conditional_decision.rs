@@ -161,7 +161,9 @@ trait ConditionalBranches<C: crate::resolver_core::ResolverCapabilities> {
         dispatch: &ProjectSemanticDispatch<'_, C>,
     ) -> Option<(SemanticNodeId, SemanticNodeId)>;
     /// The pending substitution the branches carry.
-    fn pending(&self) -> Option<Arc<ConditionalPendingSubstitution>>;
+    fn pending(
+        &self,
+    ) -> Option<verter_session_query::retention::owned::Owned<ConditionalPendingSubstitution>>;
     /// One member of a distributed check, decided without distribution.
     fn member(
         &mut self,
@@ -184,7 +186,7 @@ trait ConditionalBranches<C: crate::resolver_core::ResolverCapabilities> {
 struct MaterializedBranches {
     true_branch: SemanticNodeId,
     false_branch: SemanticNodeId,
-    pending: Option<Arc<ConditionalPendingSubstitution>>,
+    pending: Option<verter_session_query::retention::owned::Owned<ConditionalPendingSubstitution>>,
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> ConditionalBranches<C>
@@ -213,7 +215,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ConditionalBranches<C>
         Some((self.true_branch, self.false_branch))
     }
 
-    fn pending(&self) -> Option<Arc<ConditionalPendingSubstitution>> {
+    fn pending(
+        &self,
+    ) -> Option<verter_session_query::retention::owned::Owned<ConditionalPendingSubstitution>> {
         self.pending.clone()
     }
 
@@ -230,9 +234,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ConditionalBranches<C>
             false_branch: self.false_branch,
             distributive: false,
             pending: self.pending.as_ref().map(|pending| {
-                pending
-                    .distributed_over(member)
-                    .map_or_else(|| Arc::clone(pending), Arc::new)
+                pending.distributed_over(member).map_or_else(
+                    || pending.clone(),
+                    verter_session_query::retention::owned::Owned::new,
+                )
             }),
         })
     }
@@ -293,7 +298,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ConditionalBranches<C> for L
         Some((true_branch, (self.lower_branch)(false)))
     }
 
-    fn pending(&self) -> Option<Arc<ConditionalPendingSubstitution>> {
+    fn pending(
+        &self,
+    ) -> Option<verter_session_query::retention::owned::Owned<ConditionalPendingSubstitution>> {
         None
     }
 
@@ -361,7 +368,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             true_branch: SemanticNodeId,
             false_branch: SemanticNodeId,
             distributive: bool,
-            pending: Option<Arc<ConditionalPendingSubstitution>>,
+            pending: Option<
+                verter_session_query::retention::owned::Owned<ConditionalPendingSubstitution>,
+            >,
         ) -> super::walk::QueryBuildOutput {
             verter_audit::attribute_scope!(ConditionalReduce);
             self.decide_conditional(
@@ -728,7 +737,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         extends: SemanticNodeId,
         (true_branch, false_branch): (SemanticNodeId, SemanticNodeId),
         distributive: bool,
-        pending: Option<Arc<ConditionalPendingSubstitution>>,
+        pending: Option<
+            verter_session_query::retention::owned::Owned<ConditionalPendingSubstitution>,
+        >,
         selection: ConditionalBranchSelection,
     ) -> super::walk::QueryBuildOutput {
         let suspended_roots = self.observed_self_roots_from_nodes(
@@ -861,7 +872,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             Some(SemanticNodeData::TemplateLiteral {
                 quasis,
                 expressions,
-            }) => (Arc::clone(quasis), Arc::clone(expressions.as_arc())),
+            }) => (quasis.clone(), Arc::clone(expressions.as_arc())),
             _ => return None,
         };
         let read = self.execute_read(SemanticQueryKey::TemplateLiteralReduce {
@@ -1026,7 +1037,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     result,
                     OriginEdgeKind::InferBind,
                     Arc::from([check, extends]),
-                    OriginMeta::SubstitutedParam(Arc::clone(&binding.name)),
+                    OriginMeta::SubstitutedParam(binding.name.clone()),
                     fence.clone(),
                 );
             }
@@ -1199,10 +1210,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 name,
                 whole_hash,
             })) => crate::semantic_query::DeclIdentity {
-                canonical_id: Arc::clone(canonical_id),
+                canonical_id: canonical_id.clone(),
                 owner: *owner,
                 whole_hash: *whole_hash,
-                decl_name: Arc::clone(name),
+                decl_name: name.clone(),
             },
             _ => return node,
         };
@@ -1659,9 +1670,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     ) -> Option<SemanticNodeId> {
         let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
             self.type_slot_for(
-                Arc::clone(&base.canonical_id),
+                base.canonical_id.clone(),
                 base.owner,
-                Arc::clone(&base.decl_name),
+                base.decl_name.clone(),
             ),
             Arc::clone(args),
             self.instantiate_context_for(

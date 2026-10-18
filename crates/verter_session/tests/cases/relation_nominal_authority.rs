@@ -1599,7 +1599,7 @@ fn path_walker_pending_segment_over_nominal_carrier_widens() {
         &host,
         verter_type_engine::semantic_query::SemanticQueryKey::ProjectPath {
             base: carrier,
-            path: Arc::from(vec![
+            path: verter_type_expr::OwnedSlice::from(vec![
                 verter_type_engine::semantic_query::PathSegment::Member(
                     verter_type_engine::semantic_query::PropertyKey::identifier(Arc::from(
                         "description",

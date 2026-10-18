@@ -360,9 +360,9 @@ fn recursive_mapped_index_budget_refusal_does_not_warm() {
     // the selected index demand below owns reduction of its recursive value.
     let shell = dispatch.execute_read(SemanticQueryKey::Instantiate(InstantiateKey::new(
         dispatch.type_slot_for(
-            Arc::from("/paths/scenario.ts"),
+            verter_type_expr::OwnedStr::from("/paths/scenario.ts"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from("Probe"),
+            verter_type_expr::OwnedStr::from("Probe"),
         ),
         Arc::from([]),
         dispatch.instantiate_context_for(
@@ -388,7 +388,7 @@ fn recursive_mapped_index_budget_refusal_does_not_warm() {
     // IndexedAccess is admitted under this canonical ProjectPath identity.
     let memo_key = SemanticQueryKey::ProjectPath {
         base: *object,
-        path: Arc::from([PathSegment::Index(index.clone())]),
+        path: verter_type_expr::OwnedSlice::from([PathSegment::Index(index.clone())]),
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     };
     for request in 1..=2 {
@@ -515,9 +515,9 @@ fn recursive_paths_admissions(count: usize, groups: usize) -> (u64, usize) {
     let graph = host.project_type_store().semantic_graph();
     let shell = dispatch.execute_read(SemanticQueryKey::Instantiate(InstantiateKey::new(
         dispatch.type_slot_for(
-            Arc::from("/paths/scenario.ts"),
+            verter_type_expr::OwnedStr::from("/paths/scenario.ts"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from("Probe"),
+            verter_type_expr::OwnedStr::from("Probe"),
         ),
         Arc::from([]),
         dispatch.instantiate_context_for(

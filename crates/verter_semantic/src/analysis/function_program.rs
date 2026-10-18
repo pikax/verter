@@ -356,11 +356,16 @@ fn hash_entries(ctx: &mut DiscoveryCtx<'_, '_>) {
 /// group. Computed callees, member calls, and unresolved names are never
 /// direct calls.
 fn resolve_direct_calls(entries: &mut [FunctionProgramDiscovery]) {
-    let candidates: Vec<(Arc<str>, FunctionPartIdentity, u32, FunctionProgramKey)> = entries
+    let candidates: Vec<(
+        verter_type_expr::OwnedStr,
+        FunctionPartIdentity,
+        u32,
+        FunctionProgramKey,
+    )> = entries
         .iter()
         .map(|entry| {
             (
-                Arc::clone(&entry.key.declaration.name),
+                entry.key.declaration.name.clone(),
                 entry.key.part.clone(),
                 entry.key.overload_ordinal,
                 entry.key.clone(),
@@ -481,7 +486,7 @@ fn resolve_captures(entries: &mut [FunctionProgramDiscovery]) {
             };
             let slot = runtime_slots[frame][slot as usize];
             FunctionReferenceBinding::Resolved(FlowBindingIdentity {
-                name: Arc::clone(&frame_bindings[frame][slot as usize].name),
+                name: verter_type_expr::OwnedStr::from(&frame_bindings[frame][slot as usize].name),
                 kind: frame_bindings[frame][slot as usize].kind,
                 defining_function: frame_keys[frame].clone(),
                 binding_slot: slot,
@@ -1115,11 +1120,16 @@ fn for_each_call_expression_root<'a>(
 /// its overload group. Computed callees, member calls, and unresolved
 /// names carry no target.
 fn resolve_call_site_targets(entries: &mut [FunctionProgramDiscovery]) {
-    let candidates: Vec<(Arc<str>, FunctionPartIdentity, u32, FunctionProgramKey)> = entries
+    let candidates: Vec<(
+        verter_type_expr::OwnedStr,
+        FunctionPartIdentity,
+        u32,
+        FunctionProgramKey,
+    )> = entries
         .iter()
         .map(|entry| {
             (
-                Arc::clone(&entry.key.declaration.name),
+                entry.key.declaration.name.clone(),
                 entry.key.part.clone(),
                 entry.key.overload_ordinal,
                 entry.key.clone(),
@@ -1237,9 +1247,9 @@ fn link_callback_return_sources(
         .map(|entry| {
             let source = FunctionReturnSource::Flow(FlowFunctionReturnIdentity {
                 anchor: AuthoredAnchor {
-                    canonical_id: Arc::clone(canonical_id),
+                    canonical_id: verter_type_expr::OwnedStr::from(canonical_id),
                     owner: entry.key.declaration.owner,
-                    symbol: Arc::clone(&entry.key.declaration.name),
+                    symbol: entry.key.declaration.name.clone(),
                     space: LocatorSymbolSpace::Value,
                 },
                 function_part: entry.key.part.clone(),
@@ -1433,7 +1443,9 @@ fn discover_statement<'ast>(
                             discover_function_inner(
                                 func,
                                 "default",
-                                FunctionPartIdentity::Member { member_path },
+                                FunctionPartIdentity::Member {
+                                    member_path: member_path.into(),
+                                },
                                 contributor_index,
                                 descent,
                                 0,
@@ -1444,7 +1456,9 @@ fn discover_statement<'ast>(
                             discover_arrow_inner(
                                 arrow,
                                 "default",
-                                FunctionPartIdentity::Member { member_path },
+                                FunctionPartIdentity::Member {
+                                    member_path: member_path.into(),
+                                },
                                 contributor_index,
                                 descent,
                                 ctx,
@@ -1646,9 +1660,11 @@ fn discover_variable_declaration<'ast>(
                 let served = verter_session_query::function_program::ProgramInitializerSource {
                     function: FlowFunctionReturnIdentity {
                         anchor: AuthoredAnchor {
-                            canonical_id: Arc::clone(&ctx.canonical_id),
+                            canonical_id: verter_type_expr::OwnedStr::from(
+                                ctx.canonical_id.clone(),
+                            ),
                             owner: anchor.owner,
-                            symbol: Arc::from(name.as_str()),
+                            symbol: verter_type_expr::OwnedStr::from(name.as_str()),
                             space: LocatorSymbolSpace::Value,
                         },
                         function_part: FunctionPartIdentity::Initializer,
@@ -1723,7 +1739,9 @@ fn discover_variable_declaration<'ast>(
                             discover_function_inner(
                                 func,
                                 &name,
-                                FunctionPartIdentity::Member { member_path },
+                                FunctionPartIdentity::Member {
+                                    member_path: member_path.into(),
+                                },
                                 contributor_index,
                                 descent(FunctionDescentStep::ObjectMember {
                                     member_ordinal: u32::try_from(member_ordinal)
@@ -1738,7 +1756,9 @@ fn discover_variable_declaration<'ast>(
                             discover_arrow_inner(
                                 arrow,
                                 &name,
-                                FunctionPartIdentity::Member { member_path },
+                                FunctionPartIdentity::Member {
+                                    member_path: member_path.into(),
+                                },
                                 contributor_index,
                                 descent(FunctionDescentStep::ObjectMember {
                                     member_ordinal: u32::try_from(member_ordinal)
@@ -1953,7 +1973,7 @@ fn discover_top_level_callable<'ast>(
     let key = FunctionProgramKey {
         declaration: FunctionDeclarationRef {
             owner: contributor.owner,
-            name: Arc::from(declaration_name),
+            name: declaration_name.into(),
             space: SymbolSpace::Value,
         },
         part: FunctionPartIdentity::Other { ordinal },
@@ -2144,7 +2164,9 @@ fn discover_class_members<'ast>(
                 discover_function_inner(
                     &method.value,
                     name,
-                    FunctionPartIdentity::Member { member_path },
+                    FunctionPartIdentity::Member {
+                        member_path: member_path.into(),
+                    },
                     contributor_index,
                     descent,
                     overload,
@@ -2190,7 +2212,7 @@ fn discover_class_members<'ast>(
                             value,
                             name,
                             FunctionPartIdentity::Member {
-                                member_path: Arc::clone(&member_path),
+                                member_path: member_path.clone().into(),
                             },
                             contributor_index,
                             descent.clone(),
@@ -2199,13 +2221,13 @@ fn discover_class_members<'ast>(
                         ProgramExpressionSource::FieldInitializer {
                             source: FunctionReturnSource::Flow(FlowFunctionReturnIdentity {
                                 anchor: AuthoredAnchor {
-                                    canonical_id: Arc::clone(&ctx.canonical_id),
+                                    canonical_id: verter_type_expr::OwnedStr::from(ctx.canonical_id.clone()),
                                     owner: anchor.owner,
-                                    symbol: Arc::from(name),
+                                    symbol: verter_type_expr::OwnedStr::from(name),
                                     space: LocatorSymbolSpace::Value,
                                 },
                                 function_part: FunctionPartIdentity::Member {
-                                    member_path: Arc::clone(&member_path),
+                                    member_path: member_path.clone().into(),
                                 },
                                 overload_ordinal: 0,
                             }),
@@ -2232,7 +2254,9 @@ fn discover_class_members<'ast>(
                         discover_arrow_inner(
                             arrow,
                             name,
-                            FunctionPartIdentity::Member { member_path },
+                            FunctionPartIdentity::Member {
+                                member_path: member_path.into(),
+                            },
                             contributor_index,
                             descent,
                             ctx,
@@ -2242,7 +2266,9 @@ fn discover_class_members<'ast>(
                         discover_function_inner(
                             func,
                             name,
-                            FunctionPartIdentity::Member { member_path },
+                            FunctionPartIdentity::Member {
+                                member_path: member_path.into(),
+                            },
                             contributor_index,
                             descent,
                             0,
@@ -2285,7 +2311,7 @@ fn discover_function_inner<'ast>(
     let key = FunctionProgramKey {
         declaration: FunctionDeclarationRef {
             owner: anchor.owner,
-            name: Arc::from(name),
+            name: name.into(),
             space: SymbolSpace::Value,
         },
         part,
@@ -2322,7 +2348,7 @@ fn discover_arrow_inner<'ast>(
     let key = FunctionProgramKey {
         declaration: FunctionDeclarationRef {
             owner: anchor.owner,
-            name: Arc::from(name),
+            name: name.into(),
             space: SymbolSpace::Value,
         },
         part,
@@ -2362,7 +2388,7 @@ fn discover_initializer_inner<'ast>(
     let key = FunctionProgramKey {
         declaration: FunctionDeclarationRef {
             owner: anchor.owner,
-            name: Arc::from(name),
+            name: name.into(),
             space: SymbolSpace::Value,
         },
         part,

@@ -94,6 +94,35 @@ impl CostIdentity {
 }
 
 impl CostIdentity {
+    /// What the identity keeps reachable, once per `aliases`: its operand
+    /// roots and its producer key's block, with the heap that key reaches.
+    /// An encoded key owns its bytes; a prepared query identity owns its
+    /// key's and family's slices, names and records (see
+    /// [`crate::semantic_query_memo::prepared::PreparedKeyHandle::producer_heap_bytes`]);
+    /// a typed key is inline in its block.
+    pub(crate) fn owned_heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        use crate::semantic_query_memo::prepared::PreparedKeyHandle;
+        use verter_session_query::retention::allocation::{arc_block_bytes, arc_slice_block_bytes};
+        let key = if aliases.first(&self.key) {
+            let block = arc_block_bytes(std::mem::size_of_val::<dyn ProducerIdentity>(
+                self.key.as_ref(),
+            ));
+            let heap = match self.key.downcast_ref::<EncodedIdentity>() {
+                Some(encoded) => arc_slice_block_bytes(&encoded.key, aliases).unwrap_or(0),
+                None => {
+                    PreparedKeyHandle::producer_heap_bytes(self.key.as_ref(), aliases).unwrap_or(0)
+                }
+            };
+            block + heap
+        } else {
+            0
+        };
+        key + self.roots.owned_heap_bytes(aliases)
+    }
+
     /// The identity's hash: equal identities hash equal.
     pub(crate) fn hash_value(&self) -> u64 {
         self.hash
@@ -280,10 +309,6 @@ pub struct DemandCostReceipt {
     retention: OnceLock<RetentionCharge>,
 }
 
-/// The estimated bytes one prerequisite's identity keeps alive beside the
-/// receipt that names it.
-const IDENTITY_BYTES: usize = 64;
-
 impl DemandCostReceipt {
     /// A receipt for `identity` with `exclusive` usage over
     /// `prerequisites`, its own tail runs taking no step.
@@ -409,12 +434,25 @@ impl DemandCostReceipt {
         self.footprint
     }
 
-    /// The bytes this receipt keeps alive of its own: itself, its
-    /// prerequisite list and the identities it names.
-    fn retained_bytes(&self) -> usize {
-        std::mem::size_of::<Self>()
-            + self.prerequisites.len() * (std::mem::size_of::<CostDependency>() + IDENTITY_BYTES)
-            + IDENTITY_BYTES
+    /// The bytes this receipt keeps alive of its own: its block, its
+    /// prerequisite list's backing and its own identity, with the owned
+    /// names its identity reaches (each charged by its own cell, held by the
+    /// receipt). A prerequisite's identity lives in the prerequisite's
+    /// receipt, which charges it.
+    fn retained_footprint(&self) -> verter_session_query::retention::Footprint {
+        use verter_session_query::retention::allocation::{
+            arc_block_bytes, heap_block_bytes, AliasSet,
+        };
+        let mut aliases = AliasSet::new();
+        let bytes = arc_block_bytes(std::mem::size_of::<Self>())
+            + heap_block_bytes(std::mem::size_of_val::<[CostDependency]>(
+                &self.prerequisites,
+            ))
+            + self.identity.owned_heap_bytes(&mut aliases);
+        verter_session_query::retention::Footprint {
+            bytes,
+            handles: aliases.take_handles(),
+        }
     }
 
     /// Reserve this receipt, and every receipt of its closure not yet
@@ -445,9 +483,13 @@ impl DemandCostReceipt {
             }
         }
         if closure_reserved {
-            return match account.reserve(ChargeClass::Retained, self.retained_bytes()) {
+            let footprint = self.retained_footprint();
+            return match account.reserve(ChargeClass::Retained, footprint.bytes) {
                 RetentionAdmission::Admitted(charge) => {
-                    drop(self.retention.set(charge));
+                    drop(self.retention.set(footprint.handles.retained_with(
+                        charge,
+                        verter_session_query::retention::owned::ChargeCtx::new(account),
+                    )?));
                     Ok(())
                 }
                 RetentionAdmission::Refused(refusal) => Err(refusal),
@@ -460,10 +502,16 @@ impl DemandCostReceipt {
                 continue;
             }
             if expanded {
-                match account.reserve(ChargeClass::Retained, next.retained_bytes()) {
+                let footprint = next.retained_footprint();
+                match account.reserve(ChargeClass::Retained, footprint.bytes) {
                     // A concurrent store that reserved it first keeps its
                     // charge; this one releases on drop.
-                    RetentionAdmission::Admitted(charge) => drop(next.retention.set(charge)),
+                    RetentionAdmission::Admitted(charge) => {
+                        drop(next.retention.set(footprint.handles.retained_with(
+                            charge,
+                            verter_session_query::retention::owned::ChargeCtx::new(account),
+                        )?))
+                    }
                     RetentionAdmission::Refused(refusal) => return Err(refusal),
                 }
                 continue;
@@ -644,42 +692,106 @@ impl BudgetProfileSpec {
 /// the live profiles — a profile no request, ledger or sealed refusal
 /// names any more is reclaimed, and interning the same spec again mints a
 /// fresh identity no stale entry was keyed by.
+///
+/// A profile is a self-charged allocation: its block is pinned against the
+/// process retention account for exactly as long as it lives, and the
+/// interner charges its own table by capacity, giving the table back as
+/// profiles drain.
 #[derive(Clone, Debug)]
 pub struct BudgetProfile(Arc<InternedProfile>);
 
 /// The interned allowances, removed from the interner when the last
-/// profile naming them drops.
+/// profile naming them drops, and the charge of their own block.
 #[derive(Debug)]
-pub struct InternedProfile(BudgetProfileSpec);
+pub struct InternedProfile {
+    spec: BudgetProfileSpec,
+    _charge: verter_session_query::retention::RetentionCharge,
+}
 
-type ProfileInterner = Mutex<FxHashMap<BudgetProfileSpec, Weak<InternedProfile>>>;
+/// The live profiles and the pinned charge of the table holding them.
+#[derive(Default)]
+struct ProfileInterner {
+    profiles: FxHashMap<BudgetProfileSpec, Weak<InternedProfile>>,
+    backing: Option<verter_session_query::retention::granular::GranularPin>,
+}
 
-fn profile_interner() -> &'static ProfileInterner {
-    static PROFILES: OnceLock<ProfileInterner> = OnceLock::new();
+/// Granule the profile table's backing is charged in.
+const PROFILE_TABLE_GRANULE: usize = 1024;
+
+impl ProfileInterner {
+    /// Settle the table's backing charge with its capacity.
+    fn settle(&mut self) {
+        let bytes = self.profiles.capacity()
+            * (std::mem::size_of::<(BudgetProfileSpec, Weak<InternedProfile>)>() + 1);
+        let backing = self.backing.get_or_insert_with(|| {
+            verter_session_query::retention::granular::GranularPin::new(
+                &verter_session_query::retention::SemanticRetentionAccount::process_local(),
+                PROFILE_TABLE_GRANULE,
+            )
+        });
+        if bytes > backing.used() {
+            backing.add(bytes - backing.used());
+        } else {
+            backing.sub(backing.used() - bytes);
+        }
+    }
+}
+
+fn profile_interner() -> &'static Mutex<ProfileInterner> {
+    static PROFILES: OnceLock<Mutex<ProfileInterner>> = OnceLock::new();
     PROFILES.get_or_init(Default::default)
 }
 
 impl BudgetProfile {
     /// The interned profile for `spec`.
     pub fn intern(spec: BudgetProfileSpec) -> Self {
-        let mut profiles = profile_interner().lock();
-        if let Some(live) = profiles.get(&spec).and_then(Weak::upgrade) {
+        let mut interner = profile_interner().lock();
+        if let Some(live) = interner.profiles.get(&spec).and_then(Weak::upgrade) {
             return Self(live);
         }
-        let profile = Arc::new(InternedProfile(spec));
-        profiles.insert(spec, Arc::downgrade(&profile));
+        let profile = Arc::new(InternedProfile {
+            spec,
+            _charge: verter_session_query::retention::SemanticRetentionAccount::process_local()
+                .pin(
+                    verter_session_query::retention::allocation::arc_block_bytes(
+                        std::mem::size_of::<InternedProfile>(),
+                    ),
+                ),
+        });
+        interner.profiles.insert(spec, Arc::downgrade(&profile));
+        interner.settle();
         Self(profile)
     }
 
     /// The allowances.
     pub fn spec(&self) -> &BudgetProfileSpec {
-        &self.0 .0
+        &self.0.spec
     }
 
     /// Whether a live profile for `spec` is interned now.
     #[cfg(any(test, feature = "test-support"))]
     pub fn is_interned(spec: &BudgetProfileSpec) -> bool {
-        profile_interner().lock().contains_key(spec)
+        profile_interner().lock().profiles.contains_key(spec)
+    }
+
+    /// Bytes this profile is charged.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn charge_bytes_for_tests(&self) -> usize {
+        self.0._charge.bytes()
+    }
+
+    /// The profile table's bucket capacity and the bytes its backing is
+    /// charged.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn interner_backing_for_tests() -> (usize, usize) {
+        let interner = profile_interner().lock();
+        (
+            interner.profiles.capacity(),
+            interner.backing.as_ref().map_or(
+                0,
+                verter_session_query::retention::granular::GranularPin::charged,
+            ),
+        )
     }
 }
 
@@ -688,12 +800,20 @@ impl Drop for InternedProfile {
         // The last holder is gone, so no profile can upgrade this entry; a
         // spec interned again since then holds a live entry of its own,
         // which stays.
-        let mut profiles = profile_interner().lock();
-        if profiles
-            .get(&self.0)
+        let mut interner = profile_interner().lock();
+        if interner
+            .profiles
+            .get(&self.spec)
             .is_some_and(|entry| entry.strong_count() == 0)
         {
-            profiles.remove(&self.0);
+            interner.profiles.remove(&self.spec);
+            let len = interner.profiles.len();
+            if len == 0 {
+                interner.profiles = FxHashMap::default();
+            } else if len * 4 <= interner.profiles.capacity() {
+                interner.profiles.shrink_to(len * 2);
+            }
+            interner.settle();
         }
     }
 }

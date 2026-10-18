@@ -7,7 +7,6 @@ use crate::flow::{
     skeleton::{FunctionBodySkeleton, PreparedFunctionBodySkeleton},
 };
 use crate::function_program::{FunctionProgramEntry, FunctionProgramKey};
-use std::sync::Arc;
 use verter_language::{FileLanguage, ParseKey};
 
 /// The content-pinned function identity every flow-slice artifact keys
@@ -25,10 +24,10 @@ use verter_language::{FileLanguage, ParseKey};
 /// is bound to a key only through [`KeyedFunctionStructure::bind`], which
 /// admits every axis against the acquired source identity; a bundle then
 /// carries that key, and publication under any other key is refused.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct FlowSliceFunctionKey {
     /// Canonical id of the file serving the function.
-    pub canonical_id: Arc<str>,
+    pub canonical_id: crate::retention::owned::OwnedStr,
     /// The five-axis function program identity.
     pub function: FunctionProgramKey,
     /// The whole-function body-sensitive / cosmetic-insensitive hash.
@@ -55,10 +54,12 @@ pub struct FlowSliceFunctionKey {
     /// The exact parse identity (source bytes, language, compatibility
     /// domain/epoch, syntax profile) of the serving file — taken from the
     /// request-bound artifact identity, never reclassified from the path.
+    #[heap_size(with = "crate::retention::heap_size_foreign::parse_key")]
     pub parse_key: ParseKey,
     /// The runtime-authoritative [`FileLanguage`] row the serving file was
     /// parsed under — taken from the request-bound `IndexedReady`, never
     /// reclassified from the path.
+    #[heap_size(with = "crate::retention::heap_size_foreign::file_language")]
     pub file_language: FileLanguage,
     /// Parser version.
     pub build_toolchain_fingerprint: crate::source::toolchain::BuildToolchainFingerprint,
@@ -189,12 +190,21 @@ impl KeyedFunctionStructure {
 /// constructor: it takes a [`KeyedFunctionStructure`] and derives the graph
 /// and the binding map from that one prepared structure, so a bundle's key,
 /// graph and binding map always describe the same structure.
+///
+/// The parts are the bundle's own data, borrowed only: a holder that keeps
+/// one past a borrow keeps the bundle's handle ([`SkeletonRef`],
+/// [`BindingsRef`], [`GraphRef`]), so the bundle's one charge covers every
+/// part for as long as any holder keeps it.
+#[derive(verter_retention::heap_size::HeapSize)]
 pub struct FlowGraphBundle {
     key: FlowSliceFunctionKey,
-    skeleton: Arc<FunctionBodySkeleton>,
-    bindings: Arc<FlowBindingMap>,
-    graph: Arc<FunctionFlowGraph>,
+    skeleton: FunctionBodySkeleton,
+    bindings: FlowBindingMap,
+    graph: FunctionFlowGraph,
 }
+
+/// Shared owning handle: the payload charge follows every reader clone.
+pub type FlowGraphBundleRef = verter_retention::heap_size::OwnedValue<FlowGraphBundle>;
 
 impl FlowGraphBundle {
     /// Build the bundle of one keyed structure: the graph consumes the
@@ -205,9 +215,9 @@ impl FlowGraphBundle {
         let (skeleton, bindings) = prepared.into_parts();
         Self {
             key,
-            skeleton: Arc::new(skeleton),
-            bindings: Arc::new(bindings),
-            graph: Arc::new(graph),
+            skeleton,
+            bindings,
+            graph,
         }
     }
 
@@ -217,18 +227,132 @@ impl FlowGraphBundle {
     }
 
     /// The arena-free body skeleton.
-    pub fn skeleton(&self) -> &Arc<FunctionBodySkeleton> {
+    pub fn skeleton(&self) -> &FunctionBodySkeleton {
         &self.skeleton
     }
 
     /// The authoritative indexed declaration map built once with the skeleton.
-    pub fn bindings(&self) -> &Arc<FlowBindingMap> {
+    pub fn bindings(&self) -> &FlowBindingMap {
         &self.bindings
     }
 
     /// The typed-edge dependence graph built once from the skeleton.
-    pub fn graph(&self) -> &Arc<FunctionFlowGraph> {
+    pub fn graph(&self) -> &FunctionFlowGraph {
         &self.graph
+    }
+}
+
+/// One part of a flow bundle kept past a borrow, through the bundle's own
+/// handle: every clone shares the bundle's one charge, and the part derefs
+/// to the bundle's data.
+macro_rules! bundle_part_ref {
+    ($(#[$doc:meta])* $name:ident => $target:ty, $part:ident) => {
+        $(#[$doc])*
+        #[derive(Clone)]
+        pub struct $name(FlowGraphBundleRef);
+
+        impl $name {
+            /// The part of `bundle`.
+            #[must_use]
+            pub fn of(bundle: &FlowGraphBundleRef) -> Self {
+                Self(bundle.clone())
+            }
+
+            /// The bundle this part belongs to.
+            #[must_use]
+            pub fn bundle(&self) -> &FlowGraphBundleRef {
+                &self.0
+            }
+
+            /// Whether two handles name the same bundle's part.
+            #[must_use]
+            pub fn ptr_eq(this: &Self, other: &Self) -> bool {
+                FlowGraphBundleRef::ptr_eq(&this.0, &other.0)
+            }
+        }
+
+        impl std::ops::Deref for $name {
+            type Target = $target;
+            fn deref(&self) -> &$target {
+                self.0.$part()
+            }
+        }
+
+        impl AsRef<$target> for $name {
+            fn as_ref(&self) -> &$target {
+                self
+            }
+        }
+
+        impl PartialEq for $name {
+            fn eq(&self, other: &Self) -> bool {
+                Self::ptr_eq(self, other) || **self == **other
+            }
+        }
+
+        impl Eq for $name {}
+
+        impl std::fmt::Debug for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                (**self).fmt(f)
+            }
+        }
+
+        impl verter_retention::heap_size::HeapSize for $name {
+            /// The bundle's handle, charged by the bundle's own cell.
+            fn heap_size<'t>(
+                &'t self,
+                meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+            ) -> usize {
+                self.0.heap_size(meter)
+            }
+        }
+    };
+}
+
+bundle_part_ref!(
+    /// A flow bundle's skeleton, kept through the bundle's handle.
+    SkeletonRef => FunctionBodySkeleton, skeleton
+);
+bundle_part_ref!(
+    /// A flow bundle's binding map, kept through the bundle's handle.
+    BindingsRef => FlowBindingMap, bindings
+);
+bundle_part_ref!(
+    /// A flow bundle's graph, kept through the bundle's handle.
+    GraphRef => FunctionFlowGraph, graph
+);
+
+#[cfg(any(test, feature = "test-support"))]
+impl SkeletonRef {
+    /// `skeleton`, which must declare no bindings, in a fixture bundle of
+    /// its own keyed for `function`: a test double's stand-in for a bundle
+    /// the graph store memoized.
+    #[must_use]
+    pub fn fixture(
+        function: crate::function_program::FunctionProgramKey,
+        skeleton: FunctionBodySkeleton,
+    ) -> Self {
+        let bindings = FlowBindingMap::build(&skeleton, &[], &function, 0)
+            .expect("a fixture skeleton without bindings maps onto no inventory");
+        let file_language = FileLanguage::script(verter_language::ScriptSourceType::Ts);
+        let (_, parse_key) = verter_language::default_parse_identity_for("", &file_language)
+            .expect("a script language derives a parse identity");
+        let key = FlowSliceFunctionKey {
+            canonical_id: "/fixture.ts".into(),
+            function,
+            flow_body_stable_hash: [0; 16],
+            flow_body_exact_hash: [0; 16],
+            parse_env_hash: [0; 16],
+            parse_key,
+            file_language,
+            build_toolchain_fingerprint:
+                crate::source::toolchain::current_build_toolchain_fingerprint(),
+        };
+        let prepared = PreparedFunctionBodySkeleton::fixture(skeleton, bindings);
+        Self::of(&FlowGraphBundleRef::new(FlowGraphBundle::build(
+            KeyedFunctionStructure::bind_fixture(key, prepared),
+        )))
     }
 }
 
@@ -237,12 +361,12 @@ impl FlowGraphBundle {
 /// never plan over one graph while naming another's body identity. There
 /// is no constructor taking a separately supplied key.
 pub struct BoundFlowGraph {
-    bundle: Arc<FlowGraphBundle>,
+    bundle: FlowGraphBundleRef,
 }
 
 impl BoundFlowGraph {
     /// The handle on a memoized keyed bundle.
-    pub fn new(bundle: Arc<FlowGraphBundle>) -> Self {
+    pub fn new(bundle: FlowGraphBundleRef) -> Self {
         Self { bundle }
     }
 
@@ -254,5 +378,20 @@ impl BoundFlowGraph {
     /// The memoized bundle the key names.
     pub fn bundle(&self) -> &FlowGraphBundle {
         &self.bundle
+    }
+
+    /// The bundle's skeleton, kept through the bundle's handle.
+    pub fn skeleton_ref(&self) -> SkeletonRef {
+        SkeletonRef::of(&self.bundle)
+    }
+
+    /// The bundle's binding map, kept through the bundle's handle.
+    pub fn bindings_ref(&self) -> BindingsRef {
+        BindingsRef::of(&self.bundle)
+    }
+
+    /// The bundle's graph, kept through the bundle's handle.
+    pub fn graph_ref(&self) -> GraphRef {
+        GraphRef::of(&self.bundle)
     }
 }

@@ -209,7 +209,7 @@ struct BundleMemoEntry {
     /// How far the memoised value may travel. `RequestOnly` entries
     /// replay their refusal on EVERY hit.
     reuse: ReuseClass,
-    bundle: Arc<PreparedDeclBundle>,
+    bundle: crate::resolver_core::CachedValue<PreparedDeclBundle>,
 }
 
 /// The ONE request-world prepared-decl bundle memo.
@@ -273,7 +273,10 @@ impl RequestBundleMemo {
         canonical: &str,
         world: BundleMemoWorld,
         token: StoreViewCompatToken,
-    ) -> Option<(Arc<PreparedDeclBundle>, ReuseClass)> {
+    ) -> Option<(
+        crate::resolver_core::CachedValue<PreparedDeclBundle>,
+        ReuseClass,
+    )> {
         if !self.nonempty.load(Ordering::Acquire) {
             return None;
         }
@@ -281,7 +284,7 @@ impl RequestBundleMemo {
         // One owned key per miss is the price of a tuple key; the
         // `nonempty` fast path keeps it off the empty-memo hot path.
         let entry = entries.get(&(canonical.to_owned(), world))?;
-        (entry.token == token).then(|| (Arc::clone(&entry.bundle), entry.reuse))
+        (entry.token == token).then(|| (entry.bundle.clone(), entry.reuse))
     }
 
     /// Memoise a request-reusable bundle for the rest of this request.
@@ -294,7 +297,7 @@ impl RequestBundleMemo {
         world: BundleMemoWorld,
         token: StoreViewCompatToken,
         reuse: ReuseClass,
-        bundle: Arc<PreparedDeclBundle>,
+        bundle: crate::resolver_core::CachedValue<PreparedDeclBundle>,
     ) {
         if !reuse.is_request_reusable() {
             return;

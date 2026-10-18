@@ -26,6 +26,7 @@
 //! overrides) extend [`FlowEdgeKind`] on this SAME graph — a second flow
 //! structure is forbidden.
 
+use crate::retention::owned::OwnedSlice;
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -44,14 +45,18 @@ use crate::flow::{
 /// kind today; other executable region kinds (module top-level, static
 /// blocks, field / parameter initializers, decorator expressions) enter
 /// through this discriminant without reshaping the demand planner.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub enum ExecutableRegionKind {
     /// An authored function body.
     Function,
 }
 
 /// One node of the flow graph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub struct FlowNodeId(u32);
 
 impl FlowNodeId {
@@ -95,7 +100,7 @@ impl FlowCapturedBindingId {
 }
 
 /// The typed dependence class of one edge.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub enum FlowEdgeKind {
     /// The source node's value is provided by the target: a return site's
     /// argument, a binding's initializer / whole-slot definite write
@@ -107,7 +112,7 @@ pub enum FlowEdgeKind {
     /// Follow an authored read path, forwarding a result suffix only when
     /// the read itself provides the expression result.
     ReadProjection {
-        path: Arc<[FlowNameId]>,
+        path: OwnedSlice<FlowNameId>,
         kind: FlowReadKind,
     },
     /// A write targets a projection path on the source node's value: an
@@ -116,7 +121,7 @@ pub enum FlowEdgeKind {
     /// assignment).
     PathWrite {
         /// The written projection path (empty = whole-slot, non-definite).
-        path: Arc<[SkeletonPathSegment]>,
+        path: OwnedSlice<SkeletonPathSegment>,
         /// Whether the write definitely happens when its site evaluates.
         certainty: SkeletonWriteCertainty,
         /// Only entries of the same object literal have structural overwrite order.
@@ -134,7 +139,7 @@ pub enum FlowEdgeKind {
 }
 
 /// The structural authority of a path write's ordering semantics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub enum PathWriteSource {
     /// Entries in one object literal execute in authored order.
     ObjectLiteralEntry,
@@ -174,7 +179,7 @@ impl FlowEdgeKind {
 }
 
 /// One typed edge.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct FlowEdge {
     /// The depending node.
     pub from: FlowNodeId,
@@ -190,7 +195,7 @@ pub struct FlowEdge {
 /// (`Send + Sync + 'static`), compact interned ids throughout, no stored
 /// lowered type (`NoTypeExpr`-certified); every type along an edge resolves
 /// on demand only when a demand slice traverses it.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct FunctionFlowGraph {
     /// The executable-region kind this graph covers.
     pub region_kind: ExecutableRegionKind,
@@ -453,7 +458,7 @@ fn build_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
         // parent's member, a default replacing `undefined`), never the
         // initializer's value at the binding's own demanded path.
         let pattern_input = || FlowEdgeKind::ReadProjection {
-            path: Arc::from(Vec::new().into_boxed_slice()),
+            path: OwnedSlice::default(),
             kind: crate::flow::skeleton::FlowReadKind::Input,
         };
         if let Some(initializer) = binding.initializer {
@@ -507,7 +512,7 @@ fn build_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
             }
         }
         for read in site.reads.iter() {
-            let projection: Arc<[FlowNameId]> = read
+            let projection: OwnedSlice<FlowNameId> = read
                 .path
                 .iter()
                 .map(|segment| match segment {
@@ -524,7 +529,7 @@ fn build_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
                 None
             };
             for to in local_nodes.chain(captured_node) {
-                if seen_reads.insert((node.0, to.0, Arc::clone(&projection), read.kind)) {
+                if seen_reads.insert((node.0, to.0, projection.clone(), read.kind)) {
                     edges.push((
                         node,
                         to,
@@ -532,7 +537,7 @@ fn build_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
                             FlowEdgeKind::ValueDef
                         } else {
                             FlowEdgeKind::ReadProjection {
-                                path: Arc::clone(&projection),
+                                path: projection.clone(),
                                 kind: read.kind,
                             }
                         },
@@ -577,7 +582,7 @@ fn build_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
                         node,
                         site_node(*element),
                         FlowEdgeKind::ReadProjection {
-                            path: Arc::from([]),
+                            path: OwnedSlice::default(),
                             kind: FlowReadKind::Input,
                         },
                     ));
@@ -608,7 +613,7 @@ fn build_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
                                 node,
                                 site_node(*value),
                                 FlowEdgeKind::ReadProjection {
-                                    path: Arc::from(Vec::new().into_boxed_slice()),
+                                    path: OwnedSlice::default(),
                                     kind: crate::flow::skeleton::FlowReadKind::Input,
                                 },
                             ));
@@ -618,10 +623,10 @@ fn build_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
                 for entry in entries.iter() {
                     match entry {
                         SkeletonObjectEntry::Property { key, value, .. } => {
-                            let path: Arc<[SkeletonPathSegment]> = match key {
-                                SkeletonObjectKey::Static(name) => Arc::from(
-                                    vec![SkeletonPathSegment::Static(*name)].into_boxed_slice(),
-                                ),
+                            let path: OwnedSlice<SkeletonPathSegment> = match key {
+                                SkeletonObjectKey::Static(name) => {
+                                    OwnedSlice::from(vec![SkeletonPathSegment::Static(*name)])
+                                }
                                 SkeletonObjectKey::Computed(key_site) => {
                                     // A computed key's VALUE names the
                                     // property the entry writes, so every
@@ -631,13 +636,11 @@ fn build_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
                                         node,
                                         site_node(*key_site),
                                         FlowEdgeKind::ReadProjection {
-                                            path: Arc::from(Vec::new().into_boxed_slice()),
+                                            path: OwnedSlice::default(),
                                             kind: crate::flow::skeleton::FlowReadKind::Input,
                                         },
                                     ));
-                                    Arc::from(
-                                        vec![SkeletonPathSegment::Computed].into_boxed_slice(),
-                                    )
+                                    OwnedSlice::from(vec![SkeletonPathSegment::Computed])
                                 }
                             };
                             edges.push((
@@ -656,9 +659,7 @@ fn build_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
                                 site_node(*source),
                                 FlowEdgeKind::PathWrite {
                                     source: PathWriteSource::ObjectLiteralEntry,
-                                    path: Arc::from(
-                                        vec![SkeletonPathSegment::Computed].into_boxed_slice(),
-                                    ),
+                                    path: OwnedSlice::from(vec![SkeletonPathSegment::Computed]),
                                     certainty: SkeletonWriteCertainty::Optional,
                                 },
                             ));
@@ -692,7 +693,7 @@ fn build_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlowGraph {
                     provider,
                     FlowEdgeKind::PathWrite {
                         source: PathWriteSource::Assignment,
-                        path: Arc::clone(&write.path),
+                        path: write.path.clone(),
                         certainty: write.certainty,
                     },
                 ));

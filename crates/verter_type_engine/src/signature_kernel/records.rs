@@ -438,10 +438,10 @@ pub const LAYOUT_READY_SET: usize = 32;
 pub const LAYOUT_QUERY_OUTCOME_SET: usize = 32;
 /// Measured `MemoEntry` size on 64-bit. Pinned by `layouts_are_the_measured_64_bit_sizes`.
 ///
-/// The envelope includes the candidate's `Option<Arc<RetentionCharge>>`
-/// reservation against the aggregate retention account. That word is the
+/// The envelope includes the candidate's `Option<Arc<MemoRetention>>`
+/// charges against the aggregate retention account. That word is the
 /// deliberate cost of the memo participating in the process-wide byte
-/// ceiling at all: without a per-candidate charge, eviction and reader
+/// ceiling at all: without per-candidate charges, eviction and reader
 /// lifetime could not release the candidate's bytes exactly once, and
 /// the memo would need a parallel side-table keyed by admission seq — a
 /// second structure to keep consistent with `entries`. One word per
@@ -456,7 +456,7 @@ pub const LAYOUT_QUERY_OUTCOME_SET: usize = 32;
 /// one evicted before that is never registered or pruned, and the flag on
 /// the candidate keeps that state with it rather than in a side-table to
 /// keep consistent with `entries`.
-pub const LAYOUT_MEMO_ENTRY: usize = 184;
+pub const LAYOUT_MEMO_ENTRY: usize = 160;
 
 #[cfg(target_pointer_width = "64")]
 const _: () = {

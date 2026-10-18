@@ -1254,12 +1254,12 @@ fn identity_interner_is_per_store_owned_not_process_global() {
     let a1 = store_a.identity_interner().intern("/w/shared.ts");
     let a2 = store_a.identity_interner().intern("/w/shared.ts");
     assert!(
-        Arc::ptr_eq(&a1, &a2),
+        verter_type_expr::OwnedStr::ptr_eq(&a1, &a2),
         "one store dedups content-equal identity strings"
     );
     let b1 = store_b.identity_interner().intern("/w/shared.ts");
     assert!(
-        !Arc::ptr_eq(&a1, &b1),
+        !verter_type_expr::OwnedStr::ptr_eq(&a1, &b1),
         "a second store owns an INDEPENDENT pool — no process-global sharing"
     );
     assert_eq!(a1, b1, "content equality is unaffected by pool identity");
@@ -1338,11 +1338,18 @@ fn empty_host_has_empty_project_type_store() {
 fn dep_signature_construction_is_caller_local() {
     use verter_type_engine::semantic_query::{DepSignature, DepVersion};
 
-    let entries: Vec<(Arc<str>, DepVersion)> = vec![
-        (Arc::from("/w/a.ts"), DepVersion::WholeHash([1u8; 16])),
-        (Arc::from("/w/b.ts"), DepVersion::RouteGeneration(7)),
+    let entries: Vec<verter_type_engine::semantic_query::DepEntry> = vec![
+        verter_type_engine::semantic_query::DepEntry::new(
+            "/w/a.ts",
+            DepVersion::WholeHash([1u8; 16]),
+        ),
+        verter_type_engine::semantic_query::DepEntry::new(
+            "/w/b.ts",
+            DepVersion::RouteGeneration(7),
+        ),
     ];
-    let sig: DepSignature = Arc::from(entries.into_boxed_slice());
+    let sig: DepSignature =
+        verter_type_engine::semantic_query::DepSignature::new(entries.into_boxed_slice());
     assert_eq!(sig.len(), 2);
 }
 
@@ -1579,7 +1586,7 @@ fn semantic_query_warm_entry_has_non_empty_dep_signature_slice11() {
     );
     let mut has_whole_hash = false;
     let mut has_project_gen = false;
-    for (_, dv) in warm.dep_signature().iter() {
+    for verter_type_engine::semantic_query::DepEntry(_, dv) in warm.dep_signature().iter() {
         match dv {
             DepVersion::WholeHash(_) => has_whole_hash = true,
             DepVersion::ProjectGeneration(_) => has_project_gen = true,
@@ -1636,7 +1643,7 @@ fn derived_semantic_query_records_project_generation_anchor_slice11() {
         .get_unvalidated(&lookup_key)
         .expect("warm entry must exist");
     let mut has_project_gen = false;
-    for (_, dv) in warm.dep_signature().iter() {
+    for verter_type_engine::semantic_query::DepEntry(_, dv) in warm.dep_signature().iter() {
         if matches!(dv, DepVersion::ProjectGeneration(_)) {
             has_project_gen = true;
             break;

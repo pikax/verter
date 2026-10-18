@@ -35,21 +35,23 @@ fn carrier_wrapping(
         1 => graph.intern_node(SemanticNodeData::new_typeof(
             ValueRootKey {
                 scope: ScopeId {
-                    canonical_id: Arc::from("/v.ts"),
+                    canonical_id: verter_type_expr::OwnedStr::from("/v.ts"),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     local_scope: None,
                     binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                         verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     ),
                 },
-                name: Arc::from("factory"),
+                name: verter_type_expr::OwnedStr::from("factory"),
             },
-            Arc::from(Vec::new().into_boxed_slice()),
+            verter_type_expr::OwnedSlice::default(),
             args,
         )),
         _ => graph.intern_node(SemanticNodeData::new_import_type(
             Arc::from("./m"),
-            Arc::from(vec![Arc::<str>::from("G")].into_boxed_slice()),
+            verter_type_expr::OwnedSlice::from(
+                vec![verter_type_expr::OwnedStr::from("G")].into_boxed_slice(),
+            ),
             args,
             false,
         )),
@@ -73,7 +75,7 @@ fn collect_type_param_nodes_descends_carrier_args() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("X"),
+        display_name: verter_type_expr::OwnedStr::from("X"),
     });
 
     for kind in 0u8..3 {

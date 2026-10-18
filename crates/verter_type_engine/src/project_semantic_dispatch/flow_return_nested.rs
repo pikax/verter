@@ -243,7 +243,7 @@ pub(super) struct NestedChildParts {
     pub(super) execution_selection: Arc<super::super::flow_solve::FlowExecutionSelection>,
     pub(super) plan: Option<Arc<super::super::flow_solve::FlowDemandPlan>>,
     pub(super) bound: verter_session_query::flow::bundle::BoundFlowGraph,
-    pub(super) skeleton: Arc<FunctionBodySkeleton>,
+    pub(super) skeleton: verter_session_query::flow::bundle::SkeletonRef,
 }
 
 /// A nested function's signature evaluation up to its body's evaluation.
@@ -418,9 +418,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             &declared_evolving_captures;
         let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: Arc::from(self.canonical),
+                canonical_id: verter_type_expr::OwnedStr::from(self.canonical),
                 owner: function.declaration.owner,
-                symbol: Arc::clone(&function.declaration.name),
+                symbol: function.declaration.name.clone(),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
             },
             function_part: function.part.clone(),
@@ -451,6 +451,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         hash_key: site.slice_key.clone(),
                         slice_hash: planned.hash(),
                     },
+                    &planned,
                 )?;
                 Some((
                     planned,
@@ -510,7 +511,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             &content.bindings,
             skeleton,
             bound,
-            planned.as_deref(),
+            planned.as_deref().map(|planned| &**planned),
             anchor,
             &key,
             outer_env,
@@ -579,9 +580,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             param_names: &owned.content.params,
             binder_env: &owned.binder_env,
             enclosing_frames,
-            bindings: Arc::clone(&owned.content.bindings),
-            skeleton: Arc::clone(&skeleton),
-            flow_graph: Arc::clone(bound.bundle().graph()),
+            bindings: owned.content.bindings.clone(),
+            skeleton: skeleton.clone(),
+            flow_graph: bound.graph_ref(),
             execution_selection,
             plan,
             anchor,
@@ -702,7 +703,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             let can_fall_through = owned.content.can_fall_through;
             let empty_completion = owned.content.empty_completion;
             let binder_env = &owned.binder_env;
-            let skeleton = Arc::clone(&nested_evaluator.skeleton);
+            let skeleton = nested_evaluator.skeleton.clone();
             let nested_holds;
             let nested_degradation;
             let nested_observations;

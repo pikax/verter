@@ -44,7 +44,7 @@ use crate::flow::skeleton::{
 /// Node sets are sorted ascending by dense node index and disjoint —
 /// `effect_only_nodes` holds nodes reached ONLY through effect edges
 /// (their value is never materialized; their evaluation effects are).
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct ReturnSlicePlan {
     /// The demand origins the reachability started from.
     origins: Arc<[SliceOrigin]>,
@@ -129,7 +129,9 @@ pub fn return_path_peeker_plan_thread_invocations() -> u64 {
 /// One demand origin: a return site or an arbitrary expression site of
 /// the sliced function. The same planner serves return-type demands and
 /// expression-site demands — no second flow engine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub enum SliceOrigin {
     /// A `return` site of the sliced function.
     Return(SkeletonReturnSiteId),
@@ -145,7 +147,7 @@ pub enum SliceOrigin {
 
 /// One segment of the demanded projection path, resolved against the
 /// skeleton's interned name table.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub enum DemandSegment {
     /// A demanded property key that is interned in the sliced body — it
     /// can match static path-write segments.
@@ -288,7 +290,9 @@ impl Default for FlowSliceBudget {
 }
 
 /// Which budget axis tripped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub enum FlowSliceBudgetAxis {
     /// Too many selected nodes.
     SelectedNodes,
@@ -299,7 +303,9 @@ pub enum FlowSliceBudgetAxis {
 /// A typed budget trip: the axis, its limit, and the observed count at
 /// the trip. A genuine partial — the caller must route it through
 /// non-admission (`ReturnOnly` semantics); it never becomes a plan.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub struct FlowSliceBudgetExceeded {
     /// The tripped axis.
     pub axis: FlowSliceBudgetAxis,

@@ -15,9 +15,9 @@ fn published_anchor_for_identity(
     use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace};
 
     (!identity.canonical_id.is_empty()).then(|| AuthoredAnchor {
-        canonical_id: std::sync::Arc::clone(&identity.canonical_id),
+        canonical_id: identity.canonical_id.clone(),
         owner: identity.owner,
-        symbol: std::sync::Arc::clone(&identity.decl_name),
+        symbol: identity.decl_name.clone(),
         space: LocatorSymbolSpace::Type,
     })
 }
@@ -210,7 +210,7 @@ pub(crate) fn structural_member_value_source<
     Some(verter_type_expr::facts::SemanticTypeSource::Projected(
         verter_type_expr::facts::ProjectedTypeFact::MemberPath {
             base: base.clone(),
-            path: std::sync::Arc::from(vec![member_key.clone()].into_boxed_slice()),
+            path: From::from(vec![member_key.clone()].into_boxed_slice()),
         },
     ))
 }
@@ -218,17 +218,17 @@ pub(crate) fn structural_member_value_source<
 #[cfg(test)]
 mod owner_identity_tests {
     use super::*;
-    use std::sync::Arc;
+
     use verter_type_expr::locators::LocatorSymbolSpace;
     use verter_type_expr::TopLevelOwnerId;
 
     #[test]
     fn published_anchor_preserves_decl_identity_owner() {
         let identity = verter_type_engine::semantic_query::DeclIdentity {
-            canonical_id: Arc::from("/w/Component.vue"),
+            canonical_id: verter_type_expr::OwnedStr::from("/w/Component.vue"),
             owner: TopLevelOwnerId::instance(0),
             whole_hash: [3u8; 16],
-            decl_name: Arc::from("Shared"),
+            decl_name: verter_type_expr::OwnedStr::from("Shared"),
         };
 
         let anchor = published_anchor_for_identity(&identity)

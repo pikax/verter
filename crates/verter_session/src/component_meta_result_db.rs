@@ -3,11 +3,11 @@
 use std::sync::Arc;
 use verter_session_query::analysis::types::Hash16;
 pub use verter_type_engine::component_meta_result_db::{
-    classify_final_component_retention, final_component_refusal_status, footprint,
-    refusal_identity_for, ComponentMetaOptionsFingerprint, ComponentMetaRefusalClass,
-    ComponentMetaRefusalIdentity, ComponentMetaRefusalQuery, ComponentMetaResultDb,
-    ComponentMetaResultEntry, ComponentMetaResultKey, ComponentMetaRetainedRefusal,
-    FinalComponentAdmissionProof, FinalComponentRetention,
+    classify_final_component_retention, final_component_refusal_status, refusal_identity_for,
+    ComponentMetaOptionsFingerprint, ComponentMetaRefusalClass, ComponentMetaRefusalIdentity,
+    ComponentMetaRefusalQuery, ComponentMetaResultDb, ComponentMetaResultEntry,
+    ComponentMetaResultKey, ComponentMetaRetainedRefusal, FinalComponentAdmissionProof,
+    FinalComponentRetention,
 };
 use verter_type_engine::semantic_query::{FactStatus, ResultCompleteness};
 
@@ -1555,7 +1555,9 @@ mod tests {
             assert_eq!(reconstructed.completeness, cold.completeness);
             assert!(!reconstructed.synthesis_should_suppress);
             let cached = crate::component_meta_cached_result::CachedComponentMetaResult {
-                analysis: analysis.clone(),
+                analysis: crate::component_meta_cached_result::shared_component_meta_analysis(
+                    analysis.clone(),
+                ),
                 resolution_template: template,
                 canonical_id: Arc::from(canonical),
                 whole_hash: owner_hash,
@@ -2308,7 +2310,7 @@ mod tests {
             panic!("the owner whole-hash observation must be cacheable");
         };
         let cached = crate::component_meta_cached_result::CachedComponentMetaResult {
-            analysis,
+            analysis: crate::component_meta_cached_result::shared_component_meta_analysis(analysis),
             resolution_template: template,
             canonical_id: Arc::from(canonical),
             whole_hash: owner_hash,

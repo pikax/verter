@@ -132,7 +132,8 @@ fn resolve_subject(
     base: SemanticNodeId,
     mode: ProjectionMode,
 ) -> SemanticNodeId {
-    let empty_path: Arc<[PathSegment]> = Arc::from(Vec::new().into_boxed_slice());
+    let empty_path: verter_type_expr::OwnedSlice<PathSegment> =
+        verter_type_expr::OwnedSlice::default();
     match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base,
         path: empty_path,

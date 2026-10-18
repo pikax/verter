@@ -125,35 +125,27 @@ pub struct ComponentMetaResultEntry<P> {
     pub validated_at_generation: u64,
 }
 
-/// Per-record byte estimates for the component-meta footprint.
-///
-/// Each constant is the approximate resident cost of one record of that
-/// family — the struct plus the short owned strings and typed IR it
-/// keeps alive. These are ACCOUNTING estimates: they decide whether the
-/// process may RETAIN an entry, never whether a retained entry is valid.
-/// An imprecise constant therefore costs hit rate, never correctness.
-pub mod footprint {
-    /// A surface record with a resolved type descriptor: a prop, event,
-    /// slot, model, exposed member, or accepted-surface entry.
-    pub const SURFACE_RECORD_BYTES: usize = 512;
-    /// A lighter structural record: an import, binding, template ref,
-    /// component usage, API call, or style block.
-    pub const STRUCTURAL_RECORD_BYTES: usize = 192;
-    /// A resolved type-registry analysis, which carries an expanded
-    /// member list and is the heaviest per-record family.
-    pub const TYPE_RECORD_BYTES: usize = 1024;
-    /// One observed dependency fact on the entry's validity rail.
-    pub const FACT_BYTES: usize = 64;
-}
-
 impl<P> verter_session_query::retention::RetainedFootprint for ComponentMetaResultEntry<P>
 where
     P: verter_session_query::retention::RetainedFootprint,
 {
+    /// The payload, the entry's validity rail — its fact slice with every
+    /// fact's owned text — and the entry's slot.
     fn retained_footprint_bytes(&self) -> usize {
-        self.payload.retained_footprint_bytes()
-            + self.read_set_signature.facts.len() * footprint::FACT_BYTES
-            + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
+        self.retained_footprint().bytes
+    }
+
+    fn retained_footprint(&self) -> verter_session_query::retention::Footprint {
+        let payload = self.payload.retained_footprint();
+        let mut aliases = verter_session_query::retention::allocation::AliasSet::new();
+        let rail = verter_session_query::retention::allocation::fact_signature_bytes(
+            &self.read_set_signature,
+            &mut aliases,
+        );
+        verter_session_query::retention::Footprint {
+            bytes: payload.bytes + rail + verter_session_query::retention::ENTRY_OVERHEAD_BYTES,
+            handles: payload.handles.merge(aliases.take_handles()),
+        }
     }
 }
 
@@ -780,17 +772,38 @@ impl<P> ComponentMetaResultDb<P> {
     where
         P: verter_session_query::retention::RetainedFootprint,
     {
-        let bytes = {
+        let footprint = {
             use verter_session_query::retention::RetainedFootprint as _;
-            entry.retained_footprint_bytes()
+            entry.retained_footprint()
         };
+        // The owned allocations the entry reaches are retained by their own
+        // cells, all or nothing with the entry. They are held before the
+        // entry and its evidence are claimed, so a refusal of either claims
+        // no evidence and hands every cell back to its callers.
+        let holds =
+            match footprint
+                .handles
+                .hold(verter_session_query::retention::owned::ChargeCtx::new(
+                    self.retention_account(),
+                )) {
+                Ok(holds) => holds,
+                Err(refusal) => {
+                    crate::cache_runtime::admission::propagate_non_admission(
+                        refusal.non_admission_reason(),
+                    );
+                    return false;
+                }
+            };
         let charge = match verter_session_query::facts::receipt::reserve_retained_with_evidence(
             self.retention_account(),
-            bytes,
+            footprint.bytes,
             &[&entry.read_set_signature.facts],
         ) {
-            verter_session_query::retention::RetentionAdmission::Admitted(charge) => charge,
+            verter_session_query::retention::RetentionAdmission::Admitted(charge) => {
+                charge.holding(holds)
+            }
             verter_session_query::retention::RetentionAdmission::Refused(refusal) => {
+                drop(holds);
                 crate::cache_runtime::admission::propagate_non_admission(
                     refusal.non_admission_reason(),
                 );
@@ -872,24 +885,38 @@ impl<P> ComponentMetaResultDb<P> {
             Ok(value) => value,
             Err(shared) => (*shared).clone(),
         };
-        // One retained paid identity is the same 64 bytes the refusal
-        // summary reserves (`refusal_summary::IDENTITY_BYTES`).
-        const REQUEST_IDENTITY_BYTES: usize = 64;
-        let request_bytes = effects.request.as_ref().map_or(0, |spent| {
-            spent.identities().saturating_mul(REQUEST_IDENTITY_BYTES)
-        });
-        let bytes =
-            verter_session_query::retention::RetainedFootprint::retained_footprint_bytes(&recovery)
-                + read_set_signature.facts.len() * footprint::FACT_BYTES
-                + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
-                + request_bytes;
-        let charge = match verter_session_query::facts::receipt::reserve_retained_with_evidence(
+        let mut aliases = verter_session_query::retention::allocation::AliasSet::new();
+        let request_bytes = effects
+            .request
+            .as_ref()
+            .map_or(0, |spent| spent.owned_heap_bytes(&mut aliases));
+        let recovery_footprint =
+            verter_session_query::retention::RetainedFootprint::retained_footprint(&recovery);
+        let bytes = recovery_footprint.bytes
+            + verter_session_query::retention::allocation::fact_signature_bytes(
+                &read_set_signature,
+                &mut aliases,
+            )
+            + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
+            + request_bytes;
+        let handles = recovery_footprint.handles.merge(aliases.take_handles());
+        let reserved = match verter_session_query::facts::receipt::reserve_retained_with_evidence(
             self.retention_account(),
             bytes,
             &[&read_set_signature.facts],
         ) {
-            verter_session_query::retention::RetentionAdmission::Admitted(charge) => charge,
-            verter_session_query::retention::RetentionAdmission::Refused(refusal) => {
+            verter_session_query::retention::RetentionAdmission::Admitted(charge) => handles
+                .retained_with(
+                    charge,
+                    verter_session_query::retention::owned::ChargeCtx::new(
+                        self.retention_account(),
+                    ),
+                ),
+            verter_session_query::retention::RetentionAdmission::Refused(refusal) => Err(refusal),
+        };
+        let charge = match reserved {
+            Ok(charge) => charge,
+            Err(refusal) => {
                 crate::cache_runtime::admission::propagate_non_admission(
                     refusal.non_admission_reason(),
                 );
@@ -1417,7 +1444,7 @@ mod refusal_ledger_tests {
         let account = SemanticRetentionAccount::new(RetentionLimits {
             aggregate_ceiling_bytes: 10_000_000,
             active_ceiling_bytes: 10_000_000,
-            max_entry_bytes: 512,
+            max_entry_bytes: 2_048,
             pin_threshold_bytes: 10_000_000,
         });
         let db: ComponentMetaResultDb<u32> =
@@ -1441,23 +1468,31 @@ mod refusal_ledger_tests {
                 effects,
             )
         };
-        let identities = |n: usize| ComponentMetaRefusalEffects {
+        let keyed = |keys: Vec<String>| ComponentMetaRefusalEffects {
             request: Some(RequestSpent::from_identities_for_test(
-                (0..n)
-                    .map(|index| CostIdentity::new(format!("paid-{index}").into_bytes()))
+                keys.into_iter()
+                    .map(|key| CostIdentity::new(key.into_bytes()))
                     .collect(),
                 Vec::new(),
             )),
             ..ComponentMetaRefusalEffects::default()
         };
+        let identities = |n: usize| keyed((0..n).map(|index| format!("paid-{index}")).collect());
 
         assert!(seal("none", ComponentMetaRefusalEffects::default()).is_some());
         let empty_prefix = account.snapshot().retained_bytes;
         assert!(seal("one", identities(1)).is_some());
-        assert_eq!(
-            account.snapshot().retained_bytes - empty_prefix,
-            empty_prefix + 64,
-            "one retained paid identity adds the summary's 64-byte charge"
+        let one_identity = account.snapshot().retained_bytes - 2 * empty_prefix;
+        assert!(
+            one_identity > 0,
+            "a retained paid identity grows the reservation"
+        );
+        assert!(seal("long", keyed(vec!["k".repeat(600)])).is_some());
+        let long_identity = account.snapshot().retained_bytes - 3 * empty_prefix - one_identity;
+        assert!(
+            long_identity >= one_identity + 590,
+            "a paid identity is charged for the key it keeps reachable, not a fixed proxy: \
+             {long_identity} vs {one_identity}"
         );
         let charged = account.snapshot().retained_bytes;
         assert!(

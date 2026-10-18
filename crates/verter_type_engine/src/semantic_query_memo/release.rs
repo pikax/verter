@@ -258,7 +258,7 @@ fn candidate_binds_canonical(entry: &MemoEntry, canonical_id: &str) -> bool {
         || entry
             .dispatch_dep_signature
             .iter()
-            .any(|(canonical, _)| canonical.as_ref() == canonical_id)
+            .any(|crate::semantic_query::DepEntry(canonical, _)| canonical.as_ref() == canonical_id)
         || !entry.read_set_signature.aggregated_domains().is_empty()
 }
 

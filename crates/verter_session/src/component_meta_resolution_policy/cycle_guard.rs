@@ -671,7 +671,7 @@ mod tests {
 
     fn scope() -> NodeScopeId {
         NodeScopeId::File {
-            canonical_id: Arc::from("/fixture/owner.vue"),
+            canonical_id: verter_type_expr::OwnedStr::from("/fixture/owner.vue"),
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
             whole_hash: Default::default(),
             local_scope: None,
@@ -738,14 +738,14 @@ mod tests {
         let right_binder = graph.alloc_infer_binder_id();
         let left = graph.intern_node_with_scope(
             SemanticNodeData::InferRef {
-                name: Arc::from("T"),
+                name: verter_type_expr::OwnedStr::from("T"),
                 binder: left_binder,
             },
             scope(),
         );
         let right = graph.intern_node_with_scope(
             SemanticNodeData::InferRef {
-                name: Arc::from("T"),
+                name: verter_type_expr::OwnedStr::from("T"),
                 binder: right_binder,
             },
             scope(),
@@ -821,7 +821,7 @@ mod tests {
             param_index: 0,
             constraint: None,
             default: None,
-            display_name: Arc::from("T"),
+            display_name: verter_type_expr::OwnedStr::from("T"),
         });
         let member = SurfaceMember {
             key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("a"),
@@ -842,7 +842,7 @@ mod tests {
             param_index: 0,
             constraint: None,
             default: None,
-            display_name: Arc::from("U"),
+            display_name: verter_type_expr::OwnedStr::from("U"),
         });
         let object = |operand| {
             graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
@@ -964,10 +964,10 @@ mod tests {
         // `InstantiationRef` head named `Wrapper` differing ONLY in the
         // nested literal argument.
         let wrapper_base = DeclIdentity {
-            canonical_id: Arc::from("/wrapper.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/wrapper.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: Default::default(),
-            decl_name: Arc::from("Wrapper"),
+            decl_name: verter_type_expr::OwnedStr::from("Wrapper"),
         };
         let lit = |text: &str| {
             graph.intern_node_with_scope(

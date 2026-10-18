@@ -73,13 +73,15 @@ fn child_contract_completion_adapter_preserves_event_and_slot_order() {
     let slot_binding_type = PublicTypeReference {
         publication: verter_session::meta_resolve::MaterializedTypePublication::for_test(
             verter_type_expr::PublicationResult::Published {
-                selected_source: Arc::new(verter_type_expr::facts::SemanticTypeSource::Closed(
-                    verter_type_expr::facts::ClosedTypeFact::Leaf(
-                        verter_type_expr::facts::LeafTypeFact::Primitive(
-                            verter_type_expr::PrimitiveName::String,
+                selected_source: verter_type_expr::SharedTypeSource::new(
+                    verter_type_expr::facts::SemanticTypeSource::Closed(
+                        verter_type_expr::facts::ClosedTypeFact::Leaf(
+                            verter_type_expr::facts::LeafTypeFact::Primitive(
+                                verter_type_expr::PrimitiveName::String,
+                            ),
                         ),
                     ),
-                )),
+                ),
                 semantic_authority: verter_type_expr::SemanticAuthority::Resolved,
                 exactness: verter_type_expr::ResolutionExactness::ExactConcrete,
                 reason: Box::new(verter_type_expr::PublicationReason::ResolvedExactConcrete),

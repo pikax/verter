@@ -953,7 +953,7 @@ impl ResolveCallSelection {
                 },
                 substitution: substitution.clone(),
                 return_type,
-                fresh_literal_returns: std::sync::Arc::from(fresh_literal_returns.as_slice()),
+                fresh_literal_returns: fresh_literal_returns.clone().into(),
                 recovery_diagnostic: *recovery_diagnostic,
             },
             Self::DynamicAny => ResolvedCallResult::DynamicAny { return_type },

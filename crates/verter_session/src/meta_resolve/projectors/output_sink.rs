@@ -211,7 +211,11 @@ fn reduce_field_value_node(
             input_node,
         );
     if package_backed {
-        return raise_node_to_sealed_carrier(dispatch, input_node, Arc::from(Vec::new()));
+        return raise_node_to_sealed_carrier(
+            dispatch,
+            input_node,
+            verter_type_engine::semantic_query::DepSignature::default(),
+        );
     }
     let gates = super::classify_node_reduction_gates(dispatch, input_node);
     if gates.generic_instantiation_ref {
@@ -222,11 +226,19 @@ fn reduce_field_value_node(
                 input_node,
             );
         if reaches_cycle {
-            return raise_node_to_sealed_carrier(dispatch, input_node, Arc::from(Vec::new()));
+            return raise_node_to_sealed_carrier(
+                dispatch,
+                input_node,
+                verter_type_engine::semantic_query::DepSignature::default(),
+            );
         }
     }
     if !(gates.contains_reducible_operator || gates.generic_instantiation_ref) {
-        return raise_node_to_sealed_carrier(dispatch, input_node, Arc::from(Vec::new()));
+        return raise_node_to_sealed_carrier(
+            dispatch,
+            input_node,
+            verter_type_engine::semantic_query::DepSignature::default(),
+        );
     }
 
     let context = crate::meta_resolve::materialize::node_materialize_reduction_context(
@@ -251,7 +263,7 @@ fn reduce_field_value_node(
             dispatch, input_node,
         ) == Some(false)
     {
-        return raise_node_to_sealed_carrier(dispatch, input_node, Arc::from(Vec::new()));
+        return raise_node_to_sealed_carrier(dispatch, input_node, verter_type_engine::semantic_query::DepSignature::default());
     }
     reduced
 }
@@ -390,7 +402,7 @@ fn member_shape_peek_or_compute(
             // Package-backed roots stay shallow carriers. Admit so sibling members of
             // the same package-backed parent reuse the verdict at peek time.
             let Some(package_backed_fence) = package_backed_fence_opt else {
-                return raise_node_to_sealed_carrier(dispatch, member_value, Arc::from(Vec::new()));
+                return raise_node_to_sealed_carrier(dispatch, member_value, verter_type_engine::semantic_query::DepSignature::default());
             };
             let value = raise_node_to_sealed_carrier(dispatch, member_value, package_backed_fence);
             return admit_member_shape_if_possible(ctx, &key, value, &scope);
@@ -399,7 +411,7 @@ fn member_shape_peek_or_compute(
         // canonical's authoritative hash was unavailable mid-gate, in which case it
         // refuses (`None`) and the carrier is returned without admission.
         let Some(package_backed_fence) = package_backed_fence_opt else {
-            return raise_node_to_sealed_carrier(dispatch, member_value, Arc::from(Vec::new()));
+            return raise_node_to_sealed_carrier(dispatch, member_value, verter_type_engine::semantic_query::DepSignature::default());
         };
 
         // (3) Node reduction gates — the leaf / bare-carrier / generic-instantiation /
@@ -429,7 +441,7 @@ fn member_shape_peek_or_compute(
             }
             fence
         } else {
-            Arc::from(Vec::new())
+            verter_type_engine::semantic_query::DepSignature::default()
         };
 
         // The carrier-stop decision lives on the dispatch-layer reduction-demand
@@ -562,22 +574,20 @@ fn combine_dep_signatures(
     b: &verter_type_engine::semantic_query::DepSignature,
     scope_canonical_id: &str,
 ) -> verter_type_engine::semantic_query::DepSignature {
-    let mut out: Vec<(Arc<str>, verter_type_engine::semantic_query::DepVersion)> =
+    let mut out: Vec<verter_type_engine::semantic_query::DepEntry> =
         Vec::with_capacity(a.len() + b.len());
-    let mut seen: rustc_hash::FxHashSet<(
-        Arc<str>,
-        verter_type_engine::semantic_query::DepVersion,
-    )> = rustc_hash::FxHashSet::default();
+    let mut seen: rustc_hash::FxHashSet<(&str, &verter_type_engine::semantic_query::DepVersion)> =
+        rustc_hash::FxHashSet::default();
     for entry in a.iter().chain(b.iter()) {
-        if entry.0.as_ref() == scope_canonical_id || entry.0.as_ref().is_empty() {
+        if entry.canonical() == scope_canonical_id || entry.canonical().is_empty() {
             continue;
         }
-        let pair = (Arc::clone(&entry.0), entry.1.clone());
-        if seen.insert(pair.clone()) {
-            out.push(pair);
+        if seen.insert((entry.canonical(), entry.version())) {
+            // The clone shares the entry's owned canonical.
+            out.push(entry.clone());
         }
     }
-    Arc::from(out.into_boxed_slice())
+    verter_type_engine::semantic_query::DepSignature::new(out.into_boxed_slice())
 }
 
 /// Append the gate fence's dep entries to the materialised
@@ -667,7 +677,7 @@ fn admit_member_shape_if_possible(
     ) {
         return value;
     }
-    let scope = key.scope_canonical().clone();
+    let scope = key.scope_canonical();
     let Some(observed_scope) = ctx.observe_materialize_scope(scope.as_ref()) else {
         return value;
     };

@@ -37,7 +37,7 @@ use super::*;
 /// points) builds the table fresh — the pre-split per-call behavior.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn prepare_type_decl_from_lowered(
-    canonical_id: &Arc<str>,
+    canonical_id: &verter_type_expr::OwnedStr,
     state: &ShallowFileState,
     owner: verter_type_expr::TopLevelOwnerId,
     symbol_name: &str,
@@ -98,8 +98,8 @@ pub(super) fn prepare_type_decl_from_lowered(
     // once the pool is warm.
     let name_resolution = if !symbol_name.contains('.') {
         match shared_name_resolution_base {
-            Some(base) => Arc::clone(base),
-            None => Arc::new(build_type_name_resolution_base(
+            Some(base) => base.clone(),
+            None => NameResolutionTable::new(build_type_name_resolution_base(
                 canonical_id,
                 state,
                 owner,
@@ -151,7 +151,7 @@ pub(super) fn prepare_type_decl_from_lowered(
             import_canonicalization,
             interner,
         );
-        Arc::new(table)
+        NameResolutionTable::new(table)
     };
 
     finish_prepared_type_decl(
@@ -172,8 +172,8 @@ pub(super) fn prepare_type_decl_from_lowered(
 /// file. The first pass of BOTH base tables (type-space and value-space) —
 /// imports insert after (and therefore win per key) in both spaces.
 fn insert_file_symbol_resolutions(
-    table: &mut FxHashMap<Arc<str>, ResolvedRootIdentity>,
-    canonical_id: &Arc<str>,
+    table: &mut FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
+    canonical_id: &verter_type_expr::OwnedStr,
     state: &ShallowFileState,
     owner: verter_type_expr::TopLevelOwnerId,
     interner: &IdentityInterner,
@@ -184,8 +184,8 @@ fn insert_file_symbol_resolutions(
         }
         let name = interner.intern(key.name.as_ref());
         table.insert(
-            Arc::clone(&name),
-            ResolvedRootIdentity::new_in_owner(Arc::clone(canonical_id), owner, name),
+            name.clone(),
+            ResolvedRootIdentity::new_in_owner(canonical_id.clone(), owner, name),
         );
     }
     for key in state.headers.value_headers.keys() {
@@ -194,8 +194,8 @@ fn insert_file_symbol_resolutions(
         }
         let name = interner.intern(key.name.as_ref());
         table.insert(
-            Arc::clone(&name),
-            ResolvedRootIdentity::new_in_owner(Arc::clone(canonical_id), owner, name),
+            name.clone(),
+            ResolvedRootIdentity::new_in_owner(canonical_id.clone(), owner, name),
         );
     }
     // Eager framework-synthesised values (the Vue public-instance `default`)
@@ -208,8 +208,8 @@ fn insert_file_symbol_resolutions(
         }
         let name = interner.intern(key.name.as_ref());
         table.insert(
-            Arc::clone(&name),
-            ResolvedRootIdentity::new_in_owner(Arc::clone(canonical_id), owner, name),
+            name.clone(),
+            ResolvedRootIdentity::new_in_owner(canonical_id.clone(), owner, name),
         );
     }
 }
@@ -223,7 +223,7 @@ fn insert_file_symbol_resolutions(
 /// declaration from preparing. No source owner, ordinary owner, or name-only
 /// fallback is ever invented.
 fn insert_resolvable_type_space_imports(
-    table: &mut FxHashMap<Arc<str>, ResolvedRootIdentity>,
+    table: &mut FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
     state: &ShallowFileState,
     owner: verter_type_expr::TopLevelOwnerId,
     import_canonicalization: &ImportCanonicalization,
@@ -255,7 +255,7 @@ fn insert_resolvable_type_space_imports(
 /// It is returned directly to the active projection and is never admitted to
 /// the write-once prepared slot.
 pub(super) fn prepare_authored_partial_type_decl(
-    canonical_id: &Arc<str>,
+    canonical_id: &verter_type_expr::OwnedStr,
     state: &ShallowFileState,
     owner: verter_type_expr::TopLevelOwnerId,
     symbol_name: &str,
@@ -336,7 +336,7 @@ pub(super) fn prepare_authored_partial_type_decl(
         lowered.as_ref(),
         deps,
         external_deps,
-        Arc::new(table),
+        NameResolutionTable::new(table),
         interner,
     )
     .map(Some)
@@ -359,8 +359,8 @@ pub(super) fn prepare_authored_partial_type_decl(
 /// own — this only stops one bad import from taking down the rest of the
 /// file.
 fn insert_value_space_import_resolutions(
-    table: &mut FxHashMap<Arc<str>, ResolvedRootIdentity>,
-    _canonical_id: &Arc<str>,
+    table: &mut FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
+    _canonical_id: &verter_type_expr::OwnedStr,
     state: &ShallowFileState,
     owner: verter_type_expr::TopLevelOwnerId,
     _dep_edges: Option<&FxHashMap<String, String>>,
@@ -395,13 +395,13 @@ fn insert_value_space_import_resolutions(
 /// builds it once per bundle and shares it via `Arc` across those decls; a
 /// namespaced decl re-runs the same passes around its sibling bindings.
 pub(super) fn build_type_name_resolution_base(
-    canonical_id: &Arc<str>,
+    canonical_id: &verter_type_expr::OwnedStr,
     state: &ShallowFileState,
     owner: verter_type_expr::TopLevelOwnerId,
     _dep_edges: Option<&FxHashMap<String, String>>,
     import_canonicalization: &ImportCanonicalization,
     interner: &IdentityInterner,
-) -> Result<FxHashMap<Arc<str>, ResolvedRootIdentity>, PreparationFailure> {
+) -> Result<FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>, PreparationFailure> {
     let mut table = FxHashMap::default();
     insert_file_symbol_resolutions(&mut table, canonical_id, state, owner, interner);
     insert_resolvable_type_space_imports(
@@ -419,13 +419,13 @@ pub(super) fn build_type_name_resolution_base(
 /// at all, so this is the COMPLETE table of EVERY prepared value decl of the
 /// file.
 pub(super) fn build_value_name_resolution_base(
-    canonical_id: &Arc<str>,
+    canonical_id: &verter_type_expr::OwnedStr,
     state: &ShallowFileState,
     owner: verter_type_expr::TopLevelOwnerId,
     dep_edges: Option<&FxHashMap<String, String>>,
     import_canonicalization: &ImportCanonicalization,
     interner: &IdentityInterner,
-) -> Result<FxHashMap<Arc<str>, ResolvedRootIdentity>, PreparationFailure> {
+) -> Result<FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>, PreparationFailure> {
     let mut table = FxHashMap::default();
     insert_file_symbol_resolutions(&mut table, canonical_id, state, owner, interner);
     insert_value_space_import_resolutions(
@@ -472,11 +472,11 @@ pub(super) fn build_value_name_resolution_base(
 ///   across scopes. When module-scope prepared decls become addressable, the
 ///   matching `(Module(spec), …)` siblings bind here.
 fn add_namespace_sibling_resolutions(
-    name_resolution: &mut FxHashMap<Arc<str>, ResolvedRootIdentity>,
+    name_resolution: &mut FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
     state: &ShallowFileState,
     owner: verter_type_expr::TopLevelOwnerId,
     symbol_name: &str,
-    canonical_id: &Arc<str>,
+    canonical_id: &verter_type_expr::OwnedStr,
     origin: Option<&verter_session_query::declarations::AugmentationScopeKind>,
     interner: &IdentityInterner,
 ) {
@@ -503,7 +503,7 @@ fn add_namespace_sibling_resolutions(
                         name_resolution.insert(
                             interner.intern(member),
                             ResolvedRootIdentity::new_in_owner(
-                                Arc::clone(canonical_id),
+                                canonical_id.clone(),
                                 owner,
                                 interner.intern(dep_name),
                             ),
@@ -526,7 +526,7 @@ fn add_namespace_sibling_resolutions(
                         name_resolution.insert(
                             interner.intern(member),
                             ResolvedRootIdentity::new_in_owner(
-                                Arc::clone(canonical_id),
+                                canonical_id.clone(),
                                 owner,
                                 interner.intern(name),
                             ),

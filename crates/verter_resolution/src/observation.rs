@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 use verter_session_query::analysis::types::Hash16;
-use verter_session_query::flow::skeleton::FunctionBodySkeleton;
+use verter_session_query::flow::bundle::SkeletonRef;
 use verter_session_query::resolution::{
     AttemptOutcome, AugmentationTargetKey, CanonicalId, EnvHashes, FlowFunctionObservationKey,
     LoweredTypeDecl, LoweredValueDecl, ModuleAugmentationIndexObservation,
@@ -129,9 +129,11 @@ pub trait ResolverObservation: sealed::Sealed {
         target: &AugmentationTargetKey,
     ) -> AttemptOutcome<ModuleAugmentationIndexObservation>;
 
-    /// The memoized [`FunctionBodySkeleton`] of one content-pinned function
+    /// The memoized function body skeleton of one content-pinned function
     /// — the arena-free, span-relative-to-function-start flow substrate a
-    /// demand-sliced flow evaluation is built from.
+    /// demand-sliced flow evaluation is built from — kept through its
+    /// bundle's own handle ([`SkeletonRef`]), so the skeleton stays charged
+    /// for as long as the caller keeps it.
     ///
     /// Backed by a non-blocking peek at
     /// `verter_type_engine::cache_runtime::flow_slice_node::
@@ -149,7 +151,7 @@ pub trait ResolverObservation: sealed::Sealed {
     fn function_body_skeleton(
         &self,
         key: &FlowFunctionObservationKey,
-    ) -> AttemptOutcome<Option<Arc<FunctionBodySkeleton>>>;
+    ) -> AttemptOutcome<Option<SkeletonRef>>;
 
     /// Path-existence/kind classification for `path` — the
     /// `WorkspaceRead::probe_path` shape. `Complete(probe)` covers every stable classification,

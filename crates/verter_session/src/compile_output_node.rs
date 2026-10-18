@@ -89,7 +89,7 @@ pub(crate) fn with_session_publish_evidence_for_test<R>(
 /// compiler / plugin version hashes. Two requests that agree on every
 /// key dimension MUST produce byte-identical output, so a single
 /// content entry serves both — no fact-validation rail is required.
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub(crate) struct CompileOutputPureContentKey {
     /// Canonical id of the SFC whose output is cached.
     pub canonical_id: Arc<str>,
@@ -141,7 +141,7 @@ pub(crate) struct CompileOutputSessionKey {
 /// lives separately on the [`ArtifactNode::Value`] / [`Candidate`]
 /// envelope, NOT inside the value (so the value is identical between
 /// pure-content and session-mode entries).
-#[derive(Clone)]
+#[derive(Clone, verter_retention::heap_size::HeapSize)]
 pub(crate) struct CompileOutputValue {
     /// Cached semantic hash of the source content at compile time.
     pub semantic_hash: Hash16,
@@ -156,7 +156,7 @@ pub(crate) struct CompileOutputValue {
     /// Committed products or a payload-free runtime refusal. A sum: a
     /// refusal cannot carry a sibling product. The reason is structural,
     /// never sniffed from a diagnostic-code prefix.
-    pub products: crate::types::CompileProducts,
+    pub products: verter_retention::heap_size::OwnedTree<crate::types::CompileProducts>,
     /// Snapshot of compile diagnostics published with this entry.
     pub diagnostics: DiagnosticsSnapshot,
 }
@@ -175,7 +175,7 @@ impl CompileOutputValue {
             semantic_hash,
             content_override_hash,
             css_hash_override,
-            products,
+            products: verter_retention::heap_size::owned_tree(products),
             diagnostics,
         }
     }
@@ -212,7 +212,10 @@ impl CompileOutputValue {
 /// inline cold-build path) so any future `lookup` consumer cannot
 /// silently short-circuit through an unimplemented compute path.
 pub(crate) struct CompileOutputNodePureContent {
-    entries: DashMap<CompileOutputPureContentKey, Arc<CacheEntry<Arc<CompileOutputValue>>>>,
+    entries: DashMap<
+        CompileOutputPureContentKey,
+        Arc<CacheEntry<verter_retention::heap_size::OwnedTree<CompileOutputValue>>>,
+    >,
     /// Per-canonical reverse index: `canonical_id` → the set of content
     /// keys published for that canonical. Maintained alongside `entries`
     /// on every `publish_content` / `remove` / `clear_all` so a targeted
@@ -232,15 +235,25 @@ pub(crate) struct CompileOutputNodePureContent {
     /// peek / publish cold-build path this node actually takes — see the
     /// struct doc for why `Content` needs no node-level singleflight.
     inflight: InflightTable<QueryFlightKey<CompileOutputPureContentKey>>,
+    /// The account a published entry is charged to.
+    retention_account: verter_session_query::retention::StoreAccount,
 }
 
 impl CompileOutputNodePureContent {
     /// Construct a fresh node with empty storage.
     pub(crate) fn new() -> Self {
+        Self::with_retention_account(verter_session_query::retention::StoreAccount::default())
+    }
+
+    /// A node whose published entries are charged to `account`.
+    pub(crate) fn with_retention_account(
+        account: verter_session_query::retention::StoreAccount,
+    ) -> Self {
         Self {
             entries: DashMap::new(),
             by_canonical: DashMap::new(),
             inflight: InflightTable::new(),
+            retention_account: account,
         }
     }
 
@@ -252,24 +265,31 @@ impl CompileOutputNodePureContent {
     pub(crate) fn peek(
         &self,
         key: &CompileOutputPureContentKey,
-    ) -> Option<Arc<CompileOutputValue>> {
+    ) -> Option<verter_retention::heap_size::OwnedTree<CompileOutputValue>> {
         self.entries.get(key).map(|e| e.value.clone())
     }
 
     /// Publish a freshly compiled value into the content-addressed
-    /// store. The value is wrapped in `Arc` at admission so subsequent
-    /// peeks pay only the refcount bump.
+    /// store. The value becomes one self-charged allocation every peek
+    /// shares, and the entry is charged for its own allocations; a refusal
+    /// publishes nothing.
     pub(crate) fn publish_content(
         &self,
         key: CompileOutputPureContentKey,
         value: CompileOutputValue,
         validated_at_generation: u64,
     ) {
-        let entry = CacheEntry {
-            value: Arc::new(value),
-            signature: ReadSetSignature::new(Arc::from(Vec::new().as_slice())),
-            self_root_canonicals: Arc::from(Vec::new().as_slice()),
+        let value = verter_retention::heap_size::owned_tree(value);
+        let footprint = verter_retention::heap_size::footprint(&(&key, &value));
+        let Ok(entry) = CacheEntry::admit::<CompileOutputPureContentKey>(
+            value,
+            ReadSetSignature::new(Arc::from(Vec::new().as_slice())),
+            Arc::from(Vec::new().as_slice()),
             validated_at_generation,
+            footprint,
+            self.retention_account.get(),
+        ) else {
+            return;
         };
         // `entries` is inserted BEFORE `by_canonical` so no `entries`
         // row can ever be orphaned: a concurrent `remove_canonical`
@@ -411,7 +431,7 @@ impl Default for CompileOutputNodePureContent {
 
 impl ArtifactNode for CompileOutputNodePureContent {
     type Key = CompileOutputPureContentKey;
-    type Value = Arc<CompileOutputValue>;
+    type Value = verter_retention::heap_size::OwnedTree<CompileOutputValue>;
 
     fn entries(&self) -> &DashMap<Self::Key, Arc<CacheEntry<Self::Value>>> {
         &self.entries
@@ -435,6 +455,18 @@ impl ArtifactNode for CompileOutputNodePureContent {
         }
     }
 
+    fn entry_footprint(
+        &self,
+        key: &Self::Key,
+        value: &Self::Value,
+    ) -> verter_session_query::retention::Footprint {
+        verter_retention::heap_size::footprint(&(key, value))
+    }
+
+    fn retention_account(&self) -> Arc<verter_session_query::retention::SemanticRetentionAccount> {
+        Arc::clone(self.retention_account.get())
+    }
+
     /// Content-addressed warm validity: env-hash dimensions in the key
     /// already discriminate every observable env-state change, so key
     /// identity IS validity (no generation-only oracle).
@@ -445,6 +477,46 @@ impl ArtifactNode for CompileOutputNodePureContent {
         _cx: &ComputeCtx<'_>,
     ) -> Option<Self::Value> {
         Some(entry.value.clone())
+    }
+}
+
+/// The charge a session slot keeping `value` under `signature` holds: its
+/// map slot and inline record, the diagnostics and override text it keeps,
+/// its fact slice and the evidence pages it reaches, on one refusable
+/// reservation that also holds the products' cell — which, once the slot
+/// goes, passes to the warm hits still sharing it.
+pub(crate) fn compile_slot_retention(
+    value: &CompileOutputValue,
+    signature: &ReadSetSignature,
+    account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+) -> Result<
+    verter_session_query::retention::RetentionCharge,
+    verter_session_query::retention::RetentionRefusal,
+> {
+    use verter_retention::heap_size::footprint;
+    let ctx = verter_session_query::retention::owned::ChargeCtx::new(account);
+    let value_footprint = footprint(value);
+    let mut aliases = verter_session_query::retention::allocation::AliasSet::new();
+    let own = verter_session_query::retention::ENTRY_OVERHEAD_BYTES
+        + std::mem::size_of::<(u64, CompileSlot)>()
+        + value_footprint.bytes
+        + verter_session_query::retention::allocation::fact_slice_bytes(
+            &signature.facts,
+            &mut aliases,
+        );
+    let holds = aliases
+        .take_handles()
+        .merge(value_footprint.handles)
+        .hold_or_pin(ctx)?;
+    match verter_session_query::facts::receipt::reserve_retained_with_evidence(
+        account,
+        own,
+        &[&signature.facts],
+    ) {
+        verter_session_query::retention::RetentionAdmission::Admitted(charge) => {
+            Ok(charge.holding(holds))
+        }
+        verter_session_query::retention::RetentionAdmission::Refused(refusal) => Err(refusal),
     }
 }
 
@@ -604,13 +676,13 @@ impl CompileOutputNodeFactValidatedSession {
                 });
                 #[cfg(not(test))]
                 let account = &self.retention_account;
-                if let Err(refusal) = verter_session_query::facts::receipt::claim_evidence_pages(
-                    account.get(),
-                    &signature.facts,
-                ) {
-                    profile_state.compile_slot_remove_for_node(profile_hash);
-                    return SessionPublishOutcome::Refused(refusal.non_admission_reason());
-                }
+                let retention = match compile_slot_retention(&value, &signature, account.get()) {
+                    Ok(retention) => retention,
+                    Err(refusal) => {
+                        profile_state.compile_slot_remove_for_node(profile_hash);
+                        return SessionPublishOutcome::Refused(refusal.non_admission_reason());
+                    }
+                };
                 let slot = CompileSlot {
                     semantic_hash: value.semantic_hash,
                     content_override_hash: value.content_override_hash,
@@ -619,6 +691,7 @@ impl CompileOutputNodeFactValidatedSession {
                     diagnostics: value.diagnostics,
                     last_access_tick,
                     fact_dep_signature: signature,
+                    _retention: Arc::new(retention),
                 };
                 profile_state.compile_slot_insert_for_node(profile_hash, slot);
                 SessionPublishOutcome::Admitted
@@ -747,7 +820,7 @@ impl Default for CompileOutputNodeFactValidatedSession {
 pub(crate) struct SessionLookupHit {
     /// What the cached transaction committed — the produced product set OR a
     /// payload-free runtime refusal.
-    pub products: crate::types::CompileProducts,
+    pub products: verter_retention::heap_size::OwnedTree<crate::types::CompileProducts>,
     /// Diagnostics snapshot from compile time.
     pub diagnostics: DiagnosticsSnapshot,
 }
@@ -811,6 +884,17 @@ impl QueryNode for CompileOutputNodeFactValidatedSession {
             validated_at_generation,
             facts: signature.facts.clone(),
         }
+    }
+
+    /// Session-mode candidates are never built through the substrate's
+    /// `query::lookup` (see [`Self::compute`]); a session slot charges its
+    /// own products ([`Self::publish`]).
+    fn candidate_footprint(
+        &self,
+        _key: &Self::Key,
+        value: &Self::Value,
+    ) -> verter_session_query::retention::Footprint {
+        verter_session_query::retention::heap_size::footprint(value)
     }
 
     /// Session-mode publish-core is not routed through the substrate's

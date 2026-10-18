@@ -84,7 +84,7 @@ impl RegistryProducerScope {
             canonical_id: if anchor.canonical_id.is_empty() {
                 Arc::clone(&caller_scope.canonical_id)
             } else {
-                Arc::clone(&anchor.canonical_id)
+                std::sync::Arc::<str>::from(anchor.canonical_id.as_str())
             },
             owner: anchor.owner,
         }
@@ -286,7 +286,7 @@ pub(crate) fn upsert_component_meta_registry_entry(
                         }
                     }
                     let union = verter_type_expr::facts::ProjectedSurfaceFact {
-                        members: std::sync::Arc::from(members.into_boxed_slice()),
+                        members: From::from(members.into_boxed_slice()),
                         call_signatures: current.call_signatures.clone(),
                         construct_signatures: current.construct_signatures.clone(),
                         index_signatures: current.index_signatures.clone(),
@@ -1403,8 +1403,8 @@ pub(crate) fn component_meta_registry_node_instantiated_indexed_access_route(
     }
     let resolved_identity = match registry_node_data(dispatch, cursor).as_deref() {
         Some(SemanticNodeData::InstantiationRef { base, .. }) => Some((
-            std::sync::Arc::clone(&base.canonical_id),
-            std::sync::Arc::clone(&base.decl_name),
+            std::sync::Arc::<str>::from(&base.canonical_id),
+            std::sync::Arc::<str>::from(&base.decl_name),
         )),
         _ => None,
     };

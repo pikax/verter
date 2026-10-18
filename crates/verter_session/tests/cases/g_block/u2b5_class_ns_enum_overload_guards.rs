@@ -52,9 +52,9 @@ fn slot(canonical: &str, name: &str, space: SemanticSymbolSpace) -> ResolvedDecl
     // Zero-env slot via the fixture constructor (the typed env tail is
     // in-crate sealed), re-spaced to the requested symbol space.
     ResolvedDeclSlotIdentity::type_slot_unscoped(
-        Arc::from(canonical),
+        verter_type_expr::OwnedStr::from(canonical),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::from(name),
+        verter_type_expr::OwnedStr::from(name),
     )
     .with_symbol_space(space)
 }
@@ -79,7 +79,7 @@ fn count_for_b_after_publishing_a(a: &SemanticQueryKey, b: &SemanticQueryKey) ->
         QueryResult::Value(node),
         ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
-        Arc::from(Vec::new().into_boxed_slice()),
+        verter_type_engine::semantic_query::DepSignature::new(Vec::new().into_boxed_slice()),
         100,
     );
     graph.slot_candidate_count_for_tests(b)
@@ -721,13 +721,13 @@ fn class_dual_space_routes_instance_and_static_through_distinct_shared_paths() {
                     Arc::from(canonical),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
-                name: Arc::from("Foo"),
+                name: verter_type_expr::OwnedStr::from("Foo"),
             },
             typeof_project_identity,
             typeof_env.type_env_hash,
             typeof_env.lib_env_hash,
         ),
-        path: Arc::from([]),
+        path: verter_type_expr::OwnedSlice::from([]),
         context: verter_type_engine::semantic_query::TypeOfContext::new(
             verter_type_engine::semantic_query::ProjectionReductionContext::published(
                 verter_type_engine::semantic_query::ProjectionMode::Shallow,

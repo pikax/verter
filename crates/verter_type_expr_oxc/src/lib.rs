@@ -26,6 +26,7 @@ use oxc_ast::ast::{
     TSTypeQueryExprName, TSTypeReference, UnaryOperator,
 };
 use oxc_span::GetSpan;
+use verter_type_expr::OwnedStr;
 
 use std::sync::Arc;
 
@@ -1604,7 +1605,7 @@ pub fn lower_property_key(key: &PropertyKey<'_>, source: &str) -> TypeAuthoredPr
             let key = CanonicalIndexInt::from_js_number(literal.value)
                 .map(TypedPropertyKey::Number)
                 .unwrap_or_else(|| {
-                    TypedPropertyKey::String(Arc::from(verter_ecma::js_number_to_string(
+                    TypedPropertyKey::String(OwnedStr::from(verter_ecma::js_number_to_string(
                         literal.value,
                     )))
                 });
@@ -1708,10 +1709,10 @@ mod synthetic_carrier_tests {
 
     fn make_carrier() -> TypeExpr {
         TypeExpr::synthetic_slot_binding(SyntheticCarrierKey {
-            scope_canonical_id: Arc::from("/abs/Foo.vue"),
+            scope_canonical_id: From::from("/abs/Foo.vue"),
             surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
-            slot_name: Some(Arc::from("default")),
-            binding_name: Arc::from("controls"),
+            slot_name: Some(From::from("default")),
+            binding_name: From::from("controls"),
             value_node: 42,
         })
     }

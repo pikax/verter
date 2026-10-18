@@ -90,7 +90,7 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_route_target_pick_omit(
     let base = intern_four_hop_object(&host);
     let key = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![
                 PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     "a",
@@ -150,7 +150,7 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_fallthrough_inheritance
     let base = intern_four_hop_object(&host);
     let key = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![
                 PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     "a",
@@ -217,7 +217,7 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_userland_shadowing_pick
     let base = intern_four_hop_object(&host);
     let key = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![
                 PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     "a",
@@ -286,7 +286,7 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_exclude_extract_reducti
     let base = intern_four_hop_object(&host);
     let key = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![
                 PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     "a",
@@ -356,7 +356,7 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_slot_binding_lowering()
     let base = intern_four_hop_object(&host);
     let key = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![
                 PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     "a",
@@ -426,7 +426,7 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_typeof_substitution() {
     let base = intern_four_hop_object(&host);
     let key = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![
                 PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     "a",
@@ -493,7 +493,7 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_engine_state_promotion(
     let base = intern_four_hop_object(&host);
     let key = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![
                 PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     "a",

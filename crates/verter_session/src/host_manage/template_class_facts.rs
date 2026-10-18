@@ -454,7 +454,7 @@ fn classify_binding(
     let key = dispatch.typeof_key_for(
         ValueRootKey {
             scope: ScopeId::file(Arc::from(canonical), declaration.owner),
-            name: Arc::clone(&declaration.name),
+            name: verter_type_expr::OwnedStr::from(declaration.name.clone()),
         },
         context,
     );
@@ -894,7 +894,7 @@ fn closed_domain_source(domain: &ClosedLiteralDomain) -> Option<SemanticTypeSour
         .collect::<Vec<_>>();
     let fact = match leaves.as_slice() {
         [leaf] => ClosedTypeFact::Leaf(leaf.clone()),
-        _ => ClosedTypeFact::LeafUnion(Arc::from(leaves.into_boxed_slice())),
+        _ => ClosedTypeFact::LeafUnion(From::from(leaves.into_boxed_slice())),
     };
     Some(SemanticTypeSource::Closed(fact))
 }

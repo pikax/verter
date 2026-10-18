@@ -21,6 +21,7 @@
 //! grammar is untouched.
 
 use std::sync::Arc;
+use verter_type_expr::OwnedStr;
 
 use verter_type_expr::facts::{
     DeferredKeyUtilityEdge, DeferredKeyUtilityKind, ExternalRouteRefFact, FactPropertyKey,
@@ -261,7 +262,7 @@ fn collect_key_source_arms(
 ) -> bool {
     match expr {
         TypeExpr::Literal(LiteralValue::String(value)) => {
-            literals.push(PropertyKey::String(Arc::from(value.as_str())));
+            literals.push(PropertyKey::String(OwnedStr::from(value.as_str())));
             true
         }
         TypeExpr::Literal(LiteralValue::Number(value)) => {
@@ -283,9 +284,9 @@ fn collect_key_source_arms(
         } if type_arguments.is_empty() => {
             aliases.push(KeySourceRefFact {
                 anchor: AuthoredAnchor {
-                    canonical_id: lens.own_canonical_id(),
+                    canonical_id: OwnedStr::from(lens.own_canonical_id()),
                     owner: lens.own_top_level_owner(),
-                    symbol: Arc::from(name.as_ref()),
+                    symbol: OwnedStr::from(name.as_ref()),
                     space: LocatorSymbolSpace::Type,
                 },
             });
@@ -825,9 +826,9 @@ impl RouteFactProducer<'_> {
     fn key_source_recipe(&self, alias: &str) -> KeyDomainFact {
         KeyDomainFact::FollowSlot(SymbolBodyLocator {
             anchor: AuthoredAnchor {
-                canonical_id: self.lens.own_canonical_id(),
+                canonical_id: OwnedStr::from(self.lens.own_canonical_id()),
                 owner: self.lens.own_top_level_owner(),
-                symbol: Arc::from(alias),
+                symbol: OwnedStr::from(alias),
                 space: LocatorSymbolSpace::Type,
             },
         })
@@ -913,7 +914,7 @@ impl RouteFactProducer<'_> {
     fn extract_literal_keys_inner(&self, expr: &TypeExpr) -> Option<Vec<FactPropertyKey>> {
         match expr {
             TypeExpr::Literal(verter_type_expr::LiteralValue::String(value)) => {
-                Some(vec![PropertyKey::String(Arc::from(value.as_str()))])
+                Some(vec![PropertyKey::String(OwnedStr::from(value.as_str()))])
             }
             TypeExpr::Literal(verter_type_expr::LiteralValue::Number(value)) => {
                 Some(vec![number_property_key(*value)])

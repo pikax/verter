@@ -8,33 +8,49 @@ use verter_session_query::analysis::types::Hash16;
 
 use verter_type_engine::semantic_query::ProjectionMode;
 
+/// A component-meta analysis held as the value of a self-charged cell
+/// ([`SharedComponentMetaAnalysis`]).
+#[derive(Debug, Clone)]
+pub struct ComponentMetaAnalysisCell(
+    pub verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
+);
+
+impl std::ops::Deref for ComponentMetaAnalysisCell {
+    type Target = verter_session_query::analysis::component_meta::ComponentMetaAnalysis;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// A component-meta analysis the final-result cache, every delivery of it
+/// and every reader share: one allocation and one charge, released by its
+/// last holder, so an analysis a caller keeps past the cache stays charged.
+pub type SharedComponentMetaAnalysis = crate::resolver_core::CachedValue<ComponentMetaAnalysisCell>;
+
+/// `analysis` as a new shared cell, charged by the first owner that keeps
+/// it.
+#[must_use]
+pub fn shared_component_meta_analysis(
+    analysis: verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
+) -> SharedComponentMetaAnalysis {
+    crate::resolver_core::CachedValue::new(ComponentMetaAnalysisCell(analysis))
+}
+
 impl verter_session_query::retention::RetainedFootprint for CachedComponentMetaResult {
+    /// The result's `Arc` block and every allocation its payload keeps
+    /// alive (see [`crate::component_meta_footprint`]).
     fn retained_footprint_bytes(&self) -> usize {
-        let analysis = &self.analysis;
-        let surfaces = analysis.props.len()
-            + analysis.events.len()
-            + analysis.slots.len()
-            + analysis.models.len()
-            + analysis.exposed.len()
-            + analysis.accepted_props.len()
-            + analysis.accepted_events.len();
-        let structural = analysis.components.len()
-            + analysis.template_refs.len()
-            + analysis.imports.len()
-            + analysis.bindings.len()
-            + analysis.vue_api_calls.len()
-            + analysis.styles.len();
-        let types = analysis.type_registry.len()
-            + self.resolution_template.resolved_type_registry.len()
-            + self.resolution_template.resolved_type_registry_meta.len()
-            + self.resolution_template.resolved_macros.len();
-        surfaces * crate::component_meta_result_db::footprint::SURFACE_RECORD_BYTES
-            + structural * crate::component_meta_result_db::footprint::STRUCTURAL_RECORD_BYTES
-            + types * crate::component_meta_result_db::footprint::TYPE_RECORD_BYTES
-            + self.resolution_template.fact_versions.len()
-                * crate::component_meta_result_db::footprint::FACT_BYTES
-            + self.canonical_id.len()
-            + std::mem::size_of::<Self>()
+        self.retained_footprint().bytes
+    }
+
+    fn retained_footprint(&self) -> verter_session_query::retention::Footprint {
+        let footprint = crate::component_meta_footprint::cached_result_footprint(self);
+        verter_session_query::retention::Footprint {
+            bytes: verter_session_query::retention::allocation::arc_block_bytes(
+                std::mem::size_of::<Self>(),
+            ) + footprint.bytes,
+            handles: footprint.handles,
+        }
     }
 }
 
@@ -94,7 +110,9 @@ pub struct ResolutionTemplate {
 /// both halves without rerunning the cold resolver.
 #[derive(Debug, Clone)]
 pub struct CachedComponentMetaResult {
-    pub analysis: verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
+    /// The analysis as one self-charged cell the cache and every delivery
+    /// of it share.
+    pub analysis: SharedComponentMetaAnalysis,
     pub resolution_template: ResolutionTemplate,
     /// Owner canonical id used to reload `snapshot` via
     /// [`ProjectTypeStore::indexed()`] on rehydrate.

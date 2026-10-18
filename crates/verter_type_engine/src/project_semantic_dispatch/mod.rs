@@ -296,7 +296,11 @@ pub use evaluate::StructuralFactDemandOutcome;
 /// `Arc<str>` so membership checks are refcount compares, not string
 /// compares. Lives on [`ProjectSemanticDispatch`] so nested
 /// `build_instantiate` invocations share the active set.
-pub(super) type InstantiateIdentity = (Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>);
+pub(super) type InstantiateIdentity = (
+    verter_type_expr::OwnedStr,
+    verter_type_expr::TopLevelOwnerId,
+    verter_type_expr::OwnedStr,
+);
 
 /// One build on the active-instantiation stack: the declaration it
 /// materialises and the arguments it materialises it over.
@@ -473,7 +477,8 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// nothing scoped through this stack is ever admitted to a shared
     /// cache. Empty when no member-access/call site is on the stack — a
     /// rootless apparent demand then fails closed (`Miss`).
-    pub lexical_demand_scope: std::cell::RefCell<smallvec::SmallVec<[Arc<str>; 2]>>,
+    pub lexical_demand_scope:
+        std::cell::RefCell<smallvec::SmallVec<[verter_type_expr::OwnedStr; 2]>>,
     /// The transient per-obligation-root cold-compute frame (design
     /// `.claude/skills/type-resolution/SKILL.md` §2.1): the ONE shared
     /// tagged re-entry / cycle-id space with its generic frame /
@@ -832,15 +837,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 /// so an unwinding evaluation can never leak its scope onto a later
 /// build's rootless apparent lookup.
 pub struct LexicalDemandScopeGuard<'g> {
-    stack: &'g std::cell::RefCell<smallvec::SmallVec<[Arc<str>; 2]>>,
+    stack: &'g std::cell::RefCell<smallvec::SmallVec<[verter_type_expr::OwnedStr; 2]>>,
 }
 
 impl<'g> LexicalDemandScopeGuard<'g> {
     pub fn push(
-        stack: &'g std::cell::RefCell<smallvec::SmallVec<[Arc<str>; 2]>>,
-        canonical: Arc<str>,
+        stack: &'g std::cell::RefCell<smallvec::SmallVec<[verter_type_expr::OwnedStr; 2]>>,
+        canonical: impl Into<verter_type_expr::OwnedStr>,
     ) -> Self {
-        stack.borrow_mut().push(canonical);
+        stack.borrow_mut().push(canonical.into());
         Self { stack }
     }
 }
@@ -1158,10 +1163,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticQueryKey::Instantiate(key) => {
                 graph.intern_node(SemanticNodeData::InstantiationRef {
                     base: DeclIdentity {
-                        canonical_id: Arc::clone(&key.base().defining_canonical),
+                        canonical_id: key.base().defining_canonical.clone(),
                         owner: key.base().owner,
                         whole_hash: crate::semantic_query::HashValue::default(),
-                        decl_name: Arc::clone(&key.base().merged_symbol_name),
+                        decl_name: key.base().merged_symbol_name.clone(),
                     },
                     args: crate::semantic_query::PayloadArray::from(Arc::clone(key.args())),
                 })
@@ -1179,7 +1184,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticQueryKey::ProjectMember { base, member, .. } => {
                 graph.intern_node(SemanticNodeData::IndexedAccess {
                     object: *base,
-                    index: crate::semantic_query::IndexKey::String(Arc::clone(member)),
+                    index: crate::semantic_query::IndexKey::String(
+                        verter_type_expr::OwnedStr::from(member),
+                    ),
                 })
             }
             SemanticQueryKey::ProjectPath { base, path, .. } => {
@@ -1187,7 +1194,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let index = match segment {
                         crate::semantic_query::PathSegment::Member(key) => match key {
                             crate::semantic_query::PropertyKey::String(value) => {
-                                crate::semantic_query::IndexKey::String(Arc::clone(value))
+                                crate::semantic_query::IndexKey::String(
+                                    verter_type_expr::OwnedStr::from(value),
+                                )
                             }
                             crate::semantic_query::PropertyKey::Number(value) => {
                                 crate::semantic_query::IndexKey::Number(*value)
@@ -1243,12 +1252,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 value_root, path, ..
             } => graph.intern_node(SemanticNodeData::new_typeof(
                 value_root.root.clone(),
-                Arc::clone(path),
+                path.clone(),
                 Arc::from([]),
             )),
             SemanticQueryKey::TemplateLiteralReduce { pattern, args, .. } => {
                 graph.intern_node(SemanticNodeData::TemplateLiteral {
-                    quasis: Arc::clone(pattern),
+                    quasis: (*pattern).clone(),
                     expressions: crate::semantic_query::PayloadArray::from(Arc::clone(args)),
                 })
             }
@@ -1265,7 +1274,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     domain,
                     limit,
                     actual,
-                    context: format!("semantic-dispatch:{rail}"),
+                    context: format!("semantic-dispatch:{rail}").into(),
                 }))
             }
         };
@@ -1291,19 +1300,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let walker_diagnostics = carrier
             .map(|carrier| self.connected_limit_diagnostics(carrier, reasons))
-            .unwrap_or_else(|| Arc::from([]));
+            .unwrap_or_else(crate::semantic_query_memo::empty_diagnostics);
         let owned_value = match &value {
             QueryResult::Value(node) => QueryResult::Value(SemanticQueryValue::TypeNode(*node)),
             QueryResult::Error(error) => QueryResult::Error(error.clone()),
             QueryResult::Recursive(node) => QueryResult::Recursive(*node),
         };
+        let dep_signature = empty_signature();
         CacheRead {
             lease: self
                 .graph()
-                .lease_delivery(&owned_value, &walker_diagnostics)
+                .lease_delivery(
+                    crate::semantic_query_memo::delivery_lease::DeliveredAllocations::read(
+                        &owned_value,
+                        &walker_diagnostics,
+                        &dep_signature,
+                    ),
+                )
                 .expect("connected refusal operands are live"),
             value,
-            dep_signature: empty_signature(),
+            dep_signature,
             walker_diagnostics,
             cache_suppress: true,
             fact_status: if projection.is_some_and(|(_, interpretation)| interpretation.is_some()) {
@@ -1728,7 +1744,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         root: SemanticNodeId,
         reasons: crate::semantic_query::PartialReasonSet,
-    ) -> Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]> {
+    ) -> crate::project_semantic_dispatch::walk::WalkerDiagnostics {
         use crate::project_semantic_dispatch::walk::ShallowDiagnostic;
 
         let mut diagnostics = Vec::with_capacity(2);
@@ -1741,7 +1757,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if reasons.contains(crate::semantic_query::PartialReasonSet::CONNECTED_MEMORY_LIMIT) {
             diagnostics.push(ShallowDiagnostic::ConnectedMemoryLimit { root });
         }
-        Arc::from(diagnostics.into_boxed_slice())
+        crate::project_semantic_dispatch::walk::WalkerDiagnostics::new(diagnostics)
     }
 
     fn append_connected_limit_diagnostics<T>(
@@ -1765,7 +1781,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 diagnostics.push(diagnostic.clone());
             }
         }
-        read.walker_diagnostics = Arc::from(diagnostics.into_boxed_slice());
+        read.walker_diagnostics =
+            crate::project_semantic_dispatch::walk::WalkerDiagnostics::new(diagnostics);
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -2128,9 +2145,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     #[must_use]
     pub fn type_slot_for(
         &self,
-        canonical: Arc<str>,
+        canonical: impl Into<verter_type_expr::OwnedStr>,
         owner: verter_type_expr::TopLevelOwnerId,
-        name: Arc<str>,
+        name: impl Into<verter_type_expr::OwnedStr>,
     ) -> crate::semantic_query::ResolvedDeclSlotIdentity {
         self.finalize_slot_seed(crate::semantic_query::DeclarationSlotSeed::new(
             canonical,
@@ -2149,9 +2166,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     #[must_use]
     pub fn builtin_type_slot(&self, name: &str) -> crate::semantic_query::ResolvedDeclSlotIdentity {
         self.type_slot_for(
-            Arc::from("__builtin__"),
+            "__builtin__",
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(name),
+            name,
         )
     }
 
@@ -2254,9 +2271,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Some(
             crate::locator_identity::BroadRuntimeSubjectLocator::payload(
                 self.type_slot_for(
-                    Arc::clone(&owner.canonical_id),
+                    owner.canonical_id.clone(),
                     owner.owner,
-                    Arc::clone(&owner.decl_name),
+                    owner.decl_name.clone(),
                 ),
                 macro_index,
             ),
@@ -2336,7 +2353,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// through a poisoned synthetic publish) AND for any candidate whose
     /// node carries no occurrence — an occurrence-less candidate is an
     /// honest `Miss`, never a fabricated occurrence.
-    fn overload_set_refs_for(&self, node: SemanticNodeId) -> Option<Arc<[SignatureRef]>> {
+    fn overload_set_refs_for(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<verter_session_query::retention::owned::OwnedSlice<SignatureRef>> {
         let graph = self.graph();
         let data = graph.node_data(node)?;
         let to_ref = |sig: SemanticNodeId| -> Option<SignatureRef> {
@@ -2403,7 +2423,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .collect::<Option<Vec<_>>>()?,
             _ => return None,
         };
-        Some(Arc::from(refs.into_boxed_slice()))
+        Some(refs.into())
     }
 
     /// The env-bearing occurrence identity of one candidate — the env-free
@@ -2419,9 +2439,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         crate::semantic_query::SignatureOccurrenceIdentity {
             function: {
                 let mut function = self.flow_function_slot_for(
-                    Arc::clone(&occurrence.function.anchor.canonical_id),
+                    occurrence.function.anchor.canonical_id.clone(),
                     occurrence.function.anchor.owner,
-                    Arc::clone(&occurrence.function.anchor.symbol),
+                    occurrence.function.anchor.symbol.clone(),
                     occurrence.function.function_part.clone(),
                     occurrence.function.overload_ordinal,
                 );
@@ -2478,7 +2498,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         root: crate::semantic_query::ValueRootKey,
         prc: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticQueryKey {
-        self.typeof_key_with_path(root, Arc::from([]), prc)
+        self.typeof_key_with_path(root, verter_type_expr::OwnedSlice::from([]), prc)
     }
 
     /// `typeof` query for a value root plus remaining member path. The path
@@ -2489,7 +2509,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     pub(crate) fn typeof_key_with_path(
         &self,
         root: crate::semantic_query::ValueRootKey,
-        path: Arc<[Arc<str>]>,
+        path: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
         prc: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticQueryKey {
         let canonical = root.scope.canonical_id.as_ref();
@@ -2653,11 +2673,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> SemanticNodeId {
         self.graph().intern_node_with_scope(
             SemanticNodeData::Opaque(QueryError::RecursiveRef {
-                name: Arc::clone(&identity.decl_name),
+                name: identity.decl_name.clone(),
                 args: args.into(),
             }),
             NodeScopeId::File {
-                canonical_id: Arc::clone(&identity.canonical_id),
+                canonical_id: identity.canonical_id.clone(),
                 owner: identity.owner,
                 whole_hash: identity.whole_hash,
                 local_scope: None,
@@ -2670,20 +2690,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// project generation so the completion fence picks up both.
     pub(super) fn dep_signature_for(
         &self,
-        canonical_id: &Arc<str>,
+        canonical_id: impl Into<verter_type_expr::OwnedStr>,
         hash: [u8; 16],
     ) -> DepSignature {
         let project_gen = self.snapshot.current_project_generation();
-        Arc::from(
-            vec![
-                (canonical_id.clone(), DepVersion::WholeHash(hash)),
-                (
-                    canonical_id.clone(),
-                    DepVersion::ProjectGeneration(project_gen),
-                ),
-            ]
-            .into_boxed_slice(),
-        )
+        let canonical = canonical_id.into();
+        DepSignature::new(vec![
+            crate::semantic_query::DepEntry(canonical.clone(), DepVersion::WholeHash(hash)),
+            crate::semantic_query::DepEntry(canonical, DepVersion::ProjectGeneration(project_gen)),
+        ])
     }
 
     /// Build a dep-signature fragment that records only the project
@@ -2693,13 +2708,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// caller already supplied.
     pub(super) fn project_generation_signature(&self) -> DepSignature {
         let project_gen = self.snapshot.current_project_generation();
-        Arc::from(
-            vec![(
-                Arc::<str>::from("<project>"),
-                DepVersion::ProjectGeneration(project_gen),
-            )]
-            .into_boxed_slice(),
-        )
+        DepSignature::new(vec![crate::semantic_query::DepEntry::new(
+            "<project>",
+            DepVersion::ProjectGeneration(project_gen),
+        )])
     }
 
     /// Emit a `ProjectMember` origin-graph edge tagged
@@ -2851,7 +2863,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .map(|shallow| shallow.whole_hash)
                 .unwrap_or_default();
             let scope = NodeScopeId::File {
-                canonical_id: Arc::from(scope_canonical_id),
+                canonical_id: verter_type_expr::OwnedStr::from(scope_canonical_id),
                 owner,
                 whole_hash,
                 local_scope: None,
@@ -2926,7 +2938,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         ) -> SemanticNodeId {
             let read = self.execute_read(crate::semantic_query::SemanticQueryKey::ProjectPath {
                 base: handle.node(),
-                path: Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
+                path: verter_type_expr::OwnedSlice::from(
+                    Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice(),
+                ),
                 context,
             });
             crate::meta_resolve::emit_dispatch_dep_signature_facts(self, &read.dep_signature);
@@ -2977,8 +2991,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 }
 
+/// The process-static empty dependency rail (never charged).
 pub(super) fn empty_signature() -> DepSignature {
-    Arc::from(Vec::new().into_boxed_slice())
+    crate::semantic_query_memo::empty_signature()
 }
 
 /// Test-only fact-injection slot for the dispatch's
@@ -3163,7 +3178,11 @@ fn counted_value_domain_conversion_preserves_delivery_ownership() {
             crate::semantic_query_memo::empty_signature(),
         );
         read.lease = graph
-            .lease_delivery(&QueryResult::Value(SemanticQueryValue::TypeNode(node)), &[])
+            .lease_delivery(
+                crate::semantic_query_memo::delivery_lease::DeliveredAllocations::value(
+                    &QueryResult::Value(SemanticQueryValue::TypeNode(node)),
+                ),
+            )
             .unwrap();
         narrow_value_cache_read(widen_node_cache_read(read))
     });
@@ -3957,7 +3976,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let lease = std::mem::take(&mut read.lease);
         read.lease = self
             .graph()
-            .redeliver(lease, &read.value, &read.walker_diagnostics)
+            .redeliver(
+                lease,
+                crate::semantic_query_memo::delivery_lease::DeliveredAllocations::read(
+                    &read.value,
+                    &read.walker_diagnostics,
+                    &read.dep_signature,
+                ),
+            )
             .expect("dispatch delivery operands are live");
         read
     }
@@ -3996,7 +4022,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     lease: Default::default(),
                     value: QueryResult::Error(error),
                     dep_signature: empty_signature(),
-                    walker_diagnostics: Arc::from([]),
+                    walker_diagnostics: crate::semantic_query_memo::empty_diagnostics(),
                     cache_suppress: true,
                     fact_status,
                     receipt: crate::semantic_query::ReadReceipt::Unpriced,
@@ -4083,7 +4109,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticQueryKey::ProjectMember { base, member, mode } => {
                 SemanticQueryKey::ProjectPath {
                     base,
-                    path: Arc::from(
+                    path: verter_type_expr::OwnedSlice::from(
                         vec![PathSegment::Member(PropertyKey::identifier(member))]
                             .into_boxed_slice(),
                     ),
@@ -4093,7 +4119,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticQueryKey::IndexedAccess { base, index, mode } => {
                 SemanticQueryKey::ProjectPath {
                     base,
-                    path: Arc::from(vec![PathSegment::Index(index)].into_boxed_slice()),
+                    path: verter_type_expr::OwnedSlice::from(
+                        vec![PathSegment::Index(index)].into_boxed_slice(),
+                    ),
                     context: crate::semantic_query::ProjectionReductionContext::published(mode),
                 }
             }
@@ -4223,7 +4251,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let sentinel = || {
             if let SemanticQueryKey::Instantiate(k) = key {
                 return graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
-                    name: Arc::clone(&k.base().merged_symbol_name),
+                    name: k.base().merged_symbol_name.clone(),
                     args: Arc::clone(k.args()).into(),
                 }));
             }
@@ -4301,18 +4329,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // these variants on the rewritten key; the arms below
                 // are pure exhaustiveness.
                 SemanticQueryKey::ProjectMember { base, member, mode } => {
-                    let path: Arc<[PathSegment]> = Arc::from(
-                        vec![PathSegment::Member(PropertyKey::identifier(Arc::clone(
-                            member,
-                        )))]
+                    let path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(
+                        vec![PathSegment::Member(PropertyKey::identifier(member.clone()))]
                         .into_boxed_slice(),
                     );
                     let ctx = crate::semantic_query::ProjectionReductionContext::published(*mode);
                     self.build_project_path(*base, &path, ctx)
                 }
                 SemanticQueryKey::IndexedAccess { base, index, mode } => {
-                    let path: Arc<[PathSegment]> =
-                        Arc::from(vec![PathSegment::Index(index.clone())].into_boxed_slice());
+                    let path: verter_type_expr::OwnedSlice<PathSegment> =
+                        verter_type_expr::OwnedSlice::from(vec![PathSegment::Index(index.clone())].into_boxed_slice());
                     let ctx = crate::semantic_query::ProjectionReductionContext::published(*mode);
                     self.build_project_path(*base, &path, ctx)
                 }
@@ -5267,7 +5293,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> SemanticQueryApi
             let result = self.execute_relate_redischarge_from_api(relate);
             let delivery = self
                 .graph()
-                .lease_delivery(&result, &[])
+                .lease_delivery(
+                    crate::semantic_query_memo::delivery_lease::DeliveredAllocations::value(
+                        &result,
+                    ),
+                )
                 .expect("relation delivery operands are live");
             return match result {
                 QueryResult::Value(value) => QueryResult::Value(SemanticQueryOutput::delivered(
@@ -5389,12 +5419,12 @@ pub fn resolve_decl_key(
 ) -> ResolveDeclKey {
     ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::from(canonical_id),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical_id),
             owner,
             local_scope: None,
             binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(owner),
         },
-        name: Arc::from(name),
+        name: verter_type_expr::OwnedStr::from(name),
     }
 }
 
@@ -5407,7 +5437,7 @@ pub fn resolve_decl_key(
 pub fn node_data_for(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     node: SemanticNodeId,
-) -> Option<Arc<SemanticNodeData>> {
+) -> Option<crate::semantic_query_memo::NodeData> {
     graph.node_data(node)
 }
 
@@ -5417,7 +5447,7 @@ pub fn node_data_for(
 pub(crate) fn node_data_for(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     node: SemanticNodeId,
-) -> Option<Arc<SemanticNodeData>> {
+) -> Option<crate::semantic_query_memo::NodeData> {
     graph.node_data(node)
 }
 
@@ -5451,7 +5481,7 @@ pub(crate) fn node_data_for(
 #[must_use]
 pub fn pick_builtin_decl_identity() -> crate::semantic_query::ResolvedDeclSlotIdentity {
     crate::semantic_query::ResolvedDeclSlotIdentity::type_slot(
-        Arc::from("__builtin__"),
+        verter_type_expr::OwnedStr::from("__builtin__"),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::from("Pick"),
         0,
@@ -5468,7 +5498,7 @@ pub fn pick_builtin_decl_identity() -> crate::semantic_query::ResolvedDeclSlotId
 #[must_use]
 pub fn omit_builtin_decl_identity() -> crate::semantic_query::ResolvedDeclSlotIdentity {
     crate::semantic_query::ResolvedDeclSlotIdentity::type_slot(
-        Arc::from("__builtin__"),
+        verter_type_expr::OwnedStr::from("__builtin__"),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::from("Omit"),
         0,
@@ -5520,9 +5550,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         mode: ProjectionMode,
     ) -> CacheRead<QueryResult<SemanticNodeId>> {
         // Hop 1: Navigate to the slot member off the macro payload base.
-        let slot_path: Arc<[PathSegment]> = Arc::from(
-            vec![PathSegment::Member(PropertyKey::identifier(slot_name))].into_boxed_slice(),
-        );
+        let slot_path: verter_type_expr::OwnedSlice<PathSegment> =
+            verter_type_expr::OwnedSlice::from(
+                vec![PathSegment::Member(PropertyKey::identifier(slot_name))].into_boxed_slice(),
+            );
         let slot_read = self.execute_read(SemanticQueryKey::ProjectPath {
             base,
             path: slot_path,
@@ -5592,15 +5623,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // Hop 3: project the binding member off the param Object at the
         // caller's terminal mode (path-precise rule — only the terminal
         // runs in the requested mode).
-        let binding_path: Arc<[PathSegment]> = Arc::from(
-            vec![PathSegment::Member(PropertyKey::identifier(binding_name))].into_boxed_slice(),
-        );
+        let binding_path: verter_type_expr::OwnedSlice<PathSegment> =
+            verter_type_expr::OwnedSlice::from(
+                vec![PathSegment::Member(PropertyKey::identifier(binding_name))].into_boxed_slice(),
+            );
         let binding_read = self.execute_read(SemanticQueryKey::ProjectPath {
             base: param0_ty,
             path: binding_path,
             context: crate::semantic_query::ProjectionReductionContext::published(mode),
         });
-        let merged: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = slot_read
+        let merged: Vec<crate::semantic_query::DepEntry> = slot_read
             .dep_signature
             .iter()
             .cloned()
@@ -5627,7 +5659,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         CacheRead {
             lease: binding_read.lease,
             value,
-            dep_signature: Arc::from(merged.into_boxed_slice()),
+            dep_signature: DepSignature::new(merged),
             walker_diagnostics: binding_read.walker_diagnostics,
             cache_suppress: binding_read.cache_suppress,
             // Fold the partial signal across BOTH hops: a budget/walker

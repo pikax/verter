@@ -27,6 +27,10 @@ use super::prepared::PreparedKeyHandle;
 pub struct FlightCell {
     pub(super) state: Mutex<InflightState>,
     pub(super) ready: Condvar,
+    /// The cell's block and its slot in the flight table, pinned for as
+    /// long as the cell lives — through every subscriber that still holds
+    /// it after the flight retires. A flight is live work, never refused.
+    _storage: Option<verter_session_query::retention::RetentionCharge>,
 }
 
 #[derive(Default)]
@@ -78,7 +82,7 @@ pub(super) struct InflightState {
     /// preserved across cooperative-admission joins. Empty for non-
     /// walker queries.
     pub(super) walker_diagnostics:
-        Option<std::sync::Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>>,
+        Option<crate::project_semantic_dispatch::walk::WalkerDiagnostics>,
     /// The receipt of the winner's build, when it sealed one: a
     /// subscriber's demand replays it, exactly as a warm read does, so
     /// waiting on another task's computation costs what computing it would.
@@ -115,13 +119,38 @@ pub(super) struct InflightState {
 }
 
 impl FlightCell {
+    /// An unclaimed cell whose storage is pinned against `account`.
+    pub(super) fn charged(
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) -> Self {
+        Self {
+            state: Mutex::new(InflightState::default()),
+            ready: Condvar::new(),
+            _storage: Some(account.pin(flight_storage_bytes())),
+        }
+    }
+
+    /// A fixture cell owning no storage charge, for a suite that drives a
+    /// flight by hand rather than through a store.
+    #[cfg(any(test, feature = "test-support"))]
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
             state: Mutex::new(InflightState::default()),
             ready: Condvar::new(),
+            _storage: None,
         }
     }
+}
+
+/// Bytes one flight keeps while it lives: the cell's `Arc` block and its
+/// slot in a flight table (key handle, cell handle and control byte). What
+/// the winner settles into the cell — its value, rails and lease — is
+/// shared with the delivery that produced it.
+pub(super) fn flight_storage_bytes() -> usize {
+    verter_session_query::retention::allocation::arc_block_bytes(std::mem::size_of::<FlightCell>())
+        + std::mem::size_of::<(PreparedKeyHandle, Arc<FlightCell>)>()
+        + 1
 }
 
 /// RAII guard that fails the in-flight entry if the cold build panics.
@@ -192,9 +221,9 @@ impl<'a> Drop for InflightPanicGuard<'a> {
         {
             let mut state = self.inflight.state.lock();
             if state.completed.is_none() {
-                state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
-                    "cold build aborted (panic or early return)",
-                ))));
+                state.completed = Some(QueryResult::Error(QueryError::Other(
+                    verter_type_expr::OwnedStr::from("cold build aborted (panic or early return)"),
+                )));
                 state.dep_signature = Some(empty_signature());
             }
             state.aborted = true;
@@ -309,7 +338,7 @@ impl super::SemanticGraphStore {
         key: crate::semantic_query::SemanticQueryKey,
     ) -> Option<InlineMemberFlight> {
         let prepared = self.prepare_rooted_key(key);
-        let inflight = Arc::new(FlightCell::new());
+        let inflight = Arc::new(FlightCell::charged(self.retention_account()));
         let task = super::tasks::ExecutionScope::current(&self.task_registry)
             .unwrap_or_else(|| self.task_registry.register_task());
         {
@@ -337,9 +366,9 @@ impl super::SemanticGraphStore {
             let mut state = flight.inflight.state.lock();
             state.aborted = true;
             if state.completed.is_none() {
-                state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
-                    "inline member flight abandoned",
-                ))));
+                state.completed = Some(QueryResult::Error(QueryError::Other(
+                    verter_type_expr::OwnedStr::from("inline member flight abandoned"),
+                )));
                 state.dep_signature = Some(empty_signature());
             }
             state.graph_carrier = None;

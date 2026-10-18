@@ -21,7 +21,6 @@
 //! surface→shape raises. Dispatch is the sole resolution authority on these
 //! paths.
 
-use std::sync::Arc;
 use verter_type_engine::resolver_core::ResolverContext;
 
 /// Extract the OUTER utility/identifier name from a route-bearing
@@ -223,7 +222,7 @@ pub(crate) fn decompose_indexed_access_chain(
     expr: &verter_type_expr::TypeExpr,
 ) -> (
     &verter_type_expr::TypeExpr,
-    Arc<[verter_type_engine::semantic_query::PathSegment]>,
+    verter_type_expr::OwnedSlice<verter_type_engine::semantic_query::PathSegment>,
 ) {
     use verter_type_engine::semantic_query::{IndexKey, PathSegment};
     use verter_type_expr::{LiteralValue, TypeExpr};
@@ -234,9 +233,9 @@ pub(crate) fn decompose_indexed_access_chain(
             TypeExpr::IndexedAccess { object, index } => match index.as_ref() {
                 TypeExpr::Literal(LiteralValue::String(member)) => {
                     let inner_base = descend(object, path);
-                    path.push(PathSegment::Index(IndexKey::String(Arc::from(
-                        member.as_str(),
-                    ))));
+                    path.push(PathSegment::Index(IndexKey::String(
+                        verter_type_expr::OwnedStr::from(member.as_str()),
+                    )));
                     inner_base
                 }
                 _ => expr,
@@ -247,7 +246,10 @@ pub(crate) fn decompose_indexed_access_chain(
 
     let mut path: Vec<PathSegment> = Vec::new();
     let base = descend(expr, &mut path);
-    (base, Arc::from(path.into_boxed_slice()))
+    (
+        base,
+        verter_type_expr::OwnedSlice::from(path.into_boxed_slice()),
+    )
 }
 
 // Class B helpers (dispatch-only surface projection) resolve a root

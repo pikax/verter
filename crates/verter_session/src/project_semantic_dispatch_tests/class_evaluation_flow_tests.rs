@@ -136,7 +136,7 @@ fn observe(host: &Arc<VerterHost>, name: &str) -> (verter_type_expr::TypeExpr, b
             FunctionPartIdentity::DeclarationBody,
             0,
         ),
-        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(FILE),
         demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
         input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -149,7 +149,7 @@ fn observe(host: &Arc<VerterHost>, name: &str) -> (verter_type_expr::TypeExpr, b
     else {
         panic!("{name} must produce a value");
     };
-    let result: Arc<FlowReturnResult> = result;
+    let result: verter_session_query::retention::owned::Owned<FlowReturnResult> = result;
     let projected = host
         .project_node_to_type_expr_for_test(result.return_type())
         .unwrap_or_else(|| panic!("{name} must project"));

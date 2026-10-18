@@ -235,9 +235,9 @@ pub(crate) enum VueMacroDependencyFailure {
         /// Exact top-level lexical owner of the consuming macro.
         macro_owner: verter_type_expr::TopLevelOwnerId,
         /// Unresolved arm head.
-        name: Arc<str>,
+        name: verter_session_query::retention::owned::OwnedStr,
         /// Canonical file that authored the arm.
-        owner_canonical: Arc<str>,
+        owner_canonical: verter_session_query::retention::owned::OwnedStr,
         /// Exact top-level lexical owner that authored the arm/import.
         owner: verter_type_expr::TopLevelOwnerId,
     },
@@ -543,8 +543,8 @@ fn record_unresolved_surface_arms(
         Some(VueMacroDependencyFailure::UnresolvedSurfaceArm {
             macro_index,
             macro_owner,
-            name: Arc::clone(name),
-            owner_canonical: Arc::clone(owner_canonical),
+            name: name.clone(),
+            owner_canonical: owner_canonical.clone(),
             owner: *owner,
         })
     }));
@@ -1231,7 +1231,9 @@ impl VerterHost {
                     ctx,
                     dispatch,
                     payload,
-                    Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                    verter_type_expr::OwnedSlice::from(
+                        Vec::<PathSegment>::new().into_boxed_slice(),
+                    ),
                     ProjectionReductionContext::macro_object_surface(
                         ProjectionMode::Shallow,
                         SurfaceProvenanceContext::MacroTypeArgOwnBody,
@@ -1326,7 +1328,9 @@ impl VerterHost {
                     ctx,
                     dispatch,
                     payload,
-                    Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                    verter_type_expr::OwnedSlice::from(
+                        Vec::<PathSegment>::new().into_boxed_slice(),
+                    ),
                     ProjectionReductionContext::macro_object_surface(
                         ProjectionMode::Shallow,
                         SurfaceProvenanceContext::Structural,
@@ -1479,7 +1483,7 @@ impl VerterHost {
                     let key = dispatch.typeof_key_for(
                         ValueRootKey {
                             scope: ScopeId::file(Arc::from(owner_canonical), binding_key.owner),
-                            name: Arc::clone(&binding_key.name),
+                            name: verter_type_expr::OwnedStr::from(binding_key.name.clone()),
                         },
                         ProjectionReductionContext::published(ProjectionMode::Expanded),
                     );
@@ -1592,7 +1596,7 @@ impl VerterHost {
             ctx,
             dispatch,
             payload,
-            Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+            verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
             ProjectionReductionContext::vue_runtime_object_surface(
                 ProjectionMode::Shallow,
                 SurfaceProvenanceContext::MacroTypeArgOwnBody,
@@ -1751,7 +1755,7 @@ impl VerterHost {
             ctx,
             dispatch,
             payload,
-            Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+            verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
             runtime_context,
             Some(walker_diagnostics),
         );

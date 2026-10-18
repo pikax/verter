@@ -7,13 +7,16 @@ use crate::flow::binding::FlowBindingRef;
 use crate::flow::frame_span::FrameSpan;
 use crate::flow::span_index::SkeletonSpanIndex;
 use crate::function_program::FunctionProgramEntry;
+use crate::retention::owned::{OwnedSlice, OwnedStr};
 use std::sync::Arc;
 use verter_no_typeexpr::NoTypeExpr;
 
 use crate::retention::resident::{resident, ResidentCharge, ResidentKind, RESIDENT_SLOTS};
 
 /// Interned identifier / property-key name within one skeleton.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub struct FlowNameId(pub u32);
 
 impl FlowNameId {
@@ -25,7 +28,9 @@ impl FlowNameId {
 }
 
 /// One entry of the lexical binding index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub struct SkeletonBindingId(pub u32);
 
 impl SkeletonBindingId {
@@ -41,7 +46,9 @@ impl SkeletonBindingId {
 }
 
 /// One control region of the statement skeleton.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub struct SkeletonRegionId(pub u32);
 
 impl SkeletonRegionId {
@@ -57,7 +64,9 @@ impl SkeletonRegionId {
 }
 
 /// One tracked expression site.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub struct SkeletonExprSiteId(pub u32);
 
 impl SkeletonExprSiteId {
@@ -99,7 +108,9 @@ impl SkeletonClosureId {
 }
 
 /// One `return` site of the indexed function.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub struct SkeletonReturnSiteId(pub u32);
 
 impl SkeletonReturnSiteId {
@@ -115,7 +126,9 @@ impl SkeletonReturnSiteId {
 }
 
 /// The kind of one control region.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub enum SkeletonRegionKind {
     /// The function body itself — the root region.
     FunctionBody,
@@ -145,7 +158,7 @@ pub enum SkeletonRegionKind {
 /// site (an `if` / loop condition or `switch` discriminant), whether the
 /// region's statement subtree returns from the indexed function, and the
 /// region's span.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct SkeletonRegion {
     /// The region kind.
     pub kind: SkeletonRegionKind,
@@ -161,7 +174,9 @@ pub struct SkeletonRegion {
 }
 
 /// The kind of one lexical binding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub enum SkeletonBindingKind {
     /// A formal parameter (destructured identifiers included).
     Param,
@@ -266,7 +281,7 @@ impl SkeletonBindingKind {
 }
 
 /// One entry of the lexical binding index.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct SkeletonBinding {
     /// The binding name.
     pub name: FlowNameId,
@@ -295,7 +310,7 @@ pub struct SkeletonBinding {
     /// binding runs every one of them, so each is an evaluation effect of
     /// the binding: a callable authored there is created and retains its
     /// captures whenever the binding is demanded.
-    pub pattern_sites: Arc<[SkeletonExprSiteId]>,
+    pub pattern_sites: OwnedSlice<SkeletonExprSiteId>,
     /// Whether the declaration has the checker's EVOLVING-array form: an
     /// unannotated whole-identifier declarator initialised to an empty array
     /// literal (`const a = []`). Under `noImplicitAny` its type follows the
@@ -315,7 +330,7 @@ pub struct SkeletonBinding {
 
 /// One identifier read inside a site (child sites and nested function
 /// bodies excluded — their reads belong to their own site / frame).
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct SkeletonRead {
     /// The read name (a local slot when the name binds in this frame,
     /// otherwise a free / captured name).
@@ -327,21 +342,23 @@ pub struct SkeletonRead {
     pub binding: Option<FlowBindingRef>,
     /// The statically known projection path under the root. Empty is a
     /// whole-root read; a computed segment conservatively aliases every key.
-    pub path: Arc<[SkeletonPathSegment]>,
+    pub path: OwnedSlice<SkeletonPathSegment>,
     /// Whether the read provides this expression result or is consumed independently.
     pub kind: FlowReadKind,
 }
 
 /// A type-query dependency of an indexed call input, independent of runtime
 /// operand reads, effects and closure capture receipts.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct SkeletonSourceTypeQuery {
     pub span: FrameSpan,
     pub binding: Option<FlowBindingRef>,
 }
 
 /// How a read depends on a demand for the containing expression result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub enum FlowReadKind {
     /// The read provides the result; append the demanded suffix to its path.
     Result,
@@ -350,19 +367,19 @@ pub enum FlowReadKind {
 }
 
 /// The callee shape of one call / construct site.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub enum SkeletonCallee {
     /// A bare identifier callee (`g()`).
     Named(FlowNameId),
     /// A static member path rooted at an identifier (`a.b.c()`), root
     /// first.
-    Path(Arc<[FlowNameId]>),
+    Path(OwnedSlice<FlowNameId>),
     /// Any other callee shape (computed, call-result, `this`-rooted).
     Opaque,
 }
 
 /// One call / construct footprint entry.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct SkeletonCall {
     /// The callee shape.
     pub callee: SkeletonCallee,
@@ -377,7 +394,7 @@ pub struct SkeletonCall {
 }
 
 /// The key of one object-literal property entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub enum SkeletonObjectKey {
     /// A statically-known property key.
     Static(FlowNameId),
@@ -387,7 +404,9 @@ pub enum SkeletonObjectKey {
 }
 
 /// The authored kind of one object-literal property.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub enum SkeletonPropertyKind {
     /// A plain `key: value` initializer.
     Init,
@@ -398,7 +417,7 @@ pub enum SkeletonPropertyKind {
 }
 
 /// One object-literal entry of a site's shape footprint.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub enum SkeletonObjectEntry {
     /// A property provisioning one key.
     Property {
@@ -425,12 +444,12 @@ pub enum SkeletonObjectEntry {
 /// each one records the child sites the flow graph turns into
 /// value-provider edges, so the demand planner reaches every
 /// sub-expression the content half lowers.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub enum SkeletonExprShape {
     /// An object literal with its property footprint, in authored order.
     ObjectLiteral {
         /// The entries in authored order.
-        entries: Arc<[SkeletonObjectEntry]>,
+        entries: OwnedSlice<SkeletonObjectEntry>,
     },
     /// A branch JOIN (a conditional expression): every arm site provides
     /// the WHOLE value of this site, so a demand for this site's value —
@@ -438,14 +457,14 @@ pub enum SkeletonExprShape {
     /// same remaining path.
     BranchJoin {
         /// The arm sites, in authored order (consequent, alternate).
-        arms: Arc<[SkeletonExprSiteId]>,
+        arms: OwnedSlice<SkeletonExprSiteId>,
     },
     /// An array literal: every element site (a spread's argument site for
     /// a spread element) is a whole-value input of this site's value,
     /// whatever part of the array is demanded.
     ArrayLiteral {
         /// The element sites, in authored order (elisions have none).
-        elements: Arc<[SkeletonExprSiteId]>,
+        elements: OwnedSlice<SkeletonExprSiteId>,
     },
     /// Any other expression shape (footprint-only).
     Other,
@@ -457,7 +476,9 @@ pub enum SkeletonExprShape {
 /// with no correlated index record asserts NOTHING about what it captures,
 /// and a consumer must fail closed on it rather than read its empty
 /// capture list as "captures nothing".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub enum SkeletonClosureCorrelation {
     /// The indexed program named this callable, so
     /// [`SkeletonClosure::captures`] is its EXACT and EXHAUSTIVE capture
@@ -486,7 +507,7 @@ pub enum SkeletonClosureCorrelation {
 /// is the per-callback partition of that union, so a consumer can carry
 /// one obligation per (callback, captured binding) and can tell a
 /// capture-free callback from an absent one.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct SkeletonClosure {
     /// The callable's own span — its identity within the frame.
     pub span: FrameSpan,
@@ -496,7 +517,7 @@ pub struct SkeletonClosure {
     /// an enclosing frame, transitively through its own nested
     /// callables), deduplicated in the indexed source order. Genuinely
     /// free / global reads bind to no declaration and never appear here.
-    pub captures: Arc<[FlowBindingRef]>,
+    pub captures: OwnedSlice<FlowBindingRef>,
     /// The subset of `captures` this callable actually READS — its own
     /// free reads, deduplicated in the indexed source order. The
     /// remaining captures are retained for their cell alone (a
@@ -509,13 +530,13 @@ pub struct SkeletonClosure {
     /// footprint says `a` is read HERE and cannot say by WHICH callable,
     /// so a site-level answer makes the write-only callback look like a
     /// value consumer.
-    pub read_captures: Arc<[FlowBindingRef]>,
+    pub read_captures: OwnedSlice<FlowBindingRef>,
 }
 
 /// One tracked expression site: span, region membership, containment
 /// parent, shape, and the read / call footprint attributed to this site
 /// (child sites carry their own).
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct SkeletonExprSite {
     /// The expression's span.
     pub span: FrameSpan,
@@ -527,29 +548,29 @@ pub struct SkeletonExprSite {
     /// The recorded expression shape.
     pub shape: SkeletonExprShape,
     /// Identifier reads attributed to this site.
-    pub reads: Arc<[SkeletonRead]>,
-    pub source_type_queries: Arc<[SkeletonSourceTypeQuery]>,
+    pub reads: OwnedSlice<SkeletonRead>,
+    pub source_type_queries: OwnedSlice<SkeletonSourceTypeQuery>,
     /// The captured names of the nested function value (arrow / function
     /// expression) this site holds: the nested frame's free reads, already
     /// interned into THIS frame's name table, deduplicated by name. A
     /// subset of `reads`' roots, recorded separately so a consumer can
     /// tell "the closure here captures this enclosing name" from "this
     /// expression itself reads the name". Empty for a non-closure site.
-    pub captures: Arc<[FlowNameId]>,
+    pub captures: OwnedSlice<FlowNameId>,
     /// Exact enclosing bindings captured by nested values at this site.
     /// Prepared construction resolves these in this frame; names above
     /// remain diagnostic metadata only.
-    pub capture_bindings: Arc<[FlowBindingRef]>,
+    pub capture_bindings: OwnedSlice<FlowBindingRef>,
     /// The authored nested callables evaluated at this site, in authored
     /// order — the per-callback partition of `capture_bindings`. Empty
     /// for a site holding no closure.
-    pub closures: Arc<[SkeletonClosure]>,
+    pub closures: OwnedSlice<SkeletonClosure>,
     /// Call / construct footprints attributed to this site.
-    pub calls: Arc<[SkeletonCall]>,
+    pub calls: OwnedSlice<SkeletonCall>,
 }
 
 /// The root target of one write.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub enum SkeletonWriteTarget {
     /// A named root (a local slot when the name binds in this frame,
     /// otherwise a free name).
@@ -559,7 +580,9 @@ pub enum SkeletonWriteTarget {
 }
 
 /// One segment of a write's projection path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub enum SkeletonPathSegment {
     /// A statically-known property key.
     Static(FlowNameId),
@@ -568,7 +591,9 @@ pub enum SkeletonPathSegment {
 }
 
 /// Whether a write definitely happens when its site evaluates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub enum SkeletonWriteCertainty {
     /// The write happens whenever the site evaluates.
     Definite,
@@ -578,7 +603,7 @@ pub enum SkeletonWriteCertainty {
 }
 
 /// One write of the assignment / kill summary, in source order.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct SkeletonWrite {
     /// The write's root target.
     pub target: SkeletonWriteTarget,
@@ -587,7 +612,7 @@ pub struct SkeletonWrite {
     /// The exact indexed runtime variable written by this site.
     pub binding: Option<FlowBindingRef>,
     /// The projection path under the root (empty = whole-slot write).
-    pub path: Arc<[SkeletonPathSegment]>,
+    pub path: OwnedSlice<SkeletonPathSegment>,
     /// Whether the write definitely happens when the site evaluates.
     pub certainty: SkeletonWriteCertainty,
     /// The site providing the written value (`None` for self-referential
@@ -602,7 +627,7 @@ pub struct SkeletonWrite {
 }
 
 /// One `return` site of the indexed function, in source order.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct SkeletonReturnSite {
     /// Source-order ordinal.
     pub ordinal: u32,
@@ -634,36 +659,36 @@ pub struct SkeletonReturnSite {
 /// above the function moves all of them while changing nothing the key can
 /// see. Consumers rebase a live position through [`FrameSpan::rebase`]
 /// before comparing.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct FunctionBodySkeleton {
     /// The interned name table.
-    pub names: Arc<[Arc<str>]>,
+    pub names: OwnedSlice<OwnedStr>,
     /// The function's authored KIND (`async` / `generator` flags of the
     /// declaration or arrow itself — never of an enclosing form). The flow
     /// body's stable hash already folds the flags, so the fact is a property
     /// of the same content version the skeleton is memoized under.
     pub kind: FunctionBodyKind,
     /// The control regions; index 0 is the function-body root.
-    pub regions: Arc<[SkeletonRegion]>,
+    pub regions: OwnedSlice<SkeletonRegion>,
     /// The lexical binding index.
-    pub bindings: Arc<[SkeletonBinding]>,
+    pub bindings: OwnedSlice<SkeletonBinding>,
     /// The tracked expression sites (parents precede their children).
-    pub expr_sites: Arc<[SkeletonExprSite]>,
+    pub expr_sites: OwnedSlice<SkeletonExprSite>,
     /// The return-site index, in source order.
-    pub return_sites: Arc<[SkeletonReturnSite]>,
+    pub return_sites: OwnedSlice<SkeletonReturnSite>,
     /// The argument site of every statement-position `yield x` (not
     /// `yield*`), in source order. A generator's yield type is the join of
     /// these values, so a whole-return demand is a demand for each of them
     /// as well as for the return sites.
-    pub yield_sites: Arc<[SkeletonExprSiteId]>,
+    pub yield_sites: OwnedSlice<SkeletonExprSiteId>,
     /// The assignment / kill summary, in source order.
-    pub writes: Arc<[SkeletonWrite]>,
+    pub writes: OwnedSlice<SkeletonWrite>,
     /// The bindings this frame declares that a nested callable ASSIGNS
     /// whole, at any depth ([`FunctionProgramEntry::descendant_assignments`]).
     /// With the whole-binding entries of [`Self::writes`] it is every
     /// assignment the checker's `isSymbolAssigned` reads; a closure that
     /// only reads a binding, or writes one of its members, adds nothing.
-    pub closure_assignments: Arc<[SkeletonBindingId]>,
+    pub closure_assignments: OwnedSlice<SkeletonBindingId>,
     /// The containment / read index over the tables above. Empty until
     /// [`prepare_function_body_skeleton`] builds it from the prepared
     /// tables; a consumer asking which sites, writes or bindings a span
@@ -675,9 +700,27 @@ pub struct FunctionBodySkeleton {
     pub name_index: SkeletonNameIndex,
 }
 
+verter_retention::measured_by_heap_size!(
+    FlowNameId,
+    SkeletonBindingId,
+    SkeletonExprSiteId,
+    SkeletonRegion,
+    SkeletonBinding,
+    SkeletonRead,
+    SkeletonSourceTypeQuery,
+    SkeletonCall,
+    SkeletonObjectEntry,
+    SkeletonClosure,
+    SkeletonExprSite,
+    SkeletonPathSegment,
+    SkeletonWrite,
+    SkeletonReturnSite,
+    FlowBindingRef,
+);
+
 /// Each interned name's id and the bindings that declare it, so a name
 /// resolves by lookup rather than by a scan of the name or binding table.
-#[derive(Debug, Clone, Default, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Default, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct SkeletonNameIndex {
     ids: Arc<NameIds>,
     tables: Arc<NameTables>,
@@ -685,14 +728,14 @@ pub struct SkeletonNameIndex {
 
 /// The name map of a [`SkeletonNameIndex`], one allocation shared by the
 /// index's clones until one of them interns a name.
-#[derive(Debug, Default, NoTypeExpr)]
+#[derive(Debug, Default, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 struct NameIds {
-    map: rustc_hash::FxHashMap<Arc<str>, FlowNameId>,
+    map: rustc_hash::FxHashMap<OwnedStr, FlowNameId>,
     resident: ResidentCharge,
 }
 
 impl NameIds {
-    fn new(map: rustc_hash::FxHashMap<Arc<str>, FlowNameId>) -> Self {
+    fn new(map: rustc_hash::FxHashMap<OwnedStr, FlowNameId>) -> Self {
         let mut ids = Self {
             map,
             resident: ResidentCharge::default(),
@@ -706,7 +749,7 @@ impl NameIds {
         let occupancy = SkeletonNameIndexOccupancy {
             names: self.map.len(),
             bindings: 0,
-            backing_bytes: self.map.capacity() * std::mem::size_of::<(Arc<str>, FlowNameId)>(),
+            backing_bytes: self.map.capacity() * std::mem::size_of::<(OwnedStr, FlowNameId)>(),
         };
         self.resident
             .recharge(ResidentKind::SkeletonNameIndex, occupancy.slots());
@@ -731,7 +774,7 @@ impl Eq for NameIds {}
 /// The bindings of each name, in declaration order: those of name `n` are
 /// `bindings[offsets[n]..offsets[n + 1]]`. A name interned after the index
 /// was built declares none.
-#[derive(Debug, Default, NoTypeExpr)]
+#[derive(Debug, Default, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 struct NameTables {
     offsets: Box<[u32]>,
     bindings: Box<[SkeletonBindingId]>,
@@ -750,11 +793,11 @@ impl Eq for NameTables {}
 impl SkeletonNameIndex {
     /// Index `names` and the bindings declaring each.
     #[must_use]
-    pub fn build(names: &[Arc<str>], bindings: &[SkeletonBinding]) -> Self {
+    pub fn build(names: &[OwnedStr], bindings: &[SkeletonBinding]) -> Self {
         let ids = names
             .iter()
             .enumerate()
-            .map(|(index, name)| (Arc::clone(name), FlowNameId(index as u32)))
+            .map(|(index, name)| (name.clone(), FlowNameId(index as u32)))
             .collect();
         let mut offsets = vec![0u32; names.len() + 1];
         for binding in bindings {
@@ -817,14 +860,23 @@ impl SkeletonNameIndex {
         SkeletonNameIndexOccupancy {
             names: self.ids.map.len(),
             bindings: self.tables.bindings.len(),
-            backing_bytes: self.ids.map.capacity() * std::mem::size_of::<(Arc<str>, FlowNameId)>()
+            backing_bytes: self.ids.map.capacity() * std::mem::size_of::<(OwnedStr, FlowNameId)>()
                 + std::mem::size_of_val(&*self.tables.offsets)
                 + std::mem::size_of_val(&*self.tables.bindings),
         }
     }
 
+    /// A handle on the same tables, for a name table interning into it:
+    /// the first interned name copies the map, never the caller's.
+    fn open(&self) -> Self {
+        Self {
+            ids: Arc::clone(&self.ids),
+            tables: Arc::clone(&self.tables),
+        }
+    }
+
     /// Record a name interned after the index was built.
-    fn insert(&mut self, text: Arc<str>, id: FlowNameId) {
+    fn insert(&mut self, text: OwnedStr, id: FlowNameId) {
         let ids = Arc::make_mut(&mut self.ids);
         ids.map.insert(text, id);
         ids.recharge();
@@ -874,7 +926,9 @@ impl SkeletonNameIndexOccupancy {
 /// The authored kind of one function body — the `async` and `generator`
 /// flags the language's return-type rule keys on. A plain function or
 /// arrow is [`Self::Plain`]; an arrow can never be a generator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub enum FunctionBodyKind {
     Plain,
     Async,
@@ -1104,6 +1158,12 @@ impl PreparedFunctionBodySkeleton {
     pub fn into_parts(self) -> (FunctionBodySkeleton, FlowBindingMap) {
         (self.skeleton, self.bindings)
     }
+
+    /// A fixture structure of `skeleton` and the `bindings` built over it.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn fixture(skeleton: FunctionBodySkeleton, bindings: FlowBindingMap) -> Self {
+        Self { skeleton, bindings }
+    }
 }
 
 /// Resolve the authored access occurrences against one exact indexed inventory.
@@ -1121,14 +1181,17 @@ pub fn prepare_function_body_skeleton(
         .filter_map(|identity| bindings.local(identity))
         .collect::<Vec<_>>()
         .into();
-    for (ordinal, binding) in Arc::make_mut(&mut skeleton.bindings).iter_mut().enumerate() {
+    for (ordinal, binding) in OwnedSlice::make_mut(&mut skeleton.bindings)
+        .iter_mut()
+        .enumerate()
+    {
         binding.runtime_binding = binding
             .kind
             .declares_value()
             .then(|| bindings.canonical_local(SkeletonBindingId::from_index(ordinal as u32)));
     }
-    for site in Arc::make_mut(&mut skeleton.expr_sites) {
-        for capture in Arc::make_mut(&mut site.capture_bindings) {
+    for site in OwnedSlice::make_mut(&mut skeleton.expr_sites) {
+        for capture in OwnedSlice::make_mut(&mut site.capture_bindings) {
             if let FlowBindingRef::Captured(identity) = capture {
                 *capture = bindings.resolve_identity(identity)?;
             }
@@ -1136,8 +1199,8 @@ pub fn prepare_function_body_skeleton(
         // The per-callable partition resolves through the SAME map as the
         // site union above, so a subject can never be named one way in the
         // union and another way in the callback that produced it.
-        for closure in Arc::make_mut(&mut site.closures) {
-            for capture in Arc::make_mut(&mut closure.captures) {
+        for closure in OwnedSlice::make_mut(&mut site.closures) {
+            for capture in OwnedSlice::make_mut(&mut closure.captures) {
                 if let FlowBindingRef::Captured(identity) = capture {
                     *capture = bindings.resolve_identity(identity)?;
                 }
@@ -1145,13 +1208,13 @@ pub fn prepare_function_body_skeleton(
             // The callable's own read subjects resolve through the SAME
             // map, so a cell named one way in `captures` is named the
             // same way here and the two lists stay comparable.
-            for capture in Arc::make_mut(&mut closure.read_captures) {
+            for capture in OwnedSlice::make_mut(&mut closure.read_captures) {
                 if let FlowBindingRef::Captured(identity) = capture {
                     *capture = bindings.resolve_identity(identity)?;
                 }
             }
         }
-        for read in Arc::make_mut(&mut site.reads) {
+        for read in OwnedSlice::make_mut(&mut site.reads) {
             read.binding = match &read.binding {
                 Some(FlowBindingRef::Captured(identity)) => {
                     Some(bindings.resolve_identity(identity)?)
@@ -1159,10 +1222,10 @@ pub fn prepare_function_body_skeleton(
                 _ => bindings.required_occurrence(read.span)?,
             };
         }
-        for query in Arc::make_mut(&mut site.source_type_queries) {
+        for query in OwnedSlice::make_mut(&mut site.source_type_queries) {
             query.binding = bindings.required_source_type_query(query.span)?;
         }
-        for call in Arc::make_mut(&mut site.calls) {
+        for call in OwnedSlice::make_mut(&mut site.calls) {
             call.binding = call
                 .root_span
                 .map(|span| bindings.required_occurrence(span))
@@ -1170,7 +1233,7 @@ pub fn prepare_function_body_skeleton(
                 .flatten();
         }
     }
-    for write in Arc::make_mut(&mut skeleton.writes) {
+    for write in OwnedSlice::make_mut(&mut skeleton.writes) {
         if let Some(span) = write.target_span {
             write.binding = bindings.required_occurrence(span)?;
         }
@@ -1317,12 +1380,11 @@ impl DeclarationClosure {
                 own_reads.push(binding.clone());
             }
             let name = names.intern(&read.binding.name);
-            let path: Arc<[SkeletonPathSegment]> = read
+            let path: OwnedSlice<SkeletonPathSegment> = read
                 .path
                 .iter()
                 .map(|segment| SkeletonPathSegment::Static(names.intern(segment)))
-                .collect::<Vec<_>>()
-                .into();
+                .collect();
             reads.push(SkeletonRead {
                 name,
                 path,
@@ -1343,8 +1405,8 @@ impl DeclarationClosure {
                 } else {
                     SkeletonClosureCorrelation::Partial
                 },
-                captures: Arc::from(own.into_boxed_slice()),
-                read_captures: Arc::from(own_reads.into_boxed_slice()),
+                captures: OwnedSlice::from(own),
+                read_captures: OwnedSlice::from(own_reads),
             },
             names: capture_names,
             reads,
@@ -1355,7 +1417,7 @@ impl DeclarationClosure {
 /// A skeleton's name table open for interning: the names grow in place and
 /// are stored back once.
 struct SkeletonNameTable {
-    names: Vec<Arc<str>>,
+    names: Vec<OwnedStr>,
     index: SkeletonNameIndex,
 }
 
@@ -1363,7 +1425,7 @@ impl SkeletonNameTable {
     fn of(skeleton: &FunctionBodySkeleton) -> Self {
         Self {
             names: skeleton.names.to_vec(),
-            index: skeleton.name_index.clone(),
+            index: skeleton.name_index.open(),
         }
     }
 
@@ -1373,8 +1435,8 @@ impl SkeletonNameTable {
             return id;
         }
         let id = FlowNameId(u32::try_from(self.names.len()).unwrap_or(u32::MAX));
-        let text: Arc<str> = Arc::from(text);
-        self.names.push(Arc::clone(&text));
+        let text = OwnedStr::from(text);
+        self.names.push(text.clone());
         self.index.insert(text, id);
         id
     }

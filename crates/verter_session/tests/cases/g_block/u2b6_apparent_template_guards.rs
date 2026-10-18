@@ -52,7 +52,7 @@ fn count_for_b_after_publishing_a(a: &SemanticQueryKey, b: &SemanticQueryKey) ->
         QueryResult::Value(node),
         ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
-        Arc::from(Vec::new().into_boxed_slice()),
+        verter_type_engine::semantic_query::DepSignature::new(Vec::new().into_boxed_slice()),
         100,
     );
     graph.slot_candidate_count_for_tests(b)
@@ -100,7 +100,7 @@ fn rootless_apparent_type_key(base: SemanticNodeId, demand_canonical: &str) -> S
             lib_env_hash: hash16(0),
             project_identity: 0,
             demand_scope: ApparentDemandScope::Rootless {
-                canonical: Arc::from(demand_canonical),
+                canonical: verter_type_expr::OwnedStr::from(demand_canonical),
             },
         },
     }
@@ -114,7 +114,10 @@ fn template_literal_reduce_key(
     l: u8,
     j: u32,
 ) -> SemanticQueryKey {
-    let quasis: Arc<[Arc<str>]> = pattern.iter().map(|s| Arc::from(*s)).collect();
+    let quasis: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr> = pattern
+        .iter()
+        .map(|s| verter_type_expr::OwnedStr::from(*s))
+        .collect();
     let args: Arc<[SemanticNodeId]> = Arc::from(args.to_vec().into_boxed_slice());
     SemanticQueryKey::TemplateLiteralReduce {
         pattern: quasis,
@@ -301,7 +304,12 @@ fn call_member_origins(host: &VerterHost, node: SemanticNodeId) -> Vec<Option<Ar
                     if name.as_ref() == "call"
             )
         })
-        .map(|member| member.declaration_origin.clone())
+        .map(|member| {
+            member
+                .declaration_origin
+                .as_ref()
+                .map(|origin| Arc::from(origin.as_str()))
+        })
         .collect()
 }
 

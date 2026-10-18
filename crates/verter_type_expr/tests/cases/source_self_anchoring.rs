@@ -8,7 +8,8 @@
 //! Each test discriminates: it FAILS against a tree without the deep
 //! normalizer (compile-missing or a shallow-only rewrite) AND PASSES with it.
 
-use std::sync::Arc;
+use verter_type_expr::OwnedSlice;
+use verter_type_expr::OwnedStr;
 
 use verter_type_expr::facts::DeclarationOrigin;
 use verter_type_expr::facts::{
@@ -31,9 +32,9 @@ const CHILD: &str = "/components/Child.vue";
 
 fn anchor(canonical: &str) -> AuthoredAnchor {
     AuthoredAnchor {
-        canonical_id: Arc::from(canonical),
+        canonical_id: OwnedStr::from(canonical),
         owner: TopLevelOwnerId::ordinary_file(),
-        symbol: Arc::from("ChildProps"),
+        symbol: OwnedStr::from("ChildProps"),
         space: LocatorSymbolSpace::Type,
     }
 }
@@ -41,7 +42,7 @@ fn anchor(canonical: &str) -> AuthoredAnchor {
 fn slot(canonical: &str) -> TypeBodySlot {
     TypeBodySlot {
         anchor: anchor(canonical),
-        path: Arc::from(Vec::new().into_boxed_slice()),
+        path: OwnedSlice::from(Vec::new().into_boxed_slice()),
     }
 }
 
@@ -89,7 +90,7 @@ fn closed_leaf_and_leaf_union_pass_through_untouched() {
         leaf,
         "a closed leaf ref keeps the name AS WRITTEN — no anchor to rewrite"
     );
-    let union = SemanticTypeSource::Closed(ClosedTypeFact::LeafUnion(Arc::from(
+    let union = SemanticTypeSource::Closed(ClosedTypeFact::LeafUnion(From::from(
         vec![
             LeafTypeFact::StringLiteral("a".to_string()),
             LeafTypeFact::NumberLiteral("1".to_string()),
@@ -101,7 +102,7 @@ fn closed_leaf_and_leaf_union_pass_through_untouched() {
 
 #[test]
 fn synthesized_object_member_locator_absolutizes_deeply() {
-    let source = SemanticTypeSource::Synthesized(ResolvedLocalShape::Object(Arc::from(
+    let source = SemanticTypeSource::Synthesized(ResolvedLocalShape::Object(From::from(
         vec![SynthesizedMemberFact {
             name: "value".to_string(),
             optional: false,
@@ -127,7 +128,7 @@ fn synthesized_object_member_locator_absolutizes_deeply() {
 #[test]
 fn closed_object_property_slot_absolutizes_deeply() {
     let source = SemanticTypeSource::Closed(ClosedTypeFact::Object(ObjectShapeFact {
-        members: Arc::from(
+        members: From::from(
             vec![ObjectMemberFact::Property(ObjectPropertyFact {
                 key: "x".into(),
                 optional: false,
@@ -171,8 +172,8 @@ fn projected_member_and_function_positions_absolutize_deeply() {
 
     let call =
         SemanticTypeSource::Projected(ProjectedTypeFact::CallSignature(FunctionSignatureFact {
-            type_parameters: Arc::from(Vec::new().into_boxed_slice()),
-            parameters: Arc::from(
+            type_parameters: From::from(Vec::new().into_boxed_slice()),
+            parameters: From::from(
                 vec![FunctionParamFact {
                     name: Some("payload".to_string()),
                     optional: false,
@@ -223,14 +224,15 @@ fn projected_member_and_function_positions_absolutize_deeply() {
 
 #[test]
 fn synthetic_slot_binding_carrier_is_untouched() {
-    let source =
-        SemanticTypeSource::SyntheticSlotBinding(Arc::new(verter_type_expr::SyntheticCarrierKey {
-            scope_canonical_id: Arc::from(CHILD),
+    let source = SemanticTypeSource::SyntheticSlotBinding(From::from(
+        verter_type_expr::SyntheticCarrierKey {
+            scope_canonical_id: From::from(CHILD),
             surface_kind: verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding,
-            slot_name: Some(Arc::from("default")),
-            binding_name: Arc::from("row"),
+            slot_name: Some(From::from("default")),
+            binding_name: From::from("row"),
             value_node: 7,
-        }));
+        },
+    ));
     assert_eq!(
         source.absolutized_against("/pages/Parent.vue"),
         source,

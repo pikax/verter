@@ -41,7 +41,7 @@ pub struct LeasedOperand {
     pub id: SemanticNodeId,
     /// The operand's payload, leased for the explanation's lifetime. `None`
     /// only for an id the store never handed out.
-    pub payload: Option<Arc<SemanticNodeData>>,
+    pub payload: Option<crate::semantic_query_memo::NodeData>,
 }
 
 /// The two leased operands of one relation and the axis they relate on.

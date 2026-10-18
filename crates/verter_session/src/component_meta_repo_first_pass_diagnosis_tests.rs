@@ -354,13 +354,14 @@ fn prefix_backfill_skips_record_origin_edge_when_target_already_warm() {
     let source = mint_distinct_node(&graph);
     let target = mint_distinct_node(&graph);
     // Build a non-empty fence so the interner returns a stable Arc.
-    let fence: verter_type_engine::semantic_query::DepSignature = Arc::from(
-        vec![(
-            Arc::<str>::from("/workspace/src/types.ts"),
-            verter_type_engine::semantic_query::DepVersion::ProjectGeneration(7),
-        )]
-        .into_boxed_slice(),
-    );
+    let fence: verter_type_engine::semantic_query::DepSignature =
+        verter_type_engine::semantic_query::DepSignature::new(
+            vec![verter_type_engine::semantic_query::DepEntry::new(
+                "/workspace/src/types.ts",
+                verter_type_engine::semantic_query::DepVersion::ProjectGeneration(7),
+            )]
+            .into_boxed_slice(),
+        );
     let sources: Arc<[verter_type_engine::semantic_query::SemanticNodeId]> =
         Arc::from(vec![source].into_boxed_slice());
     let meta = OriginMeta::ProjectedMember {
@@ -377,7 +378,7 @@ fn prefix_backfill_skips_record_origin_edge_when_target_already_warm() {
             OriginEdgeKind::ProjectMember,
             Arc::clone(&sources),
             meta.clone(),
-            Arc::clone(&fence),
+            fence.clone(),
         );
         // Second emission: identical identity. Pre-fix this records a
         // duplicate ledger entry; post-fix the dedup skips the ledger
@@ -387,7 +388,7 @@ fn prefix_backfill_skips_record_origin_edge_when_target_already_warm() {
             OriginEdgeKind::ProjectMember,
             Arc::clone(&sources),
             meta.clone(),
-            Arc::clone(&fence),
+            fence.clone(),
         );
         _guard.end()
     };
@@ -422,13 +423,14 @@ fn prefix_backfill_emits_record_origin_edge_when_target_cold() {
     let source = mint_distinct_node(&graph);
     let target_a = mint_distinct_node(&graph);
     let target_b = mint_distinct_node(&graph);
-    let fence: verter_type_engine::semantic_query::DepSignature = Arc::from(
-        vec![(
-            Arc::<str>::from("/workspace/src/types.ts"),
-            verter_type_engine::semantic_query::DepVersion::ProjectGeneration(7),
-        )]
-        .into_boxed_slice(),
-    );
+    let fence: verter_type_engine::semantic_query::DepSignature =
+        verter_type_engine::semantic_query::DepSignature::new(
+            vec![verter_type_engine::semantic_query::DepEntry::new(
+                "/workspace/src/types.ts",
+                verter_type_engine::semantic_query::DepVersion::ProjectGeneration(7),
+            )]
+            .into_boxed_slice(),
+        );
     let sources: Arc<[verter_type_engine::semantic_query::SemanticNodeId]> =
         Arc::from(vec![source].into_boxed_slice());
 
@@ -443,7 +445,7 @@ fn prefix_backfill_emits_record_origin_edge_when_target_cold() {
                 key: verter_type_engine::semantic_query::PropertyKey::identifier("a"),
                 provenance: verter_audit::MemberEdgeProvenance::PathProjection,
             },
-            Arc::clone(&fence),
+            fence.clone(),
         );
         graph.record_origin_edge(
             target_b,
@@ -453,7 +455,7 @@ fn prefix_backfill_emits_record_origin_edge_when_target_cold() {
                 key: verter_type_engine::semantic_query::PropertyKey::identifier("b"),
                 provenance: verter_audit::MemberEdgeProvenance::PathProjection,
             },
-            Arc::clone(&fence),
+            fence.clone(),
         );
         _guard.end()
     };
@@ -508,13 +510,14 @@ fn audit_mining_traces_dropped_prefix_edges() {
     let graph = SemanticGraphStore::new();
     let source = mint_distinct_node(&graph);
     let target = mint_distinct_node(&graph);
-    let fence: verter_type_engine::semantic_query::DepSignature = Arc::from(
-        vec![(
-            Arc::<str>::from("/workspace/src/types.ts"),
-            verter_type_engine::semantic_query::DepVersion::ProjectGeneration(7),
-        )]
-        .into_boxed_slice(),
-    );
+    let fence: verter_type_engine::semantic_query::DepSignature =
+        verter_type_engine::semantic_query::DepSignature::new(
+            vec![verter_type_engine::semantic_query::DepEntry::new(
+                "/workspace/src/types.ts",
+                verter_type_engine::semantic_query::DepVersion::ProjectGeneration(7),
+            )]
+            .into_boxed_slice(),
+        );
     let sources: Arc<[verter_type_engine::semantic_query::SemanticNodeId]> =
         Arc::from(vec![source].into_boxed_slice());
 
@@ -541,7 +544,7 @@ fn audit_mining_traces_dropped_prefix_edges() {
                 key: verter_type_engine::semantic_query::PropertyKey::identifier("initial"),
                 provenance: verter_audit::MemberEdgeProvenance::PathProjection,
             },
-            Arc::clone(&fence),
+            fence.clone(),
         );
         graph.record_origin_edge(
             target,
@@ -551,7 +554,7 @@ fn audit_mining_traces_dropped_prefix_edges() {
                 key: verter_type_engine::semantic_query::PropertyKey::identifier("initial"),
                 provenance: verter_audit::MemberEdgeProvenance::PathProjection,
             },
-            Arc::clone(&fence),
+            fence.clone(),
         );
     }
 
@@ -586,13 +589,14 @@ fn repo_first_pass_diagnosis_dup_edge_ratio_under_5_percent() {
     let graph = SemanticGraphStore::new();
     let source = mint_distinct_node(&graph);
     let target = mint_distinct_node(&graph);
-    let fence: verter_type_engine::semantic_query::DepSignature = Arc::from(
-        vec![(
-            Arc::<str>::from("/workspace/src/types.ts"),
-            verter_type_engine::semantic_query::DepVersion::ProjectGeneration(7),
-        )]
-        .into_boxed_slice(),
-    );
+    let fence: verter_type_engine::semantic_query::DepSignature =
+        verter_type_engine::semantic_query::DepSignature::new(
+            vec![verter_type_engine::semantic_query::DepEntry::new(
+                "/workspace/src/types.ts",
+                verter_type_engine::semantic_query::DepVersion::ProjectGeneration(7),
+            )]
+            .into_boxed_slice(),
+        );
     let sources: Arc<[verter_type_engine::semantic_query::SemanticNodeId]> =
         Arc::from(vec![source].into_boxed_slice());
 
@@ -615,7 +619,7 @@ fn repo_first_pass_diagnosis_dup_edge_ratio_under_5_percent() {
                     key: verter_type_engine::semantic_query::PropertyKey::identifier("initial"),
                     provenance: verter_audit::MemberEdgeProvenance::PathProjection,
                 },
-                Arc::clone(&fence),
+                fence.clone(),
             );
         }
         // A few unique decoys so origin_edge_count > 0 even if
@@ -632,7 +636,7 @@ fn repo_first_pass_diagnosis_dup_edge_ratio_under_5_percent() {
                     )),
                     provenance: verter_audit::MemberEdgeProvenance::PathProjection,
                 },
-                Arc::clone(&fence),
+                fence.clone(),
             );
         }
         _guard.end()

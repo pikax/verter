@@ -516,14 +516,14 @@ export const defaults: Props = { label: 'ok' }
     let type_cache = build_prepared_type_decl_cache(
         "/src/types.ts",
         Arc::clone(&state),
-        Arc::new(FxHashMap::default()),
+        crate::resolver_core::CachedValue::new(FxHashMap::default()),
         Arc::new(ImportCanonicalization::default()),
         &test_interner(),
     );
     let value_cache = build_prepared_value_decl_cache(
         "/src/types.ts",
         state,
-        Arc::new(FxHashMap::default()),
+        crate::resolver_core::CachedValue::new(FxHashMap::default()),
         Arc::new(ImportCanonicalization::default()),
         &test_interner(),
     );
@@ -883,14 +883,14 @@ export namespace NS {
     let type_cache = build_prepared_type_decl_cache(
         "/ws/fixture.ts",
         Arc::clone(&state),
-        Arc::new(FxHashMap::default()),
+        crate::resolver_core::CachedValue::new(FxHashMap::default()),
         Arc::clone(&import_canonicalization),
         &test_interner(),
     );
     let value_cache = build_prepared_value_decl_cache(
         "/ws/fixture.ts",
         Arc::clone(&state),
-        Arc::new(FxHashMap::default()),
+        crate::resolver_core::CachedValue::new(FxHashMap::default()),
         import_canonicalization,
         &test_interner(),
     );
@@ -904,7 +904,7 @@ export namespace NS {
         .expect("B preparation should succeed")
         .expect("B should be present");
     assert!(
-        Arc::ptr_eq(&a.name_resolution, &b.name_resolution),
+        crate::resolver_core::CachedValue::ptr_eq(&a.name_resolution, &b.name_resolution),
         "non-namespaced type decls of one file must SHARE one base table, \
              not rebuild it per declaration"
     );
@@ -918,13 +918,13 @@ export namespace NS {
         .expect("d preparation should succeed")
         .expect("d should be present");
     assert!(
-        Arc::ptr_eq(&c.name_resolution, &d.name_resolution),
+        crate::resolver_core::CachedValue::ptr_eq(&c.name_resolution, &d.name_resolution),
         "value decls of one file must SHARE one base table"
     );
 
     // The two spaces stay distinct tables (their import shadow rules differ).
     assert!(
-        !Arc::ptr_eq(&a.name_resolution, &c.name_resolution),
+        !crate::resolver_core::CachedValue::ptr_eq(&a.name_resolution, &c.name_resolution),
         "type-space and value-space bases are separate tables"
     );
 
@@ -935,7 +935,7 @@ export namespace NS {
         .expect("NS.Holder preparation should succeed")
         .expect("NS.Holder should be present");
     assert!(
-        !Arc::ptr_eq(&a.name_resolution, &holder.name_resolution),
+        !crate::resolver_core::CachedValue::ptr_eq(&a.name_resolution, &holder.name_resolution),
         "a namespaced decl owns a private table"
     );
     assert!(
@@ -971,7 +971,7 @@ fn broken_lease_prepared_type_decl_get_does_not_warm_admit_none_slot() {
     let cache = build_prepared_type_decl_cache(
         "/ws/fixture.ts",
         Arc::clone(&state),
-        Arc::new(FxHashMap::default()),
+        crate::resolver_core::CachedValue::new(FxHashMap::default()),
         Arc::new(ImportCanonicalization::default()),
         &test_interner(),
     );
@@ -1017,7 +1017,7 @@ fn prepared_type_failure_is_not_published_as_absence() {
     let cache = build_prepared_type_decl_cache(
         "/ws/fixture.ts",
         Arc::clone(&state),
-        Arc::new(FxHashMap::default()),
+        crate::resolver_core::CachedValue::new(FxHashMap::default()),
         Arc::new(ImportCanonicalization::default()),
         &test_interner(),
     );
@@ -1066,7 +1066,7 @@ fn unrelated_unresolved_import_does_not_block_strict_type_preparation() {
     let cache = build_prepared_type_decl_cache(
         "/ws/Comp.vue",
         Arc::clone(&state),
-        Arc::new(FxHashMap::default()),
+        crate::resolver_core::CachedValue::new(FxHashMap::default()),
         Arc::new(ImportCanonicalization::default()),
         &test_interner(),
     );
@@ -1101,7 +1101,7 @@ fn broken_lease_prepared_value_decl_get_does_not_warm_admit_none_slot() {
     let cache = build_prepared_value_decl_cache(
         "/ws/fixture.ts",
         Arc::clone(&state),
-        Arc::new(FxHashMap::default()),
+        crate::resolver_core::CachedValue::new(FxHashMap::default()),
         Arc::new(ImportCanonicalization::default()),
         &test_interner(),
     );
@@ -1170,7 +1170,7 @@ fn broken_lease_augmentation_prepared_build_surfaces_lease_miss() {
     assert!(
         matches!(
             prepare_augmentation_type_decl_outcome_in(
-                &Arc::from("/ws/fixture.ts"),
+                &verter_type_expr::OwnedStr::from("/ws/fixture.ts"),
                 &state,
                 &scope,
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -1191,7 +1191,7 @@ fn broken_lease_augmentation_prepared_build_surfaces_lease_miss() {
     assert!(
         matches!(
             prepare_augmentation_type_decl_outcome_in(
-                &Arc::from("/ws/fixture.ts"),
+                &verter_type_expr::OwnedStr::from("/ws/fixture.ts"),
                 &state,
                 &scope,
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -1235,7 +1235,7 @@ fn concurrent_cold_prepared_type_get_is_single_flight() {
     let cache = build_prepared_type_decl_cache(
         "/ws/fixture.ts",
         Arc::clone(&state),
-        Arc::new(FxHashMap::default()),
+        crate::resolver_core::CachedValue::new(FxHashMap::default()),
         Arc::new(ImportCanonicalization::default()),
         &test_interner(),
     );
@@ -1251,7 +1251,7 @@ fn concurrent_cold_prepared_type_get_is_single_flight() {
             cache.get("T7")
         }));
     }
-    let arcs: Vec<Arc<PreparedTypeDecl>> = handles
+    let arcs: Vec<verter_retention::heap_size::OwnedValue<PreparedTypeDecl>> = handles
         .into_iter()
         .map(|h| {
             h.join()
@@ -1270,7 +1270,7 @@ fn concurrent_cold_prepared_type_get_is_single_flight() {
     let first = &arcs[0];
     for a in &arcs {
         assert!(
-            Arc::ptr_eq(first, a),
+            crate::resolver_core::CachedValue::ptr_eq(first, a),
             "every cold caller must observe the SAME committed prepared-decl Arc"
         );
     }
@@ -1287,7 +1287,7 @@ fn broken_lease_prepared_type_slot_stays_vacant_and_is_rebuildable() {
     let cache = build_prepared_type_decl_cache(
         "/ws/fixture.ts",
         Arc::clone(&state),
-        Arc::new(FxHashMap::default()),
+        crate::resolver_core::CachedValue::new(FxHashMap::default()),
         Arc::new(ImportCanonicalization::default()),
         &test_interner(),
     );
@@ -1336,7 +1336,7 @@ fn broken_lease_prepared_type_slot_stays_vacant_and_is_rebuildable() {
     let fresh_cache = build_prepared_type_decl_cache(
         "/ws/fixture.ts",
         Arc::clone(&fresh_state),
-        Arc::new(FxHashMap::default()),
+        crate::resolver_core::CachedValue::new(FxHashMap::default()),
         Arc::new(ImportCanonicalization::default()),
         &test_interner(),
     );
@@ -1387,11 +1387,11 @@ export type Variant = 'solid' | 'outline'
     // Every identity minted for this file shares ONE canonical-id
     // allocation — the pool's — instead of a fresh String per identity.
     let pooled_canonical = interner.intern("/src/types.ts");
-    assert!(Arc::ptr_eq(
+    assert!(verter_type_expr::OwnedStr::ptr_eq(
         &props.root_identity.canonical_id,
         &pooled_canonical
     ));
-    assert!(Arc::ptr_eq(
+    assert!(verter_type_expr::OwnedStr::ptr_eq(
         &variant.root_identity.canonical_id,
         &pooled_canonical
     ));
@@ -1401,10 +1401,16 @@ export type Variant = 'solid' | 'outline'
         .name_resolution
         .get_key_value("Variant")
         .expect("local sibling resolves");
-    assert!(Arc::ptr_eq(&resolved.canonical_id, &pooled_canonical));
+    assert!(verter_type_expr::OwnedStr::ptr_eq(
+        &resolved.canonical_id,
+        &pooled_canonical
+    ));
     // The map key and the identity's symbol name are ONE allocation for a
     // local symbol (key == resolved symbol).
-    assert!(Arc::ptr_eq(key, &resolved.symbol_name));
+    assert!(verter_type_expr::OwnedStr::ptr_eq(
+        key,
+        &resolved.symbol_name
+    ));
 }
 
 #[test]
@@ -1436,7 +1442,7 @@ export const defaults = { label: 'ok' }
         .expect("defaults preparation should succeed")
         .expect("defaults should be present");
     assert!(
-        Arc::ptr_eq(
+        verter_type_expr::OwnedStr::ptr_eq(
             &ty.root_identity.canonical_id,
             &value.root_identity.canonical_id
         ),
@@ -1637,4 +1643,143 @@ export const bare: Vue = null as never
         "a bare namespace head selects no member, so it records no edge, got {:?}",
         prepared.external_deps
     );
+}
+
+/// What one committed cell is charged, computed from its value alone: its
+/// block, its tree's heap, and the record of the owned cells it reaches.
+fn expected_cell_charge<T: crate::resolver_core::CachedData>(
+    value: &crate::resolver_core::CachedValue<T>,
+) -> (usize, usize) {
+    let footprint = verter_retention::heap_size::footprint(&**value);
+    let children = footprint.handles.len();
+    (
+        crate::resolver_core::CachedValue::<T>::cell_block_bytes()
+            + footprint.bytes
+            + verter_session_query::retention::owned::child_registration_bytes(children),
+        children,
+    )
+}
+
+/// A declaration committed after the bundle's admission is its own cell:
+/// the bundle retains it — and its file's name table — as it fills, so the
+/// bundle's retention grows by exactly their charges and the slice keeping
+/// each cell's child holds. A reader that keeps the declaration past the
+/// bundle keeps exactly the declaration and the table it names, pinned,
+/// until the reader's last drop.
+#[test]
+fn a_committed_declaration_grows_its_bundles_retention_and_outlives_it_charged() {
+    use verter_session_query::retention::owned::HeldHandles;
+    use verter_session_query::retention::{
+        ChargeClass, RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+    let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+    let source = "export interface Props { label: string; other: number; third: boolean }";
+    let cache = build_prepared_type_decl_cache(
+        "/src/props.ts",
+        ShallowFileState::service_backed_for_test(source),
+        crate::resolver_core::CachedValue::new(FxHashMap::default()),
+        Arc::new(ImportCanonicalization::default()),
+        &test_interner(),
+    )
+    .charged_to_for_tests(StoreAccount::new(Arc::clone(&account)));
+    assert_eq!(
+        account.snapshot().retained_bytes,
+        0,
+        "nothing committed yet"
+    );
+
+    let props = cache
+        .get("Props")
+        .expect("Props preparation should succeed")
+        .expect("Props should be present");
+    assert_eq!(props.charge_class(), Some(ChargeClass::Retained));
+    let (decl_charge, decl_children) = expected_cell_charge(&props);
+    let (table_charge, table_children) = expected_cell_charge(&props.name_resolution);
+    assert_eq!(props.charge_bytes(), Some(decl_charge));
+    assert_eq!(props.name_resolution.charge_bytes(), Some(table_charge));
+    // Beside the two cells the bundle retains the slices holding their
+    // children and the cells of the children no other owner charged yet
+    // (the declaration's member names); the file's pooled identities are
+    // the pool's.
+    let holds = HeldHandles::backing_bytes_for(decl_children)
+        + HeldHandles::backing_bytes_for(table_children);
+    let retained = account.snapshot().retained_bytes;
+    assert!(
+        retained >= decl_charge + table_charge + holds,
+        "the bundle retains the committed declaration, its name table and the \
+         slices holding their children: {retained}"
+    );
+    let warm = cache
+        .get("Props")
+        .expect("warm read")
+        .expect("Props is committed");
+    assert!(
+        crate::resolver_core::CachedValue::ptr_eq(&warm, &props),
+        "a warm read shares the committed cell"
+    );
+    drop(warm);
+
+    drop(cache);
+    let kept = account.snapshot();
+    assert_eq!(kept.retained_bytes, 0, "the bundle's holds go with it");
+    assert_eq!(
+        kept.pinned_bytes,
+        retained - holds,
+        "the reader keeps every cell the bundle retained, charged once; only \n         the bundle's hold slices go with it"
+    );
+    assert_eq!(props.charge_class(), Some(ChargeClass::Pinned));
+    drop(props);
+    assert_eq!(
+        account.snapshot().pinned_bytes,
+        0,
+        "the reader's last drop releases both at once"
+    );
+}
+
+/// With no headroom the declaration is still returned complete: uncached,
+/// charged to the caller keeping it, and rebuilt by the next demand.
+#[test]
+fn a_declaration_the_account_refuses_is_returned_complete_and_charged_to_its_caller() {
+    use verter_session_query::retention::{
+        ChargeClass, RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+    let account = SemanticRetentionAccount::new(RetentionLimits {
+        aggregate_ceiling_bytes: 0,
+        ..RetentionLimits::defaults()
+    });
+    let source = "export interface Props { label: string }";
+    let cache = build_prepared_type_decl_cache(
+        "/src/props.ts",
+        ShallowFileState::service_backed_for_test(source),
+        crate::resolver_core::CachedValue::new(FxHashMap::default()),
+        Arc::new(ImportCanonicalization::default()),
+        &test_interner(),
+    )
+    .charged_to_for_tests(StoreAccount::new(Arc::clone(&account)));
+    let props = cache
+        .get("Props")
+        .expect("Props preparation should succeed")
+        .expect("the refused declaration is still returned");
+    assert_eq!(
+        props.member_index.len(),
+        1,
+        "the returned declaration is complete"
+    );
+    assert!(
+        !cache.slot_committed_for_test("Props"),
+        "nothing is retained"
+    );
+    assert_eq!(props.charge_class(), Some(ChargeClass::Pinned));
+    let (decl_charge, _) = expected_cell_charge(&props);
+    let (table_charge, _) = expected_cell_charge(&props.name_resolution);
+    assert_eq!(props.charge_bytes(), Some(decl_charge));
+    assert_eq!(props.name_resolution.charge_bytes(), Some(table_charge));
+    let snapshot = account.snapshot();
+    assert_eq!(snapshot.retained_bytes, 0, "no hold, no hold slice");
+    assert!(snapshot.pinned_bytes >= decl_charge + table_charge);
+    drop(props);
+    // The member names the declaration shares with the file's shallow state
+    // stay charged while that state keeps them; the file goes with the cache.
+    drop(cache);
+    assert_eq!(account.snapshot().pinned_bytes, 0);
 }

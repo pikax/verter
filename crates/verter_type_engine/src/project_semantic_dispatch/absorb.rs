@@ -35,8 +35,6 @@
 //!   an expandable declaration carrier, so it is excluded from the `error`
 //!   classification (mirrors the relation engine's identity-carrier unwrap).
 
-use std::sync::Arc;
-
 use crate::project_semantic_dispatch::walk::QueryBuildOutput;
 use crate::semantic_query::{
     IndexKey, IndexSignature, PathSegment, PrimitiveKind, QueryError, QueryResult,
@@ -189,7 +187,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     Some(self.absorbed_output(self.primitive_node(PrimitiveKind::Never), [object]))
                 }
                 (SpecialKind::Unknown, _) => {
-                    let err = self.opaque(QueryError::Other(Arc::from(
+                    let err = self.opaque(QueryError::Other(verter_type_expr::OwnedStr::from(
                         "indexed access into `unknown` (no index signatures)",
                     )));
                     Some(self.absorbed_output(err, [object]))
@@ -229,7 +227,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 }
                 (SpecialKind::Never, _) => Some(self.absorbed_output(self.empty_object(), [source])),
                 (SpecialKind::Unknown, _) => {
-                    let err = self.opaque(QueryError::Other(Arc::from(
+                    let err = self.opaque(QueryError::Other(verter_type_expr::OwnedStr::from(
                         "mapped type over `unknown` (not a key set)",
                     )));
                     Some(self.absorbed_output(err, [source]))

@@ -902,7 +902,7 @@ fn inferred_class_members(
                     UnsupportedReason::SemanticConstruct,
                 ));
             };
-            identity.anchor.canonical_id = std::sync::Arc::from(owner_canonical);
+            identity.anchor.canonical_id = verter_type_expr::OwnedStr::from(owner_canonical);
             identity.anchor.owner = owner;
             let returned = dispatch.owning().execute_function_return_source(
                 &verter_type_expr::facts::FunctionReturnSource::Flow(*identity),

@@ -304,12 +304,12 @@ fn explicit_overlay_materialization_refusal_fails_closed_at_request_boundaries()
 
     let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("Ready"),
+            symbol: verter_type_expr::OwnedStr::from("Ready"),
             space: LocatorSymbolSpace::Type,
         },
-        path: Arc::from([]),
+        path: verter_type_expr::OwnedSlice::from([]),
     });
     let port = crate::query_host_port::SessionQueryHostPort::new(&ctx);
     let answer = port.lower_authored_body(&locator);
@@ -896,7 +896,7 @@ fn a_close_during_a_computation_defers_the_node_release_until_it_ends() {
         );
         let now = graph.node_data(*id).expect("still readable");
         assert!(
-            Arc::ptr_eq(&now, payload),
+            verter_type_engine::semantic_query_memo::NodeData::ptr_eq(&now, payload),
             "node {id:?} reads the same payload it read before the close"
         );
     }

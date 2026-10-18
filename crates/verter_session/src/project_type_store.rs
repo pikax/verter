@@ -180,7 +180,11 @@ pub struct IndexedReady {
     pub script_analysis:
         Option<Arc<verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot>>,
     /// Cached per-export signatures used by smart dependent invalidation.
-    pub export_signatures: Option<Arc<Vec<verter_session_query::analysis::types::ExportSignature>>>,
+    pub export_signatures: Option<
+        verter_session_query::analysis::file_analysis::SharedList<
+            verter_session_query::analysis::types::ExportSignature,
+        >,
+    >,
     /// File-level analysis snapshot consumed by component-meta / linter
     /// pipelines.
     pub snapshot: Arc<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>,
@@ -391,7 +395,11 @@ pub struct AnalysisReady {
         Option<Arc<verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot>>,
     /// Per-export signatures for smart invalidation, when the scope requested
     /// [`AnalysisScope::EXPORT_SIGNATURES`].
-    pub export_signatures: Option<Arc<Vec<verter_session_query::analysis::types::ExportSignature>>>,
+    pub export_signatures: Option<
+        verter_session_query::analysis::file_analysis::SharedList<
+            verter_session_query::analysis::types::ExportSignature,
+        >,
+    >,
     /// File-level analysis snapshot used by the existing component-meta and
     /// linter pipelines.
     pub snapshot: Arc<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>,
@@ -1284,7 +1292,9 @@ impl ProjectTypeStore {
             app_config_no_override_proof: Arc::new(app_config_no_override_proof),
             compile_cache_db: CompileCacheDb::new(),
             compile_output_pure_content:
-                crate::compile_output_node::CompileOutputNodePureContent::new(),
+                crate::compile_output_node::CompileOutputNodePureContent::with_retention_account(
+                    retention_account.clone(),
+                ),
             flow_slice,
             derived_raw_cache_db: DerivedRawCacheDb::new(),
             dependency_cache_db: DependencyCacheDb::new(),
@@ -2415,7 +2425,10 @@ mod tests {
             crate::component_meta_result_db::ComponentMetaResultEntry {
                 payload: Arc::new(
                     crate::component_meta_cached_result::CachedComponentMetaResult {
-                        analysis: empty_component_meta_analysis(),
+                        analysis:
+                            crate::component_meta_cached_result::shared_component_meta_analysis(
+                                empty_component_meta_analysis(),
+                            ),
                         resolution_template:
                             crate::component_meta_cached_result::ResolutionTemplate {
                                 mode: verter_type_engine::semantic_query::ProjectionMode::Expanded,

@@ -5,25 +5,21 @@
 //! (route generation has no authoritative validating source; entry
 //! producers refuse it via the legacy `DepSignature` rail).
 
-use std::sync::Arc;
-
 use verter_session::for_tests::dep_signature_to_fact_signature_for_tests;
 use verter_session_query::facts::fact_cache::FactVersionRef;
-use verter_type_engine::semantic_query::{DepSignature, DepVersion};
+use verter_type_engine::semantic_query::{DepEntry, DepSignature, DepVersion};
 
-fn make_dep_sig(entries: Vec<(&str, DepVersion)>) -> DepSignature {
-    Arc::from(
-        entries
-            .into_iter()
-            .map(|(canon, ver)| (Arc::from(canon), ver))
-            .collect::<Vec<_>>(),
-    )
+fn make_dep_sig(entries: Vec<DepEntry>) -> DepSignature {
+    DepSignature::new(entries)
 }
 
 #[test]
 fn whole_hash_converts_to_file_whole_hash() {
     let hash = [7u8; 16];
-    let sig = make_dep_sig(vec![("src/foo.ts", DepVersion::WholeHash(hash))]);
+    let sig = make_dep_sig(vec![DepEntry::new(
+        "src/foo.ts",
+        DepVersion::WholeHash(hash),
+    )]);
 
     let result = dep_signature_to_fact_signature_for_tests(&sig);
 
@@ -45,8 +41,8 @@ fn whole_hash_converts_to_file_whole_hash() {
 #[test]
 fn route_generation_is_dropped() {
     let sig = make_dep_sig(vec![
-        ("a.ts", DepVersion::RouteGeneration(42)),
-        ("b.ts", DepVersion::WholeHash([1u8; 16])),
+        DepEntry::new("a.ts", DepVersion::RouteGeneration(42)),
+        DepEntry::new("b.ts", DepVersion::WholeHash([1u8; 16])),
     ]);
 
     let result = dep_signature_to_fact_signature_for_tests(&sig);
@@ -74,7 +70,10 @@ fn project_generation_converts_to_project_generation_fact() {
     // MUST convert it (not drop it) so an outer entry observing this
     // sub-result through the fact tracer roots the project generation
     // and rejects the entry on a project-shape change.
-    let sig = make_dep_sig(vec![("x.ts", DepVersion::ProjectGeneration(99))]);
+    let sig = make_dep_sig(vec![DepEntry::new(
+        "x.ts",
+        DepVersion::ProjectGeneration(99),
+    )]);
 
     let result = dep_signature_to_fact_signature_for_tests(&sig);
 
@@ -92,7 +91,7 @@ fn project_generation_converts_to_project_generation_fact() {
 
 #[test]
 fn empty_dep_sig_produces_empty_result() {
-    let sig: DepSignature = Arc::from(vec![]);
+    let sig: DepSignature = verter_type_engine::semantic_query::DepSignature::new(vec![]);
     let result = dep_signature_to_fact_signature_for_tests(&sig);
     assert!(
         result.is_empty(),
@@ -102,10 +101,10 @@ fn empty_dep_sig_produces_empty_result() {
 
 #[test]
 fn multiple_whole_hashes_all_convert() {
-    let entries: Vec<(&str, DepVersion)> = (0u8..5)
+    let entries: Vec<DepEntry> = (0u8..5)
         .map(|i| {
             let canon: &'static str = Box::leak(format!("file_{i}.ts").into_boxed_str());
-            (canon, DepVersion::WholeHash([i; 16]))
+            DepEntry::new(canon, DepVersion::WholeHash([i; 16]))
         })
         .collect();
 

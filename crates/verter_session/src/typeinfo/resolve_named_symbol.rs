@@ -655,14 +655,14 @@ fn resolve_named_symbol_in_current_view(
     // Instantiate' rather than 'not found.'").
     let resolve_decl_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::clone(&scope_arc),
+            canonical_id: verter_type_expr::OwnedStr::from(scope_arc.clone()),
             owner: entry_owner,
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 entry_owner,
             ),
         },
-        name: Arc::from(name),
+        name: verter_type_expr::OwnedStr::from(name),
     });
     let decl_node_opt = match dispatch.execute_type_node(resolve_decl_key) {
         QueryResult::Value(SemanticQueryOutput { value: node, .. }) => Some(node),
@@ -701,7 +701,7 @@ fn resolve_named_symbol_in_current_view(
         return (Ok(decl_node_opt), effective_mode);
     };
     let scope_node = NodeScopeId::File {
-        canonical_id: Arc::clone(&scope_arc),
+        canonical_id: verter_type_expr::OwnedStr::from(scope_arc.clone()),
         owner: entry_owner,
         whole_hash: shallow.whole_hash,
         local_scope: None,
@@ -824,8 +824,7 @@ pub(crate) fn materialize_through_aliases(
             )) => {
                 // Materialise the placeholder by dispatching an
                 // empty-args Instantiate against its identity.
-                let base =
-                    dispatch.type_slot_for(Arc::clone(canonical_id), *owner, Arc::clone(name));
+                let base = dispatch.type_slot_for(canonical_id.clone(), *owner, name.clone());
                 let key =
                     SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
                         base,
@@ -934,7 +933,7 @@ pub(crate) fn materialize_through_aliases(
                         let resolve_result = match dispatch.execute_type_node(
                             SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                                 scope: ScopeId {
-                                    canonical_id: Arc::clone(&identity.canonical_id),
+                                    canonical_id: identity.canonical_id.clone(),
                                     owner: identity.owner,
                                     local_scope: None,
                                     binder_scope_id:
@@ -942,7 +941,7 @@ pub(crate) fn materialize_through_aliases(
                                             identity.owner,
                                         ),
                                 },
-                                name: Arc::clone(&identity.decl_name),
+                                name: identity.decl_name.clone(),
                             }),
                         ) {
                             QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
@@ -958,9 +957,9 @@ pub(crate) fn materialize_through_aliases(
                         args,
                     }) => {
                         let inst_base = dispatch.type_slot_for(
-                            Arc::clone(&ref_base.canonical_id),
+                            ref_base.canonical_id.clone(),
                             ref_base.owner,
-                            Arc::clone(&ref_base.decl_name),
+                            ref_base.decl_name.clone(),
                         );
                         let inst_result = match dispatch
                             .execute_type_node(SemanticQueryKey::Instantiate(
@@ -988,7 +987,7 @@ pub(crate) fn materialize_through_aliases(
                 let surfaced_result = match dispatch
                     .execute_type_node(SemanticQueryKey::ProjectPath {
                     base: reference_resolved,
-                    path: Arc::from(Vec::new().into_boxed_slice()),
+                    path: verter_type_expr::OwnedSlice::default(),
                     context:
                         verter_type_engine::semantic_query::ProjectionReductionContext::published(
                             ProjectionMode::Expanded,
@@ -1039,7 +1038,7 @@ pub(crate) fn materialize_through_aliases(
             ) =>
             {
                 let key = SemanticQueryKey::TemplateLiteralReduce {
-                    pattern: Arc::clone(quasis),
+                    pattern: (*quasis).clone(),
                     args: Arc::from(&expressions[..]),
                     context: dispatch.template_literal_reduce_context(),
                 };

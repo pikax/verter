@@ -412,7 +412,7 @@ impl VerterHost {
                 &host_ctx,
                 &dispatch,
                 base,
-                Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
                 ProjectionReductionContext::published(ProjectionMode::Shallow),
                 None,
             ),
@@ -643,7 +643,7 @@ pub(crate) fn navigate_param_to_object_surface<
         ctx,
         dispatch,
         base,
-        Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
         ProjectionReductionContext::published(ProjectionMode::Shallow),
         None,
     )

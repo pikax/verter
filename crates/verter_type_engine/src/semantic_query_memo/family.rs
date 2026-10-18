@@ -67,7 +67,7 @@ pub(super) struct MemoEntry {
     /// Walker diagnostics observed during the cold build that produced
     /// this entry. Replayed on warm hits via `CacheRead.walker_diagnostics`.
     /// Empty for non-walker queries.
-    pub(super) walker_diagnostics: Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
+    pub(super) walker_diagnostics: crate::project_semantic_dispatch::walk::WalkerDiagnostics,
     /// The §3.4 **materialised-record set** — the concrete `(path, point)`
     /// records this candidate's compute ACTUALLY produced (the terminal
     /// point plus one `Navigate` hop per walked intermediate for a path
@@ -82,19 +82,20 @@ pub(super) struct MemoEntry {
     /// a recorded point dominates that sibling's requested point — never by
     /// enum rank.
     pub(super) satisfied_projection: MaterializedSet,
-    /// This candidate's reservation against the project's aggregate
-    /// retained-byte account, held for exactly as long as the candidate
-    /// is reachable.
+    /// This candidate's charges against the aggregate retention account
+    /// (see [`super::retention::MemoRetention`]): its own cache-only
+    /// bookkeeping, and one shared charge per carrier or delivered
+    /// allocation it keeps reachable.
     ///
-    /// `Arc`, not a bare charge, because a same-payload BACKFILL clones
-    /// this entry into a sibling slot: the clone shares the payload's
-    /// allocations, so it must share ONE reservation rather than charge
-    /// the same bytes twice. The bytes become reclaimable when the last
-    /// clone — including any reader snapshot that outlived an eviction —
-    /// drops, which is the moment they are actually free.
+    /// `Arc` because the slot clones this entry into backfilled sibling
+    /// slots and readers snapshot it: every clone is the same candidate and
+    /// shares its charges. Declared after [`Self::lease`], so a dropped
+    /// candidate releases its delivery lease — and with it this candidate's
+    /// caller holds — before its own cache holds.
     ///
-    /// `None` for a fixture store that owns no account.
-    pub(super) retention_charge: Option<Arc<verter_session_query::retention::RetentionCharge>>,
+    /// `None` only while a candidate is staged; every published candidate
+    /// carries its charges.
+    pub(super) retention: Option<Arc<super::retention::MemoRetention>>,
     /// LRU eviction-recency metadata for the multi-candidate slot
     /// vector — NOT a semantic-validity oracle. Validity is decided
     /// exclusively by `read_set_signature.validate_with_self_roots`
@@ -125,48 +126,39 @@ pub(super) struct MemoEntry {
 }
 
 impl MemoEntry {
-    /// The portion of this candidate's footprint owned by the shared
-    /// carrier and self-root allocations.
-    fn shared_retained_footprint_bytes(&self) -> usize {
-        /// One observed dependency fact on the validity rail.
-        const FACT_BYTES: usize = 64;
-        let self_roots: usize = self
-            .self_root_canonicals
-            .iter()
-            .map(|canonical| canonical.len() + std::mem::size_of::<Arc<str>>())
-            .sum();
-        self.read_set_signature.facts.len() * FACT_BYTES + self_roots
-    }
-
-    /// The portion of this candidate's footprint that remains distinct
-    /// when an SCC component shares its carrier and self-root list.
-    pub(super) fn unique_retained_footprint_bytes(&self) -> usize {
-        /// One observed dependency fact on the dispatch-return rail.
-        const FACT_BYTES: usize = 64;
-        /// One recorded materialised `(path, point)` record.
-        const POINT_BYTES: usize = 96;
-        /// One replayed walker diagnostic.
-        const DIAGNOSTIC_BYTES: usize = 256;
-        std::mem::size_of::<Self>()
-            + self.dispatch_dep_signature.len() * FACT_BYTES
-            + self.walker_diagnostics.len() * DIAGNOSTIC_BYTES
-            + self.satisfied_projection.points().len() * POINT_BYTES
-            + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
-    }
-}
-
-impl verter_session_query::retention::RetainedFootprint for MemoEntry {
-    /// Estimated resident bytes for one memo candidate.
+    /// The bytes of this candidate's cache-only bookkeeping, held for exactly
+    /// as long as the candidate: its entry in every slot its publication may
+    /// populate (with each slot's container convention), its materialised
+    /// point record, and its reverse-index registrations. None of these is
+    /// handed to a caller, so none outlives the candidate. Its delivery
+    /// lease is caller metadata warm reads share, charged by the lease's own
+    /// owner for as long as it lives; the carrier, the delivered rails and
+    /// the value are shared allocations, charged once through
+    /// [`super::retention::MemoRetention`]'s shared holds.
     ///
-    /// Counted from the candidate's own carriers — its validity rail,
-    /// self-root list, walker diagnostics and materialised-point record.
-    /// The interned result node is deliberately NOT counted here: the
-    /// node arena is shared across every candidate that references it,
-    /// so charging it per candidate would multiply one allocation by its
-    /// reference count. This is an ACCOUNTING estimate and never a
-    /// validity input.
-    fn retained_footprint_bytes(&self) -> usize {
-        self.shared_retained_footprint_bytes() + self.unique_retained_footprint_bytes()
+    /// The materialised point's path names owned strings: those are charged
+    /// by their own cells and held by the candidate beside this charge.
+    pub(super) fn own_retained_footprint(
+        &self,
+        family: &FamilyKey,
+        populated_slots: usize,
+        registered_canonicals: usize,
+    ) -> verter_session_query::retention::Footprint {
+        use crate::semantic_query::allocation_footprint::OwnedHeap as _;
+        let mut aliases = verter_session_query::retention::allocation::AliasSet::new();
+        let registration = super::reverse_index::registration_footprint(
+            family,
+            registered_canonicals,
+            populated_slots,
+        );
+        let bytes = populated_slots
+            * (std::mem::size_of::<Self>() + verter_session_query::retention::ENTRY_OVERHEAD_BYTES)
+            + self.satisfied_projection.owned_heap_bytes(&mut aliases)
+            + registration.bytes;
+        verter_session_query::retention::Footprint {
+            bytes,
+            handles: aliases.take_handles().merge(registration.handles),
+        }
     }
 }
 
@@ -269,7 +261,7 @@ pub enum FamilyKey {
     },
     ProjectMember {
         base: SemanticNodeId,
-        member: Arc<str>,
+        member: verter_type_expr::OwnedStr,
     },
     IndexedAccess {
         base: SemanticNodeId,
@@ -310,7 +302,11 @@ pub enum FamilyKey {
         true_branch: SemanticNodeId,
         false_branch: SemanticNodeId,
         distributive: bool,
-        pending: Option<Arc<crate::semantic_query::ConditionalPendingSubstitution>>,
+        pending: Option<
+            verter_session_query::retention::owned::Owned<
+                crate::semantic_query::ConditionalPendingSubstitution,
+            >,
+        >,
     },
     /// `value_root` is the env-bearing, content-free
     /// [`crate::semantic_query::ValueRootSlotIdentity`] (R6 — carries the
@@ -331,7 +327,7 @@ pub enum FamilyKey {
         /// `FamilyKey → FamilySlots` keyspace for every other family. The
         /// box delegates `Hash`/`Eq`/`Clone` to the `Arc`, so the family
         /// IDENTITY is unchanged.
-        path: Box<Arc<[Arc<str>]>>,
+        path: Box<verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>>,
         resolve_env_hash: crate::semantic_query::HashValue,
         /// Surface-provenance dimension. `build_typeof` lowers the value's
         /// annotation / shape under the full projection-reduction context,
@@ -366,7 +362,7 @@ pub enum FamilyKey {
     },
     ProjectPath {
         base: SemanticNodeId,
-        path: Arc<[PathSegment]>,
+        path: verter_type_expr::OwnedSlice<PathSegment>,
         /// Surface-provenance dimension. A
         /// macro-type-argument own-body path projection (the empty-path
         /// macro-payload surface read) and a plain structural path
@@ -528,7 +524,7 @@ pub enum FamilyKey {
     /// dims ride here ON the family key (env hashes, R6-clean). LIVE
     /// producer (build folds via the shared deferred evaluator).
     TemplateLiteralReduce {
-        pattern: Arc<[Arc<str>]>,
+        pattern: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
         args: Arc<[SemanticNodeId]>,
         resolve_env_hash: crate::semantic_query::HashValue,
         type_env_hash: crate::semantic_query::HashValue,
@@ -808,6 +804,72 @@ fn w_object_spread_projection_family_identity(identity: &ObjectSpreadProjectionF
     let _: &VueHeritagePolicy = vue_heritage_policy;
 }
 
+impl InstantiateAuthoredFamilyIdentity {
+    /// Heap the identity keeps reachable beyond its own block (see
+    /// [`super::family_footprint`]).
+    pub(super) fn key_heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        use super::family_footprint as footprint;
+        let Self {
+            base,
+            args,
+            authored,
+            projection,
+            resolve_env_hash,
+            body_source,
+            provenance,
+            merge_role,
+            vue_heritage_policy,
+        } = self;
+        footprint::decl_slot_heap_bytes(base, aliases)
+            + footprint::copy_slice_bytes(args, aliases)
+            + footprint::authored_operand_heap_bytes(authored, aliases)
+            + footprint::force_projection_heap_bytes(projection, aliases)
+            + footprint::inline(resolve_env_hash)
+            + footprint::inline(body_source)
+            + footprint::inline(provenance)
+            + footprint::inline(merge_role)
+            + footprint::inline(vue_heritage_policy)
+    }
+}
+
+impl ObjectSpreadProjectionFamilyIdentity {
+    /// Heap the identity keeps reachable beyond its own block (see
+    /// [`super::family_footprint`]).
+    pub(super) fn key_heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        use super::family_footprint as footprint;
+        let Self {
+            program,
+            selector,
+            resolve_env_hash,
+            type_env_hash,
+            lib_env_hash,
+            project_identity,
+            substitution,
+            optional_property_policy,
+            provenance,
+            merge_role,
+            vue_heritage_policy,
+        } = self;
+        footprint::object_selector_heap_bytes(selector, aliases)
+            + footprint::inline(program)
+            + footprint::inline(resolve_env_hash)
+            + footprint::inline(type_env_hash)
+            + footprint::inline(lib_env_hash)
+            + footprint::inline(project_identity)
+            + footprint::inline(substitution)
+            + footprint::inline(optional_property_policy)
+            + footprint::inline(provenance)
+            + footprint::inline(merge_role)
+            + footprint::inline(vue_heritage_policy)
+    }
+}
+
 impl FamilyKey {
     /// Visit every [`SemanticNodeId`] this family identity embeds directly.
     ///
@@ -993,7 +1055,7 @@ impl FamilyKey {
     /// carrier sweep cover them). No wildcard: a new variant must be
     /// dispositioned here.
     pub(super) fn binds_canonical(&self, canonical_id: &str) -> bool {
-        let names = |canonical: &Arc<str>| canonical.as_ref() == canonical_id;
+        let names = |canonical: &str| canonical == canonical_id;
         match self {
             FamilyKey::ResolveDecl(key) => names(&key.scope.canonical_id),
             FamilyKey::Instantiate { base, .. }
@@ -1354,8 +1416,12 @@ pub(super) struct FamilyPublishOutcome {
 /// `cached_satisfies` the narrower slot's requested point — directional
 /// AND gated, never by enum rank (see [`FamilySlots::publish`] and
 /// [`slot_domain_siblings`]).
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub(crate) struct FamilySlots {
+    /// The family's own container charge: its key and slot lists in the
+    /// family map and its record in the retention budget's ledger, held for
+    /// as long as the family is keyed ([`super::retention::family_container_footprint`]).
+    _retention: Arc<verter_session_query::retention::RetentionCharge>,
     single: CandidateList,
     identity: CandidateList,
     navigate: CandidateList,
@@ -1406,6 +1472,26 @@ fn candidate_same_discriminant(a: &MemoEntry, b: &MemoEntry) -> bool {
 }
 
 impl FamilySlots {
+    /// Empty slots for a newly keyed family, holding its container charge.
+    pub(super) fn charged(retention: verter_session_query::retention::RetentionCharge) -> Self {
+        Self {
+            _retention: Arc::new(retention),
+            single: Default::default(),
+            identity: Default::default(),
+            navigate: Default::default(),
+            shallow: Default::default(),
+            expanded: Default::default(),
+            skeleton: Default::default(),
+            transit_identity: Default::default(),
+            transit_navigate: Default::default(),
+            transit_shallow: Default::default(),
+            transit_expanded: Default::default(),
+            transit_skeleton: Default::default(),
+            macro_surface_shallow: Default::default(),
+            vue_runtime_surface_shallow: Default::default(),
+        }
+    }
+
     fn slot_list(&self, slot: ModeSlot) -> &CandidateList {
         match slot {
             ModeSlot::Single => &self.single,
@@ -1849,6 +1935,27 @@ pub struct AuditEagerKeyRow {
     pub dep_signature: String,
 }
 
+/// The slots one publication into `slot` may populate: the slot itself and
+/// every same-domain sibling one of the candidate's recorded points
+/// satisfies ([`FamilySlots::publish`] backfills each such sibling that is
+/// empty). The candidate is charged for this bound, since whether a sibling
+/// is empty is decided only under the publish lock.
+pub(super) fn publication_slot_bound(
+    slot: ModeSlot,
+    satisfied_projection: &MaterializedSet,
+    requested_path: &ProjectionPath,
+) -> usize {
+    1 + slot_domain_siblings(slot)
+        .iter()
+        .filter(|target| {
+            cached_satisfies(
+                satisfied_projection,
+                &MaterializedPoint::new(point_for_slot(**target, requested_path)),
+            )
+        })
+        .count()
+}
+
 /// The candidate backfill TARGET slots a publish into `slot` may fill —
 /// the PROJECTION-DEPTH-narrower slots in the same domain. The ACTUAL
 /// backfill of each is then gated by `cached_satisfies` in
@@ -2046,7 +2153,7 @@ pub(crate) fn family_and_slot_in(
         SemanticQueryKey::ProjectMember { base, member, mode } => (
             FamilyKey::ProjectMember {
                 base: *base,
-                member: Arc::clone(member),
+                member: member.clone(),
             },
             mode_to_slot(*mode),
         ),
@@ -2105,7 +2212,7 @@ pub(crate) fn family_and_slot_in(
         } => (
             FamilyKey::TypeOf {
                 value_root: value_root.clone(),
-                path: Box::new(Arc::clone(path)),
+                path: Box::new(path.clone()),
                 resolve_env_hash: context.resolve_env_hash,
                 provenance: context.projection_reduction.provenance,
                 merge_role: context.projection_reduction.merge_role,
@@ -2167,7 +2274,7 @@ pub(crate) fn family_and_slot_in(
         } => (
             FamilyKey::ProjectPath {
                 base: *base,
-                path: Arc::clone(path),
+                path: path.clone(),
                 provenance: context.provenance,
                 merge_role: context.merge_role,
                 vue_heritage_policy: context.vue_heritage_policy,
@@ -2332,7 +2439,7 @@ pub(crate) fn family_and_slot_in(
             context,
         } => (
             FamilyKey::TemplateLiteralReduce {
-                pattern: Arc::clone(pattern),
+                pattern: pattern.clone(),
                 args: Arc::clone(args),
                 resolve_env_hash: context.resolve_env_hash,
                 type_env_hash: context.type_env_hash,
@@ -2500,10 +2607,10 @@ pub(crate) fn family_and_slot_in(
 /// the requested point the same real point.
 pub(crate) fn requested_path_for_key(key: &SemanticQueryKey) -> ProjectionPath {
     match key {
-        SemanticQueryKey::ProjectPath { path, .. } => ProjectionPath::from(Arc::clone(path)),
+        SemanticQueryKey::ProjectPath { path, .. } => ProjectionPath::from(path.clone()),
         SemanticQueryKey::ProjectMember { member, .. } => {
             ProjectionPath::from_segments([PathSegment::Member(PropertyKey::identifier(
-                Arc::clone(member),
+                member.clone(),
             ))])
         }
         SemanticQueryKey::IndexedAccess { index, .. } => {

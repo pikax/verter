@@ -79,7 +79,13 @@ impl SemanticGraphStore {
             // flag — see the audit-mining contract preservation note above.
             let (edge, already_recorded) = {
                 let mut store = self.derivation.lock();
-                let edge_dep_signature = store.intern_signature(builder_fence);
+                let Some(edge_dep_signature) =
+                    store.intern_signature(builder_fence, self.charge_ctx())
+                else {
+                    // The account refused to retain the edge's fence: the
+                    // edge is not recorded, exactly as if FIFO-evicted.
+                    return;
+                };
                 let edge = OriginEdge {
                     sources,
                     meta,

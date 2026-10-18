@@ -489,7 +489,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let admits =
                     crate::semantic_query::AdmissibleCallResult::admits(&result, proof_complete);
                 let mut output = QueryBuildOutput::from((
-                    QueryResult::Value(SemanticQueryValue::ResolveCall(Arc::new(result))),
+                    QueryResult::Value(SemanticQueryValue::ResolveCall(
+                        verter_session_query::retention::owned::Owned::new(result),
+                    )),
                     fence,
                 ))
                 .with_observed_self_roots(self_roots)
@@ -503,7 +505,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // the caller receives it, the memo refuses admission, and
                 // the frame close already marked the request partial.
                 let mut output: QueryBuildOutput<SemanticQueryValue> = (
-                    QueryResult::Value(SemanticQueryValue::ResolveCall(Arc::new(result))),
+                    QueryResult::Value(SemanticQueryValue::ResolveCall(
+                        verter_session_query::retention::owned::Owned::new(result),
+                    )),
                     fence,
                 )
                     .into();
@@ -559,10 +563,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .iter()
                 .any(|(canonical, _)| canonical == &key.point.canonical_id)
             {
-                self_roots.push((
-                    Arc::clone(&key.point.canonical_id),
-                    serve.indexed.whole_hash,
-                ));
+                self_roots.push((key.point.canonical_id.clone(), serve.indexed.whole_hash));
             }
             true
         } else {
@@ -1238,7 +1239,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // call site is that site.
         let _demand_scope = super::LexicalDemandScopeGuard::push(
             &self.lexical_demand_scope,
-            Arc::clone(&key.point.canonical_id),
+            key.point.canonical_id.clone(),
         );
         let explicit_type_args: Arc<[SemanticNodeId]> = Arc::from(
             key.explicit_type_args
@@ -1285,7 +1286,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return CandidateVerdict::Degraded(ResolveCallFailure::NotCallable);
         }
         let raw = if key.explicit_type_args.is_empty() {
-            Arc::clone(&visible)
+            visible.clone()
         } else {
             match self.acquire_call_candidates(
                 callee,
@@ -1298,16 +1299,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // it is paired positionally: a ROOTLESS candidate has no
                 // occurrence to pair by, and its raw form is the candidate
                 // at the same position in the equally-filtered list.
-                CallCandidates::Candidates(raw) => Arc::from(
-                    raw.iter()
-                        .filter(|candidate| {
-                            self.instantiate_call_candidate(candidate.node, &explicit_type_args)
-                                .is_some()
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                ),
+                CallCandidates::Candidates(raw) => raw
+                    .iter()
+                    .filter(|candidate| {
+                        self.instantiate_call_candidate(candidate.node, &explicit_type_args)
+                            .is_some()
+                    })
+                    .cloned()
+                    .collect(),
                 failed => {
                     return CandidateVerdict::Degraded(self.candidate_failure(callee, failed))
                 }
@@ -1850,7 +1849,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .indexed_expression_source(point.canonical_id.as_ref())
                         .ok_or(ResolveCallFailure::Undecidable)?;
                     let indexed_point = verter_type_expr::facts::ProgramExpressionIdentity {
-                        canonical_id: Arc::clone(&point.canonical_id),
+                        canonical_id: std::sync::Arc::<str>::from(point.canonical_id.as_str()),
                         offset: point.offset,
                     };
                     let program_index = source_demand.function_program_index();
@@ -2090,7 +2089,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .map(|decl| {
                     InferenceInfoSetup::for_call(
                         decl.param,
-                        Arc::clone(&decl.name),
+                        Arc::<str>::from(&decl.name),
                         if decl.is_const {
                             ConstParamPolicy::Const
                         } else {
@@ -3867,11 +3866,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let oracle_demand = ProjectionReductionContext::structural_transit_with_mode(
             crate::semantic_query::ProjectionMode::Navigate,
         );
-        let owner_canonical = Arc::clone(&base.canonical_id);
+        let owner_canonical = base.canonical_id.clone();
         let slot = self.type_slot_for(
-            Arc::clone(&base.canonical_id),
+            base.canonical_id.clone(),
             base.owner,
-            Arc::clone(&base.decl_name),
+            base.decl_name.clone(),
         );
         let args = Arc::clone(args.as_arc());
         let read = self.execute_read(SemanticQueryKey::Instantiate(
@@ -4225,7 +4224,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 enum CallCandidates {
     /// The bucket's ordered visible candidates, instantiated under the
     /// call's explicit type arguments when it carries any.
-    Candidates(Arc<[SignatureRef]>),
+    Candidates(verter_session_query::retention::owned::OwnedSlice<SignatureRef>),
     /// The bucket is complete and empty: the callee cannot be invoked this
     /// way.
     Empty,
