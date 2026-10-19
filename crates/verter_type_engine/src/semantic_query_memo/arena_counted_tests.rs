@@ -75,6 +75,25 @@ fn multiset_guard_distinguishes_planted_omission_and_duplicate() {
     for planted in [smallvec::smallvec![3], smallvec::smallvec![3, 3, 3]] {
         assert!(std::panic::catch_unwind(|| assert_retained_multiset(&data, planted)).is_err());
     }
+    // A walk that visits the same operands in another order retains the
+    // same multiset; a substituted operand does not.
+    let distinct = SemanticNodeData::TemplateLiteral {
+        quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from([
+            verter_type_expr::OwnedStr::from(""),
+            verter_type_expr::OwnedStr::from(""),
+            verter_type_expr::OwnedStr::from(""),
+        ]),
+        expressions: crate::semantic_query::PayloadArray::from([
+            SemanticNodeId(3),
+            SemanticNodeId(4),
+        ]),
+    };
+    assert_retained_multiset(&distinct, smallvec::smallvec![4, 3]);
+    assert!(std::panic::catch_unwind(|| assert_retained_multiset(
+        &distinct,
+        smallvec::smallvec![3, 5]
+    ))
+    .is_err());
 }
 
 #[test]

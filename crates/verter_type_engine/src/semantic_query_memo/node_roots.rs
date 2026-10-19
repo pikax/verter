@@ -418,7 +418,7 @@ impl ScopeStack {
                 // A repeat is another handle on an owner the heir keeps.
                 let _ = heir.adopt(lease);
             }
-            owners.delivered.clear();
+            owners.delivered = DeliveredOwners::default();
         }
         owners
     }
@@ -492,7 +492,7 @@ struct ConstructionOwners {
     /// The shared delivery owners `deliveries` already holds. Every clone
     /// of one delivery names the same owner, so an owner keeps it once
     /// however often it is read or cloned under this owner.
-    delivered: rustc_hash::FxHashSet<usize>,
+    delivered: DeliveredOwners,
 }
 
 impl Drop for ConstructionOwners {
@@ -500,6 +500,45 @@ impl Drop for ConstructionOwners {
         if !self.constructed.is_empty() {
             self.arena.release_roots(&self.constructed);
         }
+    }
+}
+
+/// The delivery owners one construction owner holds: the first few in an
+/// inline array scanned with integer compares — most owners hold a handful,
+/// and a debug build hashes each insert through several calls — and every
+/// one in a set once the array fills.
+#[derive(Default)]
+struct DeliveredOwners {
+    inline: [usize; DELIVERED_INLINE],
+    inline_len: usize,
+    spilled: Option<rustc_hash::FxHashSet<usize>>,
+}
+
+/// Delivery owners [`DeliveredOwners`] keeps before it spills to a set.
+const DELIVERED_INLINE: usize = 8;
+
+impl DeliveredOwners {
+    /// Record `owner`; `false` when it was already recorded.
+    fn insert(&mut self, owner: usize) -> bool {
+        if let Some(spilled) = self.spilled.as_mut() {
+            return spilled.insert(owner);
+        }
+        let mut index = 0;
+        while index < self.inline_len {
+            if self.inline[index] == owner {
+                return false;
+            }
+            index += 1;
+        }
+        if self.inline_len < DELIVERED_INLINE {
+            self.inline[self.inline_len] = owner;
+            self.inline_len += 1;
+            return true;
+        }
+        let mut spilled: rustc_hash::FxHashSet<usize> = self.inline.iter().copied().collect();
+        spilled.insert(owner);
+        self.spilled = Some(spilled);
+        true
     }
 }
 
@@ -520,6 +559,7 @@ impl ConstructionOwners {
 
     /// Whether this entry owns what is captured into it: every scope and
     /// operation does, a dispatcher's construction lane does not.
+    #[inline(always)]
     fn is_owner(&self) -> bool {
         self.dispatchers == 0
     }
@@ -716,33 +756,54 @@ impl NodeRootScope {
         let mut lease = Some(lease);
         SCOPES.with(|scopes| {
             let mut scopes = scopes.borrow_mut();
-            let owner = match arena {
+            // Every read and clone of a delivery lands here, so the owner is
+            // found with index loops over the stack, which a debug build runs
+            // without an iterator call per entry.
+            let entries: &mut [ConstructionOwners] = &mut scopes.entries;
+            let mut owner = None;
+            match arena {
                 Some(arena) => {
-                    let of_arena = |candidate: &ConstructionOwners| {
-                        candidate.is_owner() && Arc::as_ptr(&candidate.arena) as usize == arena
-                    };
                     // A carrier under construction keeps every delivery its
                     // build reads; otherwise the oldest owner does.
-                    match scopes
-                        .entries
-                        .iter()
-                        .rposition(|candidate| candidate.carrier && of_arena(candidate))
-                    {
-                        Some(carrier) => scopes.entries.get_mut(carrier),
-                        None => scopes
-                            .entries
-                            .iter_mut()
-                            .find(|candidate| of_arena(candidate)),
+                    let mut index = entries.len();
+                    while index > 0 {
+                        index -= 1;
+                        let candidate = &entries[index];
+                        if candidate.carrier
+                            && candidate.is_owner()
+                            && Arc::as_ptr(&candidate.arena) as usize == arena
+                        {
+                            owner = Some(index);
+                            break;
+                        }
+                    }
+                    if owner.is_none() {
+                        let mut index = 0;
+                        while index < entries.len() {
+                            let candidate = &entries[index];
+                            if candidate.is_owner()
+                                && Arc::as_ptr(&candidate.arena) as usize == arena
+                            {
+                                owner = Some(index);
+                                break;
+                            }
+                            index += 1;
+                        }
                     }
                 }
-                None => scopes
-                    .entries
-                    .iter_mut()
-                    .rev()
-                    .find(|candidate| candidate.is_owner()),
-            };
+                None => {
+                    let mut index = entries.len();
+                    while index > 0 {
+                        index -= 1;
+                        if entries[index].is_owner() {
+                            owner = Some(index);
+                            break;
+                        }
+                    }
+                }
+            }
             if let Some(owner) = owner {
-                lease = owner.adopt(lease.take().unwrap());
+                lease = entries[owner].adopt(lease.take().unwrap());
             }
         });
         drop(lease);

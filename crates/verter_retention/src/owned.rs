@@ -46,7 +46,7 @@
 //! the measurement that reaches one.
 
 use std::num::NonZeroU64;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use parking_lot::Mutex;
@@ -235,6 +235,11 @@ impl Slot {
 /// One owned allocation: its charge beside its value.
 struct Cell<T> {
     slot: Mutex<Slot>,
+    /// Whether the slot's charge is set. A cell's charge is set once, by
+    /// its first owner, and kept until the cell is freed, so a reader that
+    /// sees it set knows the charge exists without taking the slot's lock;
+    /// one that sees it clear takes the lock and decides there.
+    charged: AtomicBool,
     value: T,
 }
 
@@ -247,6 +252,8 @@ impl<T: std::panic::RefUnwindSafe> std::panic::UnwindSafe for Cell<T> {}
 /// The type-erased cell interface the charge lifecycle runs over.
 pub(crate) trait Node: Send + Sync {
     fn slot(&self) -> &Mutex<Slot>;
+    /// Set, after the slot's charge is, for the rest of the cell's life.
+    fn charged(&self) -> &AtomicBool;
     /// The cell's block: the counters, the slot and the inline value.
     fn block_bytes(&self) -> usize;
     /// The value's heap, with nested handles offered to `aliases`.
@@ -256,6 +263,9 @@ pub(crate) trait Node: Send + Sync {
 impl<T: Measured> Node for Cell<T> {
     fn slot(&self) -> &Mutex<Slot> {
         &self.slot
+    }
+    fn charged(&self) -> &AtomicBool {
+        &self.charged
     }
     fn block_bytes(&self) -> usize {
         arc_block_bytes(std::mem::size_of::<Self>())
@@ -269,7 +279,7 @@ impl<T: Measured> Node for Cell<T> {
 /// reached.
 /// The children's registration is allocated with the first charge and
 /// lives as long as the cell, so it is part of that charge.
-fn measure(node: &dyn Node, block_shared: bool) -> (usize, Box<[Arc<dyn Node>]>) {
+fn measure(node: &dyn Node, block_shared: bool) -> (usize, Vec<Arc<dyn Node>>) {
     let mut aliases = AliasSet::for_cell();
     let heap = node.value_heap_bytes(&mut aliases);
     let block = if block_shared { 0 } else { node.block_bytes() };
@@ -291,18 +301,23 @@ pub(crate) fn counted_in_full(node: &dyn Node, aliases: &mut AliasSet) -> usize 
 /// Charge `node` for its callers if no owner has yet. Locks parent before
 /// child, so it is safe under any ancestor's slot lock.
 pub(crate) fn pin_node(node: &dyn Node, ctx: ChargeCtx<'_>) {
+    // An owner already charged it, and the charge lasts as long as the cell.
+    if node.charged().load(Ordering::Acquire) {
+        return;
+    }
     let mut slot = node.slot().lock();
     if slot.charge.is_some() {
         return;
     }
     let (bytes, children) = measure(node, slot.block_share.is_some());
     slot.charge = Some(ctx.account.pin(bytes));
+    node.charged().store(true, Ordering::Release);
     for child in children.iter() {
         pin_node(&**child, ctx);
     }
     if !children.is_empty() {
         slot.nested = Some(Box::new(Nested {
-            children,
+            children: children.into_boxed_slice(),
             holds: HeldHandles::default(),
         }));
     }
@@ -326,12 +341,12 @@ pub(crate) fn hold_nodes(
         RetentionAdmission::Admitted(charge) => charge,
         RetentionAdmission::Refused(refusal) => return Err(refusal),
     };
-    let holds = children
-        .iter()
-        .map(|child| hold_node(Arc::clone(child), ctx))
-        .collect::<Result<Box<[OwnedHold]>, RetentionRefusal>>()?;
+    let mut holds = Vec::with_capacity(children.len());
+    for child in children {
+        holds.push(hold_node(Arc::clone(child), ctx)?);
+    }
     Ok(HeldHandles {
-        holds,
+        holds: holds.into_boxed_slice(),
         backing: Some(backing),
     })
 }
@@ -370,8 +385,12 @@ pub(crate) fn hold_node(
                 // just granted.
                 let holds = hold_nodes(&children, ctx)?;
                 slot.charge = Some(charge);
+                node.charged().store(true, Ordering::Release);
                 if !children.is_empty() {
-                    slot.nested = Some(Box::new(Nested { children, holds }));
+                    slot.nested = Some(Box::new(Nested {
+                        children: children.into_boxed_slice(),
+                        holds,
+                    }));
                 }
             }
         }
@@ -380,12 +399,16 @@ pub(crate) fn hold_node(
     Ok(OwnedHold(Some(node)))
 }
 
+/// The largest product of two handle lists [`OwnedHandles::merge`]
+/// deduplicates by scanning rather than through a set.
+const MERGE_SCAN_LIMIT: usize = 64;
+
 /// The owned allocations a carrier reaches at its top level, each once
 /// ([`AliasSet::take_handles`]): what an owner keeping the carrier pins or
 /// holds, so each is charged by its own cell.
 #[must_use = "an owned allocation an owner reaches must be pinned or held"]
 #[derive(Default)]
-pub struct OwnedHandles(Box<[Arc<dyn Node>]>);
+pub struct OwnedHandles(Vec<Arc<dyn Node>>);
 
 impl OwnedHandles {
     /// These handles and `other`'s, each allocation once.
@@ -396,23 +419,36 @@ impl OwnedHandles {
         if self.0.is_empty() {
             return other;
         }
-        let mut seen = rustc_hash::FxHashSet::default();
-        Self(
-            self.0
-                .into_vec()
-                .into_iter()
-                .chain(other.0.into_vec())
-                .filter(|node| seen.insert(Arc::as_ptr(node).cast::<()>() as usize))
-                .collect(),
-        )
+        let address = |node: &Arc<dyn Node>| Arc::as_ptr(node).cast::<()>() as usize;
+        let mut merged = self.0;
+        merged.reserve(other.0.len());
+        // Short lists are deduplicated by scanning; a long merge keeps a set,
+        // so it stays linear.
+        if merged.len() * other.0.len() <= MERGE_SCAN_LIMIT {
+            for node in other.0 {
+                let node_address = address(&node);
+                if !merged.iter().any(|kept| address(kept) == node_address) {
+                    merged.push(node);
+                }
+            }
+        } else {
+            let mut seen: rustc_hash::FxHashSet<usize> = merged.iter().map(address).collect();
+            for node in other.0 {
+                if seen.insert(address(&node)) {
+                    merged.push(node);
+                }
+            }
+        }
+        Self(merged)
     }
 
-    pub(crate) fn from_children(children: Box<[Arc<dyn Node>]>) -> Self {
+    pub(crate) fn from_children(children: Vec<Arc<dyn Node>>) -> Self {
         Self(children)
     }
 
+    /// The handles, in the exact-length list a charge's bookkeeping keeps.
     pub(crate) fn into_children(self) -> Box<[Arc<dyn Node>]> {
-        self.0
+        self.0.into_boxed_slice()
     }
 
     /// The handles a carrier `measure` reaches. The carrier is delivered
@@ -557,6 +593,7 @@ impl<T: Measured> Owned<T> {
     pub fn new(value: T) -> Self {
         Self(Arc::new(Cell {
             slot: Mutex::new(Slot::default()),
+            charged: AtomicBool::new(false),
             value,
         }))
     }
@@ -575,6 +612,7 @@ impl<T: Measured> Owned<T> {
                 block_share: Some(BlockShare::for_block(Self::cell_block_bytes(), ctx)),
                 ..Slot::default()
             }),
+            charged: AtomicBool::new(false),
             value,
         }))
     }
@@ -595,7 +633,7 @@ impl<T: Measured> Owned<T> {
     /// `this`, when another handle shares the allocation.
     pub fn try_unwrap(this: Self) -> Result<T, Self> {
         match Arc::try_unwrap(this.0) {
-            Ok(Cell { slot, value }) => {
+            Ok(Cell { slot, value, .. }) => {
                 drop(slot);
                 Ok(value)
             }
@@ -718,6 +756,7 @@ impl<T: Measured + Clone> Owned<T> {
 
 impl<T: Measured> Clone for Owned<T> {
     /// Another owner of the same allocation: shares its one charge.
+    #[inline(always)]
     fn clone(&self) -> Self {
         Self(Arc::clone(&self.0))
     }
@@ -725,6 +764,7 @@ impl<T: Measured> Clone for Owned<T> {
 
 impl<T: Measured> std::ops::Deref for Owned<T> {
     type Target = T;
+    #[inline(always)]
     fn deref(&self) -> &T {
         &self.0.value
     }
@@ -743,6 +783,7 @@ impl<T: Measured> AsRef<T> for Owned<T> {
 }
 
 impl<T: Measured + PartialEq> PartialEq for Owned<T> {
+    #[inline(always)]
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0) || self.0.value == other.0.value
     }
@@ -751,6 +792,7 @@ impl<T: Measured + PartialEq> PartialEq for Owned<T> {
 impl<T: Measured + Eq> Eq for Owned<T> {}
 
 impl<T: Measured + std::hash::Hash> std::hash::Hash for Owned<T> {
+    #[inline(always)]
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.0.value.hash(state);
     }
@@ -881,6 +923,7 @@ impl<T: Measured> Clone for OwnedSlice<T> {
 
 impl<T: Measured> std::ops::Deref for OwnedSlice<T> {
     type Target = [T];
+    #[inline(always)]
     fn deref(&self) -> &[T] {
         self.0.as_deref().map_or(&[], |items| items)
     }
@@ -1245,6 +1288,7 @@ impl OwnedStr {
 
     /// The text.
     #[must_use]
+    #[inline(always)]
     pub fn as_str(&self) -> &str {
         &self.0.text
     }
@@ -1327,6 +1371,7 @@ impl OwnedStr {
 
 impl std::ops::Deref for OwnedStr {
     type Target = str;
+    #[inline(always)]
     fn deref(&self) -> &str {
         self.as_str()
     }
@@ -1346,6 +1391,7 @@ impl std::borrow::Borrow<str> for OwnedStr {
 
 impl std::hash::Hash for OwnedStr {
     /// Hashes as its text, so a `str` borrow finds it.
+    #[inline(always)]
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.as_str().hash(state);
     }
