@@ -5,12 +5,25 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
 import { basename, dirname, join, relative } from "node:path";
 
 export const TYPESCRIPT_VERSION = "7.0.2";
+/**
+ * The next TypeScript, measured beside the oracle by the same method into its
+ * own reference (expected-next.json) and compared with it (oracles.mjs); it
+ * never classifies an answer. An exact nightly: 7.1 has no release yet.
+ */
+export const TYPESCRIPT_NEXT_VERSION = "7.1.0-dev.20261019.1";
 
 /** Features no production build enables; a probe built with one is not the production library. */
 export const FORBIDDEN_FEATURES = {
@@ -148,7 +161,7 @@ export function hostInfo() {
  * resolution from `fromDir` (a directory whose node_modules holds the
  * repository's `typescript` devDependency) and prove their version.
  */
-export function resolveTypeScript(fromDir) {
+export function resolveTypeScript(fromDir, pinned = TYPESCRIPT_VERSION) {
   const requireFrom = createRequire(join(fromDir, "package.json"));
   let tsPackageJson;
   try {
@@ -160,9 +173,9 @@ export function resolveTypeScript(fromDir) {
   }
   const tsPackageDir = dirname(tsPackageJson);
   const tsPackage = JSON.parse(readFileSync(tsPackageJson, "utf8"));
-  if (tsPackage.version !== TYPESCRIPT_VERSION) {
+  if (tsPackage.version !== pinned) {
     throw new Error(
-      `typescript at ${tsPackageDir} is ${tsPackage.version}, not the pinned ${TYPESCRIPT_VERSION}`,
+      `typescript at ${tsPackageDir} is ${tsPackage.version}, not the pinned ${pinned}`,
     );
   }
   const platformName = `@typescript/typescript-${process.platform}-${process.arch}`;
@@ -177,18 +190,16 @@ export function resolveTypeScript(fromDir) {
   }
   const platformDir = dirname(platformJson);
   const platformPackage = JSON.parse(readFileSync(platformJson, "utf8"));
-  if (platformPackage.version !== TYPESCRIPT_VERSION) {
-    throw new Error(
-      `${platformName} is ${platformPackage.version}, not the pinned ${TYPESCRIPT_VERSION}`,
-    );
+  if (platformPackage.version !== pinned) {
+    throw new Error(`${platformName} is ${platformPackage.version}, not the pinned ${pinned}`);
   }
   const exe = join(platformDir, "lib", process.platform === "win32" ? "tsc.exe" : "tsc");
   if (!existsSync(exe)) throw new Error(`the native tsc is missing at ${exe}`);
   const version = spawnSync(exe, ["-v"], { encoding: "utf8", timeout: 30_000 });
   const versionText = (version.stdout ?? "").trim();
-  if (version.status !== 0 || versionText !== `Version ${TYPESCRIPT_VERSION}`) {
+  if (version.status !== 0 || versionText !== `Version ${pinned}`) {
     throw new Error(
-      `${exe} -v answered ${JSON.stringify(versionText)} (exit ${version.status}), not Version ${TYPESCRIPT_VERSION}`,
+      `${exe} -v answered ${JSON.stringify(versionText)} (exit ${version.status}), not Version ${pinned}`,
     );
   }
   const apiFiles = [
@@ -209,6 +220,42 @@ export function resolveTypeScript(fromDir) {
     versionText,
     apiSha256: Object.fromEntries(apiFiles.map((f) => [f, sha256File(join(tsPackageDir, f))])),
   };
+}
+
+/**
+ * Install the next TypeScript (TYPESCRIPT_NEXT_VERSION) into
+ * target/typescript-next/<version>, apart from the repository's own, and
+ * return the directory resolveTypeScript resolves it from. npm verifies each
+ * package against the registry's integrity digest; resolveTypeScript then
+ * verifies the versions and the executable.
+ */
+export function provisionTypeScriptNext(root) {
+  const dir = join(root, "target", "typescript-next", TYPESCRIPT_NEXT_VERSION);
+  try {
+    resolveTypeScript(dir, TYPESCRIPT_NEXT_VERSION);
+    return dir;
+  } catch {
+    /* installed below */
+  }
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify(
+      { private: true, dependencies: { typescript: TYPESCRIPT_NEXT_VERSION } },
+      null,
+      2,
+    ) + "\n",
+  );
+  const install = ["install", "--no-audit", "--no-fund", "--ignore-scripts", "--no-package-lock"];
+  // npm is a .cmd script on Windows, which only a shell runs (the arguments are constants).
+  const r =
+    process.platform === "win32"
+      ? spawnSync(`npm ${install.join(" ")}`, { cwd: dir, stdio: "inherit", shell: true })
+      : spawnSync("npm", install, { cwd: dir, stdio: "inherit" });
+  if (r.status !== 0)
+    throw new Error(`npm install typescript@${TYPESCRIPT_NEXT_VERSION} failed in ${dir}`);
+  resolveTypeScript(dir, TYPESCRIPT_NEXT_VERSION);
+  return dir;
 }
 
 /**

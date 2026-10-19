@@ -24,6 +24,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { DISK_FILES, runFileReader } from "./pack.mjs";
 import { readSessionRecord } from "./session-record.mjs";
 
 import {
@@ -586,13 +587,13 @@ export function validateRun(
  * Re-read every invocation's raw files from disk and fail if they differ
  * from the copies embedded in results.json (tampering or a stale file).
  */
-export function rawFileProblems(run) {
+export function rawFileProblems(run, files = DISK_FILES) {
   const problems = [];
   for (const inv of run.sessionInvocations ?? []) {
     const id = `${inv.sessionId}|${inv.arm}|${inv.warmup ? "w" : "r"}${inv.rep}`;
     const read = (path) => {
       try {
-        return JSON.parse(readFileSync(path, "utf8"));
+        return JSON.parse(files.read(path));
       } catch {
         return null;
       }
@@ -609,7 +610,7 @@ export function rawFileProblems(run) {
       problems.push(`${id}: the supervisor record on disk differs from results.json`);
     let session = null;
     try {
-      session = readSessionRecord(inv.sessionOut);
+      session = readSessionRecord(inv.sessionOut, files.read);
     } catch {
       /* compared below */
     }
@@ -620,7 +621,7 @@ export function rawFileProblems(run) {
     if (inv.skipped) continue;
     const id = planEntry(inv);
     try {
-      const sup = JSON.parse(readFileSync(inv.supervisorOut, "utf8"));
+      const sup = JSON.parse(files.read(inv.supervisorOut));
       const { samples: _s, ...rest } = sup;
       const embedded = { ...inv.supervisor };
       delete embedded.samples;
@@ -635,8 +636,8 @@ export function rawFileProblems(run) {
     if (ARMS[inv.arm]?.kind === "cli") {
       let raw = null;
       try {
-        const sup = JSON.parse(readFileSync(inv.supervisorOut, "utf8"));
-        raw = readFileSync(sup.stdoutPath, "utf8");
+        const sup = JSON.parse(files.read(inv.supervisorOut));
+        raw = files.read(sup.stdoutPath);
       } catch {
         raw = null;
       }
@@ -653,7 +654,7 @@ export function rawFileProblems(run) {
     if (probePath) {
       let marker = null;
       try {
-        marker = JSON.parse(readFileSync(`${probePath}.phase`, "utf8"));
+        marker = JSON.parse(files.read(`${probePath}.phase`));
       } catch {
         marker = null;
       }
@@ -664,7 +665,7 @@ export function rawFileProblems(run) {
         problems.push(`${id}: the phase marker on disk differs from results.json`);
       let onDisk;
       try {
-        onDisk = compactProbeRecord(JSON.parse(readFileSync(probePath, "utf8")));
+        onDisk = compactProbeRecord(JSON.parse(files.read(probePath)));
       } catch {
         onDisk = null;
       }
@@ -688,7 +689,10 @@ async function cli(argv) {
   if (sha256File(expectedPath) !== run.meta?.expected?.sha256) {
     failures.push("the measured reference changed since the run (expected.json digest differs)");
   }
-  failures.push(...rawFileProblems(run));
+  // The run's own files, read from beside results.json (loose or packed),
+  // wherever the run was made.
+  const files = runFileReader(dirname(resolve(path)), run.meta?.options?.out);
+  failures.push(...rawFileProblems(run, files));
   const result = validateRun(run, expected, allScenarios(), {
     requireAllMatched: argv.includes("--require-all-matched"),
     sessions: allSessions(),
@@ -696,7 +700,7 @@ async function cli(argv) {
   failures.push(...result.failures);
   // The opt-in sections, when the run has them.
   if (run.oss) {
-    failures.push(...ossRawFileProblems(run.oss, loadTools(), allScenarios()));
+    failures.push(...ossRawFileProblems(run.oss, loadTools(), allScenarios(), files));
     failures.push(
       ...validateOss(run.oss, expected, allScenarios(), run.meta?.options ?? {}, schedule).failures,
     );
@@ -707,7 +711,7 @@ async function cli(argv) {
         .failures,
     );
   if (run.biome) {
-    failures.push(...biomeRawFileProblems(run.biome));
+    failures.push(...biomeRawFileProblems(run.biome, files));
     failures.push(
       ...validateBiome(run.biome, loadThenableExpected(), run.meta?.options ?? {}, schedule)
         .failures,

@@ -10,7 +10,15 @@
 //   node --test scripts/benchmark/semantic-perf/semantic-perf.test.mjs
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -81,6 +89,8 @@ import {
 } from "./project.mjs";
 import { referenceFor, summarize, timerResolution } from "./summary.mjs";
 import { resolveSupervisor } from "./supervisor.mjs";
+import { compareOracles, shown } from "./oracles.mjs";
+import { packSmallFiles, runFileReader } from "./pack.mjs";
 import { rawFileProblems, validateRun } from "./validate.mjs";
 import { writeJsonFile } from "./json-stream.mjs";
 import { readSessionRecord } from "./session-record.mjs";
@@ -128,13 +138,16 @@ test("the canonical form ignores quoting, union and property order, and keeps wh
   assert.equal(canonicalDigest(`2 | 1`).sha256, canonicalDigest(`1 | 2`).sha256);
 });
 
-test("optionality already includes undefined, and signature-free intersections are sets", () => {
+test("optionality already includes undefined, never leaves unions, and signature-free intersections are sets", () => {
   const same = [
     [`{ a?: number | undefined }`, `{ a?: number }`],
     [`[a?: string | undefined]`, `[string?]`],
     [`(x?: number | undefined) => void`, `(x?: number) => void`],
     [`{ a: 1 } & { b: 2 } & { c: 3 }`, `{ c: 3 } & { a: 1 } & { b: 2 }`],
     [`string & { __brand: 1 }`, `{ __brand: 1 } & string`],
+    // `never` is the empty union: the API prints a union member that reduced to it.
+    [`({ k: "b"; y: 2 } & { k: "b" }) | never`, `{ k: "b"; y: 2 } & { k: "b" }`],
+    [`1 | never | 2`, `2 | 1`],
   ];
   for (const [a, b] of same) assert.equal(canonicalType(a), canonicalType(b), `${a} ≡ ${b}`);
   const different = [
@@ -146,6 +159,8 @@ test("optionality already includes undefined, and signature-free intersections a
     [`{ (): 1 } & { a: 1 }`, `{ a: 1 } & { (): 1 }`],
     // A named type may carry signatures.
     [`A & { b: 1 }`, `{ b: 1 } & A`],
+    // A lone `never` is not an empty answer.
+    [`never`, `unknown`],
   ];
   for (const [a, b] of different)
     assert.notEqual(canonicalType(a), canonicalType(b), `${a} ≢ ${b}`);
@@ -1594,6 +1609,103 @@ test("a raw record on disk that differs from results.json is reported", () => {
   assert.ok(rawFileProblems(omitted).some((p) => /probe record on disk/.test(p)));
   writeFileSync(inv.probeOut, JSON.stringify({ ...inv.probe, tool: "tsc" }));
   assert.ok(rawFileProblems(run).some((p) => /differs from results.json/.test(p)));
+});
+
+test("a packed run copied elsewhere re-validates from its own archive", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "semantic-perf-test-"));
+  const copy = mkdtempSync(join(tmpdir(), "semantic-perf-copy-"));
+  t.after(() => {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(copy, { recursive: true, force: true });
+  });
+  const run = syntheticRun();
+  const inv = run.invocations[0];
+  mkdirSync(join(dir, "runs"));
+  inv.supervisorOut = join(dir, "runs", "rep-0.sup.json");
+  inv.probeOut = join(dir, "runs", "rep-0.probe.json");
+  writeFileSync(inv.supervisorOut, JSON.stringify(inv.supervisor));
+  writeFileSync(inv.probeOut, JSON.stringify(inv.probe));
+  writeFileSync(
+    `${inv.probeOut}.phase`,
+    JSON.stringify({ phase: inv.phase, history: inv.phaseHistory }),
+  );
+  run.invocations = [inv];
+  cpSync(dir, copy, { recursive: true });
+  assert.equal(packSmallFiles(copy).files, 3);
+  assert.ok(!existsSync(join(copy, "runs")), "the copy's records are only in its archive");
+  // The copy is read, not the recorded paths: tampering with the original
+  // does not reach it, and an empty copy has nothing to read.
+  writeFileSync(inv.probeOut, JSON.stringify({ ...inv.probe, tool: "tsc" }));
+  assert.ok(rawFileProblems(run).some((p) => /probe record on disk/.test(p)));
+  assert.deepEqual(rawFileProblems(run, runFileReader(copy, dir)), []);
+  const empty = mkdtempSync(join(copy, "empty-"));
+  assert.ok(rawFileProblems(run, runFileReader(empty, dir)).some((p) => /cannot read/.test(p)));
+});
+
+test("the next compiler's reference is compared cell by cell, fresh cells only", () => {
+  const scenario = allScenarios().find((s) => s.id === "baseline-empty");
+  const reference = (printed, sourceText = scenario.source) => ({
+    typescript: "x",
+    scenarios: {
+      [scenario.id]: {
+        sourceSha256: sha256Text(sourceText),
+        settings: Object.fromEntries(
+          SETTINGS.map((s) => [
+            s.id,
+            {
+              never: false,
+              codes: [],
+              printed: s.id === "strict" ? printed : "[1]",
+              receipt: { tsconfigSha256: sha256Text(tsconfigText(s, scenario)) },
+            },
+          ]),
+        ),
+      },
+    },
+  });
+  const oracle = reference("[1]");
+  const result = compareOracles(oracle, reference("[2]"), [scenario]);
+  assert.equal(result.agree, 3);
+  assert.deepEqual(
+    result.differ.map((d) => [d.setting, shown(d.oracle), shown(d.next)]),
+    [["strict", "1", "2"]],
+  );
+  // Verter's answer is attributed to the compiler it equals.
+  const run = {
+    summary: {
+      cells: [
+        {
+          key: `${scenario.id}/strict`,
+          arms: { verter: { answerDigest: result.differ[0].next.digest } },
+        },
+      ],
+    },
+  };
+  assert.equal(compareOracles(oracle, reference("[2]"), [scenario], run).differ[0].verter, "next");
+  // Running out of memory and running out of time are the same non-answer.
+  const killed = (killedBy, termination) => {
+    const ref = reference("[1]");
+    const cell = ref.scenarios[scenario.id].settings.strict;
+    delete cell.printed;
+    delete cell.never;
+    Object.assign(cell, { killed: killedBy });
+    cell.receipt.method = JSON.stringify({ memMb: 1, timeoutMs: 1000 });
+    cell.receipt.termination = { killedBy, ...termination };
+    return ref;
+  };
+  const byMemory = killed("memory", {
+    backend: "windows-job-object",
+    containment: "hard",
+    killTriggerBytes: 1024 * 1024,
+    peakBytes: 1024 * 1024,
+  });
+  const byDeadline = killed("timeout", { wallMs: 1500, terminationLatencyMs: 10 });
+  assert.equal(compareOracles(byMemory, byDeadline, [scenario]).agree, SETTINGS.length);
+  assert.equal(compareOracles(byMemory, oracle, [scenario]).differ.length, 1);
+  // A reference measured on an older scenario is not compared at all.
+  const stale = compareOracles(oracle, reference("[2]", "type __Probe = 0;"), [scenario]);
+  assert.equal(stale.agree + stale.differ.length, 0);
+  assert.equal(stale.uncompared.length, SETTINGS.length);
 });
 
 test("without a supervisor the harness refuses to run", () => {

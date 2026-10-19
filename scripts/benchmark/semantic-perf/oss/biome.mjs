@@ -26,6 +26,7 @@ import { join } from "node:path";
 
 import { probeMetrics, runLimits, stats, supervisorDeadlineMs, verdict } from "../analyze.mjs";
 import { canonicalDigest, normalize, parseType } from "../canonical.mjs";
+import { DISK_FILES } from "../pack.mjs";
 import { MEASURING_SUFFIX, parseMeasurement } from "../measure-expected.mjs";
 import { sha256Text } from "../provenance.mjs";
 import { interpretMeasurement } from "../reference.mjs";
@@ -219,19 +220,17 @@ function command(arm, ctx, dir, runBase) {
 }
 
 /** Read one invocation's answer (or why there is none). */
-function readAnswer(arm, c, record, probeOut) {
+function readAnswer(arm, c, record, probeOut, files = DISK_FILES) {
   try {
     if (arm === "verter-thenable") {
       if (record.exitCode !== 0) return { unreadable: `exit ${record.exitCode}` };
-      return readVerterAnswer(JSON.parse(readFileSync(probeOut, "utf8")));
+      return readVerterAnswer(JSON.parse(files.read(probeOut)));
     }
     if (![0, 1, 2].includes(record.exitCode)) {
-      const line = firstLine(
-        existsSync(record.stderrPath) ? readFileSync(record.stderrPath, "utf8") : "",
-      );
+      const line = firstLine(files.exists(record.stderrPath) ? files.read(record.stderrPath) : "");
       return { unreadable: `exit ${record.exitCode}${line ? `: ${line}` : ""}` };
     }
-    const stdout = readFileSync(record.stdoutPath, "utf8");
+    const stdout = files.read(record.stdoutPath);
     const read =
       arm === "tsc-thenable"
         ? readTscAnswer(stdout, c.source + MEASURING_SUFFIX)
@@ -512,14 +511,14 @@ const stable = (value) =>
  * the stdout or probe record it names) and re-derive its reading: a stored
  * copy that differs is reported.
  */
-export function biomeRawFileProblems(result) {
+export function biomeRawFileProblems(result, files = DISK_FILES) {
   const problems = [];
   const cases = new Map(thenableCases().map((c) => [c.id, c]));
   for (const inv of result.invocations ?? []) {
     const id = `biome ${inv.case}|${inv.arm}|${inv.warmup ? "w" : "r"}${inv.rep}`;
     let sup;
     try {
-      sup = JSON.parse(readFileSync(inv.supervisorOut, "utf8"));
+      sup = JSON.parse(files.read(inv.supervisorOut));
     } catch (err) {
       problems.push(`${id}: cannot read ${inv.supervisorOut}: ${err.message}`);
       continue;
@@ -535,7 +534,7 @@ export function biomeRawFileProblems(result) {
       inv.arm === "verter-thenable"
         ? inv.supervisorOut.replace(/\.sup\.json$/, ".probe.json")
         : null;
-    const again = readAnswer(inv.arm, cases.get(inv.case), sup, probeOut);
+    const again = readAnswer(inv.arm, cases.get(inv.case), sup, probeOut, files);
     if (stable(again) !== stable(inv.reading))
       problems.push(`${id}: the reading re-derived from the raw output differs`);
   }

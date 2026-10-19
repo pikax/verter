@@ -9,6 +9,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writeJsonFile } from "./json-stream.mjs";
+import { packSmallFiles } from "./pack.mjs";
 import { readSessionRecord } from "./session-record.mjs";
 
 import {
@@ -155,6 +156,9 @@ export const USAGE = `usage: node scripts/benchmark/semantic-perf.mjs [options]
   --lib-mode <m>          how Verter reads the library: root-file (default, as tsc does) | ambient
   --no-skip-after-kill    re-run every invocation of an arm whose warmup was killed at the memory cap
                           (by default the rest are recorded as skipped: a memory kill is deterministic)
+  --no-pack               leave every file loose (by default, once the report is written, files under
+                          1 MiB move into small-files.zip, so a run copies as a few files; results.json,
+                          results.md and larger files stay as they are)
   --oss [a,b]             also run the pinned open-source tools (all, or the named ones: tsz,
                           bamtiscript, ezno, tsrust, biome), each in a separate section
                           (docs/contributing/semantic-benchmark-oss.md); provisioned into target/oss-tools
@@ -210,6 +214,7 @@ export function parseArgs(argv) {
     typescriptFrom: ROOT,
     libMode: "root-file",
     skipAfterKill: true,
+    pack: true,
   };
   const positive = (name, value, min = 1) => {
     const n = Number(value);
@@ -293,6 +298,9 @@ export function parseArgs(argv) {
       }
       case "--no-skip-after-kill":
         opts.skipAfterKill = false;
+        break;
+      case "--no-pack":
+        opts.pack = false;
         break;
       case "--oss":
       case "--only-oss": {
@@ -1101,6 +1109,11 @@ export async function main(argv) {
   writeJsonFile(join(outDir, "results.json"), run);
   log(`\nsemantic-perf: results ${join(outDir, "results.json")}`);
   log(`semantic-perf: report  ${join(outDir, "results.md")}`);
+  if (opts.pack) {
+    const packed = packSmallFiles(outDir);
+    if (packed.files)
+      log(`semantic-perf: packed  ${packed.files} small files into ${packed.archive}`);
+  }
   log(
     `semantic-perf: validation ${validation.ok ? "PASSED" : "FAILED"} (${validation.failures.length} failure(s))`,
   );

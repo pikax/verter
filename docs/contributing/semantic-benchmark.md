@@ -845,6 +845,19 @@ Results land in `target/semantic-perf/<timestamp>/`:
   (`cli/` holds the whole-program arms' program);
 - `bin/` — the pinned binaries that ran.
 
+Once the report is written, every file under 1 MiB except `results.json` and
+`results.md` moves into `small-files.zip` (tens of thousands of files become
+one; larger files such as the binaries stay as they are), so a run copies
+quickly between machines. Each entry is read back and compared with its file
+before the file is removed. `--no-pack` leaves the files loose; an existing run
+directory packs with
+
+```bash
+node scripts/benchmark/semantic-perf/pack.mjs <run dir>
+```
+
+Any zip tool opens the archive.
+
 CLI invocations must use the verified tsc executable, the cell's project, and
 the arm's exact thread mode. Runtime and build environment receipts require
 64-character hexadecimal SHA-256 digests. Whole-program OS memory peaks are
@@ -858,7 +871,9 @@ its own probe record and phase marker at the path derived from the
 invocation, whether or not `results.json` embeds them, and for every
 whole-program run the complete stdout file the supervisor recorded — including
 middle diagnostics above 1 MiB — and fails on any that differs from
-`results.json` (a record on disk that `results.json` omits included). Re-validate any
+`results.json` (a record on disk that `results.json` omits included). The raw
+records are read from beside `results.json` — loose or from `small-files.zip` —
+so a run copied to another machine re-validates where it lands. Re-validate any
 run with
 
 ```bash
@@ -895,6 +910,23 @@ node scripts/benchmark/semantic-perf/measure-expected.mjs --only <ids> --allow-s
 
 The run fails validation until the reference matches the scenario sources,
 the library and the method.
+
+### The next TypeScript beside the oracle
+
+tsc 7.0.2 is the oracle: it alone classifies answers. The next TypeScript, a
+pinned nightly (`TYPESCRIPT_NEXT_VERSION` in `provenance.mjs`, today
+`7.1.0-dev.20261019.1`, since 7.1 has no release yet), is measured by the same
+method into `expected-next.json`. It is installed into
+`target/typescript-next/<version>`, apart from the repository's own TypeScript.
+Then `oracles.mjs` lists every cell where the two answer differently and, given
+a run, which compiler Verter's answer equals:
+
+```bash
+node scripts/benchmark/semantic-perf/measure-expected.mjs --next            # add --allow-sampled on macOS
+node scripts/benchmark/semantic-perf/oracles.mjs [<run>/results.json] [--out oracles.md]
+```
+
+Cells measured on an older scenario are left out of the comparison and listed.
 
 ## Evidence runs
 

@@ -6,6 +6,12 @@
 //   node scripts/benchmark/semantic-perf/measure-expected.mjs
 //       [--only a,b] [--resume] [--supervisor <exe> | --via-tsc-capped <tsc-capped.mjs>]
 //       [--mem-mb 8192] [--timeout-ms 300000] [--allow-sampled] [--typescript-from <dir>] [--work <dir>]
+//       [--next]
+//
+// --next measures the next TypeScript (TYPESCRIPT_NEXT_VERSION, installed
+// into target/typescript-next on first use unless --typescript-from names
+// it) by the same method into expected-next.json: a second reference that
+// never classifies an answer, compared with the oracle by oracles.mjs.
 //
 // Method (the CLI, independent of the API the benchmark's tsc arm uses): the
 // scenario module plus MEASURING_SUFFIX,
@@ -38,14 +44,21 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { resolveTypeScript, sha256Text, TYPESCRIPT_VERSION } from "./provenance.mjs";
+import {
+  provisionTypeScriptNext,
+  resolveTypeScript,
+  sha256Text,
+  TYPESCRIPT_NEXT_VERSION,
+  TYPESCRIPT_VERSION,
+} from "./provenance.mjs";
 import { interpretMeasurement } from "./reference.mjs";
 import { SETTINGS, selectScenarios, tsconfigText, writeCompanions } from "./scenarios.mjs";
 import { resolveSupervisor, runSupervised } from "./supervisor.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..", "..", "..");
-const EXPECTED = join(HERE, "expected.json");
+const EXPECTED_FILE = join(HERE, "expected.json");
+const EXPECTED_NEXT_FILE = join(HERE, "expected-next.json");
 const MARKER = "const __bench_s: [never] = __bench_v;";
 const NEVER_MARKER = 'const __bench_n: "never-check" = null! as __BenchIsNever;';
 export const MEASURING_SUFFIX = `type __BenchExpand<T> = T extends unknown ? [T] : never;
@@ -143,7 +156,14 @@ async function main() {
   const memMb = Number(arg("--mem-mb", 8192));
   const timeoutMs = Number(arg("--timeout-ms", 300_000));
   const viaCapped = arg("--via-tsc-capped", null);
-  const typescript = resolveTypeScript(resolve(arg("--typescript-from", ROOT)));
+  const next = process.argv.includes("--next");
+  const pinned = next ? TYPESCRIPT_NEXT_VERSION : TYPESCRIPT_VERSION;
+  const EXPECTED = next ? EXPECTED_NEXT_FILE : EXPECTED_FILE;
+  const from = arg("--typescript-from", null);
+  const typescript = resolveTypeScript(
+    from ? resolve(from) : next ? provisionTypeScriptNext(ROOT) : ROOT,
+    pinned,
+  );
   const supervisor = viaCapped ? null : resolveSupervisor(ROOT, arg("--supervisor", null)).path;
   const work = resolve(arg("--work", join(tmpdir(), `semantic-perf-expected-${Date.now()}`)));
   const lib = readFileSync(join(HERE, "lib", "bench-globals.d.ts"), "utf8");
@@ -173,7 +193,7 @@ async function main() {
   const retained = previous?.schema === 3 && (only.length || resume);
   const out = retained ? previous : { scenarios: {} };
   out.schema = 3;
-  out.typescript = TYPESCRIPT_VERSION;
+  out.typescript = pinned;
   if (!retained) out.method = method;
   out.measuredWith =
     "tsc -p (CLI) over the benchmark tsconfig (noLib, lib.bench.d.ts as a root file, noErrorTruncation) of the scenario plus the measuring suffix " +

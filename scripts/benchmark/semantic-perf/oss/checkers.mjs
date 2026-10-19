@@ -38,6 +38,7 @@ import {
   verdict,
 } from "../analyze.mjs";
 import { canonicalDigest } from "../canonical.mjs";
+import { DISK_FILES } from "../pack.mjs";
 import { MEASURING_SUFFIX } from "../measure-expected.mjs";
 import { sha256Text } from "../provenance.mjs";
 import { companionFiles, companionInputProblems, writeCompanions } from "../scenarios.mjs";
@@ -373,20 +374,20 @@ export async function runOss(ctx) {
 }
 
 /** The probe record fields of a Verter invocation (as the demand section records them). */
-export function readProbeFields(probeOut) {
+export function readProbeFields(probeOut, files = DISK_FILES) {
   let phase = null;
   let phaseHistory = null;
   let probe = null;
   let probeReadError = null;
   try {
-    const marker = JSON.parse(readFileSync(`${probeOut}.phase`, "utf8"));
+    const marker = JSON.parse(files.read(`${probeOut}.phase`));
     phase = marker.phase ?? null;
     phaseHistory = marker.history ?? null;
   } catch {
     phase = null;
   }
   try {
-    probe = compactProbeRecord(JSON.parse(readFileSync(probeOut, "utf8")));
+    probe = compactProbeRecord(JSON.parse(files.read(probeOut)));
   } catch (err) {
     probeReadError = String(err.message ?? err);
   }
@@ -686,14 +687,14 @@ export function validateOss(oss, expected, scenarios, options, schedule) {
  * and the stdout it names) and re-derive its reading: a stored copy that
  * differs is reported.
  */
-export function ossRawFileProblems(oss, tools, scenarios) {
+export function ossRawFileProblems(oss, tools, scenarios, files = DISK_FILES) {
   const problems = [];
   const byId = new Map(scenarios.map((s) => [s.id, s]));
   for (const inv of oss.invocations ?? []) {
     const id = `oss ${inv.scenario}/${inv.setting}|${inv.arm}|${inv.warmup ? "w" : "r"}${inv.rep}`;
     let sup;
     try {
-      sup = JSON.parse(readFileSync(inv.supervisorOut, "utf8"));
+      sup = JSON.parse(files.read(inv.supervisorOut));
     } catch (err) {
       problems.push(`${id}: cannot read ${inv.supervisorOut}: ${err.message}`);
       continue;
@@ -706,7 +707,7 @@ export function ossRawFileProblems(oss, tools, scenarios) {
       problems.push(`${id}: the supervisor record on disk differs from results.json`);
     if (inv.arm === VERTER_ARM) {
       if (inv.probe && inv.probeOut) {
-        const again = readProbeFields(inv.probeOut);
+        const again = readProbeFields(inv.probeOut, files);
         if (stable(again.probe) !== stable(inv.probe))
           problems.push(`${id}: the probe record on disk differs from results.json`);
       }
@@ -714,8 +715,8 @@ export function ossRawFileProblems(oss, tools, scenarios) {
     }
     if (!inv.reading || !sup.stdoutPath) continue;
     try {
-      const stdout = readFileSync(sup.stdoutPath, "utf8");
-      const stderr = existsSync(sup.stderrPath) ? readFileSync(sup.stderrPath, "utf8") : "";
+      const stdout = files.read(sup.stdoutPath);
+      const stderr = files.exists(sup.stderrPath) ? files.read(sup.stderrPath) : "";
       const tool = toolOfArm(inv.arm);
       const again = readInvocation(
         tool ? tools[tool]?.format : "tsc",

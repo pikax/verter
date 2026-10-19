@@ -14,7 +14,8 @@
 //   - string literals by value ('a' and "a" are one literal); numeric
 //     literals by value (1.0 and 1);
 //   - union members are a set: nested unions flatten, duplicates go, order
-//     does not matter, and `true | false` is `boolean`;
+//     does not matter, `true | false` is `boolean`, and a `never` member
+//     (the empty union) goes;
 //   - `T[]` is `Array<T>`, `readonly T[]` is `ReadonlyArray<T>`;
 //   - object-type properties and methods are keyed by name, so their order
 //     does not matter — but overloads (same-named methods, call signatures,
@@ -972,6 +973,9 @@ export function normalize(node, env = []) {
         );
         members.push({ k: "kw", name: "boolean" });
       }
+      // `never` is the empty union, so it adds no member.
+      const inhabited = members.filter((m) => !(m.k === "kw" && m.name === "never"));
+      if (inhabited.length) members = inhabited;
       assertUnambiguous(members);
       const unique = new Map(members.map((m) => [keyOf(m), m]));
       const sorted = [...unique.keys()].sort().map((k) => unique.get(k));

@@ -2,13 +2,14 @@
 // may tear only the last line; no subsequent step starts before its flush.
 import { readFileSync } from "node:fs";
 
-export function readSessionRecord(path) {
+// `read` reads one file's text (the run's own reader, for a packed or copied run).
+export function readSessionRecord(path, read = (p) => readFileSync(p, "utf8")) {
   try {
-    return JSON.parse(readFileSync(path, "utf8"));
+    return JSON.parse(read(path));
   } catch (err) {
     if (err.code !== "ENOENT") throw err;
   }
-  const lines = readFileSync(`${path}.steps.jsonl`, "utf8").split("\n");
+  const lines = read(`${path}.steps.jsonl`).split("\n");
   lines.pop(); // An unterminated last entry is never evidence of completion.
   const header = JSON.parse(lines.shift());
   if (header.schema !== 1 || header.kind !== "session" || header.stage !== "partial")
