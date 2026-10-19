@@ -33,8 +33,8 @@ use super::fixtures;
 use super::gates::{self, GateEvidence};
 use super::isolation::{self, delivery_digest, IsolationEvidence};
 use super::manifest::{
-    churn_file, dep_file, module_file, surge_file, Action, ConfigVariant, LifecycleClass, Manifest,
-    Mode, Target, PROJECT_ROOT,
+    big_file, canonical, churn_file, dep_file, module_file, surge_file, Action, ConfigVariant,
+    LifecycleClass, Manifest, Mode, Target, PROJECT_ROOT,
 };
 use super::refusal::{self, RefusalEvidence};
 use crate::semantic_perf::disk;
@@ -66,6 +66,9 @@ pub enum Mutation {
     MissingSummary,
     /// Skip one action without executing it.
     UnexpectedSkip,
+    /// Publish unique-owner churn modules with bytes the manifest does not
+    /// freeze.
+    UnfrozenFixture,
 }
 
 /// Evidence that a mutation was applied: the actions it changed.
@@ -343,10 +346,6 @@ impl std::fmt::Display for SoakError {
     }
 }
 
-fn canonical(file: &str) -> String {
-    format!("{PROJECT_ROOT}/{file}")
-}
-
 fn language_of(canonical_id: &str) -> FileLanguage {
     verter_session::LanguageRegistry::global()
         .classify_static(canonical_id)
@@ -586,6 +585,8 @@ impl Engine {
     fn source_of(&self, file: &str, tranche: u32, revision: u32) -> String {
         if file == dep_file(tranche) {
             fixtures::dep_source(tranche)
+        } else if file == big_file(tranche) {
+            fixtures::big_source(tranche)
         } else {
             fixtures::module_source(self.mode, tranche, revision)
         }
@@ -1020,8 +1021,14 @@ impl Engine {
                 let ordinal = (0..)
                     .find(|k| churn_file(action.tranche, *k) == *file)
                     .expect("a churn module of the tranche");
-                record.outcome =
-                    self.upsert(file, &fixtures::churn_source(action.tranche, ordinal));
+                let mut text = fixtures::churn_source(action.tranche, ordinal);
+                if mutation == Some(Mutation::UnfrozenFixture) {
+                    text.push_str(
+                        "// unfrozen
+",
+                    );
+                }
+                record.outcome = self.upsert(file, &text);
                 if record.outcome == Outcome::Done {
                     observe(&mut record, demand(&self.host, file, alias, None));
                     if let Outcome::Fault { detail } = self.remove(file) {
@@ -1154,6 +1161,10 @@ fn planned(manifest: &Manifest, mutation: Option<Mutation>) -> (Vec<Action>, Vec
                 .into_iter()
                 .take(1)
                 .collect(),
+        ),
+        Some(Mutation::UnfrozenFixture) => (
+            manifest.actions.clone(),
+            affected_by(LifecycleClass::UniqueOwnerChurn),
         ),
         Some(Mutation::RetainedKeyLeak) => (manifest.actions.clone(), Vec::new()),
         Some(Mutation::MissingSummary) | None => (manifest.actions.clone(), Vec::new()),

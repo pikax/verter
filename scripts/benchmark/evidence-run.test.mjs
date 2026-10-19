@@ -19,6 +19,8 @@ import {
   buildSummary,
   defaultValidator,
   invokeSoakRunner,
+  SOAK_BUILD,
+  SOAK_METRICS,
   loadManifest,
   main,
   MANIFEST_DIR,
@@ -588,6 +590,47 @@ describe("soak manifests", () => {
     assert.ok(
       problemsOf((m) => (m.soak.sampleEvery = 101)).some((p) => /at least every 100/.test(p)),
     );
+  });
+
+  test("the run declares exactly the soak-support build of the runner", () => {
+    assert.deepEqual(registered().soak.build, SOAK_BUILD);
+    for (const edit of [
+      (m) => delete m.soak.build,
+      (m) => (m.soak.build.features = []),
+      (m) => m.soak.build.features.push("semantic-observe"),
+      (m) => (m.soak.build.profile = "dev"),
+    ])
+      assert.ok(
+        problemsOf(edit).some((p) => /soak.build must declare the support-feature build/.test(p)),
+      );
+  });
+
+  test("surge figures are the surges' own deltas and window peaks, not lifetime counters", () => {
+    const result = {
+      summary: {
+        records: [
+          { class: "cold-demand", refusalsPressure: 50 },
+          {
+            class: "pressure-surge",
+            refusalsPressure: 2,
+            refusalsOversized: 1,
+            pressure: { refusalsActive: 0, active: { attributedPeak: 10 } },
+          },
+          {
+            class: "pressure-surge",
+            refusalsPressure: 3,
+            refusalsOversized: 0,
+            pressure: { refusalsActive: 0, active: { attributedPeak: null } },
+          },
+        ],
+        samples: [{ at: "closed", counts: { refusalsPressure: 99, peakTotalBytes: 1e12 } }],
+      },
+    };
+    assert.equal(SOAK_METRICS.surgeRefusalsPressure.from(result), 5);
+    assert.equal(SOAK_METRICS.surgeRefusalsOversized.from(result), 1);
+    assert.equal(SOAK_METRICS.surgeRefusalsActive.from(result), 0);
+    assert.equal(SOAK_METRICS.surgeActivePeakBytes.from(result), 10);
+    assert.equal(SOAK_METRICS.surgeActivePeakBytes.from({ summary: { records: [] } }), null);
   });
 
   test("an unknown kind is rejected", () => {

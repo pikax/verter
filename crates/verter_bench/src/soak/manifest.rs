@@ -17,7 +17,7 @@ pub const ACTIONS_PER_TRANCHE: u32 = 100;
 /// Tranches of the full manifest.
 pub const FULL_TRANCHES: u32 = 100;
 /// Cold-demanded aliases each tranche module declares.
-pub const COLD_ALIASES: u32 = 53;
+pub const COLD_ALIASES: u32 = 51;
 /// Threads one overlapping cold demand issues at once.
 pub const OVERLAP_THREADS: u32 = 4;
 /// Edits one candidate-churn action publishes against one identity: more
@@ -44,6 +44,9 @@ pub const OVERSIZED_PROPS: u32 = 1_600;
 /// them) runs one, so every pressure action class runs on any worker; only
 /// the full surges are judged for their account outcomes.
 pub const BOUNDED_SURGE_MODULES: u32 = 3;
+/// Props of every bounded-surge component: a bounded instance drives the
+/// surge route on any worker without the full surge's volume.
+pub const BOUNDED_SURGE_PROPS: u32 = 200;
 /// Nested aliases of a depth-refusal component: past the fixed connected
 /// query-depth bound.
 pub const DEPTH_LEVELS: u32 = 30;
@@ -316,15 +319,37 @@ impl Manifest {
         }
     }
 
-    /// SHA-256 of the canonical JSON of the action list and of the source
-    /// and configuration bytes the actions publish, so a change to a fixture
-    /// moves the identity of the workload it drives.
+    /// SHA-256 of the canonical JSON of the action list, of the setup's
+    /// publications and of every publication of every action (the digest of
+    /// its path and exact bytes, see
+    /// [`super::fixtures::expected_publications`]), so a change to any
+    /// published fixture moves the identity of the workload it drives.
     #[must_use]
     pub fn digest(&self) -> String {
+        self.digest_over(&super::fixtures::setup_publications(), |action| {
+            super::fixtures::expected_publications(self.mode, action)
+        })
+    }
+
+    /// The digest of the action list with `setup` and each action's
+    /// `publications` in place of the frozen fixtures: the composition
+    /// [`Self::digest`] applies to the real ones.
+    #[must_use]
+    pub fn digest_over(
+        &self,
+        setup: &[String],
+        publications: impl Fn(&Action) -> Vec<String>,
+    ) -> String {
         let mut bytes = serde_json::to_vec(&self.actions).expect("actions serialise");
-        bytes.extend_from_slice(
-            super::fixtures::content_digest(self.mode, self.tranches).as_bytes(),
-        );
+        for publication in setup {
+            bytes.extend_from_slice(publication.as_bytes());
+        }
+        for action in &self.actions {
+            bytes.extend_from_slice(&action.index.to_le_bytes());
+            for publication in publications(action) {
+                bytes.extend_from_slice(publication.as_bytes());
+            }
+        }
         sha256_hex(&bytes)
     }
 
@@ -348,6 +373,12 @@ impl Manifest {
     }
 }
 
+/// The host path of a soak project file.
+#[must_use]
+pub fn canonical(file: &str) -> String {
+    format!("{PROJECT_ROOT}/{file}")
+}
+
 /// The module a tranche demands from.
 #[must_use]
 pub fn module_file(tranche: u32) -> String {
@@ -364,6 +395,12 @@ pub fn dep_file(tranche: u32) -> String {
 #[must_use]
 pub fn surge_file(tranche: u32, ordinal: u32) -> String {
     format!("t{tranche:03}/surge{ordinal}.vue")
+}
+
+/// The module holding a pressure tranche's large union.
+#[must_use]
+pub fn big_file(tranche: u32) -> String {
+    format!("t{tranche:03}/big.ts")
 }
 
 /// A uniquely owned churn module.
@@ -511,7 +548,7 @@ fn tranche_template(mode: Mode, tranche: u32) -> Vec<(LifecycleClass, Target)> {
     ));
     match mode {
         Mode::Normal => {
-            out.extend((0..3).map(|x| (ColdDemand, query(format!("X{x}")))));
+            out.extend((0..5).map(|x| (ColdDemand, query(format!("X{x}")))));
             out.push((
                 MetaIsolation,
                 Target::Isolation {
@@ -523,7 +560,18 @@ fn tranche_template(mode: Mode, tranche: u32) -> Vec<(LifecycleClass, Target)> {
         }
         Mode::Pressure => {
             let surge = tranche % SURGE_PERIOD == SURGE_PERIOD - 1;
-            out.push((LargeDemand, query("Big0".into())));
+            let big = Target::File {
+                file: big_file(tranche),
+                revision: 0,
+            };
+            out.push((Open, big.clone()));
+            out.push((
+                LargeDemand,
+                Target::Query {
+                    file: big_file(tranche),
+                    alias: "Big0".into(),
+                },
+            ));
             out.push((
                 MetaIsolation,
                 Target::Isolation {
@@ -543,23 +591,28 @@ fn tranche_template(mode: Mode, tranche: u32) -> Vec<(LifecycleClass, Target)> {
                 )
             };
             out.push(churn(13));
-            let surge_of = |modules| {
+            let surge_of = |modules, props, oversized_props| {
                 (
                     PressureSurge,
                     Target::Surge {
                         modules,
-                        props: SURGE_PROPS,
-                        oversized_props: OVERSIZED_PROPS,
+                        props,
+                        oversized_props,
                     },
                 )
             };
             out.push(if surge {
-                surge_of(SURGE_MODULES)
-            } else if tranche % SURGE_PERIOD == 0 {
-                surge_of(BOUNDED_SURGE_MODULES)
+                surge_of(SURGE_MODULES, SURGE_PROPS, OVERSIZED_PROPS)
+            } else if tranche.is_multiple_of(SURGE_PERIOD) {
+                surge_of(
+                    BOUNDED_SURGE_MODULES,
+                    BOUNDED_SURGE_PROPS,
+                    BOUNDED_SURGE_PROPS,
+                )
             } else {
                 churn(14)
             });
+            out.push((Close, big));
         }
     }
     out.extend([

@@ -1,7 +1,11 @@
 //! The soak project's source texts, generated from `(file, revision)` alone,
 //! so a restored revision republishes exactly the bytes it first published.
 
-use super::manifest::{ConfigVariant, Mode, COLD_ALIASES, LARGE_UNION_MEMBERS};
+use super::manifest::{
+    big_file, canonical, churn_file, dep_file, surge_file, Action, ConfigVariant, LifecycleClass,
+    Mode, COLD_ALIASES, LARGE_UNION_MEMBERS,
+};
+use super::run::publication_digest;
 
 /// The persistent configuration sentinel module: its one alias reads a type
 /// through the `@pick/*` path mapping the configuration selects.
@@ -43,7 +47,7 @@ pub fn tsconfig(variant: ConfigVariant) -> String {
 #[must_use]
 pub fn module_source(mode: Mode, tranche: u32, revision: u32) -> String {
     use std::fmt::Write;
-    let tag = format!("t{tranche:03}r{revision}");
+    let tag = format!("{}t{tranche:03}r{revision}", mode.as_str());
     let mut out = String::from("import type { Dep } from \"./dep\";\n");
     let mut alias = |name: String| {
         let _ = writeln!(
@@ -54,7 +58,7 @@ pub fn module_source(mode: Mode, tranche: u32, revision: u32) -> String {
     for i in 0..COLD_ALIASES {
         alias(format!("A{i}"));
     }
-    for name in ["O0", "O1", "M0", "M1", "X0", "X1", "X2"] {
+    for name in ["O0", "O1", "M0", "M1", "X0", "X1", "X2", "X3", "X4"] {
         alias(name.to_string());
     }
     for f in 0..2 {
@@ -63,13 +67,18 @@ pub fn module_source(mode: Mode, tranche: u32, revision: u32) -> String {
             "export function f{f}() {{\n  return {{ ok: \"{tag}f{f}\" }};\n}}"
         );
     }
-    if mode == Mode::Pressure {
-        out.push_str("export type Big0 =");
-        for m in 0..LARGE_UNION_MEMBERS {
-            let _ = write!(out, "\n  | \"{tag}b0m{m}\"");
-        }
-        out.push_str(";\n");
+    out
+}
+
+/// A pressure tranche's large-union module.
+#[must_use]
+pub fn big_source(tranche: u32) -> String {
+    use std::fmt::Write;
+    let mut out = String::from("export type Big0 =");
+    for m in 0..LARGE_UNION_MEMBERS {
+        let _ = write!(out, "\n  | \"t{tranche:03}b0m{m}\"");
     }
+    out.push_str(";\n");
     out
 }
 
@@ -128,48 +137,112 @@ pub fn isolation_component_source(tag: &str, props: u32) -> String {
     )
 }
 
-/// SHA-256 of every source and configuration text the `(mode, tranches)`
-/// workload can publish: the sentinel project, and each tranche module,
-/// dependency, churn, surge, isolation and refusal fixture at the first,
-/// second and last tranche and at every revision the template publishes.
+/// The publications the runner makes before the first action: the original
+/// configuration, the two path-mapping targets and the sentinel, each as the
+/// digest of its path and bytes ([`publication_digest`]).
 #[must_use]
-pub fn content_digest(mode: Mode, tranches: u32) -> String {
-    use super::manifest::{
-        sha256_hex, CHURN_EDITS, ISOLATION_REFUSE_PROPS, ISOLATION_SPEND_PROPS, OVERSIZED_PROPS,
-        REFUSAL_PROPS, SURGE_PROPS,
-    };
-    let mut texts: Vec<String> = vec![
-        tsconfig(ConfigVariant::Original),
-        tsconfig(ConfigVariant::Alternate),
-        sentinel_source(),
-        isolation_types_source(),
-    ];
-    texts.extend(
+pub fn setup_publications() -> Vec<String> {
+    let mut out = vec![publication_digest(
+        &canonical("tsconfig.json"),
+        &tsconfig(ConfigVariant::Original),
+    )];
+    out.extend(
         PICK_FILES
             .iter()
-            .flat_map(|(f, t)| [f.to_string(), t.to_string()]),
+            .map(|(file, text)| publication_digest(&canonical(file), text)),
     );
-    let mut tranche_set = vec![0, 1, tranches.saturating_sub(1)];
-    tranche_set.dedup();
-    for tranche in tranche_set {
-        let tag = format!("t{tranche:03}");
-        texts.extend((0..=1).map(|rev| module_source(mode, tranche, rev)));
-        texts.extend((100..100 + CHURN_EDITS).map(|rev| module_source(mode, tranche, rev)));
-        texts.push(dep_source(tranche));
-        texts.extend((0..2).map(|k| churn_source(tranche, k)));
-        texts.push(surge_source(tranche, 0, SURGE_PROPS));
-        texts.push(surge_source(tranche, 1, OVERSIZED_PROPS));
-        texts.extend(
-            [
-                ISOLATION_SPEND_PROPS,
-                ISOLATION_REFUSE_PROPS,
-                REFUSAL_PROPS,
-                REFUSAL_PROPS + 3,
-            ]
-            .map(|props| isolation_component_source(&tag, props)),
-        );
+    out.push(publication_digest(
+        &canonical(SENTINEL_FILE),
+        &sentinel_source(),
+    ));
+    out
+}
+
+/// Every publication `action` of a `mode` workload makes, in order, as the
+/// digest of the path and the exact bytes. The runner records what it
+/// actually published and the verifier compares the two, so a fixture this
+/// enumeration omits is a failed run, not an unhashed input.
+#[must_use]
+pub fn expected_publications(mode: Mode, action: &Action) -> Vec<String> {
+    use super::manifest::Target;
+    let tranche = action.tranche;
+    let at = |file: &str, text: &str| publication_digest(&canonical(file), text);
+    let source_of = |file: &str, revision: u32| {
+        if file == dep_file(tranche) {
+            dep_source(tranche)
+        } else if file == big_file(tranche) {
+            big_source(tranche)
+        } else {
+            module_source(mode, tranche, revision)
+        }
+    };
+    match &action.target {
+        Target::File { file, revision }
+            if matches!(
+                action.class,
+                LifecycleClass::Open | LifecycleClass::Edit | LifecycleClass::RevertSource
+            ) =>
+        {
+            vec![at(file, &source_of(file, *revision))]
+        }
+        Target::Release { file, revision, .. } => vec![at(file, &source_of(file, *revision))],
+        Target::Config { variant } => vec![at("tsconfig.json", &tsconfig(*variant))],
+        Target::Query { file, .. } if action.class == LifecycleClass::UniqueOwnerChurn => {
+            let ordinal = (0..)
+                .find(|k| churn_file(tranche, *k) == *file)
+                .expect("a churn module of the tranche");
+            vec![at(file, &churn_source(tranche, ordinal))]
+        }
+        Target::Churn { file, edits, .. } => (0..*edits)
+            .map(|edit| 100 + edit)
+            .chain([0])
+            .map(|revision| at(file, &module_source(mode, tranche, revision)))
+            .collect(),
+        Target::Surge {
+            modules,
+            props,
+            oversized_props,
+        } => (0..*modules)
+            .map(|ordinal| {
+                let count = if ordinal == 0 {
+                    *oversized_props
+                } else {
+                    *props
+                };
+                at(
+                    &surge_file(tranche, ordinal),
+                    &surge_source(tranche, ordinal, count),
+                )
+            })
+            .collect(),
+        Target::Isolation {
+            spend_props,
+            refuse_props,
+            ..
+        } => {
+            let tag = format!("t{tranche:03}");
+            let one_host = [
+                ("ref.ts", isolation_types_source()),
+                ("spend.vue", isolation_component_source(&tag, *spend_props)),
+                (
+                    "refuse.vue",
+                    isolation_component_source(&tag, *refuse_props),
+                ),
+            ];
+            // The subject host and its two cold oracle hosts.
+            (0..3)
+                .flat_map(|_| one_host.iter())
+                .map(|(name, text)| publication_digest(&isolation_file(tranche, name), text))
+                .collect()
+        }
+        Target::Refusal { variant, props, .. } => {
+            super::refusal::planned_publications(*variant, tranche, *props)
+                .into_iter()
+                .map(|(name, text)| publication_digest(&isolation_file(tranche, name), &text))
+                .collect()
+        }
+        _ => Vec::new(),
     }
-    sha256_hex(texts.join("\u{0}").as_bytes())
 }
 
 /// A component whose own `<script setup>` nests `levels` `Partial` aliases

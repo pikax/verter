@@ -56,7 +56,9 @@ pub fn all() -> Vec<Control> {
         Control {
             name: "wrong-project-reversion",
             mutation: Mutation::WrongProjectReversion,
-            kinds: &["wrong-project-reversion"],
+            // The wrong configuration is also bytes the manifest does not
+            // freeze for the restore.
+            kinds: &["publication-mismatch", "wrong-project-reversion"],
             leak_figure: None,
         },
         Control {
@@ -69,6 +71,12 @@ pub fn all() -> Vec<Control> {
             name: "unexpected-skip",
             mutation: Mutation::UnexpectedSkip,
             kinds: &["unexpected-skip"],
+            leak_figure: None,
+        },
+        Control {
+            name: "unfrozen-fixture",
+            mutation: Mutation::UnfrozenFixture,
+            kinds: &["publication-mismatch"],
             leak_figure: None,
         },
     ]

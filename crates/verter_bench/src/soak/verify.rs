@@ -38,6 +38,9 @@ pub enum SoakFailure {
     WorkloadMismatch { detail: String },
     /// The executed actions differ from the regenerated manifest.
     InventoryMismatch { detail: String },
+    /// An action (or the setup, `index: None`) published other bytes, or
+    /// other paths, than the regenerated manifest freezes for it.
+    PublicationMismatch { index: Option<u32>, detail: String },
     /// A class the mode requires never ran.
     MissingClass { class: LifecycleClass },
     /// An action was recorded without being executed.
@@ -127,6 +130,7 @@ pub fn verify_summary(mode: Mode, tranches: u32, summary: &SoakSummary) -> Vec<S
         });
     }
     check_inventory(&expected, summary, &mut failures);
+    check_publications(&expected, summary, &mut failures);
     check_outcomes(&expected, summary, &mut failures);
     check_samples(summary, &mut failures);
     if mode == Mode::Pressure {
@@ -1061,5 +1065,48 @@ fn check_samples(summary: &SoakSummary, failures: &mut Vec<SoakFailure>) {
     }
     if !leaks.is_empty() {
         failures.push(SoakFailure::RetainedLeak { violations: leaks });
+    }
+}
+
+/// Every executed action, and the setup, published exactly the path-bound
+/// bytes the regenerated manifest freezes for it.
+fn check_publications(expected: &Manifest, summary: &SoakSummary, failures: &mut Vec<SoakFailure>) {
+    let mismatch = |want: &[String], got: &[String]| {
+        (want != got).then(|| {
+            format!(
+                "{} publications recorded, {} frozen; first differing at {}",
+                got.len(),
+                want.len(),
+                want.iter()
+                    .zip(got)
+                    .position(|(w, g)| w != g)
+                    .unwrap_or(want.len().min(got.len()))
+            )
+        })
+    };
+    if let Some(detail) = mismatch(
+        &super::fixtures::setup_publications(),
+        &summary.setup_published,
+    ) {
+        failures.push(SoakFailure::PublicationMismatch {
+            index: None,
+            detail,
+        });
+    }
+    let actions: BTreeMap<u32, _> = expected.actions.iter().map(|a| (a.index, a)).collect();
+    for record in &summary.records {
+        if matches!(record.outcome, Outcome::Skipped { .. }) {
+            continue;
+        }
+        let Some(action) = actions.get(&record.index) else {
+            continue;
+        };
+        let want = super::fixtures::expected_publications(expected.mode, action);
+        if let Some(detail) = mismatch(&want, &record.published) {
+            failures.push(SoakFailure::PublicationMismatch {
+                index: Some(record.index),
+                detail,
+            });
+        }
     }
 }
