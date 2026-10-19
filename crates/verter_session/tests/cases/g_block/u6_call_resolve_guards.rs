@@ -28,9 +28,10 @@ use verter_session::{HostConfig, VerterHost};
 use verter_session_query::facts::fact_cache::ReadSetSignature;
 use verter_type_engine::semantic_query::query_key_spec::semantic_query_key_specs;
 use verter_type_engine::semantic_query::{
-    ArgumentLiteralMode, CallArgKey, CallKind, CanonicalTypeSubstitution, FlowNarrowingKey,
-    PrimitiveKind, ProgramPointId, QueryError, QueryResult, ResolveCallContext, ResolveCallKey,
-    SemanticNodeData, SemanticNodeId, SemanticQueryKey, SemanticQueryKeyTag, SemanticQueryValueTag,
+    ArgumentLiteralMode, ArgumentLiteralProvenance, ArgumentPathStep, ArgumentRegularPosition,
+    CallArgKey, CallKind, CanonicalTypeSubstitution, FlowNarrowingKey, PrimitiveKind,
+    ProgramPointId, QueryError, QueryResult, ResolveCallContext, ResolveCallKey, SemanticNodeData,
+    SemanticNodeId, SemanticQueryKey, SemanticQueryKeyTag, SemanticQueryValueTag,
     SignatureCandidateOrigin, SignatureRef, SignatureReturnCarrier, TypeParamDecl,
 };
 
@@ -309,6 +310,36 @@ fn resolve_call_key_covers_callee_kind_receiver_args_and_type_args() {
                     spread: false,
                     literal_mode: ArgumentLiteralMode::Literal,
                     literal_provenance: None,
+                    context_sensitive: false,
+                    const_view: None,
+                }]
+                .into_boxed_slice(),
+            );
+            k
+        }),
+    );
+    // Argument literal provenance.
+    assert_distinct_identity(
+        &wrap(base.clone()),
+        &wrap({
+            let mut k = base_key();
+            k.args = Arc::from(
+                vec![CallArgKey::Eager {
+                    first_pass: None,
+                    ty: SemanticNodeId(2),
+                    spread: false,
+                    literal_mode: ArgumentLiteralMode::Widened,
+                    literal_provenance: Some(Arc::new(ArgumentLiteralProvenance {
+                        positions: Arc::from(
+                            vec![ArgumentRegularPosition {
+                                path: Arc::from(
+                                    vec![ArgumentPathStep::Element(0)].into_boxed_slice(),
+                                ),
+                                literals: None,
+                            }]
+                            .into_boxed_slice(),
+                        ),
+                    })),
                     context_sensitive: false,
                     const_view: None,
                 }]
