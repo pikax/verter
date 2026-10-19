@@ -128,6 +128,29 @@ test("the canonical form ignores quoting, union and property order, and keeps wh
   assert.equal(canonicalDigest(`2 | 1`).sha256, canonicalDigest(`1 | 2`).sha256);
 });
 
+test("optionality already includes undefined, and signature-free intersections are sets", () => {
+  const same = [
+    [`{ a?: number | undefined }`, `{ a?: number }`],
+    [`[a?: string | undefined]`, `[string?]`],
+    [`(x?: number | undefined) => void`, `(x?: number) => void`],
+    [`{ a: 1 } & { b: 2 } & { c: 3 }`, `{ c: 3 } & { a: 1 } & { b: 2 }`],
+    [`string & { __brand: 1 }`, `{ __brand: 1 } & string`],
+  ];
+  for (const [a, b] of same) assert.equal(canonicalType(a), canonicalType(b), `${a} ≡ ${b}`);
+  const different = [
+    // A required property's `undefined` is part of its type.
+    [`{ a: number | undefined }`, `{ a: number }`],
+    [`(x: number | undefined) => void`, `(x: number) => void`],
+    // Signatures combine as overloads, in order.
+    [`((x: 1) => 1) & ((x: 2) => 2)`, `((x: 2) => 2) & ((x: 1) => 1)`],
+    [`{ (): 1 } & { a: 1 }`, `{ a: 1 } & { (): 1 }`],
+    // A named type may carry signatures.
+    [`A & { b: 1 }`, `{ b: 1 } & A`],
+  ];
+  for (const [a, b] of different)
+    assert.notEqual(canonicalType(a), canonicalType(b), `${a} ≢ ${b}`);
+});
+
 test("binders are positions: consistent renaming is one type, swapped or free names are not", () => {
   const same = [
     [`<T>(x: T) => T`, `<U>(y: U) => U`],

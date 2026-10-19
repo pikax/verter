@@ -213,6 +213,24 @@ Why each probe demands the same work of both tools:
    extraction and control-flow narrowing. Each is one tsc 7.0.2 answers
    cleanly (no diagnostics) and quickly, so Verter being slower, partial or
    wrong there is a finding about Verter, not about the scenario.
+
+   The cases in `findings.json` were found by probing Verter against tsc
+   7.0.2, one discriminating behaviour each: checker edge semantics (family
+   `edge`: boolean distribution, intersection reduction, literal widening,
+   deferred idioms, references nested in an answer), core language features
+   (namespace merging, accessors, variance annotations, assertion functions,
+   `satisfies`, `NoInfer`), popular libraries' type-level patterns (tRPC,
+   Redux Toolkit, type-fest, `Promise` relations), Vue's own types (family
+   `vue`: `UnwrapRef`'s weak-type check, accessor `Ref.value`,
+   `ExtractPropTypes`, emits, Pinia stores, typed router narrowing) and scale
+   traps (a heritage diamond's `keyof`, path depth, literal-union relations,
+   wide `as const` reads, `export *` chains, cycles and diamonds, narrowing
+   chains). Cases whose companion files declare globals share one global
+   scope, so only one of them joins the project workload. A probe whose
+   answer tsc would print by an alias's name (a tuple or object literal, an
+   alias application, an interface instance) is written as
+   `declare const v: T;` probed through `typeof v`, around an identity mapped
+   type when T is named, so tsc prints the structure the comparison reads.
 2. **Same library.** Both read `lib.bench.d.ts`, a copy of TypeScript 7.0.2's
    own declarations for the members the scenarios read. tsc reads it as a
    root file under `noLib`, so no other library is loaded; Verter upserts it
@@ -351,7 +369,12 @@ value; union members as a set (with `true | false` as `boolean`); `T[]` as
 `Array<T>`; object properties and methods keyed by their tagged name (a
 written name — `0` and `"0"` are one property — or a computed key, never
 equal to a string); same-named overloads, call and construct signatures keep
-their order; tuple labels are dropped. Binders are positions in a lexical
+their order; tuple labels are dropped; an optional property, tuple element
+or parameter already includes `undefined` (the benchmark never sets
+`exactOptionalPropertyTypes`), so `a?: T | undefined` is `a?: T`; and
+intersection members are a set when none of them can carry call or construct
+signatures (a named type might, so it keeps the order, which overload
+resolution observes). Binders are positions in a lexical
 environment: a signature binds its type parameters and parameters (a
 `typeof` of a parameter and a type predicate's target refer to it), a
 conditional's `infer` declarations are numbered by their first appearance

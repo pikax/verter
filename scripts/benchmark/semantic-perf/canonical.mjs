@@ -24,9 +24,16 @@
 //     names and mapped-type keys are replaced by their position in the
 //     lexical environment (so consistent renaming is one type, swapped names
 //     are two); tuple labels are dropped (optional and rest markers are
-//     kept).
-// Intersection order, tuple element order, argument order, modifiers and
-// everything else are significant and kept.
+//     kept);
+//   - an optional property, tuple element or parameter already includes
+//     `undefined` (the benchmark never sets `exactOptionalPropertyTypes`):
+//     `a?: T | undefined` is `a?: T`;
+//   - intersection members are a set when none of them can carry call or
+//     construct signatures (literals, keywords, templates, arrays, tuples,
+//     mapped types, `keyof` and object types without signatures); otherwise
+//     their order, which overload resolution observes, is kept.
+// Tuple element order, argument order, modifiers and everything else are
+// significant and kept.
 
 import { createHash } from "node:crypto";
 
@@ -712,6 +719,45 @@ function flatten(kind, members) {
 
 const keyOf = (node) => JSON.stringify(node);
 
+/**
+ * The type of an optional property, tuple element or parameter: without
+ * `exactOptionalPropertyTypes` (never set by the benchmark) optionality
+ * already includes `undefined`, so `a?: T` and `a?: T | undefined` are one
+ * type. Drops `undefined` from the normalised type unless nothing else is left.
+ */
+function optionalType(optional, type) {
+  if (!optional || type.k !== "union") return type;
+  const rest = type.members.filter((m) => !(m.k === "kw" && m.name === "undefined"));
+  if (rest.length === type.members.length || rest.length === 0) return type;
+  return rest.length === 1 ? rest[0] : { k: "union", members: rest };
+}
+
+/**
+ * Whether a normalised type can carry call or construct signatures. Only
+ * forms whose spelling proves they have none are excluded: a named or
+ * computed type (a reference, `typeof`, an indexed access, a conditional)
+ * may be callable.
+ */
+function mayBeCallable(node) {
+  switch (node.k) {
+    case "kw":
+    case "lit":
+    case "template":
+    case "array":
+    case "tuple":
+    case "mapped":
+    case "keyof":
+      return false;
+    case "object":
+      return node.members.some((m) => m.m === "call" || m.m === "construct");
+    case "union":
+    case "intersection":
+      return node.members.some(mayBeCallable);
+    default:
+      return true;
+  }
+}
+
 /** A scope: names of one binding kind each map to their position. */
 const scope = (entries) => ({
   types: new Map(entries.types ?? []),
@@ -807,7 +853,7 @@ function normalizeSignature(typeParams, params, ret, env) {
     this: p.isThis,
     rest: p.rest,
     optional: p.optional,
-    type: normalize(p.type, inner),
+    type: optionalType(p.optional, normalize(p.type, inner)),
   }));
   let retOut;
   if (ret.k === "predicate") {
@@ -871,7 +917,7 @@ function normalizeMember(m, env) {
         name: normalizeKey(m.name, env),
         optional: m.optional,
         readonly: m.readonly,
-        type: normalize(m.type, env),
+        type: optionalType(m.optional, normalize(m.type, env)),
       };
     default:
       throw new Error(`unknown member kind ${m.m}`);
@@ -931,11 +977,18 @@ export function normalize(node, env = []) {
       const sorted = [...unique.keys()].sort().map((k) => unique.get(k));
       return sorted.length === 1 ? sorted[0] : { k: "union", members: sorted };
     }
-    case "intersection":
-      return {
-        k: "intersection",
-        members: flatten("intersection", flatten("intersection", node.members).map(n)),
-      };
+    case "intersection": {
+      const members = flatten("intersection", flatten("intersection", node.members).map(n));
+      // Order is observable only through call and construct signatures
+      // (they combine as overloads, in order); without them an
+      // intersection's members are a set.
+      if (members.some(mayBeCallable)) return { k: "intersection", members };
+      const sorted = members
+        .map((m) => [keyOf(m), m])
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        .map(([, m]) => m);
+      return { k: "intersection", members: sorted };
+    }
     case "array":
       return { k: "array", readonly: node.readonly, element: n(node.element) };
     case "tuple":
@@ -945,7 +998,7 @@ export function normalize(node, env = []) {
         elements: node.elements.map((e) => ({
           rest: e.rest,
           optional: e.optional,
-          type: n(e.type),
+          type: optionalType(e.optional, n(e.type)),
         })),
       };
     case "object":

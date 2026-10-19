@@ -27,8 +27,9 @@
 // The perf-suite families this catalog does NOT cover, and why, are listed in
 // UNCOVERED; each needs its own harness.
 
-import { writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { sha256Text } from "./provenance.mjs";
 
@@ -825,7 +826,29 @@ export function allScenarios() {
   }
 
   out.push(...adversarialScenarios());
+  out.push(...findingScenarios());
   return out;
+}
+
+/**
+ * Cases found by probing Verter against tsc 7.0.2 across checker edge
+ * semantics, core language features, popular libraries' type-level patterns,
+ * Vue's own types and scale traps (findings.json, one tsc-clean program
+ * each). Each discriminates one behaviour: tsc answers it cleanly, and an
+ * engine that gets the behaviour wrong answers differently, gives up or
+ * slows down past tsc.
+ */
+const FINDINGS = JSON.parse(
+  readFileSync(join(dirname(fileURLToPath(import.meta.url)), "findings.json"), "utf8"),
+);
+
+function findingScenarios() {
+  return FINDINGS.map((f) =>
+    scenario(f.id, f.family, f.note, f.body, f.probe, {
+      ...(f.files ? { files: f.files } : {}),
+      ...(f.globalScope ? { globalScope: f.globalScope } : {}),
+    }),
+  );
 }
 
 /**
@@ -1350,6 +1373,7 @@ export const SCENARIO_TIERS = {
   "conditional-chain-500": "stress",
   "infer-pattern-repeat-1000": "stress",
   ...Object.fromEntries(adversarialTierEntries()),
+  ...Object.fromEntries(FINDINGS.map((f) => [f.id, f.tier])),
   "infer-pattern-repeat-6000": "stress",
   "route-tree-names-2000": "stress",
 };
