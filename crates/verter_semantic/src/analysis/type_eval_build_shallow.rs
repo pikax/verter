@@ -14,6 +14,12 @@ use super::*;
 /// or parameter list an extraction builds.
 pub(super) enum Value {
     Type(TypeExpr),
+    /// A type whose listed top-level literals (the type itself, or members
+    /// of the union it is) are FRESH: written as bare literals, so a
+    /// mutable location widens them (`getWidenedLiteralType`). Every other
+    /// literal a type holds is regular — an asserted or const-context
+    /// literal keeps its type wherever it is written.
+    Fresh(TypeExpr, Vec<LiteralValue>),
     Object(ObjectExpr),
     Signature(LoweredSignatureParts),
     Params(Vec<FunctionParam>),
@@ -22,8 +28,34 @@ pub(super) enum Value {
 impl Value {
     pub(super) fn into_type(self) -> TypeExpr {
         match self {
-            Value::Type(ty) => ty,
+            Value::Type(ty) | Value::Fresh(ty, _) => ty,
             _ => unreachable!("a type position receives a type"),
+        }
+    }
+
+    /// The type and its fresh top-level literals.
+    fn into_typed(self) -> (TypeExpr, Vec<LiteralValue>) {
+        match self {
+            Value::Type(ty) => (ty, Vec::new()),
+            Value::Fresh(ty, fresh) => (ty, fresh),
+            _ => unreachable!("a type position receives a type"),
+        }
+    }
+
+    /// The type with its fresh top-level literals widened.
+    fn into_widened_type(self) -> TypeExpr {
+        let (ty, fresh) = self.into_typed();
+        widen_fresh_literals(ty, &fresh)
+    }
+
+    /// The type a position closed in this inference holds: its fresh
+    /// literals widened when the inference widens every mutable location
+    /// ([`InferenceState::widen_fresh_positions`]).
+    fn into_position_type(self, budget: &InferenceState) -> TypeExpr {
+        if budget.widen_fresh_positions {
+            self.into_widened_type()
+        } else {
+            self.into_type()
         }
     }
 
@@ -136,16 +168,39 @@ pub(super) fn run<'a>(
                 &mut values,
             )?,
             Task::WidenTopLevel(policy) => {
-                let ty = pop_type(&mut values);
-                values.push(Value::Type(match policy {
-                    TopLevelLiteralPolicy::Widen => widen_shallow_literal(ty),
-                    TopLevelLiteralPolicy::Preserve => ty,
-                }));
+                let value = values.pop().expect("a part's type");
+                values.push(match policy {
+                    TopLevelLiteralPolicy::Widen => Value::Type(value.into_widened_type()),
+                    TopLevelLiteralPolicy::Preserve => value,
+                });
             }
             Task::Branches => {
-                let alternate = pop_type(&mut values);
-                let consequent = pop_type(&mut values);
-                values.push(Value::Type(TypeExpr::union(vec![consequent, alternate])));
+                let (alternate, alternate_fresh) =
+                    values.pop().expect("a part's type").into_typed();
+                let (consequent, consequent_fresh) =
+                    values.pop().expect("a part's type").into_typed();
+                // A union of a fresh literal and its regular counterpart is
+                // the regular one (`c ? "a" : ("a" as "a")` is the regular
+                // `"a"`).
+                let regular: Vec<&LiteralValue> = top_level_literals(&consequent)
+                    .filter(|literal| !consequent_fresh.contains(literal))
+                    .chain(
+                        top_level_literals(&alternate)
+                            .filter(|literal| !alternate_fresh.contains(literal)),
+                    )
+                    .collect();
+                let mut fresh: Vec<LiteralValue> = Vec::new();
+                for literal in consequent_fresh.iter().chain(alternate_fresh.iter()) {
+                    if !regular.contains(&literal) && !fresh.contains(literal) {
+                        fresh.push(literal.clone());
+                    }
+                }
+                let union = TypeExpr::union(vec![consequent, alternate]);
+                values.push(if fresh.is_empty() {
+                    Value::Type(union)
+                } else {
+                    Value::Fresh(union, fresh)
+                });
             }
             Task::BooleanOver(count) => {
                 let operands: Vec<TypeExpr> = values
@@ -244,9 +299,10 @@ fn resume<'a, F: Frame<'a>>(
 
 /// A declaration-position expression: the top level under `policy`. A
 /// const assertion pins its whole operand; a type assertion's type is not a
-/// fresh literal; parentheses pass the policy through; each branch of a
-/// conditional is a top level under the same policy; an array literal's
-/// elements always widen.
+/// fresh literal; parentheses pass the policy through; a conditional's
+/// branches join before the policy widens the join's fresh literals, so a
+/// fresh literal its regular counterpart absorbs stays the regular one; an
+/// array literal's elements always widen.
 fn declaration<'a>(
     expr: &'a Expression<'a>,
     policy: TopLevelLiteralPolicy,
@@ -265,9 +321,16 @@ fn declaration<'a>(
             tasks.push(Task::Declaration(&parenthesized.expression, policy));
         }
         Expression::ConditionalExpression(conditional) => {
+            tasks.push(Task::WidenTopLevel(policy));
             tasks.push(Task::Branches);
-            tasks.push(Task::Declaration(&conditional.alternate, policy));
-            tasks.push(Task::Declaration(&conditional.consequent, policy));
+            tasks.push(Task::Declaration(
+                &conditional.alternate,
+                TopLevelLiteralPolicy::Preserve,
+            ));
+            tasks.push(Task::Declaration(
+                &conditional.consequent,
+                TopLevelLiteralPolicy::Preserve,
+            ));
         }
         Expression::ArrayExpression(array) => {
             tasks.push(Task::DeclarationArray(DeclarationArrayFrame {
@@ -498,8 +561,54 @@ fn value<'a>(
             TypeExpr::Primitive(PrimitiveName::Any)
         }
     };
-    values.push(Value::Type(ty));
+    // A bare literal is fresh, except in a const context, whose literals
+    // are written as they are.
+    values.push(match &ty {
+        TypeExpr::Literal(literal)
+            if policy != MemberLiteralPolicy::ConstAssert
+                && scalar_literal_type(expr).is_some() =>
+        {
+            let literal = literal.clone();
+            Value::Fresh(ty, vec![literal])
+        }
+        _ => Value::Type(ty),
+    });
     Ok(())
+}
+
+/// The literals at `ty`'s top level: itself, or the members of the union
+/// it is.
+fn top_level_literals(ty: &TypeExpr) -> impl Iterator<Item = &LiteralValue> {
+    let members: &[TypeExpr] = match ty {
+        TypeExpr::Union(members) => members,
+        other => std::slice::from_ref(other),
+    };
+    members.iter().filter_map(|member| match member {
+        TypeExpr::Literal(literal) => Some(literal),
+        _ => None,
+    })
+}
+
+/// `ty` with each of its top-level literals listed in `fresh` widened to
+/// its primitive (`getWidenedLiteralType`): every other literal is regular
+/// and keeps its type.
+fn widen_fresh_literals(ty: TypeExpr, fresh: &[LiteralValue]) -> TypeExpr {
+    if fresh.is_empty() {
+        return ty;
+    }
+    let widen = |member: &TypeExpr| match member {
+        TypeExpr::Literal(literal) if fresh.contains(literal) => {
+            widen_shallow_literal(member.clone())
+        }
+        _ => member.clone(),
+    };
+    match &ty {
+        TypeExpr::Literal(_) => widen(&ty),
+        TypeExpr::Union(members) => TypeExpr::union(absorb_literals_into_primitives(
+            dedupe_type_exprs(members.iter().map(widen).collect()),
+        )),
+        _ => ty,
+    }
 }
 
 /// A declaration-position array literal: its elements always widen, a
@@ -579,12 +688,14 @@ fn spread_element_types(element_types: &mut Vec<TypeExpr>, source: &TypeExpr) {
 }
 
 /// The mutable array of the union of `element_types`, `any[]` for none.
+/// A literal element beside its widened primitive is that primitive
+/// (`["a" as "a", "b"]` is `string[]`).
 fn element_union_array(element_types: Vec<TypeExpr>) -> TypeExpr {
     TypeExpr::Array {
         element: Arc::new(if element_types.is_empty() {
             TypeExpr::Primitive(PrimitiveName::Any)
         } else {
-            TypeExpr::union(element_types)
+            TypeExpr::union(absorb_literals_into_primitives(element_types))
         }),
         readonly: false,
     }
@@ -643,13 +754,13 @@ impl<'a> Frame<'a> for ValueArrayFrame<'a> {
         &mut self,
         delivered: Option<Value>,
         _source: &str,
-        _budget: &mut InferenceState,
+        budget: &mut InferenceState,
     ) -> InferenceResult<Step<'a>> {
         if let Some(readonly) = self.tuple {
             if let Some(delivered) = delivered {
                 self.awaiting = None;
                 self.tuple_elements
-                    .push(tuple_element(delivered.into_type()));
+                    .push(tuple_element(delivered.into_position_type(budget)));
             }
             while let Some(element) = self.array.elements.get(self.next) {
                 self.next += 1;
@@ -670,7 +781,7 @@ impl<'a> Frame<'a> for ValueArrayFrame<'a> {
             })));
         }
         if let Some(delivered) = delivered {
-            let ty = delivered.into_type();
+            let ty = delivered.into_position_type(budget);
             if self.awaiting.take() == Some(true) {
                 spread_element_types(&mut self.element_types, &ty);
             } else {
@@ -939,10 +1050,15 @@ impl<'a> Frame<'a> for ObjectFrame<'a> {
                     key,
                     property,
                     readonly,
-                } => data_member(key, property, delivered.into_type(), readonly),
-                ObjectAwait::Spread => {
-                    ObjectMember::Spread(verter_type_expr::SpreadMember::new(delivered.into_type()))
-                }
+                } => data_member(
+                    key,
+                    property,
+                    delivered.into_position_type(budget),
+                    readonly,
+                ),
+                ObjectAwait::Spread => ObjectMember::Spread(verter_type_expr::SpreadMember::new(
+                    delivered.into_position_type(budget),
+                )),
             };
             self.members.push(member);
         }
@@ -1173,7 +1289,7 @@ impl<'a> Frame<'a> for ArrowFrame<'a> {
         &mut self,
         delivered: Option<Value>,
         source: &str,
-        _budget: &mut InferenceState,
+        budget: &mut InferenceState,
     ) -> InferenceResult<Step<'a>> {
         self.awaiting = false;
         let Some(delivered) = delivered else {
@@ -1186,7 +1302,9 @@ impl<'a> Frame<'a> for ArrowFrame<'a> {
         };
         if self.parameters.is_some() {
             // The expression body's type.
-            return Ok(Step::Done(self.done(Some(delivered.into_type()), source)));
+            return Ok(Step::Done(
+                self.done(Some(delivered.into_position_type(budget)), source),
+            ));
         }
         self.parameters = Some(delivered.into_params());
         if self.arrow.return_type.is_none() {

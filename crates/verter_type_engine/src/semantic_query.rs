@@ -2121,9 +2121,58 @@ pub enum ArgumentLiteralMode {
     Literal,
 }
 
+/// One step from a call argument into one of its authored nested
+/// positions: an object member, by the literal type of its key (`"v"`,
+/// `1`), or a tuple element, by its index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArgumentPathStep {
+    /// An object literal's member whose key is this literal type.
+    Member(SemanticNodeId),
+    /// An array literal's element at this index.
+    Element(u32),
+}
+
+/// One authored nested position of a call argument a regular contributor
+/// writes, with the literals there that are regular.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ArgumentRegularPosition {
+    /// The steps from the argument to the position.
+    pub path: Arc<[ArgumentPathStep]>,
+    /// The position's regular literals: `None` when every literal at the
+    /// position and nested in it is regular; otherwise exactly these
+    /// literals at the position are, and the others it holds are fresh.
+    pub literals: Option<Arc<[SemanticNodeId]>>,
+}
+
+/// The authored literal provenance of a call argument's nested positions
+/// (`IndexedLiteralProvenance`, resolved in the argument's scope): each
+/// position whose literals are regular — an asserted value, a const
+/// asserted literal, a read of a binding that keeps no widening literal.
+/// A mutable location keeps a regular literal as written where it widens
+/// a fresh one (`getWidenedLiteralType`), so a candidate's contextual
+/// typing of the argument widens only the fresh literals of a position.
+/// A position not listed holds only fresh literals.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ArgumentLiteralProvenance {
+    pub positions: Arc<[ArgumentRegularPosition]>,
+}
+
+impl ArgumentLiteralProvenance {
+    /// The regular-literal record of the position at `path`, if listed.
+    #[must_use]
+    pub fn position(&self, path: &[ArgumentPathStep]) -> Option<&ArgumentRegularPosition> {
+        self.positions
+            .iter()
+            .find(|position| &*position.path == path)
+    }
+}
+
 /// One call argument's key identity. NO freshness field — freshness is
 /// derived at relation time from canonical excess-origin facts, never
-/// carried on the key.
+/// carried on the key. `literal_provenance` is no excess freshness: like
+/// `literal_mode`, it is a fact of the argument's authored form (which
+/// nested literals are written as regular ones) that its type cannot
+/// express and that changes the call's result.
 ///
 /// `context_sensitive` is the same class of authored-form fact as
 /// `literal_mode`: a structural property of the argument SYNTAX that the
@@ -2139,6 +2188,9 @@ pub enum CallArgKey {
         spread: bool,
         /// The authored literal shape of the argument.
         literal_mode: ArgumentLiteralMode,
+        /// The regular literals the argument nests at its authored
+        /// positions; `None` when it nests none.
+        literal_provenance: Option<Arc<ArgumentLiteralProvenance>>,
         /// Whether the argument is a function value at least one of whose
         /// parameters carries no authored type annotation.
         context_sensitive: bool,

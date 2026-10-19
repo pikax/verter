@@ -232,6 +232,7 @@ impl ComponentMetaQueryEngine<'_> {
                                     verter_type_engine::semantic_query::ArgumentLiteralMode::Literal
                                 }
                             },
+                            literal_provenance: None,
                         });
                 }
                 if let Some(argument) = call.args.get(top.args.len()) {

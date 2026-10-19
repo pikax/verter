@@ -242,6 +242,9 @@ struct TypedArgument {
     node: Option<SemanticNodeId>,
     fresh_call: bool,
     const_view: Option<SemanticNodeId>,
+    /// The regular literals the argument nests, when its value is the
+    /// indexed program's own in owner scope.
+    literal_provenance: Option<Arc<crate::semantic_query::ArgumentLiteralProvenance>>,
 }
 
 /// The operand a call's value computation evaluates first, if it has one.
@@ -617,6 +620,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 node: Some(node),
                 fresh_call: self.is_fresh_call_value(lowered, node),
                 const_view: None,
+                literal_provenance: None,
             },
             Positional::Hold => {
                 self.adopt_argument_observations(&mut route.argument_observations);
@@ -626,6 +630,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 node: None,
                 fresh_call: false,
                 const_view: None,
+                literal_provenance: None,
             },
         };
         self.advance_resolve_call(route, Some(typed))
@@ -691,6 +696,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         );
                     }
                     let mut const_view = None;
+                    // Whether the value is the indexed program's own,
+                    // lowered in owner scope: the argument's literal
+                    // provenance reads its regular contributors there.
+                    let mut indexed_value = false;
                     // Whether the argument is a call whose result is wholly
                     // the fresh literal its inference kept: a fresh literal
                     // source, as a bare literal is.
@@ -773,6 +782,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                         &binding,
                                     )?;
                                     fresh_call = value.fresh;
+                                    indexed_value = !matches!(
+                                        binding,
+                                        FlowIndexedArgumentBinding::ValueRead(_)
+                                            | FlowIndexedArgumentBinding::SourceTypeQuery(_)
+                                    );
                                     Some(value.node)
                                 })
                             });
@@ -794,6 +808,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             node,
                             fresh_call,
                             const_view,
+                            literal_provenance: if indexed_value {
+                                self.dispatch.resolve_argument_literal_provenance(
+                                    self.canonical,
+                                    self.owner,
+                                    argument.literal_provenance.as_deref(),
+                                )
+                            } else {
+                                None
+                            },
                         },
                     )
                 }
@@ -866,6 +889,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     argument.literal_mode,
                     reads_widening_local || typed.fresh_call,
                 ),
+                literal_provenance: typed.literal_provenance,
             });
         }
         self.finish_resolve_call(route)
@@ -1095,6 +1119,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 const_view: None,
                 first_pass: None,
                 literal_mode: crate::semantic_query::ArgumentLiteralMode::Literal,
+                literal_provenance: None,
             };
             if let Some(old) = finish.argument_observations[position].take() {
                 let _ = old.discard();

@@ -1612,6 +1612,10 @@ export function l50() { return tqk({ 1: "a" }); }
 export function l51() { return nk({ 1: "x" }); }
 declare function tqs<T extends { v: string; f: (n: number) => void }>(x: T): T;
 export function l52() { return tqs({ v: "a", f: (n) => {} }); }
+declare function tqo<T extends { v: string; f: (n: number) => void }>(o?: T): T;
+declare function tqu<T, U>(x: T | { extra: U; f: (n: number) => void }): U;
+export function l53() { return tqo({ v: "a", f: (n) => {} }); }
+export function l54() { return tqu({ extra: 1, f: (n) => {} }); }
 "##;
 
 /// Each candidate evaluates a nested argument literal under its own type
@@ -2000,6 +2004,20 @@ fn candidate_literal_contexts() {
             r#"{ v: string; f: (n: number) => void; }"#,
             r#"{ v: string; f: (n: number) => void; }"#,
         ),
+        (
+            Read::Return(r#"l53"#),
+            r#"{ v: string; f: (n: number) => void; }"#,
+            r#"{ v: string; f: (n: number) => void; }"#,
+            r#"{ v: string; f: (n: number) => void; }"#,
+            r#"{ v: string; f: (n: number) => void; }"#,
+        ),
+        (
+            Read::Return(r#"l54"#),
+            r#"number"#,
+            r#"number"#,
+            r#"number"#,
+            r#"number"#,
+        ),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
@@ -2044,6 +2062,15 @@ export function n23() { return pu({ v: c ? -1 : 2 }); }
 export function n24() { return fa(-1); }
 export function n25() { return fa(c ? -1 : 2); }
 export function n26() { return pa([c ? -1n : 2n]); }
+let sb: "b" = "b";
+export function n27() { return id({ v: sl }); }
+export function n28() { return pu({ v: c ? "a" : sb }); }
+export function n29() { return pu({ v: so }); }
+export function n30() { return pa(["a" as "a"]); }
+export function n31() { return pu({ v: ["a"] as const }); }
+export function n32() { return id({ v: "a" as "a", w: "b" }); }
+export function n33() { return pu({ v: { w: sl } }); }
+export function n34() { return pa([sl, "b"]); }
 "##;
 
 /// A literal's freshness belongs to its authored occurrence: a fresh
@@ -2223,12 +2250,14 @@ fn authored_literal_occurrences() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// An asserted or stored literal nested in an object literal argument is
-/// not fresh: it keeps its literal type where the checker keeps it
-/// (`pu({ v: "a" as "a" })` is `"a"`), and a conditional of a fresh and a
-/// stored arm of one literal keeps it (`c ? "a" : sl` with `sl: "a"`).
+/// An asserted, const-asserted or stored literal nested in an object or
+/// array literal argument is not fresh: it keeps its literal type where
+/// the checker keeps it (`pu({ v: "a" as "a" })` is `"a"`), at any depth
+/// and in a whole argument a naked parameter infers from, beside a fresh
+/// sibling that widens. A conditional of a fresh and a stored arm of one
+/// literal keeps it (`c ? "a" : sl` with `sl: "a"`), and one of a fresh
+/// and a stored arm of different literals widens (`c ? "a" : sb`).
 #[test]
-#[ignore = "typed gap in the lane: value lowering keeps no per-occurrence literal freshness, so a nested asserted or stored literal reads as a fresh one"]
 fn nested_regular_literals_keep_their_type() {
     let failures = Matrix::new(AUTHORED_LITERAL_OCCURRENCES).four(&[
         (
@@ -2252,6 +2281,151 @@ fn nested_regular_literals_keep_their_type() {
             r#""a""#,
             r#""a""#,
         ),
+        (
+            Read::Return(r#"n27"#),
+            r#"{ v: "a"; }"#,
+            r#"{ v: "a"; }"#,
+            r#"{ v: "a"; }"#,
+            r#"{ v: "a"; }"#,
+        ),
+        (
+            Read::Return(r#"n28"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"n29"#),
+            r#"{ readonly v: "a"; }"#,
+            r#"{ readonly v: "a"; }"#,
+            r#"{ readonly v: "a"; }"#,
+            r#"{ readonly v: "a"; }"#,
+        ),
+        (
+            Read::Return(r#"n30"#),
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+        ),
+        (
+            Read::Return(r#"n31"#),
+            r#"readonly ["a"]"#,
+            r#"readonly ["a"]"#,
+            r#"readonly ["a"]"#,
+            r#"readonly ["a"]"#,
+        ),
+        (
+            Read::Return(r#"n32"#),
+            r#"{ v: "a"; w: string; }"#,
+            r#"{ v: "a"; w: string; }"#,
+            r#"{ v: "a"; w: string; }"#,
+            r#"{ v: "a"; w: string; }"#,
+        ),
+        (
+            Read::Return(r#"n33"#),
+            r#"{ w: "a"; }"#,
+            r#"{ w: "a"; }"#,
+            r#"{ w: "a"; }"#,
+            r#"{ w: "a"; }"#,
+        ),
+        (
+            Read::Return(r#"n34"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+const DECLARED_LITERAL_OCCURRENCES: &str = r##"
+declare const c: boolean;
+let sl: "a" = "a";
+const s = "a";
+let d1 = { v: "a" as "a", w: "b" };
+const d2 = { v: "a" as "a", w: "b" };
+let d3 = { o: { v: sl, w: "b" } };
+const d4 = { o: { v: sl, w: "b" } };
+let d5 = ["a" as "a"];
+let d6 = ["a" as "a", "b"];
+let d7 = { v: c ? "a" : sl };
+let d8 = { v: [sl, "b"] };
+let d9 = { v: [sl] };
+let d10 = "a" as "a";
+let d11 = c ? "a" : sl;
+let d12 = { v: s };
+const d13 = [{ v: sl, w: 1 }];
+let d14 = { v: c ? "a" : ("b" as "b") };
+let d15 = { v: { w: sl } };
+let d16 = s;
+let d17 = c ? s : 1;
+let d18 = [s];
+const d19 = { v: s };
+let d20 = { o: { v: "a" as "a", w: "b" } };
+let d21 = ["a"] as const;
+let d22 = { m: () => "a" };
+let d23 = { v: "a" } satisfies { v: string };
+let d24 = { v: ["a", 1] as const, w: [1] };
+let d25 = c ? "a" : ("a" as "a");
+"##;
+
+/// A declaration's initializer keeps each literal's freshness per authored
+/// occurrence: a mutable declaration widens only the fresh literals it
+/// writes, so an asserted, const-asserted or stored literal keeps its type
+/// beside a fresh sibling that widens — as a member at any depth, as an
+/// array element, at the top level — and a union of a fresh literal and
+/// its regular counterpart is the regular one. A fresh literal widens
+/// wherever its position closes: a member, an element, an arrow's body.
+#[test]
+fn declared_literal_occurrences() {
+    let failures = Matrix::new(DECLARED_LITERAL_OCCURRENCES).same(&[
+        (Read::Type("typeof d1"), r#"{ v: "a"; w: string; }"#),
+        (Read::Type("typeof d2"), r#"{ v: "a"; w: string; }"#),
+        (Read::Type("typeof d3"), r#"{ o: { v: "a"; w: string; }; }"#),
+        (Read::Type("typeof d4"), r#"{ o: { v: "a"; w: string; }; }"#),
+        (Read::Type("typeof d5"), r#""a"[]"#),
+        (Read::Type("typeof d6"), r#"string[]"#),
+        (Read::Type("typeof d8"), r#"{ v: string[]; }"#),
+        (Read::Type("typeof d9"), r#"{ v: "a"[]; }"#),
+        (Read::Type("typeof d10"), r#""a""#),
+        (Read::Type("typeof d13"), r#"{ v: "a"; w: number; }[]"#),
+        (Read::Type("typeof d14"), r#"{ v: string; }"#),
+        (Read::Type("typeof d15"), r#"{ v: { w: "a"; }; }"#),
+        (
+            Read::Type("typeof d20"),
+            r#"{ o: { v: "a"; w: string; }; }"#,
+        ),
+        (Read::Type("typeof d21"), r#"readonly ["a"]"#),
+        (Read::Type("typeof d22"), r#"{ m: () => string; }"#),
+        (Read::Type("typeof d23"), r#"{ v: string; }"#),
+        (
+            Read::Type("typeof d24"),
+            r#"{ v: readonly ["a", 1]; w: number[]; }"#,
+        ),
+        (Read::Type("typeof d25"), r#""a""#),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A read in a declaration's mutable location is as fresh as its binding:
+/// a `const` holding a widening literal reads as that fresh literal, so a
+/// member, an element or a mutable declaration of it widens, and a
+/// conditional of a fresh literal and a stored read of the same literal is
+/// the regular one.
+#[test]
+#[ignore = "typed gap in the lane: a declaration's inferred type reads a binding's literal as regular, whatever the binding's freshness"]
+fn declared_reads_follow_their_binding_freshness() {
+    let failures = Matrix::new(DECLARED_LITERAL_OCCURRENCES).same(&[
+        (Read::Type("typeof d7"), r#"{ v: "a"; }"#),
+        (Read::Type("typeof d11"), r#""a""#),
+        (Read::Type("typeof d12"), r#"{ v: string; }"#),
+        (Read::Type("typeof d16"), r#"string"#),
+        (Read::Type("typeof d17"), r#"string | number"#),
+        (Read::Type("typeof d18"), r#"string[]"#),
+        (Read::Type("typeof d19"), r#"{ v: string; }"#),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

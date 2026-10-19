@@ -4737,15 +4737,11 @@ fn lower_identifier_variable_parts(
             expression_source_offset = Some(init.span().start);
             inference_unavailable = None;
         } else if type_annotation.is_none() {
-            let inferred =
+            let inferred = if matches!(var_kind, ValueDeclKind::Let | ValueDeclKind::Var) {
+                infer_mutable_declaration_expression_type(init, source)
+            } else {
                 infer_declaration_expression_type(init, source, TopLevelLiteralPolicy::Preserve)
-                    .map(|inferred| {
-                        if matches!(var_kind, ValueDeclKind::Let | ValueDeclKind::Var) {
-                            shallow::widen_literal_type(inferred)
-                        } else {
-                            inferred
-                        }
-                    });
+            };
             let mut inferred = match inferred {
                 Ok(inferred) => inferred,
                 Err(reason) => {
@@ -5260,6 +5256,11 @@ struct InferenceState {
     /// position is typed for this whole inference (see
     /// [`NestedNullishLiterals`]).
     nested_nullish: NestedNullishLiterals,
+    /// Whether every position this inference closes — an object member,
+    /// an array element, an arrow's expression body — is a mutable
+    /// location that widens the fresh literals it holds: the initializer
+    /// of a `let` / `var` declaration.
+    widen_fresh_positions: bool,
 }
 
 impl Default for InferenceState {
@@ -5267,6 +5268,7 @@ impl Default for InferenceState {
         Self {
             used_unmodeled_fallback: false,
             nested_nullish: NestedNullishLiterals::Keep,
+            widen_fresh_positions: false,
         }
     }
 }
@@ -5443,6 +5445,27 @@ pub fn infer_declaration_expression_type(
 ) -> InferenceResult<TypeExpr> {
     let mut budget = InferenceState::default();
     infer_declaration_expression_type_with_budget(expr, source, policy, &mut budget)
+}
+
+/// The type of a `let` / `var` initializer: every fresh literal it writes
+/// widens where its position closes — the top level, an object member, an
+/// array element, an arrow's expression body — while an asserted or
+/// const-context literal keeps its type (`let x = { v: "a" as "a", w: "b" }`
+/// is `{ v: "a"; w: string }`).
+fn infer_mutable_declaration_expression_type(
+    expr: &Expression<'_>,
+    source: &str,
+) -> InferenceResult<TypeExpr> {
+    let mut budget = InferenceState {
+        widen_fresh_positions: true,
+        ..InferenceState::default()
+    };
+    infer_declaration_expression_type_with_budget(
+        expr,
+        source,
+        TopLevelLiteralPolicy::Widen,
+        &mut budget,
+    )
 }
 
 #[repr(u8)]
@@ -5687,6 +5710,33 @@ fn append_union_members(into: &mut Vec<TypeExpr>, ty: TypeExpr) {
     } else {
         into.push(ty);
     }
+}
+
+/// `members` without each literal its primitive also among them holds
+/// (`"a" | string` is `string`): the checker's literal union reduction,
+/// which a union a widening built must apply itself.
+fn absorb_literals_into_primitives(members: Vec<TypeExpr>) -> Vec<TypeExpr> {
+    let holds = |primitive: PrimitiveName| {
+        members
+            .iter()
+            .any(|member| matches!(member, TypeExpr::Primitive(name) if *name == primitive))
+    };
+    let absorbed = |member: &TypeExpr| match member {
+        TypeExpr::Literal(LiteralValue::String(_)) => holds(PrimitiveName::String),
+        TypeExpr::Literal(LiteralValue::Number(_)) => holds(PrimitiveName::Number),
+        TypeExpr::Literal(LiteralValue::Boolean(_)) => holds(PrimitiveName::Boolean),
+        TypeExpr::Literal(LiteralValue::BigInt(_)) => holds(PrimitiveName::BigInt),
+        _ => false,
+    };
+    if !members.iter().any(absorbed) {
+        return members;
+    }
+    let keep: Vec<bool> = members.iter().map(|member| !absorbed(member)).collect();
+    members
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(member, keep)| keep.then_some(member))
+        .collect()
 }
 
 fn dedupe_type_exprs(types: Vec<TypeExpr>) -> Vec<TypeExpr> {
@@ -6845,6 +6895,7 @@ fn build_indexed_call(
         point: expression.span().start,
         spread,
         literal_mode: indexed_literal_mode(Some(expression)),
+        literal_provenance: indexed_literal_provenance(expression, source),
         context_sensitive: indexed_context_sensitive(Some(expression)),
         function_return_source: None,
     };
@@ -6894,6 +6945,7 @@ fn build_indexed_call(
                 point: tagged.quasi.span.start,
                 spread: false,
                 literal_mode: IndexedValueLiteralMode::Literal,
+                literal_provenance: None,
                 context_sensitive: false,
                 function_return_source: None,
             });
@@ -7095,6 +7147,224 @@ fn signed_literal(unary: &UnaryExpression<'_>) -> bool {
             Expression::NumericLiteral(_)
         ) | (UnaryOperator::UnaryNegation, Expression::BigIntLiteral(_))
     )
+}
+
+/// The type of a scalar literal expression a const context keeps as
+/// written: a string, numeric, boolean or bigint literal, a template with
+/// no holes, or a signed numeric or negated bigint literal.
+fn scalar_literal_type(expr: &Expression<'_>) -> Option<TypeExpr> {
+    Some(match expr {
+        Expression::StringLiteral(s) => TypeExpr::string_literal(s.value.as_str()),
+        Expression::NumericLiteral(n) => TypeExpr::number_literal(n.value),
+        Expression::BooleanLiteral(b) => TypeExpr::boolean_literal(b.value),
+        Expression::BigIntLiteral(b) => {
+            TypeExpr::Literal(LiteralValue::BigInt(b.value.to_string()))
+        }
+        Expression::TemplateLiteral(tpl) if tpl.expressions.is_empty() => TypeExpr::string_literal(
+            tpl.quasis
+                .iter()
+                .map(|quasi| verter_type_expr_oxc::template_element_text(&quasi.value))
+                .collect::<String>(),
+        ),
+        Expression::UnaryExpression(unary) if signed_literal(unary) => match &unary.argument {
+            Expression::NumericLiteral(n) if unary.operator == UnaryOperator::UnaryNegation => {
+                TypeExpr::number_literal(-n.value)
+            }
+            Expression::NumericLiteral(n) => TypeExpr::number_literal(n.value),
+            Expression::BigIntLiteral(b) => {
+                TypeExpr::Literal(LiteralValue::BigInt(format!("-{}", b.value)))
+            }
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
+
+/// The regular literals a call argument nests at its authored positions:
+/// each object-literal member and array-literal element (reached through
+/// parentheses, `satisfies`, non-null assertions and the branches of a
+/// conditional) whose value is, or has a branch that is, a type assertion,
+/// a literal or composite inside a const assertion, or a read of a value
+/// binding. The
+/// checker types such a contributor as the literal it already is, so a
+/// mutable location keeps it where it widens a fresh literal
+/// (`pu({ v: "a" as "a" })` infers `"a"`, `pu({ v: "a" })` `string`). The
+/// argument's own top level is its [`indexed_literal_mode`]'s. A
+/// conditional with more than one object or array branch is read no
+/// further: its branches are separate composites whose equal members do
+/// not share one freshness.
+pub fn indexed_literal_provenance(
+    expr: &Expression<'_>,
+    source: &str,
+) -> Option<Arc<verter_type_expr::IndexedLiteralProvenance>> {
+    use verter_type_expr::{IndexedLiteralStep, IndexedRegularLiteralSource};
+    struct Pending<'a> {
+        expr: &'a Expression<'a>,
+        path: Vec<IndexedLiteralStep>,
+        /// Whether the position is inside a const assertion, whose literals
+        /// are written as they are.
+        pinned: bool,
+    }
+    let mut positions = Vec::new();
+    let mut pending = vec![Pending {
+        expr,
+        path: Vec::new(),
+        pinned: false,
+    }];
+    while let Some(Pending { expr, path, pinned }) = pending.pop() {
+        let mut regular = Vec::new();
+        let mut mixed = false;
+        let mut composites: Vec<(&Expression<'_>, bool)> = Vec::new();
+        let mut branches = vec![(expr, pinned)];
+        while let Some((branch, pinned)) = branches.pop() {
+            match branch {
+                Expression::ParenthesizedExpression(parenthesized) => {
+                    branches.push((&parenthesized.expression, pinned));
+                }
+                Expression::TSSatisfiesExpression(satisfies) => {
+                    branches.push((&satisfies.expression, pinned));
+                }
+                Expression::TSNonNullExpression(non_null) => {
+                    branches.push((&non_null.expression, pinned));
+                }
+                Expression::ConditionalExpression(conditional) => {
+                    branches.push((&conditional.alternate, pinned));
+                    branches.push((&conditional.consequent, pinned));
+                }
+                Expression::TSAsExpression(assertion)
+                    if verter_type_expr_oxc::is_const_assertion_type(
+                        &assertion.type_annotation,
+                    ) =>
+                {
+                    branches.push((&assertion.expression, true));
+                }
+                Expression::TSAsExpression(assertion) => {
+                    regular.push(IndexedRegularLiteralSource::Pinned(lower_ts_type(
+                        &assertion.type_annotation,
+                        source,
+                    )))
+                }
+                Expression::TSTypeAssertion(assertion) => {
+                    regular.push(IndexedRegularLiteralSource::Pinned(lower_ts_type(
+                        &assertion.type_annotation,
+                        source,
+                    )))
+                }
+                Expression::ObjectExpression(_) | Expression::ArrayExpression(_) => {
+                    if pinned {
+                        regular.push(IndexedRegularLiteralSource::PinnedComposite);
+                    }
+                    composites.push((branch, pinned));
+                }
+                Expression::Identifier(identifier) if identifier.name == "undefined" => {}
+                Expression::NullLiteral(_)
+                | Expression::FunctionExpression(_)
+                | Expression::ArrowFunctionExpression(_) => {}
+                Expression::Identifier(identifier) => {
+                    regular.push(IndexedRegularLiteralSource::Read(ValueRef {
+                        path: vec![identifier.name.to_string()],
+                        type_args: Vec::new(),
+                    }));
+                }
+                Expression::StaticMemberExpression(_) => match indexed_read_path(branch) {
+                    Some(path) => regular.push(IndexedRegularLiteralSource::Read(ValueRef {
+                        path,
+                        type_args: Vec::new(),
+                    })),
+                    None => mixed = true,
+                },
+                branch => match scalar_literal_type(branch) {
+                    Some(literal) if pinned => {
+                        regular.push(IndexedRegularLiteralSource::Pinned(literal));
+                    }
+                    _ => mixed = true,
+                },
+            }
+        }
+        // A composite outside a const context is a fresh contributor: its
+        // nested positions decide their own literals.
+        mixed |= composites.iter().any(|(_, pinned)| !pinned);
+        if !regular.is_empty() && !path.is_empty() {
+            positions.push(verter_type_expr::IndexedLiteralPosition {
+                path: Arc::from(path.as_slice()),
+                regular: Arc::from(regular.into_boxed_slice()),
+                mixed,
+            });
+        }
+        let [(composite, pinned)] = composites.as_slice() else {
+            continue;
+        };
+        let nested = |step: IndexedLiteralStep, expr| {
+            let mut path = path.clone();
+            path.push(step);
+            Pending {
+                expr,
+                path,
+                pinned: *pinned,
+            }
+        };
+        match composite {
+            Expression::ObjectExpression(object) => {
+                for property in object.properties.iter().rev() {
+                    let ObjectPropertyKind::ObjectProperty(property) = property else {
+                        continue;
+                    };
+                    if property.method || !matches!(property.kind, PropertyKind::Init) {
+                        continue;
+                    }
+                    let Some(key) = lower_property_key(&property.key, source).cloned_known() else {
+                        continue;
+                    };
+                    pending.push(nested(IndexedLiteralStep::Member(key), &property.value));
+                }
+            }
+            Expression::ArrayExpression(array) => {
+                // A spread or an elision leaves no element at its own index.
+                if array.elements.iter().any(|element| {
+                    matches!(
+                        element,
+                        oxc_ast::ast::ArrayExpressionElement::SpreadElement(_)
+                            | oxc_ast::ast::ArrayExpressionElement::Elision(_)
+                    )
+                }) {
+                    continue;
+                }
+                for (index, element) in array.elements.iter().enumerate().rev() {
+                    if let (Some(element), Ok(index)) =
+                        (element.as_expression(), u32::try_from(index))
+                    {
+                        pending.push(nested(IndexedLiteralStep::Element(index), element));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    (!positions.is_empty()).then(|| {
+        Arc::new(verter_type_expr::IndexedLiteralProvenance {
+            positions: Arc::from(positions.into_boxed_slice()),
+        })
+    })
+}
+
+/// The dotted path of a member read off a chain of identifiers (`o.a.b`).
+fn indexed_read_path(expr: &Expression<'_>) -> Option<Vec<String>> {
+    let mut path = Vec::new();
+    let mut cursor = expr;
+    loop {
+        match cursor {
+            Expression::StaticMemberExpression(member) => {
+                path.push(member.property.name.to_string());
+                cursor = &member.object;
+            }
+            Expression::Identifier(identifier) => {
+                path.push(identifier.name.to_string());
+                path.reverse();
+                return Some(path);
+            }
+            _ => return None,
+        }
+    }
 }
 
 /// A contextual declarator whose method bodies need the initializer's flow
@@ -7359,6 +7629,7 @@ fn lower_indexed_tagged_template_expression_observed(
         point: tagged.quasi.span.start,
         spread: false,
         literal_mode: IndexedValueLiteralMode::Literal,
+        literal_provenance: None,
         context_sensitive: false,
         function_return_source: None,
     });
@@ -7457,6 +7728,7 @@ fn lower_indexed_call_argument(
         point: expression.span().start,
         spread,
         literal_mode: indexed_literal_mode(Some(expression)),
+        literal_provenance: indexed_literal_provenance(expression, source),
         context_sensitive: indexed_context_sensitive(Some(expression)),
         function_return_source: None,
     }
