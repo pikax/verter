@@ -19,8 +19,6 @@
 //! this one states it from the request's product set, and neither has its
 //! own copy of how a bundle becomes nodes.
 
-use std::sync::Arc;
-
 use rustc_hash::FxHashMap;
 
 use oxc_allocator::Allocator;
@@ -414,9 +412,9 @@ impl VerterHost {
                         });
                     };
                     CompiledProduct::Ide(IdeResponse {
-                        code: Arc::from(ide.code.as_str()),
+                        code: verter_type_expr::OwnedStr::from(ide.code.as_str()),
                         source_map: (!ide.source_map.is_empty())
-                            .then(|| Arc::from(ide.source_map.as_str())),
+                            .then(|| verter_type_expr::OwnedStr::from(ide.source_map.as_str())),
                         is_jsx: ide.is_jsx,
                         destructured_block: ide.destructured_block.clone(),
                     })
@@ -449,6 +447,20 @@ impl VerterHost {
                     })
                 }
             };
+            let ctx = verter_session_query::retention::owned::ChargeCtx::new(
+                self.project_type_store.retention_account(),
+            );
+            match &row {
+                CompiledProduct::Runtime { nodes, .. } => {
+                    for node in nodes {
+                        pin_generated_texts(&node.code, node.source_map.as_ref(), ctx);
+                    }
+                }
+                CompiledProduct::Ide(ide) => {
+                    pin_generated_texts(&ide.code, ide.source_map.as_ref(), ctx);
+                }
+                CompiledProduct::Analysis(_) => {}
+            }
             rows.push(row);
         }
 

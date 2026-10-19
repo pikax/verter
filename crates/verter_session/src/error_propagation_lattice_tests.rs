@@ -157,6 +157,7 @@ fn error_tolerance_broken_input_is_returnonly_fact_rooted_error_is_cacheable() {
 fn error_any_never_propagation_lattice() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -390,6 +391,7 @@ fn error_any_never_propagation_lattice() {
 fn conditional_any_check_unions_both_branches() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
@@ -475,6 +477,7 @@ fn conditional_any_check_detects_nested_infer_patterns() {
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
@@ -681,6 +684,7 @@ fn error_type_is_returnonly_prone_any_is_cacheable() {
     // ── relation: error relates BIDIRECTIONALLY like any ─────────────────
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));

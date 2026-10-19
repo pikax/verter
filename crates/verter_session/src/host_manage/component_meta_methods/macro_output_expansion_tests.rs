@@ -71,6 +71,7 @@ fn sink_preserves_fallback_source_for_non_leaf_carrier_node() {
     let host = VerterHost::new_standalone(Default::default());
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     // A representative carrier node (a bare-ref) — the kind the expansion branch
     // produces. It is a NON-leaf, so the sink preserves the fallback source.
@@ -118,6 +119,7 @@ fn sink_projects_leaf_fact_or_preserves_fallback_across_carrier_shapes() {
     let host = VerterHost::new_standalone(Default::default());
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -169,7 +171,7 @@ fn sink_projects_leaf_fact_or_preserves_fallback_across_carrier_shapes() {
         .expect("a leaf-union node publishes a source");
     assert_eq!(
         union_out.expr,
-        SemanticTypeSource::Closed(ClosedTypeFact::LeafUnion(Arc::from(
+        SemanticTypeSource::Closed(ClosedTypeFact::LeafUnion(From::from(
             vec![
                 LeafTypeFact::Primitive(PrimitiveName::String),
                 LeafTypeFact::Primitive(PrimitiveName::Number),

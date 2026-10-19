@@ -242,7 +242,7 @@ fn a_second_bundle_read_through_one_view_warm_hits() {
 /// The optional-extend shape that used to sit here (`if let Some(witness)
 /// = … { facts.extend(witness) }` followed by an unconditional insert)
 /// admits exactly that uninvalidatable candidate. `decline_import_route_witness`
-/// marks the enclosing compute non-cacheable, but `insert_arc_with_kind`
+/// marks the enclosing compute non-cacheable, but `insert_value_with_kind`
 /// never consults that mark — a lone `FileWholeHash` is a well-formed,
 /// non-empty signature — so the producer is the only
 /// correct refusal point.
@@ -330,7 +330,7 @@ fn a_rootable_witness_still_admits_a_warm_bundle_candidate() {
 /// admission gate consults the fact tracer, and
 /// `decline_import_route_witness` marks the enclosing compute
 /// non-cacheable through `note_non_cacheable_read_fan_out`. The
-/// prepared-decl producer had no such gate — `insert_arc_with_kind` takes
+/// prepared-decl producer had no such gate — `insert_value_with_kind` takes
 /// an explicit fact vector and never reads that mark, which is exactly why
 /// it needed an explicit refusal.
 ///

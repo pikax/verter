@@ -720,7 +720,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if let Some(identity) = identity {
                 out.push(NamedCall {
                     span,
-                    name: Arc::clone(name),
+                    name: Arc::<str>::from(name),
                     identity,
                 });
             }
@@ -1409,7 +1409,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     anchor: verter_type_expr::locators::AuthoredAnchor {
                         canonical_id: verter_type_expr::OwnedStr::from(canonical),
                         owner: target.declaration.owner,
-                        symbol: verter_type_expr::OwnedStr::from(target.declaration.name.clone()),
+                        symbol: target.declaration.name.clone(),
                         space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                     },
                     function_part: target.part.clone(),

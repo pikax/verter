@@ -203,6 +203,17 @@ impl verter_retention::heap_size::HeapSize for FactVersionRef {
     }
 }
 
+impl verter_retention::owned::Measured for FactVersionRef {
+    /// A fact's own heap; a receipt carries its own charge. The raw leaf
+    /// names a fact key keeps are counted with the list that owns the fact,
+    /// on a set of the fact's own; its owned names pass to the list's cell.
+    fn heap_bytes(&self, aliases: &mut AliasSet) -> usize {
+        let mut leaves = AliasSet::new();
+        let bytes = fact_heap_bytes(self, &mut leaves);
+        bytes + aliases.absorb(&mut leaves)
+    }
+}
+
 impl verter_retention::heap_size::HeapSize for crate::facts::fact_cache::ReadSetSignature {
     /// The fact slice and every fact's own heap.
     fn heap_size<'t>(

@@ -159,7 +159,7 @@ impl EpochStorage {
     }
 
     /// The live storage total.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn used(&self) -> usize {
         self.used.load(Ordering::SeqCst)
     }

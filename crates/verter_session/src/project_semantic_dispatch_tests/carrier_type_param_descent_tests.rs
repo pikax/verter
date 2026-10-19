@@ -68,6 +68,7 @@ fn carrier_wrapping(
 fn collect_type_param_nodes_descends_carrier_args() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let binder = graph.intern_node(SemanticNodeData::TypeParam {

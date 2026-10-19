@@ -13,8 +13,9 @@ same way. A document close evicts cache owners, never a held node (see
 wraps an ordinary production store for ownership tests: `run` opens an
 unaudited construction scope on the calling thread and `live_nodes` reads the
 live count. `ProjectSemanticDispatch::with_graph_fixture` binds the fixture's
-graph to a test context; like every dispatcher it opens its own construction
-scope over the graph it is bound to. Neither selects a different lifetime.
+graph to a test context; like every dispatcher it holds the construction lane
+of the graph it is bound to and opens an owner per operation (see "Public
+carriers and capabilities" below). Neither selects a different lifetime.
 
 The sole-authority boundary is executable: `production_constructor_destroys_a_node_on_its_last_release`
 (arena) and `every_production_graph_constructor_destroys_on_last_release`
@@ -85,7 +86,7 @@ mirrors own their carriers with their artifact, so an unchanged reload is
 served the same live handle.
 
 Per-node sidecars (structure bits, member-ordinal indexes, origin edges,
-stable-key classes) own nothing. Each marks the slot it describes
+stable-key classes) own no semantic nodes. Each marks the slot it describes
 (`track_sidecar`); destroying a marked slot appends its id to the arena's
 pending log, which a close, any sidecar write past
 `DESTROYED_DRAIN_THRESHOLD`, or the release that grows the log past that
@@ -98,10 +99,22 @@ lost between a failed try-lock and the holder's unlock). The member-index
 `DashMap` shards are leaf-held, so the drain waits for them. The log never
 outgrows the stale entries it removes and stays within the threshold at rest
 even when a holder's final drop follows the last close under sidecar-lock
-contention; `pending_destroyed_nodes` is its current count.
+contention; `pending_destroyed_nodes` is its current count. A single drainer
+owns the attempt; an overlapping unlock requests a rerun after its partial
+locks are released, so cleanup cannot be stranded between two failed attempts.
 
-**Known retention bound (open).** The deferral above is per EPOCH, not per
-token: every live `SignatureEpochLease` counts as a holder, including the
+Close and final release share `retire_sidecars`. The structure-bit table owns
+its pinned backing charge, retains its allocated capacity across tombstone
+removals, frees empty backing and shrinks sparse backing geometrically. The
+member-index tables and FIFO free empty backing and shrink sparse backing;
+origin retirement settles its own backing and clears empty pools and ledgers.
+The destroyed batch carries the log's charge until its buffer is dropped after
+cleanup. Pending batches below the drain threshold remain bounded and charged;
+none of these operations walks or destroys live semantic payloads.
+
+**Epoch-granularity ownership.** A live `SignatureEpochLease` can reopen a read
+view of any token in its epoch, so it owns that entire readable epoch. Every
+lease counts as a holder, including the
 leases warm memo candidates, delivered signature values and prepared
 `ReadSignatureResult` keys keep. While any such holder is alive — usually a
 cached signature result of some still-open file — a close's released token
@@ -110,10 +123,25 @@ DAGs they retain) outlive its own cache and caller owners. The bound is the
 stranded-majority epoch replacement (`replace_epoch_if_mostly_stranded`) or
 the eviction of the last holder, and never exceeds one deferred root per
 stranded token, since a re-interned token reclaims its deferred root
-(`repeated_close_and_re_intern_under_a_held_epoch_keeps_one_root_per_token`); `SemanticCloseReport::signature_tokens_released`
-counts roots taken from the store, not nodes freed. The exact fix roots, per
-delivered value or prepared key, the token nodes its records can read back, so
-only real readers keep them.
+(`repeated_close_and_re_intern_under_a_held_epoch_keeps_one_root_per_token`).
+The deferred table charges the epoch's storage for the bucket backing it holds,
+not the capacity `HashMap` reports — a tombstoning removal lowers that without
+freeing anything — and frees empty or rebuilds sparse backing geometrically, so
+repeated close/re-intern accounts no new bytes and the final holder's drop
+returns them all
+(`repeated_close_and_re_intern_under_a_held_epoch_keeps_epoch_storage_flat`); `SemanticCloseReport::signature_tokens_released`
+counts roots taken from the store, not nodes freed. This is an accepted
+ownership bound: after the epoch's cache and caller holders drain, its deferred
+roots and their backing drain too. Epoch table storage stays charged until
+that epoch's final owner drops. Finer per-result reclamation is a storage
+optimization. The public delivery regression
+`repeated_close_and_re_intern_of_a_delivered_callable_keeps_ownership_flat`
+checks that repeated discovery does not accumulate roots, records or charged
+backing, and that both release orders restore the declared baseline.
+
+The retired-symbol guard rejects activity barriers, ordinal-watermark sweeps
+and inactive ownership modes. Public compile contracts hold the capability
+boundary; a canonical close remains available solely to evict cache owners.
 
 ## Internal delivery and retained holders
 
@@ -231,16 +259,64 @@ member, entry, index signature, surface, payload or diagnostic, rooting the
 copy's operands in the active scope.
 
 Construction owners are thread-local and addressed by token, never by stack
-position, so scopes and dispatchers close in any order. Every
-`ProjectSemanticDispatch` shares ONE construction owner per graph on its thread
-with every other live dispatcher of that graph (`DispatchConstructionScope`,
-declared last on the dispatcher): an ordinal any of them interns or reads stays
-owned until the graph's last dispatcher on the thread drops, so interleaved
-dispatchers never release one another's operands. A lexical `NodeRootScope`
+position, so scopes and dispatchers close in any order. A dispatcher owns no
+result. Every `ProjectSemanticDispatch` shares ONE construction LANE per graph on
+its thread with every other live dispatcher of that graph
+(`DispatchConstructionLane`, declared last on the dispatcher): the authority to
+read and root that graph's construction ordinals while any of them lives. A
+lane holds nothing — no intern count, root or delivery is captured into it and
+a closing owner never hands its attachments to it. Each dispatcher operation
+owns its own work: every query execution opens a construction scope, and a
+root connected demand (relation, flow, call and evaluation operations) opens
+one when its thread holds no owner of the graph, and so does each public
+construction entry point that hands its result to an owning carrier (the
+output materializers, the one-level and macro-argument surface projections).
+A host request or session producer that composes construction labels across
+operations — a component-meta engine, a macro-surface cold compute, a native
+props projection — holds an explicit builder owner for that span, and a label
+that crosses into another request (a fallthrough prop override) travels with
+its own roots. Nested operations hand their
+deliveries to the enclosing operation, which is the builder owner of the
+values it consumes; the outermost operation releases its intermediates, its
+delivery attachments, the receipts its demand paid and the self-evaluation
+receipts it admitted (each roots the operands it names) when it ends. Results
+the dispatcher keeps for replay are a cache: each entry holds a retention
+charge, and a refused reservation keeps nothing. What survives an operation is what its
+returned carrier owns: a query output (`SemanticQueryOutput`) carries the
+delivery lease that roots its value, a `CacheRead` its lease. A discarded
+result therefore releases its roots while the dispatcher stays alive, and a
+retained result and every clone of it outlive every dispatcher and drain on
+the final holder's drop. Public construction adapters are reached through `ProjectSemanticDispatch::owning()`
+and return `Constructed<T>`. Their raw ordinal implementations are crate-private
+in production and public only as test fixture seams. The carrier seals the build's
+construction attachments and explicit roots for every represented result operand,
+including a reused node that the build did not intern. Only the engine mints it;
+`node` borrows a capability and `map` preserves the owner. Its clones share that
+owner, independently of the dispatcher and every builder scope. Its value is
+private: a consumer borrows it (`value()`) for as long as it holds the carrier,
+or hands the carrier to an explicit builder it holds (`into_value_in`), which
+keeps the construction until that builder closes. A label is never taken from
+a carrier at the call that delivers it. If a caller has an explicit builder
+open, sealing also gives that builder its own share, so host construction code
+may compose labels while keeping that builder open. Session consumers follow
+the same rule: a walk that carries a label across operations keeps each
+carrier (a local, a held list, or the returned `Constructed`) or holds an
+explicit builder for its whole length.
+`CallableNodeView::owning()` similarly delivers node-bearing callable demands;
+its signature adapter owns its function root while borrowing dispatch services,
+and its parameter/return demands produce independent carriers. Event names,
+spans and passive identity metadata remain graph-free results.
+
+Paid and self-evaluation receipts are operation bookkeeping: the outermost
+operation releases them even when a caller's builder remains open. Closing that
+builder therefore leaves no dispatcher-local receipt retaining its operands.
+A host request that composes ordinals across operations before rooting its
+delivery holds an explicit builder for the request.
+A lexical `NodeRootScope`
 releases its roots when it closes and hands its delivery attachments to the
-nearest remaining owner of its graph. An owner keeps each delivery once: every
-clone of a delivery shares one owner, so repeated reads and clones of a result
-under a dispatcher do not grow it. Records rooted at mint
+nearest remaining owner of its graph — never a lane. An owner keeps each
+delivery once: every clone of a delivery shares one owner, so repeated reads
+and clones of a result inside one operation do not grow it. Records rooted at mint
 (`SignatureSetValue`, `OneLevelSurface`) root in the graph that produced them,
 never in whichever graph's scope is innermost; a runtime-node `SemanticOperand`
 owns its node through the delivery lease of the forced read that produced it.
@@ -262,7 +338,10 @@ labels that authorize no read. `OneLevelSurface` is an owning adapter whose
 `from_view` is crate-private. A
 `SurfaceView` exposes its stream and indexes as borrowed slices, never as shared
 `Arc`s. `CacheRead` fields are crate-private: a consumer borrows `value()` and
-`walker_diagnostics()`; a clone of a read clones its lease. `ShallowDiagnostic`'s
+`walker_diagnostics()`; a clone of a read clones its lease. A
+`SemanticQueryOutput`'s delivery is a private field: only the dispatcher mints
+an output, its `node` capability cannot outlive it, and narrowing (`map`)
+carries the delivery to the narrowed value. `ShallowDiagnostic`'s
 recorded query failure is a `DiagnosticError` that renders but exposes no
 `QueryError` to copy. `SignatureSetValue` owns its candidate nodes: its candidate
 table and their roots share one `Arc`, so every clone owns them. Public results

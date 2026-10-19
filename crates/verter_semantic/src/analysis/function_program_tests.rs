@@ -1130,7 +1130,7 @@ function outer() {
     assert_eq!(
         inner.captures().cloned().collect::<Vec<_>>(),
         [FlowBindingIdentity {
-            name: Arc::from("x"),
+            name: "x".into(),
             kind: FunctionBindingKind::Const,
             defining_function: outer.key().clone(),
             binding_slot: 0,
@@ -1172,7 +1172,7 @@ function outer() {
     assert_eq!(
         callback.captures().cloned().collect::<Vec<_>>(),
         [FlowBindingIdentity {
-            name: Arc::from("x"),
+            name: "x".into(),
             kind: FunctionBindingKind::Const,
             defining_function: entry_of(&index, "outer").key().clone(),
             binding_slot: 0,
@@ -1243,7 +1243,7 @@ function outer() {
     assert_eq!(
         callbacks[0].captures().cloned().collect::<Vec<_>>(),
         [FlowBindingIdentity {
-            name: Arc::from("inner"),
+            name: "inner".into(),
             kind: FunctionBindingKind::NestedFunction,
             defining_function: entry_of(&index, "outer").key().clone(),
             binding_slot: 0,

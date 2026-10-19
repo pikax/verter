@@ -940,6 +940,9 @@ fn a_concurrent_close_never_revokes_an_in_flight_requests_nodes() {
         name: verter_type_expr::OwnedStr::from("IconProps"),
     });
     let request = ProjectSemanticDispatch::new(&host);
+    // The request composes the resolved label across operations, so it
+    // holds an explicit builder owner; the dispatcher's lane owns nothing.
+    let builder = request.enter_construction_scope();
     let QueryResult::Value(SemanticQueryOutput { value: node, .. }) =
         request.execute_type_node(key.clone())
     else {
@@ -978,7 +981,7 @@ fn a_concurrent_close_never_revokes_an_in_flight_requests_nodes() {
         &graph.node_data(node).expect("still readable"),
         &payload
     ));
-    drop(request);
+    drop((builder, request));
     assert!(
         !graph.node_is_live(node),
         "the closed declaration is destroyed once the request ends"

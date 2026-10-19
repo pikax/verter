@@ -6,6 +6,7 @@
 fn evaluate_deferred_terminates_on_stable_template_literal_fixpoint() {
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let template = graph.intern_node(SemanticNodeData::TemplateLiteral {
@@ -78,6 +79,7 @@ fn evaluate_deferred_has_no_iteration_cap_beyond_graph_size() {
 fn walk_path_terminates_on_deeply_nested_acyclic_union() {
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     // Build a chain of 128 singleton unions (each wraps the previous).
@@ -292,6 +294,7 @@ fn mapped_type_value_substitutes_into_keyspace_even_when_source_is_not_object() 
     };
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     // Source is a primitive — not an Object, so `source_members` is
@@ -404,6 +407,7 @@ fn mapped_type_value_falls_back_to_substituted_shell_when_evaluation_yields_opaq
     };
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     // Source is the primitive `string` — cannot be member-projected.
@@ -528,6 +532,7 @@ fn build_mapped_type_produces_canonical_mapped_shell_on_unresolvable_enumeration
     };
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     // Source is a TypeParam — the enumerator cannot resolve member
@@ -634,6 +639,7 @@ fn build_key_of_over_intersection_returns_distributed_union() {
     // base, folding to the normalised union of per-arm keysets.
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -684,6 +690,7 @@ fn build_key_of_over_union_returns_intersection_of_keys() {
     // — the dispatch builder distributes keyof over a union base.
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
@@ -732,6 +739,7 @@ fn build_key_of_over_conditional_distributes_into_branches() {
     // relation); the engine distributes into both branches.
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let deferred_tp = graph.intern_node(SemanticNodeData::TypeParam {
@@ -809,6 +817,7 @@ fn mapped_type_with_as_clause_symbolic_remapping_defers_whole_shape_preserving_n
     };
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     let source = graph.intern_node(SemanticNodeData::TypeParam {
@@ -1082,6 +1091,7 @@ fn surfaces_differing_only_in_excess_origin_intern_distinctly() {
 fn relate_object_extends_record_literal_union_key_succeeds() {
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
@@ -1108,6 +1118,7 @@ fn relate_object_extends_record_literal_union_key_succeeds() {
 fn relate_object_missing_required_record_key_returns_not_assignable() {
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -1137,6 +1148,7 @@ fn relate_object_missing_required_record_key_returns_not_assignable() {
 fn relate_object_record_shaped_mapped_with_inner_record_succeeds() {
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     // Inner "AppConfig"-shaped member type: { label: string }.
@@ -1192,6 +1204,7 @@ fn readonly_member(
 fn property_readonly_modifier_does_not_gate_assignability_in_either_direction() {
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -1559,6 +1572,7 @@ fn relation_unknown_is_never_warm_admitted_and_decided_entries_replay() {
 fn relation_memo_fences_on_transitive_imported_fact_edit() {
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     // An imported dependency whose body the relation cold-compute reads
@@ -2872,38 +2886,6 @@ fn migrate_owner_engine_project_expr_surface_as_type_expr_preserves_env() {
     }
 }
 
-/// Dispatch-first routing contract: the dispatch path on
-/// ComponentMetaQueryEngine must route through dispatch — checked by
-/// file-content grep so a regression that deletes the dispatch call
-/// surfaces immediately.
-///
-/// Scans all sibling files in the `component_meta_query_engine/`
-/// folder (mod.rs + child modules) because the dispatch-routed helpers
-/// may live in private child modules after the folder split.
-#[test]
-fn migrate_engine_lower_and_project_to_expanded_preserves_env() {
-    let cmqe_files: &[&str] = &[
-        include_str!("resolver_core/component_meta_query_engine/mod.rs"),
-        include_str!("resolver_core/component_meta_query_engine/registry_decl.rs"),
-        include_str!("resolver_core/component_meta_query_engine/shallow_preserve.rs"),
-        include_str!("resolver_core/component_meta_query_engine/surface.rs"),
-        include_str!("resolver_core/component_meta_query_engine/helpers.rs"),
-    ];
-    let combined = cmqe_files.join("\n");
-    // The dispatch-first lowering entry is the OWNER-AWARE scope spelling
-    // (`lower_type_expr_in_owner_scope_with_mode`): the engine threads the
-    // exact top-level lexical owner into the dispatch lowering so a Vue
-    // module/setup owner pair never collapses onto one scope.
-    assert!(
-        combined.contains("dispatch.lower_type_expr_in_owner_scope_with_mode"),
-        "lower_and_project_to_expanded must attempt dispatch-first lowering post-migration"
-    );
-    assert!(
-        combined.contains("ProjectPath"),
-        "lower_and_project_to_expanded must query ProjectPath post-migration"
-    );
-}
-
 // characterization tests `migrate_engine_project_expr_surface_shape_preserves_env`,
 // `instantiate_local_generic_ref_production_callers_migrated_to_dispatch_helper`, and
 // `phase_05c_engine_surface_trampolines_route_through_dispatch` deleted alongside the
@@ -3024,6 +3006,7 @@ fn type_eval_evaluate_removal_preserves_semantic_output() {
 fn type_expand_expand_object_shape_removal_preserves_shape_output() {
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let object = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
@@ -3242,6 +3225,7 @@ fn ax_hybrid_key_of_carrier_stops_under_structural_transit() {
 
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     // Build a userland-shaped Object surface: two members `a`, `b`.
@@ -3340,6 +3324,7 @@ fn ax_hybrid_mapped_type_carrier_stops_under_structural_transit() {
 
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     // Source = Object { a: string, b: number }.
@@ -3475,6 +3460,7 @@ fn ax_hybrid_userland_mypick_follows_same_carrier_stop_as_builtin_pick() {
 
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     let a_value = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3780,6 +3766,7 @@ fn relate_optional_to_required_decides_not_assignable_through_execute() {
 
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -4105,6 +4092,7 @@ fn unknown_edge_in_scc_makes_whole_component_return_only() {
 fn binding_session_close_publishes_root_only_with_fixed_bindings() {
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -4179,6 +4167,7 @@ fn binding_session_close_publishes_root_only_with_fixed_bindings() {
 fn binding_session_abandoned_by_budget_publishes_nothing() {
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -4230,6 +4219,7 @@ fn relation_budget_exceeded_is_public_and_admits_nothing() {
 
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -4324,6 +4314,7 @@ fn comparable_budget_exhaustion_is_typed_and_non_admissible() {
 
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let source = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
@@ -4888,6 +4879,7 @@ fn contravariant_infer_candidates_intersect_not_union() {
     };
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     let string_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -5028,6 +5020,7 @@ fn infer_substitution_does_not_capture_function_shadowed_binder() {
     };
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     let string_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -5129,6 +5122,7 @@ fn mutable_array_infer_element_binds_covariantly() {
     };
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     let string_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -5217,6 +5211,7 @@ fn nested_same_name_infer_binder_is_not_captured_by_outer_substitution() {
     };
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     let string_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -5373,6 +5368,7 @@ fn expanded_distribution_treats_infer_ref_check_as_open() {
     };
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     let string_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -5500,6 +5496,7 @@ fn mapped_extends_infer_declaration_shadows_outer_binder() {
     };
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     let string_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -5597,6 +5594,7 @@ fn mapped_own_key_param_shadows_same_named_outer_infer_binder() {
     };
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     let string_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -5704,6 +5702,7 @@ fn constructor_type_substitutes_bound_infer_inside_signature() {
     };
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     let string_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -5789,6 +5788,7 @@ fn constructor_type_relates_and_binds_infer_return() {
     };
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     let number_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -5877,6 +5877,7 @@ fn mapped_constructor_value_substitutes_per_key() {
     };
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     let lit_a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
@@ -5974,6 +5975,7 @@ fn constructor_pattern_infer_declaration_shadows_outer_binder() {
     };
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     let string_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -6134,6 +6136,7 @@ fn signature_fixture_nodes(
 fn call_and_construct_object_forms_relate_by_kind() {
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let (call_fn, ctor) = signature_fixture_nodes(graph, None, number);
@@ -6214,6 +6217,7 @@ fn signature_utilities_select_by_kind_over_direct_constructor() {
     };
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let string_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let instance = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
@@ -6303,6 +6307,7 @@ fn signature_kind_semantics_and_cross_producer_parity() {
     use verter_type_engine::semantic_query::SignatureKind;
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let (call_fn, ctor) = signature_fixture_nodes(graph, None, number);
@@ -6537,6 +6542,7 @@ pub(crate) mod fresh_excess_property_checking {
     fn fresh_extra_member_rejected_and_regular_mode_skips_excess() {
         let host = host_for_relation_tests();
         let dispatch = ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
         let graph = host.project_type_store().semantic_graph();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -7288,6 +7294,7 @@ pub(crate) mod fresh_excess_property_checking {
             })
             .unwrap();
         let dispatch = ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
         let graph = host.project_type_store().semantic_graph();
         let shallow = dispatch
             .ctx

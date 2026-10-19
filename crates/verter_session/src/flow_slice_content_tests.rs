@@ -6330,7 +6330,7 @@ fn loop_lowering(
     name: &str,
 ) -> (
     Arc<SliceContent>,
-    Arc<verter_session_query::flow::skeleton::FunctionBodySkeleton>,
+    verter_session_query::flow::bundle::SkeletonRef,
     usize,
 ) {
     use std::sync::atomic::Ordering;
@@ -6352,7 +6352,7 @@ fn loop_lowering(
         )
         .expect("slice content must build for an indexed function");
     let visits = memo.lowering_work.span_index_visits.load(Ordering::Relaxed);
-    (content, Arc::clone(bound.bundle().skeleton()), visits)
+    (content, bound.skeleton_ref(), visits)
 }
 
 /// Every lowered loop of `region`, outermost first.

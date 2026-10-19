@@ -35,9 +35,9 @@ fn make_analysis(
 fn exact_svelte_snippet_role() -> verter_type_expr::PropCallableRole {
     verter_type_expr::PropCallableRole::SvelteSnippet {
         symbol: verter_type_expr::ResolvedSymbolIdentity {
-            canonical_id: std::sync::Arc::from("/node_modules/svelte/index.d.ts"),
+            canonical_id: "/node_modules/svelte/index.d.ts".into(),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: std::sync::Arc::from("Snippet"),
+            symbol: "Snippet".into(),
         },
         exactness: verter_type_expr::ResolutionExactness::ExactSymbolic,
         provenance: verter_type_expr::ResolutionProvenance::FrameworkSurface,
@@ -4141,7 +4141,7 @@ fn svelte_css_analysis(source: &str) -> FileAnalysisSnapshot {
 
     FileAnalysisSnapshot {
         template: None,
-        markup_class_tokens: std::sync::Arc::new(tokens),
+        markup_class_tokens: verter_session_query::analysis::file_analysis::SharedList::new(tokens),
         styles: (vec![verter_semantic::analysis::build_scanned_style_analysis(
             verter_session_query::analysis::style::StyleAnalysisLang::Css,
             style_css,

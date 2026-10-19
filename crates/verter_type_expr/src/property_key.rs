@@ -20,6 +20,7 @@ use verter_retention::owned::OwnedStr;
     verter_no_typeexpr::NoTypeExpr,
     verter_no_storedspan::NoStoredSpan,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 pub struct CanonicalIndexInt(i64);
 
@@ -214,6 +215,7 @@ impl<I> From<OwnedStr> for PropertyKey<I> {
     verter_no_typeexpr::NoTypeExpr,
     verter_no_storedspan::NoStoredSpan,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 pub enum AuthoredPropertyKey<C, I> {
     String(OwnedStr),

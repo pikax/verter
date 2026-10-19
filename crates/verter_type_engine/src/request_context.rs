@@ -235,10 +235,10 @@ thread_local! {
     /// completeness — NOT a request-global proxy that would let one
     /// consumer's partial poison a sibling consumer's complete entry.
     ///
-    /// Single-threaded by construction: each singleflight cold compute
-    /// runs start-to-finish on the winning flight's thread, so the
-    /// per-thread stack matches the compute's call tree. A nested
-    /// compute bubbles its completeness into its parent on scope drop.
+    /// A suspended semantic task carries its enclosing compute's
+    /// accumulator between polls, installing it independently of the
+    /// polling thread's stack. A nested compute bubbles its completeness
+    /// into its parent on scope drop.
     static COLD_COMPUTE_COMPLETENESS: RefCell<Vec<ResultCompleteness>> =
         const { RefCell::new(Vec::new()) };
 }
@@ -370,6 +370,62 @@ impl DeferredPartialStickyScope {
 impl Drop for DeferredPartialStickyScope {
     fn drop(&mut self) {
         DEFERRED_PARTIAL_STICKY_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+/// A semantic task's cold-compute completeness and sticky-partial deferral.
+/// Each poll isolates these from the polling thread's unrelated computes;
+/// returning or reclaiming the task folds its observations into its lender.
+#[derive(Default)]
+pub(crate) struct TaskCompletenessCarry {
+    completeness: Option<ResultCompleteness>,
+    sticky_depth: usize,
+}
+
+impl TaskCompletenessCarry {
+    pub(crate) fn lend() -> Self {
+        Self {
+            completeness: COLD_COMPUTE_COMPLETENESS.with(|stack| stack.borrow().last().copied()),
+            sticky_depth: DEFERRED_PARTIAL_STICKY_DEPTH.with(Cell::get),
+        }
+    }
+
+    pub(crate) fn install(&mut self) -> TaskCompletenessInstall<'_> {
+        let task = self.completeness.into_iter().collect();
+        let thread = COLD_COMPUTE_COMPLETENESS.with(|stack| stack.replace(task));
+        let sticky_depth =
+            DEFERRED_PARTIAL_STICKY_DEPTH.with(|depth| depth.replace(self.sticky_depth));
+        TaskCompletenessInstall {
+            carry: self,
+            thread,
+            sticky_depth,
+            _thread_bound: std::marker::PhantomData,
+        }
+    }
+
+    pub(crate) fn return_to_lender(self) {
+        if let Some(completeness) = self.completeness {
+            // The poll already applied the request sticky under the lender's
+            // deferral policy. Only its compute-local observation returns here.
+            fold_cold_compute_completeness(completeness);
+        }
+    }
+}
+
+/// One poll's completeness installation; restores the thread on unwind too.
+pub(crate) struct TaskCompletenessInstall<'c> {
+    carry: &'c mut TaskCompletenessCarry,
+    thread: Vec<ResultCompleteness>,
+    sticky_depth: usize,
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl Drop for TaskCompletenessInstall<'_> {
+    fn drop(&mut self) {
+        let task =
+            COLD_COMPUTE_COMPLETENESS.with(|stack| stack.replace(std::mem::take(&mut self.thread)));
+        self.carry.completeness = task.last().copied();
+        DEFERRED_PARTIAL_STICKY_DEPTH.with(|depth| depth.set(self.sticky_depth));
     }
 }
 
@@ -2603,6 +2659,49 @@ impl Drop for NestedAuditGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_completeness_preserves_sticky_deferral_across_polls() {
+        for defer in [false, true] {
+            let request = make_ctx(201, false);
+            let lender = ColdComputeCompletenessScope::enter();
+            let deferred = defer.then(DeferredPartialStickyScope::enter);
+            let mut carry = TaskCompletenessCarry::lend();
+            for poll in 0..2 {
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| {
+                            let poller_request = make_ctx(202, false);
+                            let _poller_context =
+                                RequestContextGuard::install(poller_request.clone());
+                            let poller = ColdComputeCompletenessScope::enter();
+                            let _poller_deferred = (!defer).then(DeferredPartialStickyScope::enter);
+                            {
+                                let _context = RequestContextGuard::install(request.clone());
+                                let _installed = carry.install();
+                                assert_eq!(
+                                    current_cold_compute_completeness().is_partial(),
+                                    poll > 0
+                                );
+                                mark_request_result_partial();
+                                assert_eq!(current_request_result_is_partial(), !defer);
+                            }
+                            assert!(!current_cold_compute_completeness().is_partial());
+                            mark_request_result_partial();
+                            assert_eq!(current_request_result_is_partial(), defer);
+                            poller.discard();
+                        })
+                        .join()
+                        .expect("the task's poll completes on another thread");
+                });
+            }
+            assert!(!current_cold_compute_completeness().is_partial());
+            carry.return_to_lender();
+            assert!(current_cold_compute_completeness().is_partial());
+            drop(deferred);
+            lender.discard();
+        }
+    }
 
     fn make_ctx(id: u64, capture: bool) -> Arc<RequestContext> {
         RequestContext::new(id, Arc::from("/x.vue"), capture, None)

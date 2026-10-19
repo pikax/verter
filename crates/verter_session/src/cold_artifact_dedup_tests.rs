@@ -3367,7 +3367,7 @@ fn fenced_indexed_serve_template_analysis_is_served_but_not_persisted() {
             .get(VUE_OWNER)
             .and_then(|cc| {
                 cc.raw_template_analysis()
-                    .map(|entry| Arc::clone(&entry.template))
+                    .map(|entry| entry.template.clone())
             })
             .is_none(),
         "a template derived from a FENCED (ReturnOnly) IndexedReady serve \
@@ -3389,7 +3389,7 @@ fn fenced_indexed_serve_template_analysis_is_served_but_not_persisted() {
             .get(VUE_OWNER)
             .and_then(|cc| {
                 cc.raw_template_analysis()
-                    .map(|entry| Arc::clone(&entry.template))
+                    .map(|entry| entry.template.clone())
             })
             .is_some(),
         "a template computed from store-authoritative inputs is persisted \

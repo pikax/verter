@@ -1095,10 +1095,10 @@ mod tests {
 
         let mut builder = GraphBuilder::new();
         let root = builder.node_id(&TypeExpr::synthetic_slot_binding(SyntheticCarrierKey {
-            scope_canonical_id: Arc::from("/abs/Foo.vue"),
+            scope_canonical_id: From::from("/abs/Foo.vue"),
             surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
-            slot_name: Some(Arc::from("default")),
-            binding_name: Arc::from("controls"),
+            slot_name: Some(From::from("default")),
+            binding_name: From::from("controls"),
             value_node: 424242,
         }));
         assert_eq!(

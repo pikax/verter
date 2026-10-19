@@ -259,7 +259,7 @@ fn eligible_caches_surface_pinned_to_audit_conclusion() {
 
 /// The audit's discriminating insight is that the eligible cache's
 /// admission already uses `self.cache.insert(...)` (loose admission)
-/// — NOT `insert_arc_with_kind`. This pin asserts the production
+/// — NOT `insert_value_with_kind`. This pin asserts the production
 /// source still uses the loose path for the eligible cache. A
 /// migration to strict admission would require either dropping the
 /// variant gate (breaking `IntrinsicSurface` admission) or

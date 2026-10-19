@@ -404,3 +404,82 @@ fn zero_headroom_refuses_the_holds_slice_with_the_holds() {
     drop(names);
     assert_eq!(occupancy(&account), (0, 0));
 }
+
+/// A weak view keeps its allocation's block, so it keeps a share of the
+/// charge on that block: the block stays charged until the last strong
+/// handle AND the last weak view let go, in either order, and the last of
+/// them restores the baseline at once. A cell not built for weak views has
+/// none to give.
+#[test]
+fn a_weak_view_keeps_the_block_it_keeps_allocated_charged() {
+    const LIST: usize = 512;
+    let block = BlockShare::bytes_for::<Box<[u64]>>();
+    let heap = heap_block_bytes(LIST * 8);
+    for strong_first in [true, false] {
+        let account = account(1 << 30);
+        let ctx = ChargeCtx::new(&account);
+        let owned = Owned::new_with_shared_block(vec![0u64; LIST].into_boxed_slice(), ctx);
+        owned.pin(ctx);
+        assert_eq!(owned.charge_bytes(), Some(heap), "the block is the share's");
+        let weak = Owned::downgrade(&owned).expect("built for weak views");
+        assert_eq!(occupancy(&account), (0, block + heap));
+
+        if strong_first {
+            drop(owned);
+            assert!(weak.upgrade().is_none());
+            assert_eq!(
+                occupancy(&account),
+                (0, block),
+                "the value and its heap are gone; the block the view keeps is charged"
+            );
+            drop(weak);
+        } else {
+            drop(weak);
+            assert_eq!(occupancy(&account), (0, block + heap));
+            drop(owned);
+        }
+        assert_eq!(
+            occupancy(&account),
+            (0, 0),
+            "(strong first {strong_first}): the block's last holder releases its charge"
+        );
+    }
+
+    let plain = Owned::new(vec![0u64; 1].into_boxed_slice());
+    assert!(
+        Owned::downgrade(&plain).is_none(),
+        "a cell whose block no share charges cannot be viewed weakly"
+    );
+}
+
+/// A string's identity names its allocation for as long as it lives and is
+/// never handed to another: equal text in another allocation, or a string
+/// allocated after this one is freed, has its own. Asking for it keeps
+/// nothing allocated or charged.
+#[test]
+fn a_string_identity_names_one_allocation_and_keeps_nothing() {
+    let account = account(1 << 30);
+    let ctx = ChargeCtx::new(&account);
+    let first = OwnedStr::new("/w/a.ts");
+    first.pin(ctx);
+    let identity = OwnedStr::identity(&first);
+    assert_eq!(
+        OwnedStr::identity(&first.clone()),
+        identity,
+        "one allocation, one identity"
+    );
+    assert_ne!(
+        OwnedStr::identity(&OwnedStr::new("/w/a.ts")),
+        identity,
+        "equal text in another allocation"
+    );
+    assert_eq!(Owned::weak_count(&first.0), 0, "no weak view was taken");
+    drop(first);
+    assert_eq!(
+        occupancy(&account),
+        (0, 0),
+        "the identity keeps nothing charged"
+    );
+    let later = OwnedStr::new("/w/a.ts");
+    assert_ne!(OwnedStr::identity(&later), identity, "never reused");
+}

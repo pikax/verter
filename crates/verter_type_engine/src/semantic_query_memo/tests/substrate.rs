@@ -155,6 +155,73 @@ fn release_decl_key(canonical: &str, name: &str) -> SemanticQueryKey {
     })
 }
 
+fn populate_retirement_sidecars(
+    store: &SemanticGraphStore,
+    count: usize,
+) -> super::super::node_roots::NodeRootScope {
+    let build = store.enter_node_root_scope();
+    let scoped = release_file_scope("/w/a.ts", 1);
+    for index in 0..count {
+        let node = store.intern_node_with_scope(
+            release_type_param("/w/a.ts", 1, &format!("T{index}")),
+            scoped.clone(),
+        );
+        store.node_is_inert_structure(node);
+        if index % 32 == 0 {
+            let view = release_object_view(
+                (0..=index % 3)
+                    .map(|member| release_member(&format!("member{member}"), node))
+                    .collect(),
+            );
+            let object = store
+                .intern_node_with_scope(SemanticNodeData::Object(view.clone()), scoped.clone());
+            store.node_is_inert_structure(object);
+            let _ = store.member_ordinal_index(object, &view);
+            let _ = crate::semantic_query::stable_key::stable_key_for_node(store, object);
+            store.record_origin_edge(
+                object,
+                OriginEdgeKind::Normalize,
+                Arc::from([node]),
+                crate::semantic_query::OriginMeta::None,
+                dep_sig_for("/w/a.ts", 1),
+            );
+        }
+    }
+    assert!(!store.member_ordinal_index_memo.is_empty());
+    assert!(store.origin_edge_count() > 0);
+    assert!(store.stable_key_class_count() > 0);
+    build
+}
+
+fn assert_retirement_backing_released(store: &SemanticGraphStore) {
+    assert_eq!(
+        store.unresolved_reach.lock().capacity(),
+        0,
+        "empty bits release their table"
+    );
+    assert_eq!(
+        store.unresolved_reach.lock().storage_charge_bytes(),
+        0,
+        "freed bits keep no charge"
+    );
+    assert_eq!(
+        store.member_ordinal_index_memo.capacity(),
+        0,
+        "empty indexes release their tables"
+    );
+    assert_eq!(
+        store.member_ordinal_index_fifo.lock().capacity(),
+        0,
+        "empty ordering releases its deque"
+    );
+    assert_eq!(
+        store.derivation.lock().storage_charge_bytes(),
+        0,
+        "empty origins release their backing charge"
+    );
+    assert_eq!(store.stable_key_class_count(), 0);
+}
+
 /// A holder whose final drop comes after the close destroys the closed
 /// content then, with no close or sidecar write left to drain the log: the
 /// release that grows the destroyed log past its threshold drains it into
@@ -193,52 +260,71 @@ fn a_final_drop_after_close_keeps_the_destroyed_log_bounded() {
     ];
     let threshold = super::super::release::DESTROYED_DRAIN_THRESHOLD;
     for (label, hold) in cases {
-        let store = SemanticGraphStore::new();
-        let count = threshold * 4;
-        let scope = store.enter_node_root_scope();
-        let scoped = release_file_scope("/w/a.ts", 1);
-        for index in 0..count {
-            let node = store.intern_node_with_scope(
-                release_type_param("/w/a.ts", 1, &format!("T{index}")),
-                scoped.clone(),
-            );
-            // Classifying writes the node's structure-bit sidecar entry.
-            store.node_is_inert_structure(node);
-        }
-        assert_eq!(store.unresolved_reach_count(), count, "{label}");
+        let counts = if hold.is_none() {
+            vec![threshold / 2, threshold * 4, threshold * 8]
+        } else {
+            vec![threshold * 4]
+        };
+        let mut previous_work = None;
+        for count in counts {
+            let store = SemanticGraphStore::new();
+            let scope = populate_retirement_sidecars(&store, count);
+            let described = store.unresolved_reach_count();
+            assert!(described >= count, "{label}");
+            assert!(store.unresolved_reach.lock().storage_charge_bytes() > 0);
 
-        store.close_canonical("/w/a.ts");
-        assert_eq!(
-            store.unresolved_reach_count(),
-            count,
-            "{label}: premise: the scope still holds every node"
-        );
-        let held = hold.map(|hold| hold(&store));
-        drop(scope);
-        assert_eq!(
-            store.node_count(),
-            0,
-            "{label}: the final drop destroys them all"
-        );
-        if held.is_some() {
+            store.close_canonical("/w/a.ts");
             assert_eq!(
-                store.pending_destroyed_nodes(),
-                count,
-                "{label}: premise: the held lock blocks the release's drain"
+                store.unresolved_reach_count(),
+                described,
+                "{label}: premise: the scope still holds every node"
             );
-        }
-        drop(held);
+            let held = hold.map(|hold| hold(&store));
+            drop(scope);
+            assert_eq!(
+                store.node_count(),
+                0,
+                "{label}: the final drop destroys them all"
+            );
+            if held.is_some() {
+                assert_eq!(
+                    store.pending_destroyed_nodes(),
+                    described,
+                    "{label}: premise: the held lock blocks the release's drain"
+                );
+            }
+            drop(held);
 
-        assert!(
-            store.pending_destroyed_nodes() <= threshold,
-            "{label}: pending {} of {count}",
-            store.pending_destroyed_nodes()
-        );
-        assert!(
-            store.unresolved_reach_count() <= threshold,
-            "{label}: stale structure bits {} of {count}",
-            store.unresolved_reach_count()
-        );
+            assert!(
+                store.pending_destroyed_nodes() <= threshold,
+                "{label}: pending {} of {count}",
+                store.pending_destroyed_nodes()
+            );
+            assert!(
+                store.unresolved_reach_count() <= threshold,
+                "{label}: stale structure bits {} of {count}",
+                store.unresolved_reach_count()
+            );
+            if described > threshold {
+                assert_eq!(store.pending_destroyed_nodes(), 0);
+                assert_retirement_backing_released(&store);
+                let work = store.unresolved_reach.lock().retirement_work();
+                assert!(
+                    work <= 4 * described,
+                    "retirement work stays linear: {work} for {described}"
+                );
+                if let Some(previous) = previous_work {
+                    assert!(
+                        work <= 2 * previous + 64,
+                        "doubling the batch keeps linear retirement work"
+                    );
+                }
+                previous_work = Some(work);
+                eprintln!("retirement_batch={described} retirement_work={work}");
+            } else {
+                assert!(store.unresolved_reach.lock().capacity() <= 4 * threshold);
+            }
+        }
     }
 }
 
@@ -260,68 +346,70 @@ fn an_unlock_during_a_blocked_drain_leaves_no_cleanup_stranded() {
 
     const WAIT: Duration = Duration::from_secs(30);
     let threshold = super::super::release::DESTROYED_DRAIN_THRESHOLD;
-    let count = threshold * 4;
-    let store = SemanticGraphStore::new();
-    let scope = store.enter_node_root_scope();
-    let scoped = release_file_scope("/w/a.ts", 1);
-    for index in 0..count {
-        let node = store.intern_node_with_scope(
-            release_type_param("/w/a.ts", 1, &format!("T{index}")),
-            scoped.clone(),
-        );
-        store.node_is_inert_structure(node);
+    struct ClearHook<'a>(&'a super::super::arena::NodeArena);
+    impl Drop for ClearHook<'_> {
+        fn drop(&mut self) {
+            self.0.set_race_hook(None);
+        }
     }
-    store.close_canonical("/w/a.ts");
+    for count in [threshold * 4, threshold * 8] {
+        let store = SemanticGraphStore::new();
+        let scope = populate_retirement_sidecars(&store, count);
+        store.close_canonical("/w/a.ts");
 
-    let (held_tx, held_rx) = mpsc::channel();
-    let (unlock_tx, unlock_rx) = mpsc::channel::<()>();
-    let (unlocked_tx, unlocked_rx) = mpsc::channel();
-    let unlocked_rx = parking_lot::Mutex::new(unlocked_rx);
-    let blocked = Arc::new(AtomicUsize::new(0));
-    std::thread::scope(|threads| {
-        let holder = threads.spawn({
-            let store = &store;
-            move || {
-                let held = store.derivation.lock();
-                held_tx.send(()).unwrap();
-                let _ = unlock_rx.recv_timeout(WAIT);
-                // The guard's unlock settles while the drain holds its other
-                // sidecar locks.
-                drop(held);
-                let _ = unlocked_tx.send(());
-            }
+        let (held_tx, held_rx) = mpsc::channel();
+        let (unlock_tx, unlock_rx) = mpsc::channel::<()>();
+        let (unlocked_tx, unlocked_rx) = mpsc::channel();
+        let unlocked_rx = parking_lot::Mutex::new(unlocked_rx);
+        let blocked = Arc::new(AtomicUsize::new(0));
+        std::thread::scope(|threads| {
+            let unlock_tx = unlock_tx;
+            let holder = threads.spawn({
+                let store = &store;
+                move || {
+                    let held = store.derivation.lock();
+                    held_tx.send(()).unwrap();
+                    let _ = unlock_rx.recv_timeout(WAIT);
+                    // The guard's unlock settles while the drain holds its other
+                    // sidecar locks.
+                    drop(held);
+                    let _ = unlocked_tx.send(());
+                }
+            });
+            held_rx.recv_timeout(WAIT).unwrap();
+            let clear_hook = ClearHook(&store.arena);
+            let observed = Arc::clone(&blocked);
+            store.arena.set_race_hook(Some(Arc::new(move |event| {
+                if event == ArenaRaceEvent::SidecarDrainBlocked
+                    && observed.fetch_add(1, Ordering::SeqCst) == 0
+                {
+                    let _ = unlock_tx.send(());
+                    let _ = unlocked_rx.lock().recv_timeout(WAIT);
+                }
+            })));
+            drop(scope);
+            // Dropping the hook disconnects a holder the drain never released.
+            drop(clear_hook);
+            holder.join().unwrap();
         });
-        held_rx.recv_timeout(WAIT).unwrap();
-        let observed = Arc::clone(&blocked);
-        store.arena.set_race_hook(Some(Arc::new(move |event| {
-            if event == ArenaRaceEvent::SidecarDrainBlocked
-                && observed.fetch_add(1, Ordering::SeqCst) == 0
-            {
-                let _ = unlock_tx.send(());
-                let _ = unlocked_rx.lock().recv_timeout(WAIT);
-            }
-        })));
-        drop(scope);
-        // Dropping the hook disconnects a holder the drain never released.
-        store.arena.set_race_hook(None);
-        holder.join().unwrap();
-    });
 
-    assert!(
-        blocked.load(Ordering::SeqCst) >= 1,
-        "premise: the final release's drain was blocked by the held lock"
-    );
-    assert_eq!(store.node_count(), 0, "the final drop destroys them all");
-    assert!(
-        store.pending_destroyed_nodes() <= threshold,
-        "pending {} of {count}",
-        store.pending_destroyed_nodes()
-    );
-    assert!(
-        store.unresolved_reach_count() <= threshold,
-        "stale structure bits {} of {count}",
-        store.unresolved_reach_count()
-    );
+        assert!(
+            blocked.load(Ordering::SeqCst) >= 1,
+            "premise: the final release's drain was blocked by the held lock"
+        );
+        assert_eq!(store.node_count(), 0, "the final drop destroys them all");
+        assert!(
+            store.pending_destroyed_nodes() <= threshold,
+            "pending {} of {count}",
+            store.pending_destroyed_nodes()
+        );
+        assert!(
+            store.unresolved_reach_count() <= threshold,
+            "stale structure bits {} of {count}",
+            store.unresolved_reach_count()
+        );
+        assert_retirement_backing_released(&store);
+    }
 }
 
 /// The inert-structure bit and the unresolved-reach bit of a node live in
@@ -2934,10 +3022,11 @@ fn close_canonical_evicts_the_closed_documents_caches_and_keeps_the_neighbours()
 
 /// Twenty open / close cycles of one document keep the LIVE substrate
 /// flat, and a close never revokes what a caller holds: at every "open"
-/// point the live node count, memo entries and reach bits equal the first
+/// point the live node count and memo entries equal the first
 /// cycle's; the close evicts the cache but the caller's held nodes stay
 /// readable; dropping the caller then returns the substrate to the
-/// baseline. Only the append-only id space grows — by exactly the
+/// baseline, while non-owning pending sidecars stay within their drain
+/// bound. Only the append-only id space grows — by exactly the
 /// document's three nodes per cycle, because a destroyed id is never
 /// reused.
 ///
@@ -2952,7 +3041,7 @@ fn close_canonical_keeps_the_live_substrate_flat_across_open_close_cycles() {
     let baseline_live = store.node_count();
     let baseline_slots = store.node_slot_count();
     let roots_a: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from("/w/a.ts")]);
-    let mut first_open: Option<(usize, usize, usize)> = None;
+    let mut first_open: Option<(usize, usize)> = None;
 
     for cycle in 0..20usize {
         let slots_before = store.node_slot_count();
@@ -2974,11 +3063,7 @@ fn close_canonical_keeps_the_live_substrate_flat_across_open_close_cycles() {
             "cycle {cycle}: identical content must mint FRESH ids after a destruction, never a destroyed one"
         );
 
-        let open = (
-            store.node_count(),
-            store.memo_entry_count(),
-            store.unresolved_reach_count(),
-        );
+        let open = (store.node_count(), store.memo_entry_count());
         assert_eq!(
             open.0,
             baseline_live + 3,
@@ -3003,16 +3088,17 @@ fn close_canonical_keeps_the_live_substrate_flat_across_open_close_cycles() {
             "cycle {cycle}: the close never revokes a held node"
         );
         drop(held);
-        store.reclaim_destroyed_sidecars();
         assert_eq!(
             store.node_count(),
             baseline_live,
             "cycle {cycle}: live nodes back to baseline once the caller drops"
         );
-        assert_eq!(
-            store.unresolved_reach_count(),
-            1,
-            "cycle {cycle}: only the shared bit"
+        assert!(
+            store.pending_destroyed_nodes() <= super::super::release::DESTROYED_DRAIN_THRESHOLD
+        );
+        assert!(
+            store.unresolved_reach_count() <= 1 + super::super::release::DESTROYED_DRAIN_THRESHOLD,
+            "cycle {cycle}: sidecar retirement stays bounded without later work"
         );
         assert_eq!(
             store.node_slot_count(),

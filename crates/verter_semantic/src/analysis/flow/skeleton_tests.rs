@@ -244,7 +244,7 @@ fn indexed_skeleton_retains_exact_nested_capture_paths_and_runtime_aliases() {
     let exact = prepared.bindings().identity(xs[0]).unwrap();
     assert_eq!(prepared.bindings().local(exact), Some(xs[0]));
     let mut stale_name = exact.clone();
-    stale_name.name = Arc::from("replaced");
+    stale_name.name = "replaced".into();
     let mut stale_kind = exact.clone();
     stale_kind.kind = verter_session_query::function_program::FunctionBindingKind::Let;
     for stale in [&stale_name, &stale_kind] {
