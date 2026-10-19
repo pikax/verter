@@ -138,6 +138,10 @@ pub(super) struct Matrix<'a> {
     /// A file whose source differs per project, one source per setting in
     /// setting order.
     file_per_setting: Option<(&'a str, &'a [&'a str])>,
+    /// The projects live on disk beside the workspace's installed
+    /// `node_modules` — or the dependency directory the named chain of
+    /// installed packages reaches — so the probe imports real packages.
+    installed_packages: Option<&'a [&'a str]>,
 }
 
 impl<'a> Matrix<'a> {
@@ -150,7 +154,27 @@ impl<'a> Matrix<'a> {
             script: false,
             files: &[],
             file_per_setting: None,
+            installed_packages: None,
         }
+    }
+
+    /// With every project on disk under one workspace root holding the
+    /// workspace's installed `node_modules`, so the probe module's imports
+    /// resolve to the real packages through their own re-export chains and
+    /// augmentations.
+    pub(super) fn installed_packages(mut self) -> Self {
+        self.installed_packages = Some(&[]);
+        self
+    }
+
+    /// [`Self::installed_packages`] over the dependencies the installed
+    /// package chain `packages` reaches: `["vue", "@vue/runtime-dom"]` is
+    /// the directory `@vue/runtime-dom`, as `vue` depends on it, resolves its
+    /// own dependencies from, so the probe imports the packages a library
+    /// re-exports and augments without that library's own re-exports.
+    pub(super) fn installed_packages_of(mut self, packages: &'a [&'a str]) -> Self {
+        self.installed_packages = Some(packages);
+        self
     }
 
     /// With a file `name` beside the probe module whose source is
@@ -263,14 +287,30 @@ impl<'a> Matrix<'a> {
     /// One host carrying every setting's project with the probe module for
     /// `rows` (and the library and sibling files) upserted into it.
     pub(super) fn host(&self, rows: &[(Read<'_>, Vec<&str>)]) -> Arc<VerterHost> {
+        assert!(
+            self.installed_packages.is_none(),
+            "an installed-packages matrix is read through `verdicts`"
+        );
         let host = Arc::new(matrix_host(self.settings));
+        let roots: Vec<String> = self
+            .settings
+            .iter()
+            .map(|setting| setting.root.to_owned())
+            .collect();
+        self.upsert_projects(&host, rows, &roots);
+        host
+    }
+
+    /// The probe module and its siblings upserted into each setting's
+    /// project, the i-th setting's rooted at `roots[i]`.
+    fn upsert_projects(&self, host: &VerterHost, rows: &[(Read<'_>, Vec<&str>)], roots: &[String]) {
         let module = self.module(rows);
-        for (index, setting) in self.settings.iter().enumerate() {
-            let canonical = format!("{}/probe.ts", setting.root);
+        for (index, root) in roots.iter().enumerate() {
+            let canonical = format!("{root}/probe.ts");
             if let Some((name, sources)) = self.file_per_setting {
-                let path = format!("{}/{name}", setting.root);
+                let path = format!("{root}/{name}");
                 crate::u6_flow_shape_corpus_tests::upsert(
-                    &host,
+                    host,
                     &path,
                     sources[index],
                     crate::FileLanguage::script_ts(),
@@ -278,29 +318,82 @@ impl<'a> Matrix<'a> {
             }
             if let Some(lib) = self.lib {
                 crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::register_lib_environment(
-                    &host,
+                    host,
                     &canonical,
                     "lib.probe.d.ts",
                     lib,
                 );
             }
             for (name, source) in self.files {
-                let path = format!("{}/{name}", setting.root);
+                let path = format!("{root}/{name}");
                 // A sibling is classified by its name, as the host classifies
                 // it: a `.d.ts` sibling is a declaration file.
                 let language = crate::LanguageRegistry::global()
                     .classify_static(&path)
                     .static_resolution();
-                crate::u6_flow_shape_corpus_tests::upsert(&host, &path, source, language);
+                crate::u6_flow_shape_corpus_tests::upsert(host, &path, source, language);
             }
             crate::u6_flow_shape_corpus_tests::upsert(
-                &host,
+                host,
                 &canonical,
                 &module,
                 crate::FileLanguage::script_ts(),
             );
         }
-        host
+    }
+
+    /// One host over every setting's project on disk, beside the
+    /// workspace's installed `node_modules`, with the probe module for
+    /// `rows` upserted into each; and each setting's project root.
+    fn installed_packages_host(
+        &self,
+        rows: &[(Read<'_>, Vec<&str>)],
+    ) -> (Arc<VerterHost>, Vec<String>, InstalledPackagesWorkspace) {
+        let workspace_dir = InstalledPackagesWorkspace::new(self.installed_packages.unwrap_or(&[]));
+        let workspace_root = workspace_dir.root();
+        let workspace = Arc::new(verter_workspace::FilesystemWorkspace::new(
+            verter_workspace::FilesystemOptions::default(),
+        ));
+        let module = self.module(rows);
+        let mut roots = Vec::with_capacity(self.settings.len());
+        let mut configs = Vec::with_capacity(self.settings.len());
+        for setting in self.settings {
+            let dir = workspace_dir.project_dir(setting);
+            let options = setting
+                .options
+                .trim_end()
+                .strip_suffix('}')
+                .expect("a setting's options are a JSON object");
+            std::fs::write(
+                dir.join("tsconfig.json"),
+                format!(
+                    r#"{{ "compilerOptions": {options}, "module": "esnext", "moduleResolution": "bundler", "target": "es2020", "skipLibCheck": true }} }}"#
+                ),
+            )
+            .expect("write the project's tsconfig");
+            // On disk too, so the project's `include` lists it.
+            std::fs::write(dir.join("probe.ts"), &module).expect("write the probe module");
+            let root = slash_path(&dir);
+            configs.push(verter_workspace::configured_ide_project(
+                &*workspace,
+                root.clone(),
+                workspace_root.clone(),
+                &format!("{root}/tsconfig.json"),
+            ));
+            roots.push(root);
+        }
+        let host = Arc::new(VerterHost::new(
+            HostConfig {
+                analysis_level: crate::types::AnalysisLevel::Full,
+                audit_enabled: true,
+                footprint_capture: false,
+                ..HostConfig::default()
+            },
+            workspace,
+        ));
+        host.configure_projects(configs);
+        self.upsert_projects(&host, rows, &roots);
+        (host, roots, workspace_dir)
     }
 
     /// Every `(setting, function)` whose body-derived return closes WITHOUT
@@ -393,6 +486,10 @@ impl<'a> Matrix<'a> {
 
     /// Each row's verdict in each setting, in row then setting order.
     pub(super) fn verdicts(&self, rows: &[(Read<'_>, Vec<&str>)]) -> Vec<Vec<Verdict>> {
+        if self.installed_packages.is_some() {
+            let (host, roots, _workspace) = self.installed_packages_host(rows);
+            return self.verdicts_at(&host, &roots, rows);
+        }
         self.verdicts_on(&self.host(rows), rows)
     }
 
@@ -403,6 +500,22 @@ impl<'a> Matrix<'a> {
         host: &Arc<VerterHost>,
         rows: &[(Read<'_>, Vec<&str>)],
     ) -> Vec<Vec<Verdict>> {
+        let roots: Vec<String> = self
+            .settings
+            .iter()
+            .map(|setting| setting.root.to_owned())
+            .collect();
+        self.verdicts_at(host, &roots, rows)
+    }
+
+    /// Each row's verdict read from `host` at each setting's project
+    /// `roots`, in row then setting order.
+    fn verdicts_at(
+        &self,
+        host: &Arc<VerterHost>,
+        roots: &[String],
+        rows: &[(Read<'_>, Vec<&str>)],
+    ) -> Vec<Vec<Verdict>> {
         rows.iter()
             .enumerate()
             .map(|(index, (read, answers))| {
@@ -410,11 +523,11 @@ impl<'a> Matrix<'a> {
                     Read::Type(_) => format!("__probe_{index}"),
                     Read::Return(function) => (*function).to_owned(),
                 };
-                self.settings
+                roots
                     .iter()
                     .zip(answers)
-                    .map(|(setting, expected)| {
-                        let canonical = format!("{}/probe.ts", setting.root);
+                    .map(|(root, expected)| {
+                        let canonical = format!("{root}/probe.ts");
                         let (observed, diagnostics) =
                             observe_with_deadline(host, &canonical, &symbol, self.lib.is_some());
                         let matched = match &observed {
@@ -453,6 +566,122 @@ impl<'a> Matrix<'a> {
         }
         module
     }
+}
+
+/// A temporary workspace root holding a link to the workspace's installed
+/// `node_modules` (or the directory `VERTER_TEST_NODE_MODULES` names, for a
+/// worktree without its own install) and one project directory per
+/// setting. The link is removed before the directory, so removal never
+/// walks into the installed packages.
+struct InstalledPackagesWorkspace {
+    dir: tempfile::TempDir,
+    link: std::path::PathBuf,
+}
+
+impl InstalledPackagesWorkspace {
+    fn new(packages: &[&str]) -> Self {
+        let node_modules = std::env::var_os("VERTER_TEST_NODE_MODULES").map_or_else(
+            || {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .and_then(std::path::Path::parent)
+                    .expect("crate is <workspace>/crates/verter_session")
+                    .join("node_modules")
+            },
+            std::path::PathBuf::from,
+        );
+        assert!(
+            node_modules.is_dir(),
+            "an installed-packages matrix needs the workspace's installed packages under {} \
+             (run pnpm install)",
+            node_modules.display()
+        );
+        // Each package of the chain resolves its own dependencies from the
+        // `node_modules` directory its installed location sits in.
+        let node_modules = packages.iter().fold(node_modules, |node_modules, package| {
+            let installed = node_modules
+                .join(package)
+                .canonicalize()
+                .unwrap_or_else(|_| panic!("the installed package {package}"));
+            installed
+                .ancestors()
+                .nth(package.split('/').count())
+                .expect("an installed package sits in a node_modules directory")
+                .to_path_buf()
+        });
+        let dir = tempfile::tempdir().expect("a temporary workspace");
+        let link = dir.path().join("node_modules");
+        link_dir(&node_modules, &link);
+        Self { dir, link }
+    }
+
+    /// The workspace root, canonical and slash-separated.
+    fn root(&self) -> String {
+        slash_path(
+            &self
+                .dir
+                .path()
+                .canonicalize()
+                .expect("canonical workspace root"),
+        )
+    }
+
+    /// `setting`'s project directory, created.
+    fn project_dir(&self, setting: &Setting) -> std::path::PathBuf {
+        let dir = self
+            .dir
+            .path()
+            .canonicalize()
+            .expect("canonical workspace root")
+            .join(setting.root.trim_start_matches('/'));
+        std::fs::create_dir_all(&dir).expect("create the project directory");
+        dir
+    }
+}
+
+impl Drop for InstalledPackagesWorkspace {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        let _ = std::fs::remove_dir(&self.link);
+        #[cfg(not(windows))]
+        let _ = std::fs::remove_file(&self.link);
+    }
+}
+
+#[cfg(windows)]
+fn link_dir(target: &std::path::Path, link: &std::path::Path) {
+    let windows_path = |path: &std::path::Path| {
+        let text = path.to_string_lossy().replace('/', "\\");
+        text.strip_prefix(r"\\?\")
+            .map(str::to_string)
+            .unwrap_or(text)
+    };
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(windows_path(link))
+        .arg(windows_path(target))
+        .stdout(std::process::Stdio::null())
+        .status()
+        .expect("mklink runs");
+    assert!(
+        status.success(),
+        "junction {} -> {}",
+        link.display(),
+        target.display()
+    );
+}
+
+#[cfg(not(windows))]
+fn link_dir(target: &std::path::Path, link: &std::path::Path) {
+    std::os::unix::fs::symlink(target, link).expect("link the installed packages");
+}
+
+/// `path` slash-separated, without a verbatim prefix.
+fn slash_path(path: &std::path::Path) -> String {
+    let text = path.to_string_lossy().replace('\\', "/");
+    text.strip_prefix("//?/")
+        .map(str::to_string)
+        .unwrap_or(text)
 }
 
 /// One host carrying a tsconfig-backed project per setting.
@@ -1026,7 +1255,33 @@ fn print(
             None => format!("infer {name}"),
         },
         SemanticNodeData::InferRef { name, .. } => name.to_string(),
-        SemanticNodeData::IndexedAccess { .. } => "<unreduced indexed access>".to_owned(),
+        // An access of a type parameter is generic and prints as written; any
+        // other access the lane kept is a gap.
+        SemanticNodeData::IndexedAccess { object, index } => {
+            let mut root = *object;
+            while let Some(SemanticNodeData::IndexedAccess { object, .. }) =
+                graph.node_data(root).as_deref()
+            {
+                root = *object;
+            }
+            if !matches!(
+                graph.node_data(root).as_deref(),
+                Some(SemanticNodeData::TypeParam { .. })
+            ) {
+                return "<unreduced indexed access>".to_owned();
+            }
+            let index = match index {
+                verter_type_engine::semantic_query::IndexKey::String(name) => {
+                    checker_string_literal(name)
+                }
+                verter_type_engine::semantic_query::IndexKey::Number(number) => number.to_string(),
+                verter_type_engine::semantic_query::IndexKey::Computed(index) => at(*index),
+                verter_type_engine::semantic_query::IndexKey::UniqueSymbol(_) => {
+                    return "<unreduced indexed access>".to_owned();
+                }
+            };
+            format!("{}[{index}]", operand(dispatch, *object, depth, false))
+        }
         SemanticNodeData::Mapped { .. } => "<unreduced mapped>".to_owned(),
         other => {
             let text: String = format!("{other:?}").chars().take(60).collect();

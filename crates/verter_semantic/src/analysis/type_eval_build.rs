@@ -5871,20 +5871,20 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
                 )),
                 type_annotation: None,
             };
-            Some(ObjectMember::Method(
-                MethodSignature::with_key_spans_public(
-                    key,
-                    FunctionExpr::with_spans(
-                        params,
-                        return_type.map(Arc::new),
-                        type_parameters,
-                        fn_spans,
-                    )
-                    .with_predicate(predicate),
-                    method.optional,
-                    member_spans,
-                ),
-            ))
+            let mut signature = MethodSignature::with_key_spans_public(
+                key,
+                FunctionExpr::with_spans(
+                    params,
+                    return_type.map(Arc::new),
+                    type_parameters,
+                    fn_spans,
+                )
+                .with_predicate(predicate),
+                method.optional,
+                member_spans,
+            );
+            signature.method_kind = verter_type_expr_oxc::interface_method_kind(method.kind);
+            Some(ObjectMember::Method(signature))
         }
         TSSignature::TSCallSignatureDeclaration(call) => {
             let params = lower_function_params(&call.params, call.this_param.as_deref(), source);
