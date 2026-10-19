@@ -1621,12 +1621,31 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let SemanticNodeData::Union(members) = data.as_ref() else {
             return None;
         };
+        let strict = self.relation_strict_config().strict_null_checks;
+        let (mut has_null, mut has_undefined) = (false, false);
         let mut bases: Vec<String> = Vec::new();
         for &member in members.iter() {
+            // `null` and `undefined` are unit types the base mapping leaves
+            // as they are; without `strictNullChecks` the checker never
+            // builds them, so they leave the union.
+            match self.graph().node_data(member).as_deref() {
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Null)) => {
+                    has_null = strict;
+                    continue;
+                }
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined)) => {
+                    has_undefined = strict;
+                    continue;
+                }
+                _ => {}
+            }
             let spelled = base(member)?;
             if !bases.contains(&spelled) {
                 bases.push(spelled);
             }
+        }
+        if bases.is_empty() {
+            return None;
         }
         // The checker prints the bases in its intrinsic type-id order, the
         // enums a program declares after them.
@@ -1636,6 +1655,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 .position(|intrinsic| intrinsic == base)
                 .unwrap_or(4)
         });
+        // `typeToString` prints a union's nullish members last, `null`
+        // before `undefined`.
+        if has_null {
+            bases.push("null".to_owned());
+        }
+        if has_undefined {
+            bases.push("undefined".to_owned());
+        }
         Some(bases.join(" | "))
     }
 }

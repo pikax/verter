@@ -98,6 +98,7 @@ pub fn offset_indexed_value_expression(expression: &mut IndexedValueExpression, 
             IndexedValueExpression::Call(call) => {
                 call.point = call.point.saturating_add(base);
                 call.report_point = call.report_point.saturating_add(base);
+                call.report_end = call.report_end.saturating_add(base);
                 let IndexedValueCall {
                     callee,
                     receiver,
@@ -6969,7 +6970,8 @@ fn build_indexed_call(
     match node {
         IndexedCallNode::Call(call) => IndexedValueCall {
             point: call.span.start,
-            report_point: indexed_call_report_point(&call.callee),
+            report_point: indexed_call_report_span(&call.callee).0,
+            report_end: indexed_call_report_span(&call.callee).1,
             kind: IndexedValueCallKind::Call,
             callee: Box::new(callee),
             receiver,
@@ -6982,6 +6984,7 @@ fn build_indexed_call(
         IndexedCallNode::New(call) => IndexedValueCall {
             point: call.span.start,
             report_point: call.span.start,
+            report_end: call.span.end,
             kind: IndexedValueCallKind::Construct,
             callee: Box::new(callee),
             receiver: None,
@@ -7005,6 +7008,7 @@ fn build_indexed_call(
                 function_return_source: None,
                 report: IndexedReportSite {
                     point: tagged.quasi.span.start,
+                    end: tagged.quasi.span.end,
                     form: None,
                 },
             });
@@ -7016,6 +7020,7 @@ fn build_indexed_call(
             IndexedValueCall {
                 point: tagged.span.start,
                 report_point: tagged.span.start,
+                report_end: tagged.span.end,
                 kind: IndexedValueCallKind::Call,
                 callee: Box::new(callee),
                 receiver,
@@ -7617,7 +7622,8 @@ fn lower_indexed_call_expression_observed(
     let (callee, receiver) = indexed_callee_and_receiver(&call.callee, source, &mut observe);
     IndexedValueCall {
         point: call.span.start,
-        report_point: indexed_call_report_point(&call.callee),
+        report_point: indexed_call_report_span(&call.callee).0,
+        report_end: indexed_call_report_span(&call.callee).1,
         kind: IndexedValueCallKind::Call,
         callee: Box::new(callee),
         receiver,
@@ -7650,6 +7656,7 @@ fn lower_indexed_new_expression_observed(
     IndexedValueCall {
         point: call.span.start,
         report_point: call.span.start,
+        report_end: call.span.end,
         kind: IndexedValueCallKind::Construct,
         callee: Box::new(lower_indexed_value_expression(&call.callee, source)),
         receiver: None,
@@ -7700,6 +7707,7 @@ fn lower_indexed_tagged_template_expression_observed(
         function_return_source: None,
         report: IndexedReportSite {
             point: tagged.quasi.span.start,
+            end: tagged.quasi.span.end,
             form: None,
         },
     });
@@ -7717,6 +7725,7 @@ fn lower_indexed_tagged_template_expression_observed(
     IndexedValueCall {
         point: tagged.span.start,
         report_point: tagged.span.start,
+        report_end: tagged.span.end,
         kind: IndexedValueCallKind::Call,
         callee: Box::new(callee),
         receiver,
@@ -7813,12 +7822,13 @@ fn lower_indexed_call_argument(
 /// Where the checker reports a diagnostic about a whole call whose callee
 /// is `callee` (`getDiagnosticSpanForCallNode`): a property access's name,
 /// otherwise the callee expression.
-fn indexed_call_report_point(callee: &Expression<'_>) -> u32 {
-    match callee {
-        Expression::StaticMemberExpression(member) => member.property.span.start,
-        Expression::PrivateFieldExpression(member) => member.field.span.start,
-        callee => callee.span().start,
-    }
+fn indexed_call_report_span(callee: &Expression<'_>) -> (u32, u32) {
+    let span = match callee {
+        Expression::StaticMemberExpression(member) => member.property.span,
+        Expression::PrivateFieldExpression(member) => member.field.span,
+        callee => callee.span(),
+    };
+    (span.start, span.end)
 }
 
 /// Where the checker reports a relation failure of one call argument: the
@@ -7828,6 +7838,7 @@ fn indexed_argument_report_site(argument: &oxc_ast::ast::Argument<'_>) -> Indexe
     match argument {
         oxc_ast::ast::Argument::SpreadElement(spread) => IndexedReportSite {
             point: spread.span.start,
+            end: spread.span.end,
             form: None,
         },
         argument => indexed_report_site(argument.to_expression()),
@@ -7848,27 +7859,27 @@ fn indexed_report_site(expression: &Expression<'_>) -> IndexedReportSite {
         Whole,
         Unmodelled,
         Arrow(usize),
-        Object(Vec<(Arc<str>, u32, Option<usize>)>),
+        Object(Vec<(Arc<str>, u32, u32, Option<usize>)>),
         Array(Vec<usize>),
     }
     fn child<'a, 'b>(
         expression: &'a Expression<'b>,
-        nodes: &mut Vec<(u32, Shape)>,
+        nodes: &mut Vec<(u32, u32, Shape)>,
         pending: &mut Vec<(usize, &'a Expression<'b>)>,
     ) -> usize {
-        nodes.push((expression.span().start, Shape::Whole));
+        nodes.push((expression.span().start, expression.span().end, Shape::Whole));
         pending.push((nodes.len() - 1, expression));
         nodes.len() - 1
     }
 
-    let mut nodes: Vec<(u32, Shape)> = Vec::new();
+    let mut nodes: Vec<(u32, u32, Shape)> = Vec::new();
     let mut pending = Vec::new();
     child(expression, &mut nodes, &mut pending);
     while let Some((index, mut expression)) = pending.pop() {
         while let Expression::ParenthesizedExpression(parenthesized) = expression {
             expression = &parenthesized.expression;
         }
-        nodes[index].1 = match expression {
+        nodes[index].2 = match expression {
             Expression::ArrowFunctionExpression(arrow) => {
                 let annotated = arrow
                     .params
@@ -7910,7 +7921,12 @@ fn indexed_report_site(expression: &Expression<'_>) -> IndexedReportSite {
                         && !property.method
                         && !property.shorthand)
                         .then(|| child(&property.value, &mut nodes, &mut pending));
-                    properties.push((name, property.key.span().start, value));
+                    properties.push((
+                        name,
+                        property.key.span().start,
+                        property.key.span().end,
+                        value,
+                    ));
                 }
                 if modelled {
                     Shape::Object(properties)
@@ -7961,7 +7977,7 @@ fn indexed_report_site(expression: &Expression<'_>) -> IndexedReportSite {
             .take()
             .expect("a child site is built before its parent")
     };
-    for (index, (point, shape)) in nodes.into_iter().enumerate().rev() {
+    for (index, (point, end, shape)) in nodes.into_iter().enumerate().rev() {
         let form = match shape {
             Shape::Whole => None,
             Shape::Unmodelled => Some(IndexedElaborationForm::Unmodelled),
@@ -7971,9 +7987,10 @@ fn indexed_report_site(expression: &Expression<'_>) -> IndexedReportSite {
             Shape::Object(properties) => Some(IndexedElaborationForm::Object(Arc::from(
                 properties
                     .into_iter()
-                    .map(|(name, point, value)| IndexedElaboratedProperty {
+                    .map(|(name, point, end, value)| IndexedElaboratedProperty {
                         name,
                         point,
+                        end,
                         value: value.map(|value| take(&mut sites, value)),
                     })
                     .collect::<Vec<_>>(),
@@ -7985,7 +8002,7 @@ fn indexed_report_site(expression: &Expression<'_>) -> IndexedReportSite {
                     .collect::<Vec<_>>(),
             ))),
         };
-        sites[index] = Some(IndexedReportSite { point, form });
+        sites[index] = Some(IndexedReportSite { point, end, form });
     }
     sites[0].take().expect("the root site is built")
 }

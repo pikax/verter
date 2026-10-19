@@ -172,6 +172,9 @@ pub struct IndexedValueCallArg {
 pub struct IndexedReportSite {
     /// The start of the node the checker reports at.
     pub point: u32,
+    /// The end of the node the checker reports at; with `point` it is the
+    /// span the checker orders same-start diagnostics by.
+    pub end: u32,
     /// The expression's elaborated form; `None` for an expression the
     /// checker reports whole.
     pub form: Option<IndexedElaborationForm>,
@@ -206,6 +209,8 @@ pub struct IndexedElaboratedProperty {
     /// The start of the member's name, where the checker reports a failure
     /// of its value.
     pub point: u32,
+    /// The end of the member's name.
+    pub end: u32,
     /// The member's initializer; `None` for a shorthand, method or accessor,
     /// whose failure the checker reports at the name.
     pub value: Option<IndexedReportSite>,
@@ -217,11 +222,13 @@ impl IndexedReportSite {
         let mut pending = vec![self];
         while let Some(site) = pending.pop() {
             site.point = site.point.saturating_add(base);
+            site.end = site.end.saturating_add(base);
             match &mut site.form {
                 Some(IndexedElaborationForm::Arrow(returned)) => pending.push(returned),
                 Some(IndexedElaborationForm::Object(properties)) => {
                     for property in Arc::make_mut(properties) {
                         property.point = property.point.saturating_add(base);
+                        property.end = property.end.saturating_add(base);
                         if let Some(value) = property.value.as_mut() {
                             pending.push(value);
                         }
@@ -246,6 +253,8 @@ pub struct IndexedValueCall {
     /// callee's name, any other callee of a call, and the expression itself
     /// for `new` and a tagged template.
     pub report_point: u32,
+    /// The end of the node `report_point` starts.
+    pub report_end: u32,
     pub kind: IndexedValueCallKind,
     pub callee: Box<IndexedValueExpression>,
     pub receiver: Option<Box<IndexedValueExpression>>,

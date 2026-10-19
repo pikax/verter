@@ -1304,6 +1304,16 @@ export function boolean_symbol() { return bsf(bs); }
 export function mixed_literals() { return big(mix); }
 declare function nlp(x: number | undefined): void;
 export function nullable_target() { return nlp("a"); }
+declare function nn(x: number): void;
+declare const au: "a" | undefined;
+declare const an: "a" | "b" | null;
+declare const tu: true | undefined;
+declare const e2: 1 | 2 | undefined;
+export function literal_undefined() { return nn(au); }
+export function literals_null() { return nn(an); }
+export function true_undefined() { return nn(tu); }
+export function numbers_undefined() { return nn(e2); }
+export function nested() { return one(one()); }
 "#;
 
 /// An optional target property or parameter reports against its declared
@@ -1327,6 +1337,18 @@ fn call_diagnostics_follow_the_checkers_optionality_union_order_and_nullability(
                 vec!["error TS2322: Type 'string' is not assignable to type 'number'.".into()],
             ),
             ("optional_undefined", "", vec![], vec![]),
+            (
+                "nested",
+                "(36,39)",
+                vec![
+                    "error TS2554: Expected 1 arguments, but got 0.".into(),
+                    format!("error TS2345: {}", argument("number", "string")),
+                ],
+                vec![
+                    "error TS2554: Expected 1 arguments, but got 0.".into(),
+                    format!("error TS2345: {}", argument("number", "string")),
+                ],
+            ),
             (
                 "reversed_explicit",
                 "(17,57)",
@@ -1371,6 +1393,30 @@ fn call_diagnostics_follow_the_checkers_optionality_union_order_and_nullability(
             "(23,47)",
             &["error TS2345: Argument of type 'symbol | boolean' is not assignable to parameter of type 'string | number'.\n  Type 'symbol' is not assignable to type 'string | number'."],
             &["error TS2345: Argument of type 'symbol | boolean' is not assignable to parameter of type 'string | number'.\n  Type 'symbol' is not assignable to type 'string | number'."],
+        ),
+        (
+            "literal_undefined",
+            "(32,49)",
+            &["error TS2345: Argument of type 'string | undefined' is not assignable to parameter of type 'number'.\n  Type 'undefined' is not assignable to type 'number'."],
+            &["error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'."],
+        ),
+        (
+            "literals_null",
+            "(33,45)",
+            &["error TS2345: Argument of type 'string | null' is not assignable to parameter of type 'number'.\n  Type 'null' is not assignable to type 'number'."],
+            &["error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'.\n  Type 'string' is not assignable to type 'number'."],
+        ),
+        (
+            "true_undefined",
+            "(34,46)",
+            &["error TS2345: Argument of type 'boolean | undefined' is not assignable to parameter of type 'number'.\n  Type 'undefined' is not assignable to type 'number'."],
+            &["error TS2345: Argument of type 'boolean' is not assignable to parameter of type 'number'."],
+        ),
+        (
+            "numbers_undefined",
+            "(35,49)",
+            &["error TS2345: Argument of type 'number | undefined' is not assignable to parameter of type 'number'.\n  Type 'undefined' is not assignable to type 'number'."],
+            &[],
         ),
         (
             "mixed_literals",
