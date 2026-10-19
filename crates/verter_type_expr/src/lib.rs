@@ -76,10 +76,10 @@ pub use facts::{
 
 mod indexed_expression;
 pub use indexed_expression::{
-    IndexedElaboratedProperty, IndexedElaborationForm, IndexedLiteralPosition,
-    IndexedLiteralProvenance, IndexedLiteralStep, IndexedRegularLiteralSource, IndexedReportSite,
-    IndexedValueCall, IndexedValueCallArg, IndexedValueCallKind, IndexedValueExpression,
-    IndexedValueLiteralMode,
+    DeclaredReadPosition, DeclaredReadProvenance, DeclaredReadStep, IndexedElaboratedProperty,
+    IndexedElaborationForm, IndexedLiteralPosition, IndexedLiteralProvenance, IndexedLiteralStep,
+    IndexedRegularLiteralSource, IndexedReportSite, IndexedValueCall, IndexedValueCallArg,
+    IndexedValueCallKind, IndexedValueExpression, IndexedValueLiteralMode,
 };
 
 /// Property-key identity stored by authored type IR.

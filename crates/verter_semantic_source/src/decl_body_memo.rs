@@ -3040,6 +3040,7 @@ impl DeclBodyMemo {
                     // contributor order — the index is the GROUP-level
                     // `ValueSignature` ordinal the minted locators carry.
                     merged.type_annotation = decl.type_annotation.clone();
+                    merged.read_provenance = decl.read_provenance.clone();
                     merged.object_shape = decl.object_shape.clone();
                     merged.signatures.extend(decl.signatures.iter().cloned());
                     merged.kind = Some(decl.kind);
@@ -3618,6 +3619,7 @@ pub fn lowered_value_decl_for_synthesised_default(
             reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
             expression_source: None,
             literal_freshness: verter_type_expr::facts::DeclaredLiteralFreshness::Regular,
+            defers_read_widening: false,
         },
         vec![FunctionSignature {
             type_parameters: From::from(Vec::new().into_boxed_slice()),

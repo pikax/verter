@@ -354,6 +354,9 @@ pub struct LoweredValueDeclParts {
     /// Whether the declared type is a widening literal type (a `const`
     /// initialized with a literal, see [`DeclaredLiteralFreshness`]).
     pub literal_freshness: DeclaredLiteralFreshness,
+    /// The positions of the initializer-inferred annotation whose widening
+    /// waits on the bindings they read; `None` when it has none.
+    pub read_provenance: Option<Arc<verter_type_expr::DeclaredReadProvenance>>,
 }
 
 /// The TRANSIENT lowered parts one top-level statement contributes, routed to
@@ -1505,6 +1508,7 @@ fn mint_value_decl(
         parts.inference_unavailable,
     );
     type_annotation.literal_freshness = parts.literal_freshness.clone();
+    type_annotation.defers_read_widening = parts.read_provenance.is_some();
     let signatures = parts
         .signatures
         .iter()
@@ -3116,6 +3120,7 @@ fn collect_named_class_selecting(
                             enum_members: None,
                             enum_member_names: None,
                             literal_freshness: DeclaredLiteralFreshness::Regular,
+                            read_provenance: None,
                         });
                         TypeExpr::TypeOf(ValueRef {
                             path: vec![field_name],
@@ -3450,6 +3455,7 @@ fn collect_named_class_selecting(
             enum_members: None,
             enum_member_names: None,
             literal_freshness: DeclaredLiteralFreshness::Regular,
+            read_provenance: None,
         });
     }
     let base_name = match decl.heritage.as_ref().map(|heritage| &heritage.expression) {
@@ -3578,6 +3584,7 @@ fn collect_named_class_selecting(
                 instance: Arc::from(instance_widening_members.into_boxed_slice()),
             }
         },
+        read_provenance: None,
     });
 }
 
@@ -3724,6 +3731,7 @@ fn collect_enum(
         enum_members: Some(members),
         enum_member_names: Some(enum_member_names),
         literal_freshness: DeclaredLiteralFreshness::Regular,
+        read_provenance: None,
     });
 
     // Type-space: the enum used AS A TYPE is the union of its members'
@@ -3883,6 +3891,7 @@ fn lower_function_parts_in(
         enum_members: None,
         enum_member_names: None,
         literal_freshness: DeclaredLiteralFreshness::Regular,
+        read_provenance: None,
     })
 }
 
@@ -4485,6 +4494,7 @@ fn lower_destructured_variable_parts(
             enum_members: None,
             enum_member_names: None,
             literal_freshness: DeclaredLiteralFreshness::Regular,
+            read_provenance: None,
         })
         .collect()
 }
@@ -4707,6 +4717,7 @@ fn lower_identifier_variable_parts(
     let mut object_shape = None;
     let mut inference_unavailable = None;
     let mut expression_source_offset = None;
+    let mut read_provenance = None;
 
     if let Some(ref init) = decl.init {
         function_signature = extract_initializer_function_signature(init, source);
@@ -4740,13 +4751,16 @@ fn lower_identifier_variable_parts(
             expression_source_offset = Some(init.span().start);
             inference_unavailable = None;
         } else if type_annotation.is_none() {
-            let inferred = if matches!(var_kind, ValueDeclKind::Let | ValueDeclKind::Var) {
-                infer_mutable_declaration_expression_type(init, source)
-            } else {
-                infer_declaration_expression_type(init, source, TopLevelLiteralPolicy::Preserve)
-            };
+            let inferred = infer_declarator_initializer_type(
+                init,
+                source,
+                matches!(var_kind, ValueDeclKind::Let | ValueDeclKind::Var),
+            );
             let mut inferred = match inferred {
-                Ok(inferred) => inferred,
+                Ok((inferred, provenance)) => {
+                    read_provenance = provenance;
+                    inferred
+                }
                 Err(reason) => {
                     inference_unavailable = Some(reason);
                     TypeExpr::Primitive(PrimitiveName::Any)
@@ -4795,6 +4809,9 @@ fn lower_identifier_variable_parts(
 
     // A `const` without an annotation declares the fresh literal type of
     // its initializer; every other declaration declares a regular type.
+    // The positions are the inferred annotation's.
+    let read_provenance =
+        read_provenance.filter(|_| !annotation_is_authored && type_annotation.is_some());
     let literal_freshness = match (&decl.init, var_kind, annotation_is_authored) {
         (Some(init), _, false) if expr_is_widening_nullish(init) => {
             DeclaredLiteralFreshness::WideningNullish
@@ -4833,6 +4850,7 @@ fn lower_identifier_variable_parts(
         enum_members: None,
         enum_member_names: None,
         literal_freshness,
+        read_provenance,
     })
 }
 
@@ -5033,6 +5051,7 @@ fn lower_default_expression_parts(expr: &Expression<'_>, source: &str) -> Lowere
         enum_members: None,
         enum_member_names: None,
         literal_freshness: DeclaredLiteralFreshness::Regular,
+        read_provenance: None,
     }
 }
 
@@ -5264,6 +5283,11 @@ struct InferenceState {
     /// location that widens the fresh literals it holds: the initializer
     /// of a `let` / `var` declaration.
     widen_fresh_positions: bool,
+    /// Whether a position this inference closes in a mutable location
+    /// leaves the widening of what it reads to the bindings' resolution:
+    /// the type of a variable declaration's initializer, whose
+    /// [`verter_type_expr::DeclaredReadProvenance`] its `typeof` reads.
+    defer_read_widening: bool,
 }
 
 impl Default for InferenceState {
@@ -5272,6 +5296,7 @@ impl Default for InferenceState {
             used_unmodeled_fallback: false,
             nested_nullish: NestedNullishLiterals::Keep,
             widen_fresh_positions: false,
+            defer_read_widening: false,
         }
     }
 }
@@ -5450,25 +5475,48 @@ pub fn infer_declaration_expression_type(
     infer_declaration_expression_type_with_budget(expr, source, policy, &mut budget)
 }
 
-/// The type of a `let` / `var` initializer: every fresh literal it writes
-/// widens where its position closes — the top level, an object member, an
-/// array element, an arrow's expression body — while an asserted or
-/// const-context literal keeps its type (`let x = { v: "a" as "a", w: "b" }`
-/// is `{ v: "a"; w: string }`).
-fn infer_mutable_declaration_expression_type(
+/// The type of a variable declaration's initializer, and the positions it
+/// closes in a mutable location whose widening waits on the bindings they
+/// read. A `let` / `var` initializer (`mutable`) widens every fresh
+/// literal it writes where its position closes — the top level, an object
+/// member, an array element, an arrow's expression body — while an
+/// asserted or const-context literal keeps its type (`let x = { v: "a" as
+/// "a", w: "b" }` is `{ v: "a"; w: string }`); a `const` initializer
+/// keeps its top level as written.
+fn infer_declarator_initializer_type(
     expr: &Expression<'_>,
     source: &str,
-) -> InferenceResult<TypeExpr> {
+    mutable: bool,
+) -> InferenceResult<(
+    TypeExpr,
+    Option<Arc<verter_type_expr::DeclaredReadProvenance>>,
+)> {
     let mut budget = InferenceState {
-        widen_fresh_positions: true,
+        widen_fresh_positions: mutable,
+        defer_read_widening: true,
         ..InferenceState::default()
     };
-    infer_declaration_expression_type_with_budget(
-        expr,
+    let policy = if mutable {
+        TopLevelLiteralPolicy::Widen
+    } else {
+        TopLevelLiteralPolicy::Preserve
+    };
+    let (ty, positions) = shallow::run(
+        shallow::Task::Declaration(expr, policy),
         source,
-        TopLevelLiteralPolicy::Widen,
         &mut budget,
-    )
+        None,
+    )?
+    .into_typed()
+    .into_declared();
+    Ok((
+        ty,
+        (!positions.is_empty()).then(|| {
+            Arc::new(verter_type_expr::DeclaredReadProvenance {
+                positions: Arc::from(positions.into_boxed_slice()),
+            })
+        }),
+    ))
 }
 
 #[repr(u8)]
