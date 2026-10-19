@@ -702,8 +702,15 @@ are combined into ONE project, and each tool answers it with ONE instance.
   Every left-out scenario is listed with its reason.
 - **Limits.** Each process gets the run's memory cap and the run's
   per-demand deadline for every member (`--timeout-ms` × members, plus one
-  startup allowance). One crash or kill ends that tool's whole project:
-  every member is then reported with that end.
+  startup allowance). The demand arms also hold every phase to the
+  per-demand deadline itself (the session job's `stepTimeoutMs`): a demand
+  that runs past `--timeout-ms` ends its process (exit 124, a `.deadline`
+  marker naming the phase), so one stalled demand cannot hold the process
+  for every member's deadline. The members answered before it keep their
+  answers (read from the session journal), the stalled member is reported
+  killed and the members after it as not reached. Any other crash or kill
+  ends that tool's whole project: every member is then reported with that
+  end.
 
 ## Capacity
 

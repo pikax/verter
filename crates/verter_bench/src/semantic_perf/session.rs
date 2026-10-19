@@ -21,10 +21,16 @@
 //! observation (both tools observe the same way). Completed steps are
 //! flushed to a journal; the final record adds statistics, and the phase
 //! marker names the step running.
+//!
+//! A job may give every phase a deadline (`stepTimeoutMs`): a phase that
+//! runs past it ends the process with [`STEP_DEADLINE_EXIT`] after writing
+//! a deadline marker that names it, so one stalled demand cannot hold a
+//! session of many demands for the whole run's deadline. The steps already
+//! answered stay in the journal.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use verter_session::VerterHost;
@@ -39,6 +45,8 @@ use super::{
 pub const SESSION_JOB_SCHEMA: u32 = 1;
 /// The session record schema this runner writes.
 pub const SESSION_RESULT_SCHEMA: u32 = 1;
+/// The exit code of a session whose phase ran past the job's step deadline.
+pub const STEP_DEADLINE_EXIT: i32 = 124;
 
 /// One aliased type to demand.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -86,6 +94,110 @@ pub struct SessionJob {
     /// Host observability bookkeeping, as for a probe job.
     #[serde(default)]
     pub observability: bool,
+    /// The deadline of every phase (setup, init, each step, statistics);
+    /// none when absent.
+    #[serde(default)]
+    pub step_timeout_ms: Option<u64>,
+}
+
+#[derive(Default)]
+struct WatchState {
+    /// The running phase and when it began; none while disarmed.
+    phase: Option<(String, Instant)>,
+    stopped: bool,
+}
+
+/// Calls `expire` once, from its own thread, when the armed phase runs
+/// past `limit`; arming a new phase restarts the clock.
+pub(super) struct StepWatchdog {
+    state: Arc<(Mutex<WatchState>, Condvar)>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl StepWatchdog {
+    pub(super) fn start(
+        limit: Duration,
+        expire: impl FnOnce(&str, Duration) + Send + 'static,
+    ) -> Self {
+        let state = Arc::new((Mutex::new(WatchState::default()), Condvar::new()));
+        let watched = Arc::clone(&state);
+        let thread = std::thread::spawn(move || {
+            let (lock, wake) = &*watched;
+            let mut s = lock.lock().unwrap_or_else(|e| e.into_inner());
+            loop {
+                if s.stopped {
+                    return;
+                }
+                let Some((name, started)) = &s.phase else {
+                    s = wake.wait(s).unwrap_or_else(|e| e.into_inner());
+                    continue;
+                };
+                let elapsed = started.elapsed();
+                if elapsed >= limit {
+                    // Expire under the lock: no phase can be armed between
+                    // the check and the expiry.
+                    expire(name, elapsed);
+                    return;
+                }
+                s = wake
+                    .wait_timeout(s, limit - elapsed)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0;
+            }
+        });
+        StepWatchdog {
+            state,
+            thread: Some(thread),
+        }
+    }
+
+    /// Begin timing `phase`.
+    pub(super) fn arm(&self, phase: &str) {
+        self.set(Some((phase.to_string(), Instant::now())));
+    }
+
+    /// Stop timing (no phase runs).
+    pub(super) fn disarm(&self) {
+        self.set(None);
+    }
+
+    fn set(&self, phase: Option<(String, Instant)>) {
+        let (lock, wake) = &*self.state;
+        lock.lock().unwrap_or_else(|e| e.into_inner()).phase = phase;
+        wake.notify_one();
+    }
+}
+
+impl Drop for StepWatchdog {
+    fn drop(&mut self) {
+        let (lock, wake) = &*self.state;
+        lock.lock().unwrap_or_else(|e| e.into_inner()).stopped = true;
+        wake.notify_one();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// The process's watchdog for `job`: writes the deadline marker at
+/// `marker` and exits with [`STEP_DEADLINE_EXIT`].
+fn deadline_watchdog(job: &SessionJob, marker: PathBuf) -> Option<StepWatchdog> {
+    let limit_ms = job.step_timeout_ms?;
+    Some(StepWatchdog::start(
+        Duration::from_millis(limit_ms),
+        move |phase, elapsed| {
+            let record = serde_json::json!({
+                "phase": phase,
+                "timeoutMs": limit_ms,
+                "elapsedMs": elapsed.as_millis() as u64,
+            });
+            if let Err(err) = super::disk::write(&marker, &record.to_string()) {
+                eprintln!("write the deadline marker {}: {err}", marker.display());
+            }
+            eprintln!("{phase} ran past the {limit_ms} ms step deadline");
+            std::process::exit(STEP_DEADLINE_EXIT);
+        },
+    ))
 }
 
 /// One timed request of a demand step and its answer.
@@ -314,6 +426,7 @@ pub fn run_session(job: &SessionJob, sink: &Sink<'_>) -> Result<SessionResult, J
         sink.out.to_path_buf(),
         sink.sibling(".steps.jsonl"),
         sink.sibling(".phase"),
+        sink.sibling(".deadline"),
     ] {
         super::disk::remove_if_present(&path).map_err(|err| {
             JobError(format!(
@@ -323,13 +436,21 @@ pub fn run_session(job: &SessionJob, sink: &Sink<'_>) -> Result<SessionResult, J
         })?;
     }
     let mut stats_errors = Vec::new();
+    let watchdog = deadline_watchdog(job, sink.sibling(".deadline"));
+    let begin = |phase: &str| -> Result<(), JobError> {
+        sink.phase(phase)?;
+        if let Some(watchdog) = &watchdog {
+            watchdog.arm(phase);
+        }
+        Ok(())
+    };
 
-    sink.phase("engine-start")?;
+    begin("engine-start")?;
     let start = Instant::now();
     let (workspace, host) = start_engine(job.observability);
     let engine_start = micros(start);
 
-    sink.phase("setup")?;
+    begin("setup")?;
     let start = Instant::now();
     configure_project(
         &job.dir,
@@ -348,7 +469,7 @@ pub fn run_session(job: &SessionJob, sink: &Sink<'_>) -> Result<SessionResult, J
     }
     let setup = micros(start);
 
-    sink.phase("init")?;
+    begin("init")?;
     let (init, _) = request(&host, &canonical(&job.init_file), &job.init_alias, false);
     let init_retention = retention(&host);
 
@@ -366,7 +487,7 @@ pub fn run_session(job: &SessionJob, sink: &Sink<'_>) -> Result<SessionResult, J
     let mut steps = Vec::with_capacity(job.steps.len());
     let mut step_retention = Vec::with_capacity(job.steps.len());
     for (index, step) in job.steps.iter().enumerate() {
-        sink.phase(&format!("step-{index}"))?;
+        begin(&format!("step-{index}"))?;
         #[cfg(test)]
         super::session_tests::before_step(index);
         steps.push(match step {
@@ -398,7 +519,7 @@ pub fn run_session(job: &SessionJob, sink: &Sink<'_>) -> Result<SessionResult, J
             .map_err(|err| JobError(format!("flush step {index}: {err}")))?;
     }
 
-    sink.phase("stats")?;
+    begin("stats")?;
     let retention = retention(&host);
     let after_steps = process_stats::current_process()
         .map_err(|err| stats_errors.push(format!("after steps: {err}")))
@@ -424,6 +545,9 @@ pub fn run_session(job: &SessionJob, sink: &Sink<'_>) -> Result<SessionResult, J
         init_retention,
         step_retention,
     };
+    if let Some(watchdog) = &watchdog {
+        watchdog.disarm();
+    }
     sink.record(&result)?;
     sink.phase("done")?;
     Ok(result)

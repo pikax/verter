@@ -72,13 +72,17 @@ import {
   projectFiles,
   projectJob,
   projectTsconfigText,
+  journalRecord,
   readProjectAnswers,
+  readStepDeadline,
+  STEP_DEADLINE_EXIT,
   summarizeProject,
   validateProject,
 } from "./project.mjs";
 import { referenceFor, summarize, timerResolution } from "./summary.mjs";
 import { resolveSupervisor } from "./supervisor.mjs";
 import { rawFileProblems, validateRun } from "./validate.mjs";
+import { writeJsonFile } from "./json-stream.mjs";
 import { readSessionRecord } from "./session-record.mjs";
 
 // ---------------------------------------------------------------- canonical form
@@ -2832,6 +2836,96 @@ test("the project section validates, and fails when tsc's combined answer is not
   );
 });
 
+test("a step deadline ends a demand arm at one member, keeping the answers before it", () => {
+  const options = {
+    settings: "strict",
+    repeat: 1,
+    warmup: 0,
+    timeoutMs: 1000,
+    startupAllowanceMs: 500,
+    memMb: MEM_MB,
+    infraMb: INFRA_MB,
+  };
+  const ids = ["library-awaited", "program-module-augmentation", "program-global-merge"];
+  const { scenarios, project } = syntheticProject(ids, options);
+  const job = projectJob("/p", scenarios, "root-file", options.timeoutMs);
+  assert.equal(job.stepTimeoutMs, 1000);
+  assert.equal(projectJob("/p", scenarios, "root-file").stepTimeoutMs, undefined);
+  // Each demand arm stalls at the second member: the first keeps its
+  // answer, the second ran past the deadline, the third was never demanded.
+  const stalled = structuredClone(project);
+  for (const inv of stalled.invocations.filter((i) => i.session)) {
+    inv.supervisor.exitCode = STEP_DEADLINE_EXIT;
+    inv.stepDeadline = {
+      phase: "step-1",
+      timeoutMs: 1000,
+      elapsedMs: 1001,
+      member: "program-module-augmentation",
+    };
+    inv.session = {
+      ...inv.session,
+      stage: "partial",
+      answers: { "library-awaited": inv.session.answers["library-awaited"] },
+    };
+  }
+  assert.deepEqual(
+    validateProject(stalled, REAL_EXPECTED, scenarios, options, schedule).failures,
+    [],
+  );
+  const arms = summarizeProject(stalled, REAL_EXPECTED, scenarios, options).settings.strict.arms;
+  for (const [arm, answered] of [
+    ["verter", "matched"],
+    ["tsc-api", "reference"],
+  ]) {
+    const perMember = arms[arm].perMember;
+    assert.equal(perMember["library-awaited"].result, answered, arm);
+    assert.equal(perMember["program-module-augmentation"].result, "killed", arm);
+    assert.match(
+      perMember["program-module-augmentation"].detail,
+      /per-demand deadline \(1000 ms\)/,
+    );
+    assert.equal(perMember["program-global-merge"].result, "unverified", arm);
+    assert.match(perMember["program-global-merge"].detail, /not reached/);
+  }
+  // A marker without the deadline's exit is not a step deadline.
+  const other = structuredClone(stalled);
+  for (const inv of other.invocations.filter((i) => i.session)) inv.supervisor.exitCode = 3;
+  assert.ok(
+    validateProject(other, REAL_EXPECTED, scenarios, options, schedule).failures.length > 0,
+  );
+});
+
+test("a step deadline marker names its member, and the journal yields the answered steps", () => {
+  const dir = mkdtempSync(join(tmpdir(), "semantic-step-deadline-"));
+  try {
+    const out = join(dir, "session.json");
+    const members = [{ id: "a" }, { id: "b" }];
+    assert.equal(readStepDeadline(out, members), null);
+    writeFileSync(`${out}.deadline`, JSON.stringify({ phase: "step-1", timeoutMs: 5 }));
+    assert.equal(readStepDeadline(out, members).member, "b");
+    writeFileSync(`${out}.deadline`, JSON.stringify({ phase: "setup", timeoutMs: 5 }));
+    assert.equal(readStepDeadline(out, members).member, null);
+    writeFileSync(
+      `${out}.steps.jsonl`,
+      [
+        { tool: "verter", stage: "partial" },
+        { index: 0, step: { requests: [{ micros: 7 }] } },
+        { index: 1, step: { requests: [{ micros: 9 }] } },
+      ]
+        .map((x) => JSON.stringify(x))
+        .join("\r\n") + "\r\n",
+    );
+    const record = journalRecord(`${out}.steps.jsonl`);
+    assert.equal(record.tool, "verter");
+    assert.deepEqual(
+      record.steps.map((s) => s.requests[0].micros),
+      [7, 9],
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 /** Per-step retention figures as the Verter session runner records them. */
 const retentionFigures = (overrides = {}) => ({
   ...RETENTION,
@@ -3012,4 +3106,27 @@ test("the session summary carries each growth session's retention proof", () => 
   assert.equal(growth.retentionProof.verdict, "failed");
   assert.match(growth.retentionProof.problems.join(), /snapshotLeases 2004 exceeds/);
   assert.equal(cells.find((c) => c.key === "augment-global-baseline").retentionProof, undefined);
+});
+
+test("the streamed results file is byte for byte JSON.stringify's, without one whole-run string", () => {
+  const run = syntheticRun({ arms: ["verter", "tsc-api"] });
+  const tricky = {
+    run,
+    empty: { object: {}, array: [] },
+    omitted: { undefined: undefined, fn: () => 1 },
+    holes: [undefined, () => 1, NaN, -0, Infinity, null],
+    text: 'quote " backslash \\ newline \n tab \t unicode   é',
+    date: new Date(0),
+    nested: [[[{ a: [1, { b: [] }] }]]],
+  };
+  const dir = mkdtempSync(join(tmpdir(), "semantic-json-stream-"));
+  try {
+    for (const value of [run, tricky, [], {}, "x", 0, null]) {
+      const path = join(dir, "results.json");
+      writeJsonFile(path, value);
+      assert.equal(readFileSync(path, "utf8"), JSON.stringify(value, null, 1));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -26,6 +26,11 @@
 // are printed right after it, outside every timer (as the Verter probe
 // observes them). A `meta` step (Vue component metadata) has no tsc
 // counterpart and is recorded as not applicable.
+//
+// A job's `stepTimeoutMs` gives every phase a deadline, as for the Verter
+// probe: a phase that runs past it writes the deadline marker naming it,
+// ends the server and exits with STEP_DEADLINE_EXIT; the steps already
+// answered stay in the journal.
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -36,6 +41,8 @@ import { pathToFileURL } from "node:url";
 import { INCREMENTAL_FACILITY } from "./sessions.mjs";
 
 const RESULT_SCHEMA = 1;
+/** The exit code of a session whose phase ran past the job's step deadline (as the Verter probe's). */
+const STEP_DEADLINE_EXIT = 124;
 // TypeFormatFlags.NoTruncation | TypeFormatFlags.InTypeAlias.
 const PRINT_FLAGS = 1 | (1 << 23);
 
@@ -63,17 +70,40 @@ async function main() {
     writeFileSync(`${path}.tmp`, text);
     renameSync(`${path}.tmp`, path);
   };
+  const job = JSON.parse(readFileSync(jobPath, "utf8"));
+  if (job.schema !== 1) throw new Error(`session job schema ${job.schema} is not 1`);
+  if (!job.steps?.length) throw new Error("a session runs at least one step");
+  for (const path of [outPath, `${outPath}.steps.jsonl`, `${outPath}.phase`, `${outPath}.deadline`])
+    rmSync(path, { force: true });
   const history = [];
+  // The API client awaits the server, so the timer fires while a request runs.
+  let serverPid = null;
+  let client = null;
+  let deadline = null;
   const phase = (name) => {
     const atMs = Date.now();
     history.push({ phase: name, atMs });
     replace(`${outPath}.phase`, JSON.stringify({ phase: name, atMs, history }));
+    clearTimeout(deadline);
+    if (job.stepTimeoutMs && name !== "done")
+      deadline = setTimeout(() => {
+        const elapsedMs = Date.now() - atMs;
+        writeFileSync(
+          `${outPath}.deadline`,
+          JSON.stringify({ phase: name, timeoutMs: job.stepTimeoutMs, elapsedMs }),
+        );
+        console.error(`${name} ran past the ${job.stepTimeoutMs} ms step deadline`);
+        const pid = serverPid ?? client?.process?.pid ?? null;
+        if (pid !== null) {
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch {
+            // Already gone.
+          }
+        }
+        process.exit(STEP_DEADLINE_EXIT);
+      }, job.stepTimeoutMs);
   };
-  const job = JSON.parse(readFileSync(jobPath, "utf8"));
-  if (job.schema !== 1) throw new Error(`session job schema ${job.schema} is not 1`);
-  if (!job.steps?.length) throw new Error("a session runs at least one step");
-  for (const path of [outPath, `${outPath}.steps.jsonl`, `${outPath}.phase`])
-    rmSync(path, { force: true });
   const { API } = await import(
     pathToFileURL(join(job.tsPackageDir, "dist", "api", "async", "api.js")).href
   );
@@ -90,6 +120,7 @@ async function main() {
   phase("spawn");
   let t = performance.now();
   const api = new API({ cwd: dir, collectTiming: true, tsserverPath: job.tscExe });
+  client = api.client ?? null;
   const spawnMs = performance.now() - t;
   const serverTime = async (method) =>
     (await api.getTimingInfo()).recentRequests.filter((r) => r.method === method).at(-1)
@@ -100,7 +131,7 @@ async function main() {
   let snapshot = await api.updateSnapshot({ openProjects: [configPath] });
   const setupRoundTripMs = performance.now() - t;
   const setupMs = await serverTime("updateSnapshot");
-  const serverPid = api.client?.process?.pid;
+  serverPid = api.client?.process?.pid ?? null;
   if (typeof serverPid !== "number") throw new Error("the tsc API server pid is not reachable");
   let project = snapshot.getProject(configPath) ?? snapshot.getProjects()[0];
   if (snapshot.getProjects().length !== 1)

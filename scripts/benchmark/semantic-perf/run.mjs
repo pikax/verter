@@ -8,6 +8,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { writeJsonFile } from "./json-stream.mjs";
 import { readSessionRecord } from "./session-record.mjs";
 
 import {
@@ -1090,12 +1091,14 @@ export async function main(argv) {
     ok &&= projectResult.validation.ok;
     extraFailures.push(...projectResult.validation.failures);
   }
-  writeFileSync(join(outDir, "results.json"), JSON.stringify(run, null, 1));
+  // The report first: it never depends on the record's size.
   let markdown = renderMarkdown(run);
   if (run.oss) markdown += "\n" + renderOssMarkdown(run.oss);
   if (run.biome) markdown += "\n" + renderBiomeMarkdown(run.biome);
   if (run.project) markdown += "\n" + renderProjectMarkdown(run.project);
   writeFileSync(join(outDir, "results.md"), markdown);
+  // A whole run's record can exceed the longest string the engine allows.
+  writeJsonFile(join(outDir, "results.json"), run);
   log(`\nsemantic-perf: results ${join(outDir, "results.json")}`);
   log(`semantic-perf: report  ${join(outDir, "results.md")}`);
   log(

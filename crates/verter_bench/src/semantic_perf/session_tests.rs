@@ -1,10 +1,20 @@
 use super::{session::*, LibMode, Sink};
 use std::path::Path;
+use std::time::Duration;
 
 const CHILD_OUT: &str = "VERTER_BENCH_MEMORY_CHILD_OUT";
+const STALL_OUT: &str = "VERTER_BENCH_STALL_CHILD_OUT";
 
 pub(super) fn before_step(index: usize) {
-    if index != 2 || std::env::var_os(CHILD_OUT).is_none() {
+    if index != 2 {
+        return;
+    }
+    if std::env::var_os(STALL_OUT).is_some() {
+        loop {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    if std::env::var_os(CHILD_OUT).is_none() {
         return;
     }
     let mut held = Vec::new();
@@ -43,6 +53,7 @@ fn job(dir: &Path) -> SessionJob {
         init_file: "input.ts".into(),
         init_alias: "Init".into(),
         observability: false,
+        step_timeout_ms: None,
         steps: (0..4)
             .map(|_| Step::Demand {
                 concurrent: false,
@@ -182,4 +193,81 @@ fn memory_kill_keeps_two_answers_and_the_running_step_phase() {
     )
     .unwrap();
     assert_eq!(phase["phase"], "step-2");
+}
+
+#[test]
+fn step_watchdog_expires_only_the_phase_that_overruns() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let watchdog = StepWatchdog::start(Duration::from_millis(150), move |phase, elapsed| {
+        tx.send((phase.to_string(), elapsed)).unwrap();
+    });
+    // Each phase finishes inside the deadline: re-arming restarts the clock.
+    for phase in ["setup", "step-0", "step-1"] {
+        watchdog.arm(phase);
+        std::thread::sleep(Duration::from_millis(60));
+    }
+    watchdog.arm("step-2");
+    let (phase, elapsed) = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(phase, "step-2");
+    assert!(elapsed >= Duration::from_millis(150), "{elapsed:?}");
+    drop(watchdog);
+    // A disarmed watchdog never expires.
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let watchdog = StepWatchdog::start(Duration::from_millis(20), move |phase, _| {
+        tx.send(phase.to_string()).unwrap();
+    });
+    watchdog.arm("stats");
+    watchdog.disarm();
+    assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+}
+
+#[test]
+#[ignore = "fixture subprocess; launched by the step-deadline test"]
+fn session_stall_child() {
+    let out = std::env::var_os(STALL_OUT).expect("child output path");
+    let out = Path::new(&out);
+    let mut job = job(out.parent().unwrap());
+    job.step_timeout_ms = Some(500);
+    run_session(&job, &Sink::new(out)).unwrap();
+    panic!("the step deadline must end the third step");
+}
+
+#[test]
+fn a_stalled_step_ends_the_session_at_its_deadline_keeping_earlier_answers() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("session.json");
+    let started = std::time::Instant::now();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "semantic_perf::session_tests::session_stall_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env(STALL_OUT, &out)
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(STEP_DEADLINE_EXIT));
+    assert!(
+        started.elapsed() < Duration::from_secs(9),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(!out.exists());
+    let marker: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("session.json.deadline")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(marker["phase"], "step-2");
+    assert_eq!(marker["timeoutMs"], 500);
+    let journal = std::fs::read_to_string(dir.path().join("session.json.steps.jsonl")).unwrap();
+    let entries: Vec<serde_json::Value> = journal
+        .lines()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect();
+    assert_eq!(entries.len(), 3);
+    for (index, entry) in entries[1..].iter().enumerate() {
+        assert_eq!(entry["index"], index);
+        assert_eq!(entry["step"]["requests"][0]["observation"]["text"], "42");
+    }
 }

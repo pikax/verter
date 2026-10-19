@@ -159,9 +159,15 @@ export function projectSteps(members) {
   }));
 }
 
-/** The session job the Verter probe and the tsc API driver read. */
-export function projectJob(dir, members, libMode) {
+/**
+ * The session job the Verter probe and the tsc API driver read. With
+ * `stepTimeoutMs`, each probe ends itself when one phase (one member's
+ * demand) runs past it, so a stalled demand cannot hold the process for
+ * every member's deadline.
+ */
+export function projectJob(dir, members, libMode, stepTimeoutMs = null) {
   return {
+    ...(stepTimeoutMs ? { stepTimeoutMs } : {}),
     schema: 1,
     dir,
     tsconfig: "tsconfig.json",
@@ -242,6 +248,33 @@ export function projectCapability(tool) {
  */
 export function projectDeadlineMs(options, memberCount) {
   return (options.timeoutMs ?? 0) * memberCount + (options.startupAllowanceMs ?? 0);
+}
+
+/** The exit code of a session probe whose phase ran past the job's step deadline. */
+export const STEP_DEADLINE_EXIT = 124;
+
+/**
+ * A session probe's deadline marker, with the member whose demand ran past
+ * it (none for a phase outside the steps: setup, init, statistics).
+ */
+export function readStepDeadline(sessionOut, members) {
+  let marker;
+  try {
+    marker = JSON.parse(readFileSync(`${sessionOut}.deadline`, "utf8"));
+  } catch {
+    return null;
+  }
+  const step = /^step-(\d+)$/.exec(marker.phase ?? "");
+  return { ...marker, member: step ? (members[Number(step[1])]?.id ?? null) : null };
+}
+
+/** The steps a session probe flushed to its journal before it ended, as a partial record. */
+export function journalRecord(journalPath) {
+  const lines = readFileSync(journalPath, "utf8").split(/\r?\n/).filter(Boolean);
+  const [header, ...entries] = lines.map((line) => JSON.parse(line));
+  const steps = [];
+  for (const entry of entries) steps[entry.index] = entry.step;
+  return { ...header, stage: "partial", steps };
 }
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -344,7 +377,7 @@ export async function runProject(ctx) {
   for (const setting of members.length ? settings : []) {
     const dir = join(outDir, "project", setting.id);
     const inputs = materializeProject(dir, members, setting, ctx.libText);
-    const job = projectJob(dir, members, opts.libMode);
+    const job = projectJob(dir, members, opts.libMode, opts.timeoutMs);
     const jobPath = join(outDir, "project", `${setting.id}.job.json`);
     const tscJobPath = join(outDir, "project", `${setting.id}.tsc-job.json`);
     writeFileSync(jobPath, JSON.stringify(job, null, 2));
@@ -425,8 +458,15 @@ export async function runProject(ctx) {
       } catch {
         inv.phase = null;
       }
+      const deadline = readStepDeadline(sessionOut, members);
+      if (deadline && record?.exitCode === STEP_DEADLINE_EXIT) inv.stepDeadline = deadline;
       try {
-        inv.session = compactSession(JSON.parse(readFileSync(sessionOut, "utf8")), members);
+        inv.session = compactSession(
+          inv.stepDeadline
+            ? journalRecord(`${sessionOut}.steps.jsonl`)
+            : JSON.parse(readFileSync(sessionOut, "utf8")),
+          members,
+        );
       } catch (err) {
         inv.session = null;
         inv.sessionReadError = String(err.message ?? err);
@@ -442,7 +482,11 @@ export async function runProject(ctx) {
       }
     }
     invocations.push(inv);
-    const end = record?.killedBy ? `killed:${record.killedBy}` : `exit ${record?.exitCode ?? "?"}`;
+    const end = inv.stepDeadline
+      ? `step deadline at ${inv.stepDeadline.member ?? inv.stepDeadline.phase}`
+      : record?.killedBy
+        ? `killed:${record.killedBy}`
+        : `exit ${record?.exitCode ?? "?"}`;
     log(
       `[project ${index + 1}/${plan.length}] ${step.key} ${step.arm} ${step.warmup ? "warmup" : "rep"} ${step.rep}: ${end} ${record?.wallMs?.toFixed?.(0) ?? "?"} ms`,
     );
@@ -474,12 +518,37 @@ const isReferenceArm = (arm) => Boolean(REFERENCE_ARMS[arm]);
 /** How a demand arm's invocation ended (a session record exists only complete). */
 export function projectSessionEnd(inv, limits) {
   let end = invocationEnd(inv, limits);
+  const deadline = inv.stepDeadline;
+  if (deadline && end.kind === "exited" && end.exitCode === STEP_DEADLINE_EXIT)
+    return {
+      kind: "killed",
+      detail: deadline.member
+        ? `timeout: ${deadline.member} ran past the per-demand deadline (${deadline.timeoutMs} ms)`
+        : `timeout during ${deadline.phase} (per-phase deadline ${deadline.timeoutMs} ms)`,
+    };
   if (end.kind === "exited" && end.exitCode !== 0)
     end = { kind: "child-failure", detail: `exit ${end.exitCode}` };
   if (end.kind === "observe-killed") end = { kind: "exited", exitCode: 0 };
   if (end.kind === "exited" && !inv.session)
     end = { kind: "child-failure", detail: inv.sessionReadError ?? "no session record" };
   return end;
+}
+
+/**
+ * How one member's demand ended. A step deadline ends the process at one
+ * member: the members answered before it keep their answers, the members
+ * after it were never demanded.
+ */
+export function memberSessionEnd(inv, id, limits) {
+  const end = projectSessionEnd(inv, limits);
+  const deadline = inv.stepDeadline;
+  if (!deadline || end.kind !== "killed" || !deadline.member) return end;
+  if (deadline.member === id) return end;
+  if (inv.session?.answers?.[id]) return { kind: "exited", exitCode: 0 };
+  return {
+    kind: "unattributed-kill",
+    detail: `not reached: the process ended at ${deadline.member}'s per-demand deadline`,
+  };
 }
 
 /** One member's answer from a demand arm, in the shape the probe classifiers read. */
@@ -524,7 +593,7 @@ function beyondOf(scenario) {
 export function memberResult(inv, scenario, reference, limits) {
   const beyond = beyondOf(scenario);
   if (PROJECT_DEMAND_ARMS.includes(inv.arm)) {
-    const end = projectSessionEnd(inv, limits);
+    const end = memberSessionEnd(inv, scenario.id, limits);
     const answer = memberDemandAnswer(
       end,
       end.kind === "exited" ? inv.session?.answers?.[scenario.id] : null,
