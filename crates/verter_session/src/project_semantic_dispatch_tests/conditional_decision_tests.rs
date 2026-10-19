@@ -35,6 +35,14 @@ export function b7<T>() { return null! as ({ v: T } extends {} ? 1 : 2); }
 export function b9<T>() { return null! as ({ v: T[] } extends { v: string[] } ? 1 : 2); }
 export function b10<T>() { return null! as ({ v: [T] } extends { v: [] } ? 1 : 2); }
 export function b12<T>() { return null! as ({ v: T } extends { v: never } ? 1 : 2); }
+export function n1<T>() { return null! as ({ v: T; f: <U>(x: U) => T } extends { v: string; f: unknown } ? 1 : 2); }
+export function n2<T>() { return null! as ({ v: 1; f: <U>(x: U) => U } extends { v: number; f: unknown } ? 1 : 2); }
+export function n3<T>() { return null! as ({ v: T; f: <T>(x: T) => T } extends { v: string; f: unknown } ? 1 : 2); }
+export function n4<T>() { return null! as ({ f: <T>(x: T) => T } extends { f: (x: string) => string } ? 1 : 2); }
+export function n5<T>() { return null! as ({ f: <U>(x: U) => T } extends { f: (x: string) => string } ? 1 : 2); }
+export function n6<T>() { return null! as ({ f: <T>(x: T) => T; v: T } extends { f: (x: string) => string; v: unknown } ? 1 : 2); }
+export function n7<T>() { return null! as ({ f: <U>(x: U) => U } extends { f: (x: string) => number } ? 1 : 2); }
+export function n8<T>() { return null! as ({ v: T; f: <U>(x: U) => U } extends { v: unknown; f: (x: string) => number } ? 1 : 2); }
 export function c1<T>(x: T extends string ? 1 : 2) { return pickNum(x); }
 export function c2<T>(x: T extends string ? 1 : 2) { return pick12(x); }
 export function c3<T>(x: T extends string ? 1 : 2) { return pickStr(x); }
@@ -81,6 +89,23 @@ const RETURNS: &[(&str, &str)] = &[
     ("b9", "{ v: T[]; } extends { v: string[]; } ? 1 : 2"),
     ("b10", "2"),
     ("b12", "{ v: T; } extends { v: never; } ? 1 : 2"),
+    (
+        "n1",
+        "{ v: T; f: <U>(x: U) => T; } extends { v: string; f: unknown; } ? 1 : 2",
+    ),
+    ("n2", "1"),
+    (
+        "n3",
+        "{ v: T; f: <T>(x: T) => T; } extends { v: string; f: unknown; } ? 1 : 2",
+    ),
+    ("n4", "1"),
+    (
+        "n5",
+        "{ f: <U>(x: U) => T; } extends { f: (x: string) => string; } ? 1 : 2",
+    ),
+    ("n6", "1"),
+    ("n7", "2"),
+    ("n8", "2"),
 ];
 
 /// `any extends T ? 1 : 2` stays deferred (the `any` check is read only
@@ -93,7 +118,12 @@ const RETURNS: &[(&str, &str)] = &[
 /// wildcard of the permissive test relating to itself). The wildcard relates
 /// to `never` as well, where `any` does not, so `{ v: T } extends { v: never
 /// }` stays deferred; `{ v: [T] } extends { v: [] }` fails even
-/// permissively.
+/// permissively. A type parameter a generic signature declares is bound
+/// only inside that signature: the function's `T` written in a signature
+/// that declares `U` (or that declares a `T` of its own beside it) stays
+/// free there and defers the conditional, while a signature's own
+/// parameters never do: `{ f: <U>(x: U) => U }` against `{ f: (x: string)
+/// => number }` is plainly false.
 #[test]
 fn conditionals_are_deferred_and_decided_as_the_checker_decides_them() {
     let failures = Matrix::new(SOURCE).settings(&ALL).returns(RETURNS);

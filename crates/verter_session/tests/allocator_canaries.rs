@@ -779,3 +779,6 @@ mod recursive_paths_allocation;
 
 #[path = "allocation_cases/reverse_index.rs"]
 mod reverse_index_backing;
+
+#[path = "allocation_cases/recursive_growth.rs"]
+mod recursive_growth_allocation;
