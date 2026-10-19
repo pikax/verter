@@ -2130,6 +2130,9 @@ pub enum ArgumentPathStep {
     Member(SemanticNodeId),
     /// An array literal's element at this index.
     Element(u32),
+    /// The one element type an array literal's elements join into when a
+    /// spread or an elision makes it no tuple.
+    Elements,
 }
 
 /// One authored nested position of a call argument a regular contributor

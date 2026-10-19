@@ -7237,162 +7237,224 @@ fn scalar_literal_type(expr: &Expression<'_>) -> Option<TypeExpr> {
 /// checker types such a contributor as the literal it already is, so a
 /// mutable location keeps it where it widens a fresh literal
 /// (`pu({ v: "a" as "a" })` infers `"a"`, `pu({ v: "a" })` `string`). The
-/// argument's own top level is its [`indexed_literal_mode`]'s. A
-/// conditional with more than one object or array branch is read no
-/// further: its branches are separate composites whose equal members do
-/// not share one freshness.
+/// argument's own top level is its [`indexed_literal_mode`]'s. Each object
+/// or array literal a position's conditional holds is an arm of its own
+/// at the positions it nests: the checker types each arm, widening its
+/// fresh literals, before the arms join (`c ? { v: "a" as "a" } : { v: "b"
+/// }` writes `v` regular in one arm and fresh in the other).
 pub fn indexed_literal_provenance(
     expr: &Expression<'_>,
     source: &str,
 ) -> Option<Arc<verter_type_expr::IndexedLiteralProvenance>> {
     use verter_type_expr::{IndexedLiteralStep, IndexedRegularLiteralSource};
+    /// One arm's expression at a position, and whether it is inside a
+    /// const assertion, whose literals are written as they are.
+    type Arm<'a> = (&'a Expression<'a>, bool);
     struct Pending<'a> {
-        expr: &'a Expression<'a>,
         path: Vec<IndexedLiteralStep>,
-        /// Whether the position is inside a const assertion, whose literals
-        /// are written as they are.
-        pinned: bool,
+        arms: Vec<Arm<'a>>,
     }
     let mut positions = Vec::new();
     let mut pending = vec![Pending {
-        expr,
         path: Vec::new(),
-        pinned: false,
+        arms: vec![(expr, false)],
     }];
-    while let Some(Pending { expr, path, pinned }) = pending.pop() {
-        let mut regular = Vec::new();
-        let mut mixed = false;
-        let mut composites: Vec<(&Expression<'_>, bool)> = Vec::new();
-        let mut branches = vec![(expr, pinned)];
-        while let Some((branch, pinned)) = branches.pop() {
-            match branch {
-                Expression::ParenthesizedExpression(parenthesized) => {
-                    branches.push((&parenthesized.expression, pinned));
-                }
-                Expression::TSSatisfiesExpression(satisfies) => {
-                    branches.push((&satisfies.expression, pinned));
-                }
-                Expression::TSNonNullExpression(non_null) => {
-                    branches.push((&non_null.expression, pinned));
-                }
-                Expression::ConditionalExpression(conditional) => {
-                    branches.push((&conditional.alternate, pinned));
-                    branches.push((&conditional.consequent, pinned));
-                }
-                Expression::TSAsExpression(assertion)
-                    if verter_type_expr_oxc::is_const_assertion_type(
-                        &assertion.type_annotation,
-                    ) =>
-                {
-                    branches.push((&assertion.expression, true));
-                }
-                Expression::TSTypeAssertion(assertion)
-                    if verter_type_expr_oxc::is_const_assertion_type(
-                        &assertion.type_annotation,
-                    ) =>
-                {
-                    branches.push((&assertion.expression, true));
-                }
-                Expression::TSAsExpression(assertion) => {
-                    regular.push(IndexedRegularLiteralSource::Pinned(lower_ts_type(
-                        &assertion.type_annotation,
-                        source,
-                    )))
-                }
-                Expression::TSTypeAssertion(assertion) => {
-                    regular.push(IndexedRegularLiteralSource::Pinned(lower_ts_type(
-                        &assertion.type_annotation,
-                        source,
-                    )))
-                }
-                Expression::ObjectExpression(_) | Expression::ArrayExpression(_) => {
-                    if pinned {
-                        regular.push(IndexedRegularLiteralSource::PinnedComposite);
+    while let Some(Pending { path, arms }) = pending.pop() {
+        let mut written = Vec::with_capacity(arms.len());
+        let mut composites: Vec<Arm<'_>> = Vec::new();
+        for arm in arms {
+            let mut regular = Vec::new();
+            let mut fresh = Vec::new();
+            let mut mixed = false;
+            let mut branches = vec![arm];
+            while let Some((branch, pinned)) = branches.pop() {
+                match branch {
+                    Expression::ParenthesizedExpression(parenthesized) => {
+                        branches.push((&parenthesized.expression, pinned));
                     }
-                    composites.push((branch, pinned));
-                }
-                Expression::Identifier(identifier) if identifier.name == "undefined" => {}
-                Expression::NullLiteral(_)
-                | Expression::FunctionExpression(_)
-                | Expression::ArrowFunctionExpression(_) => {}
-                Expression::Identifier(identifier) => {
-                    regular.push(IndexedRegularLiteralSource::Read(ValueRef {
-                        path: vec![identifier.name.to_string()],
-                        type_args: Vec::new(),
-                    }));
-                }
-                Expression::StaticMemberExpression(_) => match indexed_read_path(branch) {
-                    Some(path) => regular.push(IndexedRegularLiteralSource::Read(ValueRef {
-                        path,
-                        type_args: Vec::new(),
-                    })),
-                    None => mixed = true,
-                },
-                branch => match scalar_literal_type(branch) {
-                    Some(literal) if pinned => {
-                        regular.push(IndexedRegularLiteralSource::Pinned(literal));
+                    Expression::TSSatisfiesExpression(satisfies) => {
+                        branches.push((&satisfies.expression, pinned));
                     }
-                    _ => mixed = true,
-                },
+                    Expression::TSNonNullExpression(non_null) => {
+                        branches.push((&non_null.expression, pinned));
+                    }
+                    Expression::ConditionalExpression(conditional) => {
+                        branches.push((&conditional.alternate, pinned));
+                        branches.push((&conditional.consequent, pinned));
+                    }
+                    Expression::TSAsExpression(assertion)
+                        if verter_type_expr_oxc::is_const_assertion_type(
+                            &assertion.type_annotation,
+                        ) =>
+                    {
+                        branches.push((&assertion.expression, true));
+                    }
+                    Expression::TSTypeAssertion(assertion)
+                        if verter_type_expr_oxc::is_const_assertion_type(
+                            &assertion.type_annotation,
+                        ) =>
+                    {
+                        branches.push((&assertion.expression, true));
+                    }
+                    Expression::TSAsExpression(assertion) => {
+                        regular.push(IndexedRegularLiteralSource::Pinned(lower_ts_type(
+                            &assertion.type_annotation,
+                            source,
+                        )))
+                    }
+                    Expression::TSTypeAssertion(assertion) => {
+                        regular.push(IndexedRegularLiteralSource::Pinned(lower_ts_type(
+                            &assertion.type_annotation,
+                            source,
+                        )))
+                    }
+                    Expression::ObjectExpression(_) | Expression::ArrayExpression(_) => {
+                        if pinned {
+                            regular.push(IndexedRegularLiteralSource::PinnedComposite);
+                        } else {
+                            // A composite outside a const context is a fresh
+                            // contributor: its nested positions decide their
+                            // own literals.
+                            mixed = true;
+                        }
+                        composites.push((branch, pinned));
+                    }
+                    Expression::Identifier(identifier) if identifier.name == "undefined" => {}
+                    Expression::NullLiteral(_)
+                    | Expression::FunctionExpression(_)
+                    | Expression::ArrowFunctionExpression(_) => {}
+                    Expression::Identifier(identifier) => {
+                        regular.push(IndexedRegularLiteralSource::Read(ValueRef {
+                            path: vec![identifier.name.to_string()],
+                            type_args: Vec::new(),
+                        }));
+                    }
+                    Expression::StaticMemberExpression(_) => match indexed_read_path(branch) {
+                        Some(path) => regular.push(IndexedRegularLiteralSource::Read(ValueRef {
+                            path,
+                            type_args: Vec::new(),
+                        })),
+                        None => mixed = true,
+                    },
+                    branch => match scalar_literal_type(branch) {
+                        Some(literal) if pinned => {
+                            regular.push(IndexedRegularLiteralSource::Pinned(literal));
+                        }
+                        Some(literal) => {
+                            if let TypeExpr::Literal(literal) = &literal {
+                                fresh.push(literal.clone());
+                            }
+                            mixed = true;
+                        }
+                        None => mixed = true,
+                    },
+                }
             }
-        }
-        // A composite outside a const context is a fresh contributor: its
-        // nested positions decide their own literals.
-        mixed |= composites.iter().any(|(_, pinned)| !pinned);
-        if !regular.is_empty() && !path.is_empty() {
-            positions.push(verter_type_expr::IndexedLiteralPosition {
-                path: Arc::from(path.as_slice()),
+            written.push(verter_type_expr::IndexedLiteralArm {
                 regular: Arc::from(regular.into_boxed_slice()),
                 mixed,
+                fresh: Arc::from(fresh.into_boxed_slice()),
             });
         }
-        let [(composite, pinned)] = composites.as_slice() else {
-            continue;
-        };
-        let nested = |step: IndexedLiteralStep, expr| {
+        if !path.is_empty() && written.iter().any(|arm| !arm.regular.is_empty()) {
+            positions.push(verter_type_expr::IndexedLiteralPosition {
+                path: Arc::from(path.as_slice()),
+                arms: Arc::from(written.into_boxed_slice()),
+            });
+        }
+        // The positions the composites nest, each written by every
+        // composite that holds it, in source order.
+        let mut nested: Vec<(IndexedLiteralStep, Vec<Arm<'_>>)> = Vec::new();
+        let mut nested_at: rustc_hash::FxHashMap<IndexedLiteralStep, usize> =
+            rustc_hash::FxHashMap::default();
+        for (composite, pinned) in composites {
+            let mut held: Vec<(IndexedLiteralStep, &Expression<'_>)> = Vec::new();
+            let mut held_at: rustc_hash::FxHashMap<IndexedLiteralStep, usize> =
+                rustc_hash::FxHashMap::default();
+            match composite {
+                Expression::ObjectExpression(object) => {
+                    for property in &object.properties {
+                        let ObjectPropertyKind::ObjectProperty(property) = property else {
+                            continue;
+                        };
+                        if property.method || !matches!(property.kind, PropertyKind::Init) {
+                            continue;
+                        }
+                        let Some(key) = lower_property_key(&property.key, source).cloned_known()
+                        else {
+                            continue;
+                        };
+                        let step = IndexedLiteralStep::Member(key);
+                        // A later member of the same key is the one the
+                        // object holds.
+                        match held_at.get(&step) {
+                            Some(&at) => held[at].1 = &property.value,
+                            None => {
+                                held_at.insert(step.clone(), held.len());
+                                held.push((step, &property.value));
+                            }
+                        }
+                    }
+                }
+                // A spread or an elision makes the literal no tuple: its
+                // elements, and those of each array literal a spread
+                // spreads, are the arms of its one element type.
+                Expression::ArrayExpression(array)
+                    if array.elements.iter().any(|element| {
+                        matches!(
+                            element,
+                            oxc_ast::ast::ArrayExpressionElement::SpreadElement(_)
+                                | oxc_ast::ast::ArrayExpressionElement::Elision(_)
+                        )
+                    }) =>
+                {
+                    let mut spread = vec![array];
+                    while let Some(array) = spread.pop() {
+                        for element in &array.elements {
+                            let element = match element {
+                                oxc_ast::ast::ArrayExpressionElement::SpreadElement(element) => {
+                                    if let Expression::ArrayExpression(source) =
+                                        element.argument.without_parentheses()
+                                    {
+                                        spread.push(source);
+                                        continue;
+                                    }
+                                    &element.argument
+                                }
+                                element => match element.as_expression() {
+                                    Some(element) => element,
+                                    None => continue,
+                                },
+                            };
+                            held.push((IndexedLiteralStep::Elements, element));
+                        }
+                    }
+                }
+                Expression::ArrayExpression(array) => {
+                    for (index, element) in array.elements.iter().enumerate() {
+                        if let (Some(element), Ok(index)) =
+                            (element.as_expression(), u32::try_from(index))
+                        {
+                            held.push((IndexedLiteralStep::Element(index), element));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            for (step, expr) in held {
+                match nested_at.get(&step) {
+                    Some(&at) => nested[at].1.push((expr, pinned)),
+                    None => {
+                        nested_at.insert(step.clone(), nested.len());
+                        nested.push((step, vec![(expr, pinned)]));
+                    }
+                }
+            }
+        }
+        for (step, arms) in nested.into_iter().rev() {
             let mut path = path.clone();
             path.push(step);
-            Pending {
-                expr,
-                path,
-                pinned: *pinned,
-            }
-        };
-        match composite {
-            Expression::ObjectExpression(object) => {
-                for property in object.properties.iter().rev() {
-                    let ObjectPropertyKind::ObjectProperty(property) = property else {
-                        continue;
-                    };
-                    if property.method || !matches!(property.kind, PropertyKind::Init) {
-                        continue;
-                    }
-                    let Some(key) = lower_property_key(&property.key, source).cloned_known() else {
-                        continue;
-                    };
-                    pending.push(nested(IndexedLiteralStep::Member(key), &property.value));
-                }
-            }
-            Expression::ArrayExpression(array) => {
-                // A spread or an elision leaves no element at its own index.
-                if array.elements.iter().any(|element| {
-                    matches!(
-                        element,
-                        oxc_ast::ast::ArrayExpressionElement::SpreadElement(_)
-                            | oxc_ast::ast::ArrayExpressionElement::Elision(_)
-                    )
-                }) {
-                    continue;
-                }
-                for (index, element) in array.elements.iter().enumerate().rev() {
-                    if let (Some(element), Ok(index)) =
-                        (element.as_expression(), u32::try_from(index))
-                    {
-                        pending.push(nested(IndexedLiteralStep::Element(index), element));
-                    }
-                }
-            }
-            _ => {}
+            pending.push(Pending { path, arms });
         }
     }
     (!positions.is_empty()).then(|| {

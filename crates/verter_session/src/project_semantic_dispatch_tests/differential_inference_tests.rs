@@ -2104,6 +2104,21 @@ export function n34() { return pa([sl, "b"]); }
 export function n35() { return pu({ v: c ? <const>"a" : "a" }); }
 export function n36() { return pu({ v: <const>["a"] }); }
 export function n37() { return id({ v: <const>"a", w: "b" }); }
+declare const c2: boolean;
+export function n38() { return pu(c ? { v: "a" as "a" } : { v: "a" as "a" }); }
+export function n39() { return pu(c ? { v: "a" as "a" } : { v: "b" }); }
+export function n40() { return pu(c ? { v: "a" as "a" } : { v: "a" }); }
+export function n41() { return pu(c ? { v: sl } : { w: 1, v: "b" as "b" }); }
+export function n42() { return pa(c ? ["a" as "a"] : ["b" as "b"]); }
+export function n43() { return pu(c ? { v: { w: "a" as "a" } } : { v: { w: "b" as "b" } }); }
+export function n44() { return pu(c ? { v: s } : { v: sl }); }
+export function n45() { return pu(c ? (c2 ? { v: "a" as "a" } : { v: sl }) : { v: "b" as "b" }); }
+export function n46() { return id({ v: "a" as "a", w: "a" }); }
+export function n47() { return id({ v: sl, w: "a" }); }
+export function n48() { return id({ v: sl, w: s }); }
+export function n49() { return id({ v: "a" as "a", v2: s, 0: sl }); }
+export function n50() { return pa(["a" as "a", ...([] as [])]); }
+export function n51() { return pa([, "a" as "a"]); }
 "##;
 
 /// A literal's freshness belongs to its authored occurrence: a fresh
@@ -2292,7 +2307,7 @@ fn authored_literal_occurrences() {
 /// and a stored arm of different literals widens (`c ? "a" : sb`).
 #[test]
 fn nested_regular_literals_keep_their_type() {
-    let failures = Matrix::new(AUTHORED_LITERAL_OCCURRENCES).four(&[
+    let mut failures = Matrix::new(AUTHORED_LITERAL_OCCURRENCES).four(&[
         (
             Read::Return(r#"n1"#),
             r#""a""#,
@@ -2392,6 +2407,36 @@ fn nested_regular_literals_keep_their_type() {
             r#"{ v: "a"; w: string; }"#,
         ),
     ]);
+    // Each object or array arm of a conditional argument is its own
+    // expression: its asserted or stored literals stay regular, and an
+    // equal literal another arm writes fresh widens.
+    failures.extend(Matrix::new(AUTHORED_LITERAL_OCCURRENCES).same(&[
+        (Read::Return(r#"n38"#), r#""a""#),
+        (Read::Return(r#"n39"#), r#"string"#),
+        (Read::Return(r#"n40"#), r#"string"#),
+        (Read::Return(r#"n41"#), r#""a" | "b""#),
+        (Read::Return(r#"n42"#), r#""a" | "b""#),
+        (Read::Return(r#"n43"#), r#"{ w: "a"; } | { w: "b"; }"#),
+        (Read::Return(r#"n44"#), r#"string"#),
+        (Read::Return(r#"n45"#), r#""a" | "b""#),
+    ]));
+    // A regular literal at one member is no reason to keep an equal fresh
+    // literal at a sibling member, and an array literal's elements before
+    // a spread, or past an elision, are still addressed by their index.
+    failures.extend(Matrix::new(AUTHORED_LITERAL_OCCURRENCES).same(&[
+        (Read::Return(r#"n46"#), r#"{ v: "a"; w: string; }"#),
+        (Read::Return(r#"n47"#), r#"{ v: "a"; w: string; }"#),
+        (Read::Return(r#"n48"#), r#"{ v: "a"; w: string; }"#),
+        (Read::Return(r#"n49"#), r#"{ v: "a"; v2: string; 0: "a"; }"#),
+        (Read::Return(r#"n50"#), r#""a""#),
+    ]));
+    failures.extend(Matrix::new(AUTHORED_LITERAL_OCCURRENCES).four(&[(
+        Read::Return(r#"n51"#),
+        r#""a" | undefined"#,
+        r#""a""#,
+        r#""a" | undefined"#,
+        r#""a""#,
+    )]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -2430,6 +2475,23 @@ let d27 = c ? (c2 ? "a" : "b") : "c";
 let d28 = { v: c ? (c2 ? "a" : sl) : "b" };
 let d29 = [s, "x" as "x"];
 let d30 = { v: s, w: { u: c ? s : sl } };
+declare const o: { w: number };
+const so = { v: "a" as "a" };
+let d31 = c ? { v: s } : { v: 1 };
+let d32 = { ...o, v: s };
+let d33 = c ? { v: s } : { v: sl };
+let d34 = c ? [s] : [1];
+let d35 = { a: { ...o, v: s } };
+let d36 = { ...o, v: c ? "a" : sl };
+let d37 = { ...so, v: s };
+let d38 = { v: s, ...o };
+declare const ov: { v: "a" };
+let d39 = { v: s, ...ov };
+let d40 = c ? { v: s, k: 1 } : { v: sl, k: "z" };
+let d41 = c ? { v: sl, k: 1 } : { v: s, k: "z" };
+let d42 = { ...{ v: s } };
+let d43 = { ...{ v: sl } };
+let d44 = [...[s]];
 "##;
 
 /// A declaration's initializer keeps each literal's freshness per authored
@@ -2478,7 +2540,9 @@ fn declared_literal_occurrences() {
 /// member, an element or a mutable declaration of it widens, and a
 /// conditional of a fresh literal and a stored read of the same literal is
 /// the regular one — through a nested conditional, beside an asserted
-/// element, and through a member read of the declaration.
+/// element, and through a member read of the declaration. A member read
+/// widens in each object or array arm of a conditional and beside a
+/// spread, while a later spread's own member of that key keeps its type.
 #[test]
 fn declared_reads_follow_their_binding_freshness() {
     let failures = Matrix::new(DECLARED_LITERAL_OCCURRENCES).same(&[
@@ -2497,6 +2561,32 @@ fn declared_reads_follow_their_binding_freshness() {
         ),
         (Read::Type("typeof d30.w"), r#"{ u: "a"; }"#),
         (Read::Type("typeof d30.v"), r#"string"#),
+        (
+            Read::Type("typeof d31"),
+            r#"{ v: string; } | { v: number; }"#,
+        ),
+        (Read::Type("typeof d32"), r#"{ w: number; v: string; }"#),
+        (Read::Type("typeof d33"), r#"{ v: string; }"#),
+        (Read::Type("typeof d34"), r#"string[] | number[]"#),
+        (
+            Read::Type("typeof d35"),
+            r#"{ a: { w: number; v: string; }; }"#,
+        ),
+        (Read::Type("typeof d36"), r#"{ w: number; v: "a"; }"#),
+        (Read::Type("typeof d37"), r#"{ v: string; }"#),
+        (Read::Type("typeof d38"), r#"{ w: number; v: string; }"#),
+        (Read::Type("typeof d39"), r#"{ v: "a"; }"#),
+        (
+            Read::Type("typeof d40"),
+            r#"{ v: string; k: number; } | { v: "a"; k: string; }"#,
+        ),
+        (
+            Read::Type("typeof d41"),
+            r#"{ v: "a"; k: number; } | { v: string; k: string; }"#,
+        ),
+        (Read::Type("typeof d42"), r#"{ v: string; }"#),
+        (Read::Type("typeof d43"), r#"{ v: "a"; }"#),
+        (Read::Type("typeof d44"), r#"string[]"#),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
@@ -2519,6 +2609,8 @@ let e8 = c ? ("b" as "b") : s;
 let e9 = { v: [s, sl] };
 let e10 = c ? { v: s } : null;
 let e11 = [c ? "a" : sl, "x" as "x"];
+let e12 = { ...{ v: s } };
+let e13 = { ...{ v: sl } };
 export function m1() { return pu({ v: e1 }); }
 export function m2() { return id(e2); }
 export function m3() { return pu({ v: e3 }); }
@@ -2532,6 +2624,8 @@ export function m10() { return id(e9); }
 export function m11() { return id(e10); }
 export function m12() { return id(e7.o.v); }
 export function m13() { return id(e11); }
+export function m14() { return pu(e12); }
+export function m15() { return pu(e13); }
 "##;
 
 /// A declaration's type, widened by the freshness of the bindings its
@@ -2554,6 +2648,8 @@ fn declared_reads_reach_their_stored_uses() {
         (Read::Return(r#"m10"#), r#"{ v: string[]; }"#),
         (Read::Return(r#"m12"#), r#"string"#),
         (Read::Return(r#"m13"#), r#"("a" | "x")[]"#),
+        (Read::Return(r#"m14"#), r#"string"#),
+        (Read::Return(r#"m15"#), r#""a""#),
     ]);
     failures.extend(Matrix::new(DECLARED_READ_USES).four(&[(
         Read::Return(r#"m11"#),

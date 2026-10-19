@@ -2431,8 +2431,9 @@ struct CallArgumentLiteralPolicy {
 /// A literal an authored position of a call argument keeps, with a type
 /// parameter the position's contextual type names — the only parameter
 /// whose deposits from that position keep it. A position holding an
-/// equal literal under a contextual type that is no literal context for
-/// it relates with that literal already widened, so its deposits never
+/// equal fresh literal under a contextual type that is no literal context
+/// for it, or under no contextual type beside a regular literal kept this
+/// way, relates with that literal already widened, so its deposits never
 /// read this record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ContextKeptLiteral {
