@@ -1139,30 +1139,29 @@ never a per-candidate canonical closure — and `invalidate_canonical` walks up
 from the canonical, each node once. Unregistering a candidate drops every
 evidence node and canonical only it reached, so the index drains to empty with
 its last candidate; edges naming a candidate are charged by that candidate's
-reservation, everything else by the index's own pin — every table and holder
-set by the capacity its allocation was made with, not its live `capacity()`
-(a removal's tombstone lowers `capacity()` without freeing a bucket), so the
-spare and tombstoned buckets a partial drain leaves stay charged until the
-table is rebuilt (at a quarter live) or freed, and a full drain releases
-exactly what was charged. There is no
+reservation, everything else by the index's own pin. Each charge follows the
+allocation it covers, under the declared heap-block convention
+(`retention::allocation::heap_block_bytes`): every table and holder set by the
+layout of its backing allocation (`hashbrown` `allocation_size`), which no
+removal — tombstoned or not — shrinks, from its allocation until it is rebuilt
+(at a quarter live) or freed; each candidate's extra-canonical list and each
+canonical's text by its own block. A full drain, a clear or a drop releases
+exactly what was charged. The allocator canaries
+(`allocator_canaries` `reverse_index_backing`) measure the blocks the index
+holds from the allocator's layouts and require the index's charge plus its
+owners' reservations to cover them at every stage, within the charge granule. There is no
 account-less index: `Default` charges the process-local account, and
 `ReceiptReverseIndex::charging_registrations` (the candidate store, whose
 candidates charge nothing) charges the candidates' share too. The index drives
 explicit-invalidation cleanup only, never validity; its one leaf lock is taken
-inside each store's existing consistency boundary. The family memo's index is
-registered when it is READ, not at publish: a publish leaves its candidate
-unindexed (`MemoEntry::reverse_indexed`) and notes its family and admission
-sequence in `PendingRegistrations`; every read of `canonical_to_entries` —
-`invalidate_canonical` and the diagnostic counts — first registers exactly
-those pending candidates under the same `entries` hold
-(`index_unregistered_candidates_locked`), so a read sees every resident
-candidate, its registration work follows the publishes since the previous read
-rather than the memo's size, and a candidate displaced or FIFO-evicted before
-any read is dropped with nothing to unlink. A pending list that reaches the
-resident family count is dropped for one walk of every resident family at the
-next read, so it never outgrows the memo it indexes. The work counter
-`test_reverse_index_registration_visits` guards that bound
-(`reverse_index_read_registers_only_candidates_published_since_the_last_read`). The
+inside each store's existing consistency boundary. Every store registers a
+candidate in the step that makes it visible — the family memo's publishes
+(ordinary, prefix backfill, SCC member) under the `entries` hold that installs
+it, the candidate store under the slot guard — and only then unregisters the
+candidates that step displaced, so evidence they share stays indexed across a
+replacement and a read of the index owes no registration work
+(`a_publish_registers_its_candidate_and_a_read_links_nothing`,
+`replacing_a_registration_keeps_its_shared_evidence`). The
 allocation canary `recursive_paths_allocations_per_entity_stay_flat` guards the
 per-entity allocation ceiling and its flat growth across layouts.
 

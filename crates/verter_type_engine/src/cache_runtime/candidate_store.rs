@@ -331,26 +331,28 @@ where
             let mut candidates = slot_ref.candidates.write();
             let new_candidate = Arc::new(candidate);
             let new_candidate_ref = Arc::clone(&new_candidate);
+            // The candidates this publish takes out of the slot. Their
+            // registrations are drained only after the newcomer's is in,
+            // so evidence it shares with them stays indexed.
+            let mut displaced: smallvec::SmallVec<[StoredCandidate<V>; 2]> =
+                smallvec::SmallVec::new();
             if let Some(pos) = candidates
                 .iter()
                 .position(|c| c.discriminant == new_candidate.discriminant)
             {
-                // Same-view re-publish: drop the prior candidate's
-                // reverse-index + ledger registrations, then re-append the
-                // replacement as the newest so FIFO order reflects the
-                // latest write. Occupancy is unchanged.
-                let displaced = candidates.remove(pos);
-                self.drain_candidate_registrations(&key, &displaced);
+                // Same-view re-publish: the prior candidate leaves and the
+                // replacement is re-appended as the newest so FIFO order
+                // reflects the latest write. Occupancy is unchanged.
+                displaced.push(candidates.remove(pos));
                 candidates.push(new_candidate);
             } else {
                 fresh = true;
                 candidates.push(new_candidate);
                 while candidates.len() > self.per_slot_cap {
-                    // Oldest = front (admission order). Drain its
-                    // registrations and record it as a per-slot victim.
+                    // Oldest = front (admission order): a per-slot victim.
                     let victim = candidates.remove(0);
-                    self.drain_candidate_registrations(&key, &victim);
                     per_slot_evicted.push((key.clone(), victim.admission_seq));
+                    displaced.push(victim);
                 }
             }
 
@@ -386,6 +388,11 @@ where
             // with no facts still self-roots its keyed canonical, e.g. the
             // imported-registry keyed canonical).
             register_candidate(&self.canonical_index, &key, &new_candidate_ref);
+            // Then drain what it displaced: their reverse-index and ledger
+            // registrations, still under the slot guard.
+            for victim in &displaced {
+                self.drain_candidate_registrations(&key, victim);
+            }
 
             // Record the retention admission and capture FIFO victims for
             // deferred eviction — STILL under the slot guard, so the ledger

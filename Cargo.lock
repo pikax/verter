@@ -4181,6 +4181,7 @@ dependencies = [
  "arc-swap",
  "boxcar",
  "dashmap",
+ "hashbrown 0.17.1",
  "hotpath",
  "imbl",
  "indexmap",

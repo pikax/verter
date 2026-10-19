@@ -43,22 +43,22 @@
 //! (charged by its owner through [`ReceiptReverseIndex::candidate_bytes`]),
 //! an edge naming an evidence node is the index's own storage. Every
 //! allocation the index holds is charged to a retention account for as long
-//! as it is held: by the capacity its allocation was made with, not by live
-//! count, so a table or set that keeps spare or tombstoned buckets after a
-//! partial drain stays charged until it is rebuilt or freed. The candidates' own share is the only part an owner may
+//! as it is held, by the allocation itself under the declared heap-block
+//! convention ([`heap_block_bytes`]): a table or set by the layout its
+//! backing was allocated with — which a removal, tombstoned or not, never
+//! shrinks — from the moment it is allocated until it is rebuilt or freed;
+//! a candidate's extra-canonical list and each canonical's text by their
+//! own blocks. The candidates' own share is the only part an owner may
 //! charge instead ([`ReceiptReverseIndex::charged`]); an owner that charges
 //! nothing of its candidates leaves all of it to the index
 //! ([`ReceiptReverseIndex::charging_registrations`]). There is no
 //! account-less index: [`Default`] charges the process-local account.
 //!
-//! **Registration on read (family memo).** Publishing a family-memo
-//! candidate leaves it unindexed and notes its family and admission sequence
-//! in [`PendingRegistrations`]; the next read of the index registers exactly
-//! those candidates under the same `entries` lock hold as that read
-//! ([`SemanticGraphStore::index_unregistered_candidates_locked`](super::SemanticGraphStore)),
-//! so its work follows the publishes since the previous read, not the memo's
-//! size. A read therefore sees every resident candidate, and a candidate
-//! displaced or evicted before any read is dropped with nothing to unlink.
+//! **Registration at publication (family memo).** A family-memo candidate is
+//! registered by the publish that makes it visible, under the same `entries`
+//! lock hold, before the candidates it displaces are unregistered: evidence
+//! the newcomer shares with a displaced sibling stays indexed across the
+//! replacement, and no read of the index ever owes registration work.
 //!
 //! **Locking.** One leaf mutex guards the whole index; no other lock is
 //! taken while it is held, and evidence the index drops is released after
@@ -70,12 +70,19 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::{FxBuildHasher, FxHashSet};
 use smallvec::SmallVec;
 use verter_session_query::facts::fact_cache::{FactVersionRef, ResultReceipt};
-use verter_session_query::retention::allocation::arc_block_bytes;
+use verter_session_query::retention::allocation::{arc_block_bytes, heap_block_bytes};
 use verter_session_query::retention::granular::GranularPin;
 use verter_session_query::retention::SemanticRetentionAccount;
+
+/// The index's hash maps: they report the layout of their backing
+/// allocation, which the index's charge follows.
+type Map<K, V> = hashbrown::HashMap<K, V, FxBuildHasher>;
+
+/// The index's hash sets; see [`Map`].
+type Set<T> = hashbrown::HashSet<T, FxBuildHasher>;
 
 use super::family::{FamilyKey, FamilySlots, MemoEntry, ModeSlot};
 use crate::semantic_query::DepSignature;
@@ -158,18 +165,20 @@ struct EvidenceNode {
     owner: EvidenceOwner,
     /// The evidence nodes that consumed this one and the candidates it
     /// validates.
-    parents: Tracked<FxHashSet<Holder>>,
+    parents: Tracked<Set<Holder>>,
 }
 
 /// A hash table the index can resize and rebuild.
 trait Table: Default {
     fn len(&self) -> usize;
     fn capacity(&self) -> usize;
+    /// The size of the table's backing allocation, zero when it has none.
+    fn allocation_size(&self) -> usize;
     /// The same entries in a fresh allocation for at least `capacity`.
     fn rebuilt(self, capacity: usize) -> Self;
 }
 
-impl<T: Hash + Eq, V> Table for FxHashMap<T, V> {
+impl<T: Hash + Eq, V> Table for Map<T, V> {
     fn len(&self) -> usize {
         self.len()
     }
@@ -178,14 +187,18 @@ impl<T: Hash + Eq, V> Table for FxHashMap<T, V> {
         self.capacity()
     }
 
+    fn allocation_size(&self) -> usize {
+        self.allocation_size()
+    }
+
     fn rebuilt(self, capacity: usize) -> Self {
-        let mut table = FxHashMap::with_capacity_and_hasher(capacity, Default::default());
+        let mut table = Map::with_capacity_and_hasher(capacity, FxBuildHasher);
         table.extend(self);
         table
     }
 }
 
-impl<T: Hash + Eq> Table for FxHashSet<T> {
+impl<T: Hash + Eq> Table for Set<T> {
     fn len(&self) -> usize {
         self.len()
     }
@@ -194,21 +207,25 @@ impl<T: Hash + Eq> Table for FxHashSet<T> {
         self.capacity()
     }
 
+    fn allocation_size(&self) -> usize {
+        self.allocation_size()
+    }
+
     fn rebuilt(self, capacity: usize) -> Self {
-        let mut table = FxHashSet::with_capacity_and_hasher(capacity, Default::default());
+        let mut table = Set::with_capacity_and_hasher(capacity, FxBuildHasher);
         table.extend(self);
         table
     }
 }
 
-/// A hash table and the buckets its allocation holds.
+/// A hash table and the most entries its current allocation was sized for.
 ///
 /// A removal may leave a tombstone that lowers the table's `capacity()`
-/// without giving its bucket back, so `capacity()` understates the
-/// allocation once anything was removed. `slots` is the capacity the
-/// current allocation was made with — the most `capacity()` has answered
-/// since: a table only reallocates when it grows past it, or when
-/// [`Tracked::release_sparse`] rebuilds or frees it.
+/// without giving its bucket back. `slots` is the capacity the current
+/// allocation was made with — the most `capacity()` has answered since — so
+/// [`Tracked::release_sparse`] judges sparseness against the allocation,
+/// not against what tombstones leave of it. The charge never reads `slots`:
+/// it follows the allocation's own layout ([`Tracked::block_bytes`]).
 #[derive(Default)]
 struct Tracked<T> {
     table: T,
@@ -216,6 +233,12 @@ struct Tracked<T> {
 }
 
 impl<T: Table> Tracked<T> {
+    /// What the table's backing allocation costs under the declared
+    /// heap-block convention.
+    fn block_bytes(&self) -> usize {
+        heap_block_bytes(self.table.allocation_size())
+    }
+
     /// Take in the table's capacity after an insertion: a reallocation
     /// raises `slots` to it.
     fn note_inserted(&mut self) {
@@ -247,25 +270,24 @@ struct CandidateNode<K, P> {
     extras: Box<[Arc<str>]>,
 }
 
-/// Bytes one canonical's bucket holds, besides its text.
-const CANONICAL_BUCKET_BYTES: usize =
-    std::mem::size_of::<(Arc<str>, Tracked<FxHashSet<Holder>>)>() + 1;
-
-/// Bytes one evidence node's bucket holds.
-const EVIDENCE_BUCKET_BYTES: usize = std::mem::size_of::<(EvidenceAddr, EvidenceNode)>() + 1;
-
-/// Bytes one bucket of the candidate-id table holds.
+/// Bytes one bucket of the candidate-id table holds: its entry and its
+/// control byte, which a live entry occupies within the table's allocation.
 const fn id_bucket_bytes<K>() -> usize {
     std::mem::size_of::<(K, CandidateId)>() + 1
 }
 
-/// Bytes one bucket of the candidate table holds.
+/// Bytes one bucket of the candidate table holds; see [`id_bucket_bytes`].
 const fn candidate_bucket_bytes<K, P>() -> usize {
     std::mem::size_of::<(CandidateId, CandidateNode<K, P>)>() + 1
 }
 
 /// Bytes one edge's bucket holds in the set naming it.
 const EDGE_BYTES: usize = std::mem::size_of::<Holder>() + 1;
+
+/// Bytes a candidate's list of `extras` extra canonicals costs: one block.
+const fn extras_list_bytes(extras: usize) -> usize {
+    heap_block_bytes(extras * std::mem::size_of::<Arc<str>>())
+}
 
 /// Granule the index's own storage is charged in.
 const INDEX_STORAGE_GRANULE: usize = 4 * 1024;
@@ -308,13 +330,14 @@ struct IndexStorage {
     pin: Option<GranularPin>,
     /// Text blocks of the canonicals the index holds.
     text: usize,
-    /// Slots of every holder set — a canonical's holders, an evidence
-    /// node's parents — live, spare or tombstoned.
-    set_slots: usize,
-    /// Edges naming a candidate.
-    candidate_edges: usize,
-    /// Extra canonicals the candidates' lists name.
-    candidate_extras: usize,
+    /// Backing blocks of every holder set — a canonical's holders, an
+    /// evidence node's parents.
+    set_blocks: usize,
+    /// Blocks of the candidates' extra-canonical lists.
+    extras_blocks: usize,
+    /// The registrations the candidates' owners charge
+    /// ([`ReceiptReverseIndex::candidate_bytes`] per live candidate).
+    owner_share: usize,
 }
 
 impl IndexStorage {
@@ -324,18 +347,18 @@ impl IndexStorage {
             candidates_charged_by_owner,
             pin: None,
             text: 0,
-            set_slots: 0,
-            candidate_edges: 0,
-            candidate_extras: 0,
+            set_blocks: 0,
+            extras_blocks: 0,
+            owner_share: 0,
         }
     }
 }
 
 struct IndexState<K, P> {
-    canonicals: Tracked<FxHashMap<Arc<str>, Tracked<FxHashSet<Holder>>>>,
-    evidence: Tracked<FxHashMap<EvidenceAddr, EvidenceNode>>,
-    candidate_ids: Tracked<FxHashMap<K, CandidateId>>,
-    candidates: Tracked<FxHashMap<CandidateId, CandidateNode<K, P>>>,
+    canonicals: Tracked<Map<Arc<str>, Tracked<Set<Holder>>>>,
+    evidence: Tracked<Map<EvidenceAddr, EvidenceNode>>,
+    candidate_ids: Tracked<Map<K, CandidateId>>,
+    candidates: Tracked<Map<CandidateId, CandidateNode<K, P>>>,
     next_candidate: CandidateId,
     edges: usize,
     storage: IndexStorage,
@@ -357,24 +380,35 @@ impl<K, P> IndexState<K, P> {
             ops: ReverseIndexEdgeOps::default(),
         }
     }
+}
 
+impl<K: Eq + Hash, P> IndexState<K, P> {
     /// The bytes the index's charge covers: every table's and every holder
-    /// set's allocated slots, spare and tombstoned ones included, and the
+    /// set's backing block, the candidates' extra-canonical lists and the
     /// canonicals' text — less the share each candidate's owner charges
-    /// when it does.
+    /// when it does. That share is a candidate's own buckets, list and
+    /// edges, all inside blocks counted here, so it never exceeds them.
     fn storage_bytes(&self) -> usize {
-        let held = self.canonicals.slots * CANONICAL_BUCKET_BYTES
-            + self.evidence.slots * EVIDENCE_BUCKET_BYTES
-            + self.candidate_ids.slots * id_bucket_bytes::<K>()
-            + self.candidates.slots * candidate_bucket_bytes::<K, P>()
-            + self.storage.text
-            + self.storage.set_slots * EDGE_BYTES;
+        let held = self.canonicals.block_bytes()
+            + self.evidence.block_bytes()
+            + self.candidate_ids.block_bytes()
+            + self.candidates.block_bytes()
+            + self.storage.set_blocks
+            + self.storage.extras_blocks
+            + self.storage.text;
+        held.saturating_sub(self.storage.owner_share)
+    }
+
+    /// What candidate `node`'s owner charges of its registration, when the
+    /// owner charges it.
+    fn owner_share(&self, node: &CandidateNode<K, P>) -> usize {
         if self.storage.candidates_charged_by_owner {
-            held - (self.candidates.table.len()
-                * (id_bucket_bytes::<K>() + candidate_bucket_bytes::<K, P>())
-                + self.storage.candidate_edges * EDGE_BYTES)
+            ReceiptReverseIndex::<K, P>::candidate_bytes(
+                node.extras.len(),
+                usize::from(node.carrier.is_some()) + usize::from(node.fence.is_some()),
+            )
         } else {
-            held + self.storage.candidate_extras * std::mem::size_of::<Arc<str>>()
+            0
         }
     }
 
@@ -394,45 +428,35 @@ impl<K, P> IndexState<K, P> {
     }
 }
 
-/// Release a non-empty holder set's spare slots, keeping `set_slots` in
-/// step.
-fn release_holders(set_slots: &mut usize, set: &mut Tracked<FxHashSet<Holder>>) {
-    let before = set.slots;
+/// Release a non-empty holder set's spare buckets, keeping `set_blocks` in
+/// step with its backing block.
+fn release_holders(set_blocks: &mut usize, set: &mut Tracked<Set<Holder>>) {
+    let before = set.block_bytes();
     set.release_sparse();
-    *set_slots = *set_slots + set.slots - before;
+    *set_blocks = *set_blocks + set.block_bytes() - before;
 }
 
-/// Insert `holder` into `set`, keeping `set_slots` in step. Answers
-/// whether it was new.
-fn insert_holder(
-    set_slots: &mut usize,
-    set: &mut Tracked<FxHashSet<Holder>>,
-    holder: Holder,
-) -> bool {
-    let before = set.slots;
+/// Insert `holder` into `set`, keeping `set_blocks` in step with its backing
+/// block. Answers whether it was new.
+fn insert_holder(set_blocks: &mut usize, set: &mut Tracked<Set<Holder>>, holder: Holder) -> bool {
+    let before = set.block_bytes();
     let inserted = set.table.insert(holder);
     set.note_inserted();
-    *set_slots += set.slots - before;
+    *set_blocks = *set_blocks + set.block_bytes() - before;
     inserted
 }
 
 impl<K: Eq + Hash + Clone, P> IndexState<K, P> {
-    fn note_linked(&mut self, holder: Holder) {
+    fn note_linked(&mut self) {
         self.edges += 1;
-        if matches!(holder, Holder::Candidate(_)) {
-            self.storage.candidate_edges += 1;
-        }
         #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         {
             self.ops.linked += 1;
         }
     }
 
-    fn note_unlinked(&mut self, holder: Holder) {
+    fn note_unlinked(&mut self) {
         self.edges -= 1;
-        if matches!(holder, Holder::Candidate(_)) {
-            self.storage.candidate_edges -= 1;
-        }
         #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         {
             self.ops.unlinked += 1;
@@ -459,8 +483,8 @@ impl<K: Eq + Hash + Clone, P> IndexState<K, P> {
             .table
             .get_mut(canonical)
             .expect("present above");
-        if insert_holder(&mut self.storage.set_slots, set, holder) {
-            self.note_linked(holder);
+        if insert_holder(&mut self.storage.set_blocks, set, holder) {
+            self.note_linked();
         }
         key
     }
@@ -475,14 +499,14 @@ impl<K: Eq + Hash + Clone, P> IndexState<K, P> {
             return;
         }
         if set.table.is_empty() {
-            self.storage.set_slots -= set.slots;
+            self.storage.set_blocks -= set.block_bytes();
             self.canonicals.table.remove(canonical);
             self.storage.text -= arc_block_bytes(canonical.len());
             self.canonicals.release_sparse();
         } else {
-            release_holders(&mut self.storage.set_slots, set);
+            release_holders(&mut self.storage.set_blocks, set);
         }
-        self.note_unlinked(holder);
+        self.note_unlinked();
     }
 
     /// Link `owner` under `parent`, registering every evidence node it
@@ -497,8 +521,8 @@ impl<K: Eq + Hash + Clone, P> IndexState<K, P> {
         while let Some((owner, parent)) = pending.pop() {
             let addr = owner.addr();
             if let Some(node) = self.evidence.table.get_mut(&addr) {
-                if insert_holder(&mut self.storage.set_slots, &mut node.parents, parent) {
-                    self.note_linked(parent);
+                if insert_holder(&mut self.storage.set_blocks, &mut node.parents, parent) {
+                    self.note_linked();
                 }
                 continue;
             }
@@ -514,8 +538,8 @@ impl<K: Eq + Hash + Clone, P> IndexState<K, P> {
                 }
             });
             let mut parents = Tracked::default();
-            insert_holder(&mut self.storage.set_slots, &mut parents, parent);
-            self.note_linked(parent);
+            insert_holder(&mut self.storage.set_blocks, &mut parents, parent);
+            self.note_linked();
             self.evidence
                 .table
                 .insert(addr, EvidenceNode { owner, parents });
@@ -542,13 +566,13 @@ impl<K: Eq + Hash + Clone, P> IndexState<K, P> {
                 continue;
             }
             if !node.parents.table.is_empty() {
-                release_holders(&mut self.storage.set_slots, &mut node.parents);
-                self.note_unlinked(parent);
+                release_holders(&mut self.storage.set_blocks, &mut node.parents);
+                self.note_unlinked();
                 continue;
             }
-            self.note_unlinked(parent);
+            self.note_unlinked();
             let node = self.evidence.table.remove(&addr).expect("present above");
-            self.storage.set_slots -= node.parents.slots;
+            self.storage.set_blocks -= node.parents.block_bytes();
             let holder = Holder::Evidence(addr);
             node.owner.for_each_read(|read| match read {
                 EvidenceRead::Receipt(child) => {
@@ -567,13 +591,19 @@ impl<K: Eq + Hash + Clone, P> IndexState<K, P> {
 
     fn unregister(&mut self, key: &K, released: &mut Vec<EvidenceOwner>) -> Option<P> {
         let id = self.candidate_ids.table.remove(key)?;
+        Some(self.unregister_id(id, released))
+    }
+
+    /// Unregister the candidate numbered `id`, whose key no longer names it.
+    fn unregister_id(&mut self, id: CandidateId, released: &mut Vec<EvidenceOwner>) -> P {
         let node = self
             .candidates
             .table
             .remove(&id)
             .expect("every id names a node");
         let holder = Holder::Candidate(id);
-        self.storage.candidate_extras -= node.extras.len();
+        self.storage.owner_share -= self.owner_share(&node);
+        self.storage.extras_blocks -= extras_list_bytes(node.extras.len());
         for canonical in node.extras.iter() {
             self.unlink_canonical(canonical, holder);
         }
@@ -582,7 +612,7 @@ impl<K: Eq + Hash + Clone, P> IndexState<K, P> {
         }
         self.candidates.release_sparse();
         self.candidate_ids.release_sparse();
-        Some(node.payload)
+        node.payload
     }
 }
 
@@ -613,6 +643,18 @@ impl<K, P> ReceiptReverseIndex<K, P> {
     pub fn charging_registrations(account: &Arc<SemanticRetentionAccount>) -> Self {
         Self::with_storage(IndexStorage::new(Arc::clone(account), false))
     }
+
+    /// The bytes a candidate's own registration keeps: its two table
+    /// buckets and node, its extra-canonical list, and the edges naming it
+    /// (one per extra canonical, one from each of its `evidence` nodes —
+    /// its carrier and its fence). Its payload's heap is the caller's to
+    /// add.
+    pub fn candidate_bytes(extras: usize, evidence: usize) -> usize {
+        id_bucket_bytes::<K>()
+            + candidate_bucket_bytes::<K, P>()
+            + extras_list_bytes(extras)
+            + (extras + evidence) * EDGE_BYTES
+    }
 }
 
 impl<K, P> Default for ReceiptReverseIndex<K, P> {
@@ -623,21 +665,11 @@ impl<K, P> Default for ReceiptReverseIndex<K, P> {
 }
 
 impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
-    /// The bytes a candidate's own registration keeps: its two table
-    /// buckets and node, its extra-canonical list, and the edges naming it
-    /// (one per extra canonical, one from each of its `evidence` nodes —
-    /// its carrier and its fence). Its payload's heap is the caller's to
-    /// add.
-    pub fn candidate_bytes(extras: usize, evidence: usize) -> usize {
-        id_bucket_bytes::<K>()
-            + candidate_bucket_bytes::<K, P>()
-            + extras * std::mem::size_of::<Arc<str>>()
-            + (extras + evidence) * EDGE_BYTES
-    }
-
     /// Register candidate `key` with `payload`: its carrier evidence, every
     /// receipt that evidence reaches that is not indexed yet, and its extra
-    /// canonicals. A key already registered is replaced. A candidate whose
+    /// canonicals. A key already registered is replaced: the newcomer is
+    /// linked first, so evidence it shares with the replaced registration
+    /// stays indexed. A candidate whose
     /// carrier holds no fact and that names no extra canonical is not
     /// registered; one whose facts name no canonical still is — no walk
     /// reaches it, and it drains with its candidate.
@@ -666,36 +698,35 @@ impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
         let mut released = Vec::new();
         {
             let mut state = self.state.lock();
-            state.unregister(&key, &mut released);
-            if carrier.is_empty() && fence.is_empty() && extras.is_empty() {
-                state.settle();
-                drop(state);
-                drop(released);
-                return;
-            }
-            let id = state.next_candidate;
-            state.next_candidate += 1;
-            let holder = Holder::Candidate(id);
-            let extras: Box<[Arc<str>]> = extras
-                .iter()
-                .map(|canonical| state.link_canonical(canonical, holder))
-                .collect();
-            state.storage.candidate_extras += extras.len();
-            let carrier = state.link_evidence(EvidenceOwner::Carrier(Arc::clone(carrier)), holder);
-            let fence = state.link_evidence(EvidenceOwner::Fence(fence.clone()), holder);
-            state.candidate_ids.table.insert(key.clone(), id);
-            state.candidate_ids.note_inserted();
-            state.candidates.table.insert(
-                id,
-                CandidateNode {
+            let replaced = state.candidate_ids.table.remove(&key);
+            if !(carrier.is_empty() && fence.is_empty() && extras.is_empty()) {
+                let id = state.next_candidate;
+                state.next_candidate += 1;
+                let holder = Holder::Candidate(id);
+                let extras: Box<[Arc<str>]> = extras
+                    .iter()
+                    .map(|canonical| state.link_canonical(canonical, holder))
+                    .collect();
+                let carrier =
+                    state.link_evidence(EvidenceOwner::Carrier(Arc::clone(carrier)), holder);
+                let fence = state.link_evidence(EvidenceOwner::Fence(fence.clone()), holder);
+                state.candidate_ids.table.insert(key.clone(), id);
+                state.candidate_ids.note_inserted();
+                let node = CandidateNode {
                     key,
                     payload,
                     carrier,
                     fence,
                     extras,
-                },
-            );
-            state.candidates.note_inserted();
+                };
+                state.storage.extras_blocks += extras_list_bytes(node.extras.len());
+                state.storage.owner_share += state.owner_share(&node);
+                state.candidates.table.insert(id, node);
+                state.candidates.note_inserted();
+            }
+            if let Some(replaced) = replaced {
+                state.unregister_id(replaced, &mut released);
+            }
             state.settle();
         }
         drop(released);
@@ -789,9 +820,9 @@ impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
             state.candidates = Tracked::default();
             state.edges = 0;
             state.storage.text = 0;
-            state.storage.set_slots = 0;
-            state.storage.candidate_edges = 0;
-            state.storage.candidate_extras = 0;
+            state.storage.set_blocks = 0;
+            state.storage.extras_blocks = 0;
+            state.storage.owner_share = 0;
             state.settle();
             released
         };
@@ -886,114 +917,6 @@ pub(super) fn direct_edge_count(
         + usize::from(!dispatch_dep_signature.is_empty())
 }
 
-/// The family-memo candidates published since the reverse index was last
-/// read, so the read registers exactly those instead of walking every
-/// resident family. Locked only while the family memo's `entries` lock is
-/// held (`entries → pending`), so it never contends.
-///
-/// The list is charged, pinned, while it waits: its backing by capacity and
-/// the boxes each entry's family-key clone copies (the clone shares the
-/// key's `Arc`s and owned names, which keep their own charges). The read
-/// that takes the list gives the charge back.
-pub(super) struct PendingRegistrations {
-    /// Each publish's family and admission sequence, in publish order. An
-    /// entry whose candidate was displaced or evicted before the read
-    /// finds nothing to register.
-    published: Vec<(FamilyKey, u64)>,
-    /// The list grew to the memo's resident family count (repeat publishes
-    /// into resident families, or candidates evicted unread) and was
-    /// dropped: the next read registers every unindexed resident candidate
-    /// in one walk. The list therefore never outgrows the memo it indexes,
-    /// and the walk costs no more per publish than the list it replaces.
-    overflowed: bool,
-    /// The heap the waiting family-key clones copied.
-    key_heap: usize,
-    account: Arc<SemanticRetentionAccount>,
-    pin: Option<GranularPin>,
-}
-
-/// What a reverse-index read registers.
-pub(super) enum PendingWork {
-    /// Nothing was published since the previous read.
-    None,
-    /// These publishes' candidates.
-    Published(Vec<(FamilyKey, u64)>),
-    /// Every unindexed resident candidate.
-    All,
-}
-
-impl PendingRegistrations {
-    /// An empty list whose storage is charged to `account`.
-    pub(super) fn charged(account: &Arc<SemanticRetentionAccount>) -> Self {
-        Self {
-            published: Vec::new(),
-            overflowed: false,
-            key_heap: 0,
-            account: Arc::clone(account),
-            pin: None,
-        }
-    }
-
-    /// Note one published candidate; `resident_families` is the memo's
-    /// family count after the publish.
-    pub(super) fn note(
-        &mut self,
-        family: &FamilyKey,
-        admission_seq: u64,
-        resident_families: usize,
-    ) {
-        if self.overflowed {
-            return;
-        }
-        if self.published.len() >= resident_families {
-            self.published = Vec::new();
-            self.overflowed = true;
-            self.key_heap = 0;
-            self.settle();
-            return;
-        }
-        self.published.push((family.clone(), admission_seq));
-        self.key_heap += super::family_footprint::family_key_clone_heap_bytes(family).bytes;
-        self.settle();
-    }
-
-    /// Bytes the pending list is charged.
-    pub(super) fn storage_charge_bytes(&self) -> usize {
-        self.pin.as_ref().map_or(0, GranularPin::charged)
-    }
-
-    /// Settle the charge with the list's backing and its keys' heap.
-    fn settle(&mut self) {
-        let bytes =
-            verter_session_query::retention::allocation::vec_bytes(&self.published) + self.key_heap;
-        let account = &self.account;
-        let pin = self
-            .pin
-            .get_or_insert_with(|| GranularPin::new(account, INDEX_STORAGE_GRANULE));
-        let used = pin.used();
-        if bytes > used {
-            pin.add(bytes - used);
-        } else if used > bytes {
-            pin.sub(used - bytes);
-        }
-    }
-
-    /// Take the registration work a read owes, leaving none pending.
-    pub(super) fn take(&mut self) -> PendingWork {
-        let published = std::mem::take(&mut self.published);
-        let overflowed = std::mem::take(&mut self.overflowed);
-        self.key_heap = 0;
-        self.settle();
-        if overflowed {
-            PendingWork::All
-        } else if published.is_empty() {
-            PendingWork::None
-        } else {
-            PendingWork::Published(published)
-        }
-    }
-}
-
 /// What one family-memo candidate's registration keeps, by the evidence
 /// edges naming it ([`direct_edge_count`]): its node, its edges, and
 /// the one `Arc<FamilyKey>` clone it names its family by — its block and the
@@ -1019,38 +942,34 @@ pub(super) fn registration_footprint(
     }
 }
 
-/// Register `entry`, the candidate it was admitted as, for `slot`: the first
-/// of its slots registers its carrier and its dispatch fence, each later
-/// one joins that registration. A candidate with no direct edge
-/// registers nothing. Caller holds the `entries` lock.
-pub(super) fn register_candidate(
+/// Register the candidate `admission_seq` that a publish just made visible
+/// in the `populated` slots of `family`: its carrier and its dispatch fence,
+/// once for all of its slots. A candidate with no direct edge registers
+/// nothing. Called under the `entries` lock by the publish itself, before
+/// it unregisters the candidates it displaced, so evidence the newcomer
+/// shares with them stays indexed.
+pub(super) fn register_published(
     canonical_to_entries: &CanonicalToEntries,
-    family: &Arc<FamilyKey>,
-    slot: ModeSlot,
-    entry: &MemoEntry,
+    family: &FamilyKey,
+    populated: &[ModeSlot],
+    admission_seq: u64,
+    read_set_signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
+    dispatch_dep_signature: &DepSignature,
 ) {
-    if canonical_to_entries.update(&entry.admission_seq, |registration| {
-        if !registration.slots.contains(&slot) {
-            registration.slots.push(slot);
-        }
-        true
-    }) {
-        return;
-    }
-    if entry.read_set_signature.facts.is_empty() && entry.dispatch_dep_signature.is_empty() {
+    if populated.is_empty() || direct_edge_count(read_set_signature, dispatch_dep_signature) == 0 {
         return;
     }
     // The index's lock acquisition, as request audit contention.
     #[cfg(feature = "semantic-observe")]
     crate::request_observers::record_family_map_lock_acquisition(std::time::Duration::ZERO);
     canonical_to_entries.register_fenced(
-        entry.admission_seq,
+        admission_seq,
         MemoRegistration {
-            family: Arc::clone(family),
-            slots: smallvec::smallvec![slot],
+            family: Arc::new(family.clone()),
+            slots: populated.iter().copied().collect(),
         },
-        &entry.read_set_signature.facts,
-        &entry.dispatch_dep_signature,
+        &read_set_signature.facts,
+        dispatch_dep_signature,
         [],
     );
 }
@@ -1063,9 +982,6 @@ pub(super) fn drain_candidate_reverse_index_registrations(
     slot: ModeSlot,
     entry: &MemoEntry,
 ) {
-    if !entry.reverse_indexed {
-        return;
-    }
     canonical_to_entries.update(&entry.admission_seq, |registration| {
         registration.slots.retain(|registered| *registered != slot);
         !registration.slots.is_empty()
@@ -1081,9 +997,6 @@ pub(super) fn drain_family_slots_registrations(
 ) -> bool {
     let mut pruned_any = false;
     for (slot, entry) in slots.iter_populated_slots_all() {
-        if !entry.reverse_indexed {
-            continue;
-        }
         pruned_any |= canonical_to_entries.update(&entry.admission_seq, |registration| {
             registration.slots.retain(|registered| *registered != slot);
             !registration.slots.is_empty()

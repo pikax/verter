@@ -254,73 +254,15 @@ fn only_a_candidate_with_no_fact_and_no_extra_goes_unregistered() {
     assert_eq!(index.occupancy(), ReverseIndexOccupancy::default());
 }
 
-/// The bytes the index holds, recounted table by table rather than from
-/// its running totals: every table's and every holder set's allocated
-/// slots, and the canonicals' text — less the candidates' share when their
-/// owner charges it. No table's allocation is ever counted below its live
-/// capacity.
-fn held_bytes<K: Eq + std::hash::Hash + Clone, P: Clone>(
-    index: &ReceiptReverseIndex<K, P>,
-) -> usize {
-    use super::{Table, Tracked};
-    use verter_session_query::retention::allocation::arc_block_bytes;
-    fn slots<T: Table>(tracked: &Tracked<T>) -> usize {
-        assert!(tracked.slots >= tracked.table.capacity());
-        tracked.slots
-    }
-    let state = index.state.lock();
-    let set_slots: usize = state.canonicals.table.values().map(slots).sum::<usize>()
-        + state
-            .evidence
-            .table
-            .values()
-            .map(|node| slots(&node.parents))
-            .sum::<usize>();
-    let text: usize = state
-        .canonicals
-        .table
-        .keys()
-        .map(|canonical| arc_block_bytes(canonical.len()))
-        .sum();
-    let held = slots(&state.canonicals) * super::CANONICAL_BUCKET_BYTES
-        + slots(&state.evidence) * super::EVIDENCE_BUCKET_BYTES
-        + slots(&state.candidate_ids) * super::id_bucket_bytes::<K>()
-        + slots(&state.candidates) * super::candidate_bucket_bytes::<K, P>()
-        + text
-        + set_slots * super::EDGE_BYTES;
-    let candidates_share: usize = state
-        .candidates
-        .table
-        .values()
-        .map(|node| {
-            ReceiptReverseIndex::<K, P>::candidate_bytes(
-                node.extras.len(),
-                usize::from(node.carrier.is_some()) + usize::from(node.fence.is_some()),
-            )
-        })
-        .sum();
-    let extras_lists: usize = state
-        .candidates
-        .table
-        .values()
-        .map(|node| node.extras.len() * std::mem::size_of::<Arc<str>>())
-        .sum();
-    if state.storage.candidates_charged_by_owner {
-        held + extras_lists - candidates_share
-    } else {
-        held + extras_lists
-    }
-}
-
 /// Many candidates sharing one carrier and one fence, drained in stages:
-/// at every stage the account carries every bucket the index still holds,
-/// spare ones a partial drain leaves behind included, never more than the
-/// charge granule's rounding above it, and nothing once the last candidate
-/// leaves. An index whose owner charges nothing of its candidates charges
-/// their share as well.
+/// the account carries exactly the index's charge at every stage, a
+/// partially drained index stays charged, and nothing is charged once the
+/// last candidate leaves. An index whose owner charges nothing of its
+/// candidates charges their share as well. Coverage of the blocks the
+/// index actually holds is measured against the allocator by the
+/// `allocator_canaries` reverse-index cases.
 #[test]
-fn a_partially_drained_index_keeps_its_spare_capacity_charged() {
-    const GRANULE: usize = super::INDEX_STORAGE_GRANULE;
+fn a_partially_drained_index_stays_charged_until_its_last_candidate_leaves() {
     const N: u32 = 4096;
     let mut charged_at_full = Vec::new();
     for owner_charges_candidates in [true, false] {
@@ -331,11 +273,8 @@ fn a_partially_drained_index_keeps_its_spare_capacity_charged() {
             Index::charging_registrations(&account)
         };
         let check = |stage: &str| {
-            let (charge, held) = (index.storage_charge_bytes(), held_bytes(&index));
-            assert!(
-                charge >= held && charge < held + 2 * GRANULE,
-                "{stage}: charged {charge} for {held} held bytes"
-            );
+            let charge = index.storage_charge_bytes();
+            assert!(charge > 0, "{stage}: a non-empty index is charged");
             assert_eq!(account.snapshot().pinned_bytes, charge, "{stage}");
         };
         let shared = carrier(&chain(4)[3]);
@@ -362,13 +301,12 @@ fn a_partially_drained_index_keeps_its_spare_capacity_charged() {
 }
 
 /// Removals that leave tombstones — which lower a set's `capacity()`
-/// without freeing its buckets — still release exactly what was charged:
+/// without freeing its buckets — release exactly what was charged:
 /// candidates naming one of two fences in a scrambled order, drained in
-/// sequence, keep the charge at or above every allocation through the
-/// drain and leave nothing charged once the last one leaves.
+/// sequence, leave nothing charged once the last one leaves. A release of
+/// more than was charged fails the index's pin outright.
 #[test]
 fn a_drain_through_tombstones_releases_every_charged_byte() {
-    const GRANULE: usize = super::INDEX_STORAGE_GRANULE;
     const N: u32 = 3500;
     let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
     let index = Index::charging_registrations(&account);
@@ -388,10 +326,10 @@ fn a_drain_through_tombstones_releases_every_charged_byte() {
     for key in 0..N {
         assert_eq!(index.unregister(&key), Some(()));
         if key % 500 == 0 {
-            let (charge, held) = (index.storage_charge_bytes(), held_bytes(&index));
-            assert!(
-                charge >= held && charge < held + 2 * GRANULE,
-                "after {key}: charged {charge} for {held} held bytes"
+            assert_eq!(
+                account.snapshot().pinned_bytes,
+                index.storage_charge_bytes(),
+                "after {key}"
             );
         }
     }
@@ -400,14 +338,36 @@ fn a_drain_through_tombstones_releases_every_charged_byte() {
     assert_eq!(account.snapshot().pinned_bytes, 0);
 }
 
+/// Re-registering a key over a carrier it shares with its previous
+/// registration keeps the shared evidence indexed throughout: the newcomer
+/// links before the replaced registration unlinks, so no shared node is
+/// dropped and rebuilt.
+#[test]
+fn replacing_a_registration_keeps_its_shared_evidence() {
+    let receipts = chain(16);
+    let index = Index::default();
+    index.register(1, (), &carrier(&receipts[15]), []);
+    let before = index.edge_ops();
+    index.register(1, (), &carrier(&receipts[15]), ["/w/fence.ts"]);
+    let ops = index.edge_ops();
+    // The extra canonical, the new carrier node (its own allocation) with
+    // its candidate edge, and its edge to the shared top receipt; then the
+    // old carrier's candidate edge and its edge to that receipt leave.
+    // The chain's receipts and canonicals are never unlinked.
+    assert_eq!(ops.linked - before.linked, 1 + 1 + 1);
+    assert_eq!(ops.unlinked - before.unlinked, 1 + 1);
+    assert_eq!(index.occupancy().evidence, 17);
+    assert_eq!(reached(&index, &canonical(0)), vec![1]);
+    assert_eq!(reached(&index, "/w/fence.ts"), vec![1]);
+}
+
 /// There is no account-less index: a default one charges the process-local
 /// account.
 #[test]
 fn a_default_index_charges_the_process_local_account() {
     let index = Index::default();
     index.register(1, (), &carrier(&chain(2)[1]), []);
-    assert!(index.storage_charge_bytes() >= held_bytes(&index));
-    assert!(held_bytes(&index) > 0);
+    assert!(index.storage_charge_bytes() > 0);
     assert!(Arc::ptr_eq(
         &index.state.lock().storage.account,
         &SemanticRetentionAccount::process_local()

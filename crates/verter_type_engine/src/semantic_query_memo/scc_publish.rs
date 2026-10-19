@@ -606,7 +606,6 @@ impl SemanticGraphStore {
             retention: None,
             validated_at_generation,
             admission_seq: 0,
-            reverse_indexed: false,
             cost_receipt: Arc::clone(cost_receipt),
         })
     }
@@ -800,6 +799,8 @@ impl SemanticGraphStore {
             return NewlyKeyedFamily(false);
         };
         let admission_seq = entry.admission_seq;
+        let read_set_signature = entry.read_set_signature.clone();
+        let dispatch_dep_signature = entry.dispatch_dep_signature.clone();
         let outcome = slots.publish(
             ModeSlot::Single,
             entry,
@@ -808,17 +809,23 @@ impl SemanticGraphStore {
             eviction,
         );
         let populated_slots = outcome.populated;
+        // The member is registered under the batch's `entries` hold, before
+        // the candidates it displaced are unregistered; see
+        // `warm_publish_one`.
+        reverse_index::register_published(
+            &self.canonical_to_entries,
+            family,
+            &populated_slots,
+            admission_seq,
+            &read_set_signature,
+            &dispatch_dep_signature,
+        );
         for (displaced_slot, displaced_entry) in &outcome.displaced {
             reverse_index::drain_candidate_reverse_index_registrations(
                 &self.canonical_to_entries,
                 *displaced_slot,
                 displaced_entry,
             );
-        }
-        // The member enters the reverse index when the index is next read,
-        // under the `entries` lock this publish holds.
-        if !populated_slots.is_empty() {
-            self.defer_reverse_index_registration(family, admission_seq, entries.len());
         }
         NewlyKeyedFamily(family_was_new && !populated_slots.is_empty())
     }
