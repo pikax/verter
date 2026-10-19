@@ -639,6 +639,22 @@ impl Subscription<'_> {
         } else {
             None
         };
+        // A rendezvous learns of this registered subscriber while the flight
+        // state is held: the producer's completion needs the same lock, so a
+        // flight that already completed is never counted as a subscriber's
+        // registration event — the registration happens-before the
+        // completion whenever both occur. The registration is held until
+        // the wait returns, so the rendezvous's live-participant oracle
+        // never counts a completed subscriber either.
+        #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+        let mut subscriber_registration = if wait_edge.is_some() {
+            match store.armed_flight_rendezvous(prepared.key()) {
+                Some(rendezvous) => rendezvous.note_subscriber(prepared.key(), &inflight),
+                None => super::inflight::SubscriberRegistration::inactive(),
+            }
+        } else {
+            super::inflight::SubscriberRegistration::inactive()
+        };
         // Cooperative wait on the flight's condvar until it completes, is
         // aborted by a canonical-invalidation sweep, or this request is
         // cancelled. Subscribers never busy-spin.
@@ -658,6 +674,12 @@ impl Subscription<'_> {
                 .wait_for(&mut state, std::time::Duration::from_millis(2));
         }
         drop(wait_edge);
+        // The wait returned: retire the subscriber's registration before any
+        // further engine work on this request, with the flight unlocked —
+        // retirement only removes the token, so it needs no ordering against
+        // the flight's completion.
+        #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+        parking_lot::MutexGuard::unlocked(&mut state, || subscriber_registration.retire());
         store
             .stats
             .waits_ms
@@ -1037,6 +1059,24 @@ impl<'s> ProducerLease<'s> {
         crate::project_semantic_dispatch::cost_receipt::CostIdentity::of_producer(
             self.prepared.as_task_producer(),
         )
+    }
+
+    /// The cold-build boundary of an armed [`super::FlightRendezvous`]: a
+    /// joinable producer of its key parks here, its flight claimed and its
+    /// raw computation not begun, until the rendezvous releases it or the
+    /// producer's own request is cancelled. Called with no memo or flight
+    /// lock held.
+    #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+    pub(crate) fn hold_for_flight_rendezvous(
+        &self,
+        flags: &crate::resolver_core::resolver_context::RequestFlags,
+    ) {
+        if self.independent {
+            return;
+        }
+        if let Some(rendezvous) = self.store.armed_flight_rendezvous(self.prepared.key()) {
+            rendezvous.hold_producer(self.prepared.key(), &self.inflight, flags);
+        }
     }
 
     /// A receipt recording no cost for this producer's computation: a
