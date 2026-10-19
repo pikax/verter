@@ -2123,6 +2123,8 @@ export function n52(p: "a") { return pu({ v: p }); }
 export function n53(s: "a") { return pu({ v: s }); }
 export function n54(p: "a") { return id({ v: p, w: "b" }); }
 export function n55(o: { v: "a" }) { return pu({ v: o.v }); }
+export function n56() { return kc({ v: [sl, "b"] }); }
+export function n57(p: number) { return kc({ v: [p, "b"] }); }
 "##;
 
 /// A literal's freshness belongs to its authored occurrence: a fresh
@@ -2451,6 +2453,13 @@ fn nested_regular_literals_keep_their_type() {
         (Read::Return(r#"n53"#), r#""a""#),
         (Read::Return(r#"n54"#), r#"{ v: "a"; w: string; }"#),
         (Read::Return(r#"n55"#), r#""a""#),
+    ]));
+    // A fresh literal beside a regular read keeps its type in a const
+    // context: the array literal's contextual type is a `const` type
+    // parameter, whatever the parameters the argument reaches.
+    failures.extend(Matrix::new(AUTHORED_LITERAL_OCCURRENCES).same(&[
+        (Read::Return(r#"n56"#), r#"readonly ["a", "b"]"#),
+        (Read::Return(r#"n57"#), r#"readonly [number, "b"]"#),
     ]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
