@@ -42,8 +42,9 @@ fn overload_applicability_lowers_each_overload_statement_a_bounded_number_of_tim
         );
         let warm = host.provenance().snapshot().decl_statements_lowered - before_warm;
         assert!(
-            warm <= cold,
-            "warm lowering must reuse the cold result: {warm} > {cold}"
+            warm <= 16,
+            "warm lowering must reuse the cold result, not re-lower the \
+             group: {warm} statements at size={size} (cold {cold})"
         );
 
         let edited = source.replace("x: number): \"n\"", "x: number): \"edited\"");
