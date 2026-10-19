@@ -134,11 +134,11 @@ pub(crate) fn shallow_to_expansion(
         // operation budget stopped it. The context is the checker's
         // formatted diagnostic naming the check's two types, where the
         // caller can print them.
-        ShallowDiagnostic::RelationTooComplex { source, target } => ExpansionDiagnostic {
+        ShallowDiagnostic::RelationTooComplex { .. } => ExpansionDiagnostic {
             reason: ExpansionStopReason::BudgetExceeded,
             context: checker_message
                 .map(str::to_owned)
-                .unwrap_or_else(|| format!("relation-too-complex@{source:?}->{target:?}")),
+                .unwrap_or_else(|| "relation-too-complex".to_owned()),
             property_name: None,
         },
     }

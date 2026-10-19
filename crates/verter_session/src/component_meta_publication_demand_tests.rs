@@ -1790,3 +1790,40 @@ fn a_macro_payload_relation_refusal_reports_the_checkers_message() {
         ]
     );
 }
+
+/// A refused relation whose operands print past the string length the
+/// checker clips at still publishes a formatted checker message, never a
+/// placeholder built from arena ids.
+#[test]
+fn a_macro_payload_relation_refusal_over_wide_operands_publishes_no_placeholder() {
+    use verter_type_engine::semantic_query::checker_policy::with_relation_comparisons_for_tests;
+    let members: String = (0..40).map(|i| format!("property{i}: string; ")).collect();
+    let sfc = format!(
+        r#"<script setup lang="ts">
+type Keep<T, U> = T extends U ? T : never;
+defineProps<Keep<{{ {members}}}, {{ a: string }}>>();
+</script>
+<template><div /></template>
+"#
+    );
+    let host = build_host(&[("/workspace/src/Refused.vue", sfc.as_str())]);
+    let resolved = with_relation_comparisons_for_tests(0, || {
+        host.get_component_meta_with_resolution("/workspace/src/Refused.vue")
+    });
+    let (meta, _) = resolved.expect("the component resolves");
+    let contexts: Vec<&str> = meta
+        .macro_expansion_diagnostics
+        .iter()
+        .flat_map(|d| d.diagnostics.iter().map(|diag| diag.context.as_str()))
+        .collect();
+    assert!(!contexts.is_empty(), "the refusal is reported");
+    for context in contexts {
+        assert!(!context.contains('@'), "no arena-id placeholder: {context}");
+        assert!(
+            context
+                .starts_with("TS2859: Excessive complexity comparing types '{ property0: string;"),
+            "{context}"
+        );
+        assert!(context.contains("..."), "the operand is clipped: {context}");
+    }
+}

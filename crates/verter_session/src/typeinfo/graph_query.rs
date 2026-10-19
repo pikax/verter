@@ -332,7 +332,7 @@ fn push_checker_diagnostic(
                 strings.push(text.to_owned());
                 strings.len() - 1
             });
-        u32::try_from(id).unwrap_or(0)
+        u32::try_from(id).expect("a graph's string table indexes by u32 on the wire")
     };
     let message_name_id = intern(&message);
     let span_canonical_name_id = intern(&canonical);

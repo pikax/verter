@@ -1148,8 +1148,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     "TS{}: {}",
                     code.code(),
                     code.format(&[
-                        self.print_diagnostic_type(*source)?,
-                        self.print_diagnostic_type(*target)?,
+                        self.print_diagnostic_type_clipped(*source),
+                        self.print_diagnostic_type_clipped(*target),
                     ])
                 ))
             }
@@ -1225,6 +1225,24 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         Some((canonical, span))
     }
 
+    /// One type as a message prints it, never withheld: past the string
+    /// length `typeToString` itself clips at (twice the truncation length)
+    /// the text is cut to that length with a trailing `...`. The node
+    /// builder's own abbreviation of a wide union or object (`... N more
+    /// ...`) runs on a running length count this printer does not model,
+    /// so a type between the two lengths prints whole. For a message with
+    /// no occurrence to withhold (a refused relation's two types).
+    fn print_diagnostic_type_clipped(&self, node: SemanticNodeId) -> String {
+        let printed = self.print_diagnostic_type_text(node);
+        let clip = DIAGNOSTIC_TYPE_TRUNCATION_LENGTH * 2;
+        if printed.chars().count() >= clip {
+            let kept: String = printed.chars().take(clip - 3).collect();
+            format!("{kept}...")
+        } else {
+            printed
+        }
+    }
+
     /// One type as a diagnostic message prints it. `None` past the
     /// checker's truncation length: `typeToString` abbreviates such a type
     /// by a running length count this printer does not model, so no text
@@ -1234,7 +1252,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         &self,
         node: SemanticNodeId,
     ) -> Option<String> {
-        let printed = crate::semantic_query::display::display_type_node(
+        let printed = self.print_diagnostic_type_text(node);
+        (printed.chars().count() <= DIAGNOSTIC_TYPE_TRUNCATION_LENGTH).then_some(printed)
+    }
+
+    fn print_diagnostic_type_text(&self, node: SemanticNodeId) -> String {
+        crate::semantic_query::display::display_type_node(
             self.graph(),
             node,
             crate::semantic_query::DisplayNeeds::single(
@@ -1248,8 +1271,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 self.relation_strict_config().strict_null_checks,
             ),
         )
-        .0;
-        (printed.chars().count() <= DIAGNOSTIC_TYPE_TRUNCATION_LENGTH).then_some(printed)
+        .0
     }
 
     /// The properties `target` requires that `source` lacks, named as the
@@ -1326,9 +1348,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 .is_some_and(|constraint| self.could_hold_top_level_singleton(constraint, depth)),
             SemanticNodeData::Literal(_)
             | SemanticNodeData::EnumLiteral(_)
-            | SemanticNodeData::Primitive(PrimitiveKind::Null | PrimitiveKind::Undefined)
             | SemanticNodeData::TemplateLiteral { .. }
             | SemanticNodeData::IntrinsicApplication { .. } => true,
+            // Under `strictNullChecks: false` the checker never builds the
+            // `null` and `undefined` types, so neither holds a literal.
+            SemanticNodeData::Primitive(PrimitiveKind::Null | PrimitiveKind::Undefined) => {
+                self.relation_strict_config().strict_null_checks
+            }
             _ => false,
         }
     }

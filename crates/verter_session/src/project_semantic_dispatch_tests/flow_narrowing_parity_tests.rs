@@ -1302,6 +1302,8 @@ export function null_number() { return one(nl); }
 export function boolean_undefined() { return one(bu2); }
 export function boolean_symbol() { return bsf(bs); }
 export function mixed_literals() { return big(mix); }
+declare function nlp(x: number | undefined): void;
+export function nullable_target() { return nlp("a"); }
 "#;
 
 /// An optional target property or parameter reports against its declared
