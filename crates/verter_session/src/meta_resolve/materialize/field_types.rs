@@ -193,21 +193,19 @@ pub(crate) fn package_backed_object_like_root_identity_with_fence(
             target.owner,
             target.symbol_name.as_ref(),
         )
-        .and_then(|locator| {
-            let dispatch = query_engine.dispatch;
-            dispatch
-                .raise_authored_locator_to_hot(
-                    &locator,
-                    verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                        verter_type_engine::semantic_query::ProjectionMode::Navigate,
-                    ),
+        .is_some_and(|locator| {
+            // The raised carrier owns the body while its surface is read.
+            let raised = query_engine.dispatch.owning().raise_authored_locator_to_hot(
+                &locator,
+                verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                    verter_type_engine::semantic_query::ProjectionMode::Navigate,
+                ),
+            );
+            raised.value().clone().at_optional_boundary().is_some_and(|hot| {
+                crate::resolver_core::component_meta_query_engine::component_meta_registry_node_has_explicit_object_surface(dispatch,
+                    hot.node(),
                 )
-                .at_optional_boundary()
-        })
-        .is_some_and(|hot| {
-            crate::resolver_core::component_meta_query_engine::component_meta_registry_node_has_explicit_object_surface(dispatch,
-                hot.node(),
-            )
+            })
         });
     if refused {
         return (verdict, None);

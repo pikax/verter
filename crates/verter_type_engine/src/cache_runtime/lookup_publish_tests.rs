@@ -324,6 +324,13 @@ fn candidate_for(
         self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
         admission_seq: 0,
         validated_at_generation: 0,
+        // These publication-order fixtures charge nothing of their own.
+        retention: Arc::new(
+            verter_session_query::retention::SemanticRetentionAccount::new(
+                verter_session_query::retention::RetentionLimits::defaults(),
+            )
+            .pin(0),
+        ),
     }
 }
 

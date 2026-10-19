@@ -163,7 +163,7 @@ fn imported_registry_seed_refresh_does_not_engage_skip_under_graph_only_authorit
         text: Some("export interface Props { label?: string }".to_string()),
     };
     let object = verter_type_expr::facts::SemanticTypeSource::Synthesized(
-        verter_type_expr::facts::ResolvedLocalShape::Object(Arc::from(vec![
+        verter_type_expr::facts::ResolvedLocalShape::Object(From::from(vec![
             verter_type_expr::facts::SynthesizedMemberFact {
                 name: "label".to_string(),
                 optional: true,
@@ -212,7 +212,7 @@ fn imported_registry_seed_refresh_keeps_symbolic_imported_surfaces_refreshable()
                     },
                     path: verter_type_expr::OwnedSlice::default(),
                 },
-                index_path: Arc::from(vec!["variants".to_string()]),
+                index_path: From::from(vec!["variants".to_string()]),
             },
         ),
     );
@@ -5302,7 +5302,10 @@ defineProps<Props>()
         "repeated DB-backed resolutions should preserve tracked dependencies"
     );
     assert!(
-        result1.canonical_dependencies.contains("/src/types.ts"),
+        result1
+            .canonical_dependencies
+            .iter()
+            .any(|dependency| dependency == "/src/types.ts"),
         "registry resolution should track the defining file as a dependency"
     );
     assert_eq!(
@@ -6551,6 +6554,7 @@ defineProps<Props<T>>()
     let _ = session.evaluate_types("/Generic.vue").unwrap().unwrap();
 
     let dispatch = ProjectSemanticDispatch::new(host);
+    let _builder = dispatch.enter_construction_scope();
 
     // Construct the macro's parent shell `Props<T>` as a TypeExpr —
     // this is the *macro field's parent*, not the field itself. Step
@@ -6665,6 +6669,7 @@ defineProps<Wrapper<Inner>>()
     let _ = session.evaluate_types("/Owner.vue").unwrap().unwrap();
     let host = project.host();
     let dispatch = ProjectSemanticDispatch::new(host);
+    let _builder = dispatch.enter_construction_scope();
 
     let wrapper_inner = TypeExpr::Ref {
         name: StdArc::from("Wrapper"),
@@ -6949,6 +6954,7 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
 
     let host = project.host();
     let dispatch = ProjectSemanticDispatch::new(host);
+    let _builder = dispatch.enter_construction_scope();
 
     // The macro shell: `PricingPlansSlots<{ id: string; tier: 'pro' }>`.
     let plan_arg = TypeExpr::Object(StdArc::new(verter_type_expr::ObjectExpr {
@@ -7161,6 +7167,7 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
 
     let host = project.host();
     let dispatch = ProjectSemanticDispatch::new(host);
+    let _builder = dispatch.enter_construction_scope();
 
     let plan_arg = TypeExpr::Object(StdArc::new(verter_type_expr::ObjectExpr {
         properties: vec![
@@ -7505,7 +7512,7 @@ defineEmits<Emits>()
         assert_eq!(tuple.elements[0].label.as_deref(), Some("payload"));
         assert_eq!(
             tuple.elements[0].ty,
-            FactOrLocator::LeafUnion(std::sync::Arc::from(
+            FactOrLocator::LeafUnion(From::from(
                 vec![
                     LeafTypeFact::Primitive(verter_type_expr::PrimitiveName::String),
                     LeafTypeFact::Primitive(verter_type_expr::PrimitiveName::Number),
@@ -8030,9 +8037,15 @@ defineEmits<ConditionalEmits>()
     );
 
     let mut carrier_visited = rustc_hash::FxHashSet::default();
-    let conditional_root =
-        resolve_emit_payload_to_conditional_root(&dispatch, payload_node, 0, &mut carrier_visited)
-            .expect("the named emit alias carrier must reach its conditional root");
+    let builder = dispatch.enter_construction_scope();
+    let conditional_root = resolve_emit_payload_to_conditional_root(
+        &dispatch,
+        &builder,
+        payload_node,
+        0,
+        &mut carrier_visited,
+    )
+    .expect("the named emit alias carrier must reach its conditional root");
     assert!(matches!(
         verter_type_engine::project_semantic_dispatch::node_data_for(
             host.project_type_store().semantic_graph(),
@@ -8281,6 +8294,7 @@ fn emit_branch_merge_with_open_program_branch_keeps_the_conditional_carrier() {
 
     let host = VerterHost::new_standalone(crate::HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(
         verter_type_engine::semantic_query::PrimitiveKind::String,
@@ -8507,9 +8521,15 @@ defineEmits<EmitChain0>()
     );
 
     let mut carrier_visited = rustc_hash::FxHashSet::default();
-    let conditional_root =
-        resolve_emit_payload_to_conditional_root(&dispatch, payload_node, 0, &mut carrier_visited)
-            .expect("the >8-hop named emit alias carrier must reach its conditional root");
+    let builder = dispatch.enter_construction_scope();
+    let conditional_root = resolve_emit_payload_to_conditional_root(
+        &dispatch,
+        &builder,
+        payload_node,
+        0,
+        &mut carrier_visited,
+    )
+    .expect("the >8-hop named emit alias carrier must reach its conditional root");
     assert!(matches!(
         verter_type_engine::project_semantic_dispatch::node_data_for(
             host.project_type_store().semantic_graph(),
@@ -8605,6 +8625,7 @@ fn dispatch_mutual_alias_cycle_emits_terminates_by_identity() {
 
     let scope = "/src/cyclic.ts";
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let builder = dispatch.enter_construction_scope();
 
     // Navigate-lower the cyclic alias head to its DeclRef carrier — the
     // shape the macro projector hands the carrier walk. Navigate produces
@@ -8635,7 +8656,13 @@ fn dispatch_mutual_alias_cycle_emits_terminates_by_identity() {
     // Drive the carrier walk DIRECTLY so the termination mechanism is
     // observable. A mutual alias cycle has no Conditional root → `None`.
     let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
-    let result = resolve_emit_payload_to_conditional_root(&dispatch, payload_node, 0, &mut visited);
+    let result = resolve_emit_payload_to_conditional_root(
+        &dispatch,
+        &builder,
+        payload_node,
+        0,
+        &mut visited,
+    );
 
     assert!(
         result.is_none(),
@@ -8702,6 +8729,7 @@ export type C = { back: A }
         // One dispatcher lowers and detects: it owns the lowered node.
         let fixture_dispatch_16 =
             verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+        let _builder = fixture_dispatch_16.enter_construction_scope();
         let node = fixture_dispatch_16
             .lower_type_expr_in_scope_with_mode(
                 "/cycle.ts",

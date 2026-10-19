@@ -565,12 +565,11 @@ fn hm_slot_names(
 }
 
 fn assert_exact_value_reference_arg(
-    args: &Arc<[verter_type_expr::facts::AuthoredReferenceArgLocator]>,
+    args: &[verter_type_expr::facts::AuthoredReferenceArgLocator],
     canonical: &str,
     symbol: &str,
 ) {
-    let [verter_type_expr::facts::AuthoredReferenceArgLocator::Value(locator)] = args.as_ref()
-    else {
+    let [verter_type_expr::facts::AuthoredReferenceArgLocator::Value(locator)] = args else {
         panic!("expected one exact value-annotation argument locator for {symbol}");
     };
     assert_eq!(locator.anchor.canonical_id.as_ref(), canonical);
@@ -725,13 +724,15 @@ fn persisted_raw_template(
     host: &VerterHost,
     canonical: &str,
 ) -> Option<(
-    Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
+    verter_session_query::retention::heap_size::OwnedValue<
+        verter_session_query::analysis::template::TemplateAnalysisSnapshot,
+    >,
     verter_session_query::facts::fact_cache::ReadSetSignature,
 )> {
     host.derived_raw_cache().get(canonical).and_then(|derived| {
         derived.raw_template_analysis().map(|entry| {
             (
-                Arc::clone(&entry.template),
+                entry.template.clone(),
                 entry.template_class_signature.clone(),
             )
         })

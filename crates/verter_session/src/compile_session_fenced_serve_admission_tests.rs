@@ -184,7 +184,7 @@ fn fenced_serve_inside_the_compile_flight_declines_the_session_publish() {
             .get(OWNER)
             .and_then(|cc| {
                 cc.raw_template_analysis()
-                    .map(|entry| Arc::clone(&entry.template))
+                    .map(|entry| entry.template.clone())
             })
             .is_none(),
         "the declined Session publish must not persist raw_template_analysis \
@@ -209,7 +209,7 @@ fn fenced_serve_inside_the_compile_flight_declines_the_session_publish() {
             .get(OWNER)
             .and_then(|cc| {
                 cc.raw_template_analysis()
-                    .map(|entry| Arc::clone(&entry.template))
+                    .map(|entry| entry.template.clone())
             })
             .is_some(),
         "the quiescent recompile's cacheable admission persists \

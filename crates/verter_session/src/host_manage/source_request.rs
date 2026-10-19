@@ -7,7 +7,6 @@ use crate::resolver_core::route_db::{
     emit_export_route_resolved_event, RouteDb, RouteFlightOutcome,
 };
 use crate::resolver_core::{RouteNameKey, RouteResult, SingleflightRole, SingleflightRunResult};
-use std::sync::Arc;
 use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_session_query::facts::store_view::StoreView;
 use verter_type_engine::resolver_core::ResolverContext;
@@ -28,7 +27,7 @@ impl<'a> ImportedRootRequestDriver<'a> {
         resolve: F,
     ) -> Option<(
         crate::resolver_core::CachedValue<ImportedRootResult>,
-        Arc<[FactVersionRef]>,
+        crate::resolver_core::OwnedFactSignature,
     )>
     where
         V: StoreView + ?Sized,
@@ -62,7 +61,7 @@ impl<'a> ImportedRootRequestDriver<'a> {
         resolve: F,
     ) -> Option<(
         crate::resolver_core::CachedValue<ImportedRootResult>,
-        Arc<[FactVersionRef]>,
+        crate::resolver_core::OwnedFactSignature,
     )>
     where
         V: StoreView + ?Sized,
@@ -82,7 +81,7 @@ impl<'a> ImportedRootRequestDriver<'a> {
         let run_result = self.resolve_root_singleflight_inner(key, view, probe, resolve)?;
         Some((
             run_result.value.root.clone(),
-            Arc::clone(&run_result.value.facts),
+            run_result.value.facts.clone(),
         ))
     }
 
@@ -160,6 +159,10 @@ impl<'a> ImportedRootRequestDriver<'a> {
                     //
                     // The route surface is still returned to the caller either
                     // way; only the persist is refused.
+                    //
+                    // An unadmitted value is still delivered, so it is charged
+                    // to the callers keeping it; the signature the caller
+                    // receives is its own list, charged to it the same way.
                     let admitted = !facts.is_empty() && !probe.non_cacheable();
                     if admitted {
                         self.db.roots.insert_value_with_kind(
@@ -168,10 +171,12 @@ impl<'a> ImportedRootRequestDriver<'a> {
                             facts.clone(),
                             "imported_root_db.roots",
                         );
+                    } else {
+                        self.db.roots.charge_to_caller(&arc);
                     }
                     Ok(ImportedRootFlightOutcome {
                         root: arc,
-                        facts: Arc::from(facts),
+                        facts: self.db.roots.deliver_signature(facts),
                         admitted,
                     })
                 }
@@ -475,6 +480,9 @@ impl<'a> RouteRequestDriver<'a> {
                     //
                     // The route surface is still returned to the caller either
                     // way; only the persist is refused.
+                    //
+                    // An unadmitted route is still delivered, so it is charged
+                    // to the callers keeping it.
                     let admitted = !facts.is_empty() && !probe.non_cacheable();
                     if admitted {
                         self.db.routes.insert_value_with_kind(
@@ -483,6 +491,8 @@ impl<'a> RouteRequestDriver<'a> {
                             facts,
                             "route_db.routes",
                         );
+                    } else {
+                        self.db.routes.charge_to_caller(&arc);
                     }
                     // R23 typed event: cold-path route admission.
                     // Fires once per `(provider, exported_name)`

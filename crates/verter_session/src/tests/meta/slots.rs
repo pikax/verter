@@ -561,6 +561,7 @@ defineSlots<OpenMappedSlots<T>>()
     // Object and not an Opaque miss.
     let dispatch =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(project.host());
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(project.host().project_type_store().semantic_graph());
     let t_param = graph.intern_node(
         verter_type_engine::semantic_query::SemanticNodeData::TypeParam {
@@ -2940,7 +2941,7 @@ fn output_memo_hash_work_is_one_traversal_per_lane_slot() {
         })
         .collect();
     let large = verter_type_expr::facts::SemanticTypeSource::Synthesized(
-        ResolvedLocalShape::Object(Arc::from(members)),
+        ResolvedLocalShape::Object(From::from(members)),
     );
     let distinct = closed_ref_source("DistinctAlias");
 

@@ -356,11 +356,16 @@ fn hash_entries(ctx: &mut DiscoveryCtx<'_, '_>) {
 /// group. Computed callees, member calls, and unresolved names are never
 /// direct calls.
 fn resolve_direct_calls(entries: &mut [FunctionProgramDiscovery]) {
-    let candidates: Vec<(Arc<str>, FunctionPartIdentity, u32, FunctionProgramKey)> = entries
+    let candidates: Vec<(
+        verter_type_expr::OwnedStr,
+        FunctionPartIdentity,
+        u32,
+        FunctionProgramKey,
+    )> = entries
         .iter()
         .map(|entry| {
             (
-                Arc::clone(&entry.key.declaration.name),
+                entry.key.declaration.name.clone(),
                 entry.key.part.clone(),
                 entry.key.overload_ordinal,
                 entry.key.clone(),
@@ -481,7 +486,7 @@ fn resolve_captures(entries: &mut [FunctionProgramDiscovery]) {
             };
             let slot = runtime_slots[frame][slot as usize];
             FunctionReferenceBinding::Resolved(FlowBindingIdentity {
-                name: Arc::clone(&frame_bindings[frame][slot as usize].name),
+                name: verter_type_expr::OwnedStr::from(&frame_bindings[frame][slot as usize].name),
                 kind: frame_bindings[frame][slot as usize].kind,
                 defining_function: frame_keys[frame].clone(),
                 binding_slot: slot,
@@ -1115,11 +1120,16 @@ fn for_each_call_expression_root<'a>(
 /// its overload group. Computed callees, member calls, and unresolved
 /// names carry no target.
 fn resolve_call_site_targets(entries: &mut [FunctionProgramDiscovery]) {
-    let candidates: Vec<(Arc<str>, FunctionPartIdentity, u32, FunctionProgramKey)> = entries
+    let candidates: Vec<(
+        verter_type_expr::OwnedStr,
+        FunctionPartIdentity,
+        u32,
+        FunctionProgramKey,
+    )> = entries
         .iter()
         .map(|entry| {
             (
-                Arc::clone(&entry.key.declaration.name),
+                entry.key.declaration.name.clone(),
                 entry.key.part.clone(),
                 entry.key.overload_ordinal,
                 entry.key.clone(),
@@ -1239,7 +1249,7 @@ fn link_callback_return_sources(
                 anchor: AuthoredAnchor {
                     canonical_id: verter_type_expr::OwnedStr::from(canonical_id),
                     owner: entry.key.declaration.owner,
-                    symbol: verter_type_expr::OwnedStr::from(entry.key.declaration.name.clone()),
+                    symbol: entry.key.declaration.name.clone(),
                     space: LocatorSymbolSpace::Value,
                 },
                 function_part: entry.key.part.clone(),
@@ -1963,7 +1973,7 @@ fn discover_top_level_callable<'ast>(
     let key = FunctionProgramKey {
         declaration: FunctionDeclarationRef {
             owner: contributor.owner,
-            name: Arc::from(declaration_name),
+            name: declaration_name.into(),
             space: SymbolSpace::Value,
         },
         part: FunctionPartIdentity::Other { ordinal },
@@ -2301,7 +2311,7 @@ fn discover_function_inner<'ast>(
     let key = FunctionProgramKey {
         declaration: FunctionDeclarationRef {
             owner: anchor.owner,
-            name: Arc::from(name),
+            name: name.into(),
             space: SymbolSpace::Value,
         },
         part,
@@ -2338,7 +2348,7 @@ fn discover_arrow_inner<'ast>(
     let key = FunctionProgramKey {
         declaration: FunctionDeclarationRef {
             owner: anchor.owner,
-            name: Arc::from(name),
+            name: name.into(),
             space: SymbolSpace::Value,
         },
         part,
@@ -2378,7 +2388,7 @@ fn discover_initializer_inner<'ast>(
     let key = FunctionProgramKey {
         declaration: FunctionDeclarationRef {
             owner: anchor.owner,
-            name: Arc::from(name),
+            name: name.into(),
             space: SymbolSpace::Value,
         },
         part,

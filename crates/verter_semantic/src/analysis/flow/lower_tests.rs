@@ -67,7 +67,7 @@ fn lower_slice_plan_lowers_only_selected_nodes() {
     let FlowObjectEntry::Property { key, value } = &entries[0] else {
         panic!("b lowers as a property entry");
     };
-    assert_eq!(key, &FlowObjectKey::Named(Arc::from("b")));
+    assert_eq!(key, &FlowObjectKey::Named(From::from("b")));
     assert_eq!(ir.expr(*value).role, FlowExprRole::Value);
 
     // Slots: `b` (with its literal def) — never `a`.
@@ -98,7 +98,7 @@ fn lower_slice_plan_lowers_only_selected_nodes() {
     assert!(ir.returns.sites[0].argument.is_some());
     assert_eq!(
         ir.demanded_path.as_ref(),
-        &[FlowPathSegment::Named(Arc::from("b"))]
+        &[FlowPathSegment::Named(From::from("b"))]
     );
 }
 

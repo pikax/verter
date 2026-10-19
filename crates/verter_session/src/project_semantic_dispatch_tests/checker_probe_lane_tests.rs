@@ -279,6 +279,7 @@ pub(super) fn with_probe_outcome_on_host<R>(
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     // A read of a global the ambient library declares is scoped by the
     // probe module's project, as the member access in its body would be.
     let _demand_scope = project.ambient_lib.map(|_| {
@@ -670,6 +671,7 @@ pub(super) fn mismatches_in_one_host_observing(
             let host_ctx =
                 crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
             let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+            let _builder = dispatch.enter_construction_scope();
             let node = dispatch
                 .normalize_node_keeping_declaration_refs_for_tests(
                     result.return_type(),

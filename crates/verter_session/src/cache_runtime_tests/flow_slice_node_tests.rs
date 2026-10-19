@@ -117,7 +117,7 @@ impl FlowBodySkeletonSource for FixtureSkeletonSource {
             &parsed.program,
             source,
             &owners,
-            Arc::clone(&key.canonical_id),
+            Arc::<str>::from(&key.canonical_id),
         );
         let indexed = index
             .get(&key.function)
@@ -176,11 +176,11 @@ fn function_key(
     let (_, parse_key) = verter_language::default_parse_identity_for(source, &file_language)
         .expect("a script fixture derives a real parse identity");
     FlowSliceFunctionKey {
-        canonical_id: Arc::from(canonical),
+        canonical_id: canonical.into(),
         function: FunctionProgramKey {
             declaration: FunctionDeclarationRef {
                 owner: TopLevelOwnerId::ordinary_file(),
-                name: Arc::from(name),
+                name: name.into(),
                 space: SymbolSpace::Value,
             },
             part: FunctionPartIdentity::DeclarationBody,
@@ -347,7 +347,7 @@ fn skeleton_source_verifies_parse_key_and_language() {
         );
     let env = host.host_view_env_hashes_for(canonical);
     let key = FlowSliceFunctionKey {
-        canonical_id: Arc::from(canonical),
+        canonical_id: canonical.into(),
         function: entry.key().clone(),
         flow_body_stable_hash: entry.flow_body_stable_hash(),
         flow_body_exact_hash: entry
@@ -388,7 +388,7 @@ fn skeleton_source_verifies_parse_key_and_language() {
     }
     let repeated = stores.bound_graph_for(&key).expect("warm graph is bound");
     assert!(
-        Arc::ptr_eq(bindings, repeated.bundle().bindings()),
+        std::ptr::eq(*bindings, repeated.bundle().bindings()),
         "all demands share the map built from the pinned retained index"
     );
     assert_eq!(stores.graphs().build_count(), 1);
@@ -469,7 +469,7 @@ fn skeleton_source_verifies_parse_env_and_toolchain() {
             serve.indexed.parse_env_hash,
         );
     let key = FlowSliceFunctionKey {
-        canonical_id: Arc::from(canonical),
+        canonical_id: canonical.into(),
         function: entry.key().clone(),
         flow_body_stable_hash: entry.flow_body_stable_hash(),
         flow_body_exact_hash: entry
@@ -763,7 +763,9 @@ fn flow_slice_stores_peek_skeleton_for_mirrors_the_graph_store_peek() {
     let peeked = stores
         .peek_skeleton_for(&key)
         .expect("peek_skeleton_for must see the warm entry");
-    assert!(Arc::ptr_eq(&peeked, &built));
+    assert!(verter_session_query::flow::bundle::SkeletonRef::ptr_eq(
+        &peeked, &built
+    ));
     assert_eq!(source.build_calls(), 1);
 }
 
@@ -907,7 +909,7 @@ pub(crate) fn two_demands_one_function_flow_graph_build() {
         .graphs
         .bound_graph(&function)
         .expect("second demand reuses");
-    assert!(Arc::ptr_eq(
+    assert!(std::ptr::eq(
         first.bundle().bindings(),
         second.bundle().bindings()
     ));
@@ -1182,7 +1184,7 @@ fn mytype_member_slice_via_production_store_materializes_no_sibling_and_no_mytyp
         );
     let key = FlowSliceHashKey {
         function: FlowSliceFunctionKey {
-            canonical_id: Arc::from(canonical),
+            canonical_id: canonical.into(),
             function: entry.key().clone(),
             flow_body_stable_hash: entry.flow_body_stable_hash(),
             flow_body_exact_hash: entry
@@ -1815,6 +1817,9 @@ fn a_retained_graph_bundle_charges_its_structure_until_its_eviction() {
         let snapshot = account.snapshot();
         assert_eq!(snapshot.retained_bytes, 0, "a bundle is never refusable");
         charged.push(snapshot.pinned_bytes);
+        // The key's names are shared with the bundle, charged by their own
+        // cells: the test's copy keeps them alive until it drops too.
+        drop(key);
         store.remove_canonical("/graph.ts");
         assert_eq!(account.snapshot().total_bytes(), 0, "eviction releases it");
     }
@@ -1873,6 +1878,7 @@ fn a_graph_reader_keeps_its_payload_charge_after_store_teardown() {
             );
             drop(reader);
         }
+        drop(key);
         assert_eq!(
             account.snapshot().total_bytes(),
             0,
@@ -1881,9 +1887,256 @@ fn a_graph_reader_keeps_its_payload_charge_after_store_teardown() {
     }
 }
 
+/// A holder that keeps one part of a published bundle — its skeleton, its
+/// binding map or its graph — keeps it through the bundle's own handle, so
+/// the part's variable data stays charged after the store and every other
+/// reader let go, and its drop restores the baseline at once. No accessor
+/// hands out a part as an allocation of its own that could outlive that
+/// charge.
+#[test]
+fn a_kept_bundle_part_stays_charged_after_store_teardown() {
+    use verter_session_query::flow::bundle::{BindingsRef, GraphRef, SkeletonRef};
+    use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
+    let name = "kept_part_binding_name_".repeat(256);
+    let source = format!("function myType() {{ const {name} = 1; return {name} }}");
+    for part in 0..3 {
+        for part_first in [false, true] {
+            let account = SemanticRetentionAccount::new(RetentionLimits {
+                aggregate_ceiling_bytes: 0,
+                active_ceiling_bytes: 0,
+                max_entry_bytes: 0,
+                pin_threshold_bytes: 0,
+            });
+            let store = FunctionFlowGraphStore::charged_to_for_test(Arc::clone(&account));
+            let key = function_key("/graph.ts", "myType", 4, &source);
+            let GraphClaim::Produce(lease) = store.claim(&key) else {
+                panic!("empty store must grant a producer");
+            };
+            let reader = lease
+                .publish(FlowGraphBundle::build(
+                    KeyedFunctionStructure::bind_fixture(key.clone(), prepared_of(&source)),
+                ))
+                .expect("complete bundle is delivered even at zero headroom");
+            let published = account.snapshot().pinned_bytes;
+            let kept: Box<dyn std::any::Any> = match part {
+                0 => Box::new(SkeletonRef::of(&reader)),
+                1 => Box::new(BindingsRef::of(&reader)),
+                _ => Box::new(GraphRef::of(&reader)),
+            };
+            assert_eq!(
+                account.snapshot().pinned_bytes,
+                published,
+                "(part {part}) a kept part shares the bundle's charge"
+            );
+            drop(reader);
+            if part_first {
+                drop(kept);
+                assert_eq!(account.snapshot().pinned_bytes, published);
+                drop(store);
+            } else {
+                drop(store);
+                let surviving = account.snapshot().pinned_bytes;
+                assert!(
+                    surviving >= name.len() && surviving < published,
+                    "(part {part}) the kept part still owns the bundle's data, not its slot: \
+                     {surviving} of {published}"
+                );
+                drop(kept);
+            }
+            drop(key);
+            assert_eq!(
+                account.snapshot().total_bytes(),
+                0,
+                "(part {part}, part first {part_first}) final release is immediate"
+            );
+        }
+    }
+}
+
+/// A holder that clones a nested table, one name or the key's canonical
+/// out of a published bundle keeps an owned handle on that allocation: it
+/// stays charged by its own cell after the store and the bundle's last
+/// handle let go, at zero headroom, and its final drop restores the
+/// baseline at once. Dropping the leaf first leaves the bundle's charge
+/// whole.
+#[test]
+fn a_kept_nested_bundle_leaf_stays_charged_after_store_teardown() {
+    use verter_session_query::retention::owned::OwnedStr;
+    use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
+    let name = "kept_leaf_binding_name_".repeat(256);
+    let canonical = format!("/{}.ts", "kept_leaf_canonical_".repeat(256));
+    let source = format!("function myType() {{ const {name} = 1; return {name} }}");
+    for leaf in ["names", "name", "bindings", "canonical"] {
+        for leaf_first in [false, true] {
+            let account = SemanticRetentionAccount::new(RetentionLimits {
+                aggregate_ceiling_bytes: 0,
+                active_ceiling_bytes: 0,
+                max_entry_bytes: 0,
+                pin_threshold_bytes: 0,
+            });
+            let store = FunctionFlowGraphStore::charged_to_for_test(Arc::clone(&account));
+            let key = function_key(&canonical, "myType", 4, &source);
+            let GraphClaim::Produce(lease) = store.claim(&key) else {
+                panic!("empty store must grant a producer");
+            };
+            let reader = lease
+                .publish(FlowGraphBundle::build(
+                    KeyedFunctionStructure::bind_fixture(key, prepared_of(&source)),
+                ))
+                .expect("complete bundle is delivered even at zero headroom");
+            let published = account.snapshot().pinned_bytes;
+            let skeleton = reader.skeleton();
+            let (kept, kept_len): (Box<dyn std::any::Any>, usize) = match leaf {
+                "names" => (Box::new(skeleton.names.clone()), name.len()),
+                "name" => {
+                    let kept = skeleton
+                        .names
+                        .iter()
+                        .find(|text| text.len() == name.len())
+                        .expect("the long binding name is interned")
+                        .clone();
+                    (Box::new(kept), name.len())
+                }
+                "bindings" => {
+                    assert!(!skeleton.bindings.is_empty());
+                    (Box::new(skeleton.bindings.clone()), 1)
+                }
+                _ => (Box::new(reader.key().canonical_id.clone()), canonical.len()),
+            };
+            assert_eq!(
+                account.snapshot().pinned_bytes,
+                published,
+                "({leaf}) a kept leaf shares the bundle's charge"
+            );
+            drop(reader);
+            if leaf_first {
+                drop(kept);
+                assert_eq!(account.snapshot().pinned_bytes, published);
+                drop(store);
+            } else {
+                drop(store);
+                let surviving = account.snapshot().pinned_bytes;
+                assert!(
+                    surviving >= kept_len && surviving < published,
+                    "({leaf}) the kept leaf owns its allocation, not the bundle: \
+                     {surviving} of {published}"
+                );
+                if leaf == "name" {
+                    assert_eq!(surviving, OwnedStr::charge_for_len(name.len()));
+                }
+                drop(kept);
+            }
+            assert_eq!(
+                account.snapshot().total_bytes(),
+                0,
+                "({leaf}, leaf first {leaf_first}) final release is immediate"
+            );
+        }
+    }
+}
+
+/// A caller that clones a list or a name out of a lowered slice — its slot
+/// table, one slot's binding name, its expression table — keeps an owned
+/// handle: the nested allocation stays charged by its own cell after the
+/// slice, every reader and the stores let go, at zero headroom, and its own
+/// final drop restores the baseline at once. Dropping the leaf first leaves
+/// the slice's charge whole.
+#[test]
+fn a_kept_lowered_slice_leaf_stays_charged_after_store_teardown() {
+    use verter_session_query::retention::owned::OwnedStr;
+    use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
+    let name = "kept_lowered_slot_name_".repeat(256);
+    let source: &'static str = Box::leak(
+        format!("function myType() {{ const {name} = 1; return {{ b: {name} }} }}")
+            .into_boxed_str(),
+    );
+    for leaf in ["slots", "name", "exprs"] {
+        for leaf_first in [false, true] {
+            let account = SemanticRetentionAccount::new(RetentionLimits {
+                aggregate_ceiling_bytes: 0,
+                active_ceiling_bytes: 0,
+                max_entry_bytes: 0,
+                pin_threshold_bytes: 0,
+            });
+            let function = function_key("/fixtures/kept-lowered.ts", "myType", 5, source);
+            let host = VerterHost::new_standalone(HostConfig::default());
+            let rig = Rig {
+                host,
+                source: Arc::new(FixtureSkeletonSource::new(vec![(function.clone(), source)])),
+                stores: FlowSliceStores::charged_to_for_test(Arc::clone(&account)),
+            };
+            let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &rig.host;
+            let key = hash_key(function, &["b"]);
+            let FlowSliceHashOutcome::Planned(plan) =
+                rig.driver(ctx).lookup_hash(key.clone()).expect("hash")
+            else {
+                panic!("({leaf}) a planned slice");
+            };
+            let lowered_key = FlowSliceLoweredKey {
+                hash_key: key,
+                slice_hash: plan.hash(),
+            };
+            let ir = rig
+                .driver(ctx)
+                .lookup_lowered(lowered_key, &plan)
+                .expect("a complete slice is delivered even at zero headroom");
+            drop(plan);
+            let published = account.snapshot().total_bytes();
+            assert!(published >= name.len(), "({leaf}) the slice is charged");
+            let (kept, kept_len): (Box<dyn std::any::Any>, usize) = match leaf {
+                "slots" => {
+                    assert!(ir.slots.iter().any(|slot| slot.name.len() == name.len()));
+                    (Box::new(ir.slots.clone()), name.len())
+                }
+                "name" => {
+                    let kept = ir
+                        .slots
+                        .iter()
+                        .find(|slot| slot.name.len() == name.len())
+                        .expect("the long binding lowers to a slot")
+                        .name
+                        .clone();
+                    (Box::new(kept), name.len())
+                }
+                _ => {
+                    assert!(!ir.exprs.is_empty());
+                    (Box::new(ir.exprs.clone()), 1)
+                }
+            };
+            assert_eq!(
+                account.snapshot().total_bytes(),
+                published,
+                "({leaf}) a kept leaf shares the slice's charge"
+            );
+            drop(ir);
+            if leaf_first {
+                drop(kept);
+                drop(rig);
+            } else {
+                drop(rig);
+                let surviving = account.snapshot().total_bytes();
+                assert!(
+                    surviving >= kept_len && surviving < published,
+                    "({leaf}) the kept leaf owns its allocation, not the slice: \
+                     {surviving} of {published}"
+                );
+                if leaf == "name" {
+                    assert_eq!(surviving, OwnedStr::charge_for_len(name.len()));
+                }
+                drop(kept);
+            }
+            assert_eq!(
+                account.snapshot().total_bytes(),
+                0,
+                "({leaf}, leaf first {leaf_first}) final release is immediate"
+            );
+        }
+    }
+}
+
 #[test]
 fn graph_publication_charges_independently_allocated_equal_key_backing() {
-    use verter_session_query::retention::allocation::arc_block_bytes;
+    use verter_session_query::retention::owned::OwnedStr;
     use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
     let canonical = format!("/{}.ts", "module_name".repeat(256));
     let source = "function myType() { return 1 }";
@@ -1913,11 +2166,15 @@ fn graph_publication_charges_independently_allocated_equal_key_backing() {
         );
         charges.push(account.snapshot().pinned_bytes);
         drop(store);
+        drop(key);
         assert_eq!(account.snapshot().total_bytes(), 0);
     }
     assert_eq!(
         charges[1] - charges[0],
-        arc_block_bytes(canonical.len()) + arc_block_bytes("myType".len())
+        OwnedStr::charge_for_len(canonical.len()) + OwnedStr::charge_for_len("myType".len())
     );
-    assert_eq!(charges[2] - charges[0], arc_block_bytes(canonical.len()));
+    assert_eq!(
+        charges[2] - charges[0],
+        OwnedStr::charge_for_len(canonical.len())
+    );
 }

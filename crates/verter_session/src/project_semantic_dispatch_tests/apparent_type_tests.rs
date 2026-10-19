@@ -253,6 +253,7 @@ fn rootless_apparent_surface_is_project_scoped_and_never_cached() {
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     let base = rootless_signature(&dispatch);
 
     let apparent_a = apparent_under_demand_scope(&dispatch, base, "/a/main.ts")
@@ -308,6 +309,7 @@ fn rootless_apparent_taint_propagates_through_enclosing_member_projection() {
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     let base = rootless_signature(&dispatch);
 
     // The rootless ApparentType read itself: value + suppress.
@@ -381,6 +383,7 @@ fn rootless_apparent_without_registered_ambient_fails_closed() {
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     let base = rootless_signature(&dispatch);
 
     assert_eq!(

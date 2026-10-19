@@ -407,6 +407,9 @@ pub struct ComponentMetaQueryEngine<'a> {
     prepared_type_decl_query_count: usize,
     fuse_budgets: FuseBudgets,
     fuse_state: FuseState,
+    /// This caller's explicit builder: internal projections compose labels
+    /// across dispatch operations before publishing graph-free metadata.
+    builder: verter_type_engine::semantic_query_memo::node_roots::NodeRootScope,
 }
 
 #[cfg(test)]
@@ -753,7 +756,18 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             prepared_type_decl_query_count: 0,
             fuse_budgets: FuseBudgets::default(),
             fuse_state: FuseState::default(),
+            builder: dispatch.enter_construction_scope(),
         }
+    }
+
+    /// The engine's explicit builder owner: a dispatcher result handed to it
+    /// ([`Constructed::into_value_in`]) stays live for the engine's lifetime.
+    ///
+    /// [`Constructed::into_value_in`]: verter_type_engine::semantic_query_memo::node_roots::Constructed::into_value_in
+    pub(crate) fn builder(
+        &self,
+    ) -> &verter_type_engine::semantic_query_memo::node_roots::NodeRootScope {
+        &self.builder
     }
 
     /// Returns the cached [`DeclarationScopePayload`] for

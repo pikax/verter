@@ -1941,30 +1941,36 @@ impl VerterHost {
     /// generation; otherwise `None`.
     fn source_bound_file_analysis_snapshot(
         parse: &crate::ParseSnapshot,
-        export_signatures: Arc<Vec<verter_session_query::analysis::types::ExportSignature>>,
-        template: Option<Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>>,
+        export_signatures: verter_session_query::analysis::file_analysis::SharedList<
+            verter_session_query::analysis::types::ExportSignature,
+        >,
+        template: Option<
+            verter_session_query::retention::heap_size::OwnedValue<
+                verter_session_query::analysis::template::TemplateAnalysisSnapshot,
+            >,
+        >,
     ) -> verter_session_query::analysis::file_analysis::FileAnalysisSnapshot {
         let sa = parse.script_analysis.as_ref();
         verter_session_query::analysis::file_analysis::FileAnalysisSnapshot {
             imports: sa.imports.clone(),
             bindings: sa.bindings.clone(),
-            module_references: Arc::new(sa.module_references.clone()),
-            macros: Arc::new(sa.macros.clone()),
-            macro_type_deps: Arc::new(sa.macro_type_deps.clone()),
+            module_references: verter_session_query::analysis::file_analysis::SharedList::new(sa.module_references.clone()),
+            macros: verter_session_query::analysis::file_analysis::SharedList::new(sa.macros.clone()),
+            macro_type_deps: verter_session_query::analysis::file_analysis::SharedList::new(sa.macro_type_deps.clone()),
             script_flags: sa.flags.bits(),
-            styles: Arc::new(parse.style_analyses.clone()),
+            styles: verter_session_query::analysis::file_analysis::SharedList::new(parse.style_analyses.clone()),
             template,
-            vue_api_calls: Arc::new(sa.vue_api_calls.clone()),
-            dom_query_calls: Arc::new(sa.dom_query_calls.clone()),
-            css_var_manipulations: Arc::new(sa.css_var_manipulations.clone()),
-            script_binding_occurrences: Arc::new(sa.script_binding_occurrences.clone()),
+            vue_api_calls: verter_session_query::analysis::file_analysis::SharedList::new(sa.vue_api_calls.clone()),
+            dom_query_calls: verter_session_query::analysis::file_analysis::SharedList::new(sa.dom_query_calls.clone()),
+            css_var_manipulations: verter_session_query::analysis::file_analysis::SharedList::new(sa.css_var_manipulations.clone()),
+            script_binding_occurrences: verter_session_query::analysis::file_analysis::SharedList::new(sa.script_binding_occurrences.clone()),
             macro_usage: sa.macro_usage.clone(),
             style_vbind_roots: sa.style_vbind_roots.clone(),
-            markup_class_tokens: Arc::new(parse.markup_class_tokens.clone()),
+            markup_class_tokens: verter_session_query::analysis::file_analysis::SharedList::new(parse.markup_class_tokens.clone()),
             export_signatures,
             options_api: sa.options_api.clone(),
-            store_usages: Arc::new(sa.store_usages.clone()),
-            store_definitions: Arc::new(sa.store_definitions.clone()),
+            store_usages: verter_session_query::analysis::file_analysis::SharedList::new(sa.store_usages.clone()),
+            store_definitions: verter_session_query::analysis::file_analysis::SharedList::new(sa.store_definitions.clone()),
             is_typescript: sa.is_typescript,
             anchor_revision: verter_session_query::analysis::file_analysis::AnalysisSourceRevision::from_whole_hash(
                 parse.whole_hash,
@@ -2564,12 +2570,14 @@ impl VerterHost {
             self.provenance
                 .indexed_ready_scheduler_snapshot_reuse
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let export_signatures = Arc::new(hd.parse.export_signatures.clone());
+            let export_signatures = verter_session_query::analysis::file_analysis::SharedList::new(
+                hd.parse.export_signatures.clone(),
+            );
             let template =
                 self.validated_raw_template_analysis(canonical_id, source_snap.version());
             let snapshot = Arc::new(Self::source_bound_file_analysis_snapshot(
                 &hd.parse,
-                Arc::clone(&export_signatures),
+                export_signatures.clone(),
                 template,
             ));
 

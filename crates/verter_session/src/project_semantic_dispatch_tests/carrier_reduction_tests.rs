@@ -167,6 +167,7 @@ fn evaluate_typeof_carrier_applies_instantiation_args() {
     let host = host();
     upsert_ts(&host, "/m.ts", GENERIC_FN_TS);
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     let carrier = typeof_carrier_node(&dispatch, "/m.ts", "f", &[], PrimitiveKind::String);
     let (reduced, _) = dispatch.evaluate_deferred_semantic_node_with_context_for_tests(
@@ -221,6 +222,7 @@ fn walk_typeof_carrier_applies_instantiation_args() {
     let host = host();
     upsert_ts(&host, "/m.ts", GENERIC_FN_TS);
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     let carrier = typeof_carrier_node(&dispatch, "/m.ts", "f", &[], PrimitiveKind::String);
     // Carrier as the base + a non-empty path drives the per-segment loop and
@@ -288,6 +290,7 @@ fn walk_typeof_internal_path_projects_in_navigate_not_caller_mode() {
     let host = host();
     upsert_ts(&host, "/holder.ts", GENERIC_FN_HOLDER_TS);
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     // `typeof C.make` — a NON-EMPTY internal path (`["make"]`) so the arm runs
     // the internal-path `ProjectPath` (an empty internal path would skip it).
@@ -353,6 +356,7 @@ fn raise_reduce_typeof_carrier_applies_instantiation_args() {
     let host = host();
     upsert_ts(&host, "/m.ts", GENERIC_FN_TS);
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     let carrier = typeof_carrier_node(&dispatch, "/m.ts", "f", &[], PrimitiveKind::String);
     let materialized = dispatch.raise_and_reduce_with_context(
@@ -401,6 +405,7 @@ fn evaluate_typeof_carrier_with_path_projects_then_applies_args() {
     let host = host();
     upsert_ts(&host, "/holder.ts", GENERIC_METHOD_HOLDER_TS);
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     let carrier = typeof_carrier_node(
         &dispatch,
@@ -452,6 +457,7 @@ fn raise_reduce_typeof_carrier_does_not_drop_path() {
     let host = host();
     upsert_ts(&host, "/holder.ts", GENERIC_METHOD_HOLDER_TS);
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     let carrier = typeof_carrier_node(
         &dispatch,
@@ -556,6 +562,7 @@ fn typeof_carrier_reduction_equals_eager_lowering_path() {
         "import { f } from './m';\nexport const reExport = f;\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     // Carrier-aware reducer result.
     let carrier = typeof_carrier_node(&dispatch, "/m.ts", "f", &[], PrimitiveKind::String);
@@ -777,6 +784,7 @@ fn output_boundaries_discriminate_plain_shell_from_reduce_then_raise() {
     let host = host();
     upsert_ts(&host, "/m.ts", GENERIC_FN_TS);
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     let carrier = typeof_carrier_node(&dispatch, "/m.ts", "f", &[], PrimitiveKind::String);
 

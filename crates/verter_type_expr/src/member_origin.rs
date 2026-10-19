@@ -42,6 +42,7 @@ use crate::TypeExpr;
     verter_no_typeexpr::NoTypeExpr,
     verter_no_storedspan::NoStoredSpan,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 #[serde(rename_all = "camelCase")]
 pub enum ExcessPropertyOrigin {
@@ -69,6 +70,7 @@ pub enum ExcessPropertyOrigin {
     serde::Serialize,
     serde::Deserialize,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]

@@ -358,7 +358,7 @@ impl ResolvedImportFactsDb {
     pub(crate) fn candidate_signatures_for_tests(
         &self,
         key: &ResolvedImportFactsKey,
-    ) -> Vec<Arc<[FactVersionRef]>> {
+    ) -> Vec<crate::resolver_core::OwnedFactSignature> {
         self.entries.candidate_signatures_for_key(key)
     }
 

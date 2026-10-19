@@ -149,6 +149,7 @@ fn root_only_projection_root_kind_matches_full_fold() {
     let host = VerterHost::new_standalone(Default::default());
     let graph = host.project_type_store().semantic_graph();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     let empty_surface = || {
         verter_type_engine::surface_view! {
@@ -350,6 +351,7 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
     let host = VerterHost::new_standalone(Default::default());
     let graph = host.project_type_store().semantic_graph();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     let empty_surface = || {
         verter_type_engine::surface_view! {
@@ -669,6 +671,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
     let host = VerterHost::new_standalone(Default::default());
     let graph = host.project_type_store().semantic_graph();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     // A node id with no arena entry — a dangling required child.
     let dangling = SemanticNodeId(u64::MAX);
