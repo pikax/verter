@@ -144,6 +144,25 @@ impl FileFacts {
         self.lazy.as_ref()?.compute(key)
     }
 
+    /// [`Self::lookup_or_compute`], keeping the refusal evidence of the
+    /// declaration-body reads a lazy fact rested on instead of applying it:
+    /// a refused read answers `None` for a fact a retry under a live lease
+    /// can compute, which a validator must not take for a consistent
+    /// absence.
+    pub(crate) fn lookup_or_compute_read(
+        &self,
+        key: &fact_registry::FactKey,
+    ) -> verter_session_query::source::demand::SourceRead<Option<fact_registry::Fact>> {
+        use verter_session_query::source::demand::SourceRead;
+        if let Some(fact) = self.lookup(key) {
+            return SourceRead::clean(Some(fact.clone()));
+        }
+        match self.lazy.as_ref() {
+            Some(lazy) => lazy.compute_read(key),
+            None => SourceRead::clean(None),
+        }
+    }
+
     /// Borrow the underlying registry. O(1) per-key lookup via
     /// `registry().get(&key)`.
     #[must_use]

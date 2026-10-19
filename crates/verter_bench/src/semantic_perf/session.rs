@@ -203,7 +203,10 @@ fn demand_record(
         alias: demand.alias.clone(),
         micros: record.micros,
         outcome: record.outcome,
-        observation: observe(bytes.as_deref().map_err(Clone::clone)),
+        observation: super::Observation {
+            checker_recovery: node.as_ref().and_then(verter_type_engine::semantic_query_memo::node_roots::NodeRoot::checker_recovery_code),
+            ..observe(bytes.as_deref().map_err(Clone::clone))
+        },
     }
 }
 
