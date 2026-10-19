@@ -2702,6 +2702,8 @@ pub struct CheckerDispatchTransaction {
     pub augmentation: AugmentationPlanTable,
     /// The declaration kinds read on this transaction.
     pub decl_kinds: DeclKindTable,
+    /// The key-domain closedness proofs completed on this transaction.
+    pub(super) closedness_proofs: super::raise::ClosednessProofTable,
     /// The declaration files' `IndexedReady` records instantiations read on
     /// this transaction.
     pub indexed_serves: IndexedServeTable,

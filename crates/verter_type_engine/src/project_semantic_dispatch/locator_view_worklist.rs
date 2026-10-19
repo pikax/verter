@@ -242,7 +242,8 @@ pub(super) struct ProjectionDelivery {
 }
 
 /// A member-path or applied `typeof` a reference projection reads: the
-/// `TypeOf` query reading it and the type arguments the answer applies.
+/// one `TypeOf` query of its root and member path, and the type arguments
+/// the answer applies.
 pub(super) struct TypeofRead {
     key: SemanticQueryKey,
     type_args: Arc<[SemanticNodeId]>,
@@ -538,6 +539,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         self.typeof_key_with_path(value_root, path, context),
                     );
                 }
+                // One root-and-path read owns namespace and value-member
+                // resolution, as where the `typeof` is lowered in place
+                // (`typeof_reference_key`): a member path that answers no
+                // value is a miss, never retried under a joined name that
+                // bypasses the module's export domain.
                 let read = Box::new(TypeofRead {
                     key: self.typeof_key_with_path(value_root, path, context),
                     type_args,
@@ -1342,7 +1348,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         None
     }
 
-    /// Carry a `typeof` read on with what its query answered.
+    /// The projection plan a `typeof` read reaches with what its query
+    /// answered: a read that answered no value is a miss.
     fn advance_typeof_read(
         &self,
         read: TypeofRead,

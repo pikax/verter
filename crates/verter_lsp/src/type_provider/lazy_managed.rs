@@ -4,8 +4,11 @@
 //! configuration lifecycle is recorded in the hub's desired state without
 //! starting a process, and the first real fallback query establishes one
 //! managed engine chain, replays the latest desired state into it, and only
-//! then serves the query. Establishment, replay, singleflight and the retry
-//! cooldown are the hub's; this module only supplies the engine-chain factory.
+//! then serves the query. Without a shared editor route there is no other
+//! engine, so the composite also demands it through
+//! [`TypeProvider::synchronize_pending_file`] for the first held write.
+//! Establishment, replay, singleflight and the retry cooldown are the hub's;
+//! this module only supplies the engine-chain factory.
 
 use std::future::Future;
 use std::pin::Pin;
