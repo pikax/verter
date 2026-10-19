@@ -1514,6 +1514,19 @@ impl PayloadHeap for cm::ResolvedRootStep {
     }
 }
 
+/// The chain's own unique-link accounting, admitting each link through the
+/// measurement's borrowed-payload set: chains of different branches share
+/// their tails and pay for them once per measurement.
+impl PayloadHeap for cm::RootChain {
+    fn heap(&self, m: &mut Meter<'_>) -> usize {
+        self.unique_link_heap(
+            m,
+            |m, link| m.borrowed.insert(link as usize),
+            |m, step| step.heap(m),
+        )
+    }
+}
+
 impl PayloadHeap for cm::FallthroughBranch {
     fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {

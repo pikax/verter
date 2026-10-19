@@ -913,6 +913,27 @@ fn get_meta(
         .clone()
 }
 
+/// Every non-receipt fact a fact list reaches, shared receipts walked.
+fn evidence_leaves(
+    facts: &[verter_session_query::facts::fact_cache::FactVersionRef],
+) -> Vec<verter_session_query::facts::fact_cache::FactVersionRef> {
+    use verter_session_query::facts::fact_cache::FactVersionRef;
+    let mut walk = verter_session_query::facts::receipt::ReceiptWalk::default();
+    let mut leaves = Vec::new();
+    for fact in facts {
+        match fact {
+            FactVersionRef::Receipt(receipt) => {
+                walk.leaves(receipt, |leaf| {
+                    leaves.push(leaf.clone());
+                    true
+                });
+            }
+            leaf => leaves.push(leaf.clone()),
+        }
+    }
+    leaves
+}
+
 /// Every root-chain step reachable from a resolved fallthrough surface.
 fn root_chain_steps(
     meta: &verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
