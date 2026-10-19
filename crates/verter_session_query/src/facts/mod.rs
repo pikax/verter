@@ -32,9 +32,10 @@ pub mod symbol;
 pub mod version;
 
 pub use crate::facts::hashing::{
-    compute_member_presence_hash, compute_member_shape_hash, compute_semantic_hash,
-    type_body_fingerprint, value_body_fingerprint, CrossDeclLens, CrossDeclRef, HashOutcome,
-    TransientTypeBody, UnresolvedLens, ValueBodyFingerprintInput, MAX_HASH_DEPTH,
+    compute_class_member_read_hash, compute_member_presence_hash, compute_member_shape_hash,
+    compute_semantic_hash, type_body_fingerprint, value_body_fingerprint, CrossDeclLens,
+    CrossDeclRef, HashOutcome, TransientTypeBody, UnresolvedLens, ValueBodyFingerprintInput,
+    MAX_HASH_DEPTH,
 };
 pub use crate::facts::registry::{
     AugmentationScopeKindTag, AugmentationTargetKindTag, Fact, FactDomain, FactHash, FactKey,

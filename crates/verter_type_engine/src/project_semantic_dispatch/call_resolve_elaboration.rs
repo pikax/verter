@@ -118,9 +118,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // REPORTED type for it: a fresh object or array literal's widened
         // literal tree, not the literal one it checked.
         let source = self.widened_fresh_literal(site.form.as_ref(), source);
-        Some(vec![
-            self.report_relation_failure(source, target, site.point, head)?
-        ])
+        Some(vec![self.report_relation_failure(
+            source,
+            target,
+            (site.point, site.end),
+            head,
+        )?])
     }
 
     /// The type the checker REPORTS a fresh object or array literal
@@ -296,7 +299,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         Some(Some(vec![self.report_relation_failure(
             source_return,
             target_return,
-            returned.point,
+            (returned.point, returned.end),
             type_not_assignable(),
         )?]))
     }
@@ -351,7 +354,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             reported.push(self.report_relation_failure(
                 source_type,
                 target_type,
-                property.point,
+                (property.point, property.end),
                 type_not_assignable(),
             )?);
         }
@@ -405,7 +408,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             reported.push(self.report_relation_failure(
                 source_type,
                 target_type,
-                element.point,
+                (element.point, element.end),
                 type_not_assignable(),
             )?);
         }
@@ -479,7 +482,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             ),
             None => (CheckerDiagnosticCode::ExcessProperty, vec![name, printed]),
         };
-        Some(Some(occurrence(excess.point, code, arguments, Vec::new())))
+        Some(Some(occurrence(
+            (excess.point, excess.end),
+            code,
+            arguments,
+            Vec::new(),
+        )))
     }
 
     /// `checkTypeRelatedTo` reporting at `point`: `head` naming the two
@@ -490,18 +498,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
-        point: u32,
+        span: (u32, u32),
         head: CheckerDiagnostic,
     ) -> Option<CheckerDiagnosticOccurrence> {
         if let FailedStep::Missing { code, arguments } = self.failed_step(source, target)? {
-            return Some(occurrence(point, code, arguments, Vec::new()));
+            return Some(occurrence(span, code, arguments, Vec::new()));
         }
         let mut chain = Vec::new();
         let mut steps = CHAIN_STEP_LIMIT;
         self.explain_failure(source, target, 1, false, &mut chain, &mut steps)?;
         let (source, target) = self.print_relation_operands(source, target)?;
         Some(CheckerDiagnosticOccurrence::new(
-            point,
+            span.0,
+            span.1,
             head,
             Box::new([source.into_boxed_str(), target.into_boxed_str()]),
             chain.into_boxed_slice(),
@@ -1084,13 +1093,14 @@ const fn type_not_assignable() -> CheckerDiagnostic {
 
 /// One call-resolution occurrence with no chain beyond `chain`.
 fn occurrence(
-    point: u32,
+    span: (u32, u32),
     code: CheckerDiagnosticCode,
     arguments: Vec<String>,
     chain: Vec<CheckerDiagnosticChainLine>,
 ) -> CheckerDiagnosticOccurrence {
     CheckerDiagnosticOccurrence::new(
-        point,
+        span.0,
+        span.1,
         CheckerDiagnostic {
             code,
             operation: CheckerDiagnosticOperation::CallResolution,

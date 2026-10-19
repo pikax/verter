@@ -166,6 +166,7 @@ fn a_flow_return_is_charged_for_its_nested_backing() {
         .map(|ordinal| {
             let site = CheckerDiagnosticSite {
                 operation_start: Some(ordinal as u32),
+                operation_end: Some(ordinal as u32),
                 ..Default::default()
             };
             recipe
@@ -378,6 +379,7 @@ fn a_diagnostic_chain_is_charged_one_block_per_allocation() {
     const TEXT: usize = 37;
     let occurrence = |chain: Vec<CheckerDiagnosticChainLine>| {
         CheckerDiagnosticOccurrence::new(
+            0,
             0,
             CheckerDiagnostic {
                 code: CheckerDiagnosticCode::TypeNotAssignable,

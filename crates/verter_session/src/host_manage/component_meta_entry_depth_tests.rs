@@ -17,13 +17,14 @@ use std::rc::Rc;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use crate::for_tests::{
+    status_has_missing_dependency, status_is_depth_refusal as is_depth_refusal,
+};
+use crate::types::{FileLanguage, HostConfig, UpsertRequest};
+use crate::VerterHost;
 use verter_type_engine::request_context::{
     current_request_budget, RequestContext, RequestContextGuard,
 };
-use verter_type_engine::semantic_query::{FactStatus, PartialReasonSet};
-
-use crate::types::{FileLanguage, HostConfig, UpsertRequest};
-use crate::VerterHost;
 
 use super::COLD_BODY_PRE_RESOLVE_HOOK;
 
@@ -74,19 +75,6 @@ pub(crate) fn isolated_depth_refusal_host() -> VerterHost {
         FileLanguage::vue(),
     );
     host
-}
-
-fn reasons(status: FactStatus) -> PartialReasonSet {
-    match status {
-        FactStatus::Complete => PartialReasonSet::empty(),
-        FactStatus::Approximate(reasons, _) | FactStatus::Unavailable(reasons) => reasons.get(),
-    }
-}
-
-fn is_depth_refusal(status: FactStatus) -> bool {
-    matches!(status, FactStatus::Unavailable(_))
-        && reasons(status).contains(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT)
-        && !reasons(status).contains(PartialReasonSet::MISSING_DEPENDENCY)
 }
 
 /// Counts cold-body entries on this thread while armed. Disarms on drop,
@@ -327,10 +315,10 @@ fn a_missing_input_beside_the_depth_trip_is_kept_and_vetoes_retention() {
         let meta = host.get_component_meta(OWNER).expect("mixed");
         assert!(cold.entered(), "an ineligible outcome recomputes ({round})");
         drop(cold);
-        let found = reasons(meta.status());
         assert!(
-            found.contains(PartialReasonSet::MISSING_DEPENDENCY),
-            "the missing import is kept as its own cause: {found:?}"
+            status_has_missing_dependency(meta.status()),
+            "the missing import is kept as its own cause: {:?}",
+            meta.status()
         );
         assert!(!meta.is_complete());
     }
@@ -370,7 +358,7 @@ fn a_missing_input_alone_heals_when_supplied() {
         assert!(cold.entered(), "a missing input recomputes ({round})");
         drop(cold);
         assert!(
-            reasons(meta.status()).contains(PartialReasonSet::MISSING_DEPENDENCY),
+            status_has_missing_dependency(meta.status()),
             "{:?}",
             meta.status()
         );

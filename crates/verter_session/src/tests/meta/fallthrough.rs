@@ -3757,7 +3757,7 @@ defineProps<{ msg: string }>()
             "branch status should be Resolved"
         );
         assert!(
-            matches!(&branches[0].root_chain[0], ResolvedRootStep::NativeTag { tag } if tag == "div"),
+            matches!(branches[0].root_chain.first().unwrap(), ResolvedRootStep::NativeTag { tag } if tag == "div"),
             "root_chain should show NativeTag div"
         );
     }
@@ -3947,14 +3947,14 @@ defineProps<{ msg: string }>()
         // Branch 0: div
         assert_eq!(branches[0].branch_key, "0");
         assert!(
-            matches!(&branches[0].root_chain[0], ResolvedRootStep::NativeTag { tag } if tag == "div"),
+            matches!(branches[0].root_chain.first().unwrap(), ResolvedRootStep::NativeTag { tag } if tag == "div"),
             "first branch should be div"
         );
 
         // Branch 1: input
         assert_eq!(branches[1].branch_key, "1");
         assert!(
-            matches!(&branches[1].root_chain[0], ResolvedRootStep::NativeTag { tag } if tag == "input"),
+            matches!(branches[1].root_chain.first().unwrap(), ResolvedRootStep::NativeTag { tag } if tag == "input"),
             "second branch should be input"
         );
 
@@ -4008,7 +4008,7 @@ const showNative = true
         assert!(
             branches
                 .iter()
-                .any(|branch| matches!(&branch.root_chain[0], ResolvedRootStep::NativeTag { tag } if tag == "div")),
+                .any(|branch| matches!(branch.root_chain.first().unwrap(), ResolvedRootStep::NativeTag { tag } if tag == "div")),
             "dynamic :is should produce a native div branch"
         );
         assert!(
@@ -4217,7 +4217,7 @@ import Poly from './Poly.vue'
     assert!(
         branches.iter().any(|branch| {
             matches!(
-                branch.root_chain.as_slice(),
+                branch.root_chain.iter().cloned().collect::<Vec<_>>().as_slice(),
                 [
                     ResolvedRootStep::Component { component_name, .. },
                     ResolvedRootStep::NativeTag { tag }
@@ -4323,7 +4323,7 @@ import Wrapper from './Wrapper.vue'
     assert!(
         branches.iter().any(|branch| {
             matches!(
-                branch.root_chain.as_slice(),
+                branch.root_chain.iter().cloned().collect::<Vec<_>>().as_slice(),
                 [
                     ResolvedRootStep::Component { component_name: wrapper_name, .. },
                     ResolvedRootStep::Component { component_name: poly_name, .. },
@@ -4805,9 +4805,10 @@ import Child from './Child.vue'
     let _ = project.host().resolve_fallthrough_surface("/App.vue");
     let cached = cached_fallthrough_entry(&project, "/App.vue")
         .expect("parent fallthrough should be cached after meta extraction");
+    let leaves = evidence_leaves(&cached.fact_versions);
 
     assert!(
-        cached.fact_versions.iter().any(|fact| matches!(
+        leaves.iter().any(|fact| matches!(
             fact,
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
                 if canonical_id == "/Child.vue"
@@ -4815,13 +4816,112 @@ import Child from './Child.vue'
         "cached fallthrough facts should include the child component file"
     );
     assert!(
-        cached.fact_versions.iter().any(|fact| matches!(
+        leaves.iter().any(|fact| matches!(
             fact,
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
                 if canonical_id == "/types.ts"
         )),
         "cached fallthrough facts should include transitive child component-meta deps"
     );
+}
+
+/// A three-hop chain `App -> Mid -> Leaf -> <div>` shares each hop's
+/// evidence with its parent. An edit two hops below the owner still
+/// invalidates the owner's held evidence, the refreshed owner sees the new
+/// root, and a result held across the edit keeps its own ordered chain and
+/// surface.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn deep_chain_edit_invalidates_the_owner_and_leaves_held_results_intact() {
+    let project = make_project();
+    project
+        .upsert_base("/Leaf.vue", r#"<template><div>leaf</div></template>"#)
+        .unwrap();
+    project
+        .upsert_base(
+            "/Mid.vue",
+            r#"<script setup lang="ts">
+import Leaf from './Leaf.vue'
+</script>
+<template><Leaf /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import Mid from './Mid.vue'
+</script>
+<template><Mid /></template>"#,
+        )
+        .unwrap();
+
+    let chain_of = |resolution: &crate::types::FallthroughResolution| -> Vec<ResolvedRootStep> {
+        let FallthroughSurface::Branches { branches } = &resolution.fallthrough_surface else {
+            panic!("a single-root chain has a branch surface");
+        };
+        assert_eq!(branches.len(), 1);
+        branches[0].root_chain.iter().cloned().collect()
+    };
+    let component = |name: &str| ResolvedRootStep::Component {
+        canonical_id: format!("/{name}.vue"),
+        component_name: name.to_string(),
+    };
+
+    let held = project
+        .host()
+        .resolve_fallthrough_surface("/App.vue")
+        .expect("the owner resolves");
+    let held_chain = vec![
+        component("Mid"),
+        component("Leaf"),
+        ResolvedRootStep::NativeTag {
+            tag: "div".to_string(),
+        },
+    ];
+    assert_eq!(chain_of(&held), held_chain);
+    assert!(!held.accepted_props.iter().any(|prop| prop.name == "value"));
+    assert!(
+        evidence_leaves(&held.fact_versions).iter().any(|fact| matches!(
+            fact,
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
+                if canonical_id == "/Leaf.vue"
+        )),
+        "the owner's evidence reaches the leaf two hops down"
+    );
+    assert!(project.host().fact_versions_match(&held.fact_versions));
+
+    project
+        .upsert_base("/Leaf.vue", r#"<template><input /></template>"#)
+        .unwrap();
+
+    assert!(
+        !project.host().fact_versions_match(&held.fact_versions),
+        "a leaf edit invalidates the owner's evidence through the shared hops"
+    );
+    let fresh = project
+        .host()
+        .resolve_fallthrough_surface("/App.vue")
+        .expect("the owner resolves after the edit");
+    assert_eq!(
+        chain_of(&fresh),
+        vec![
+            component("Mid"),
+            component("Leaf"),
+            ResolvedRootStep::NativeTag {
+                tag: "input".to_string(),
+            },
+        ]
+    );
+    assert!(fresh.accepted_props.iter().any(|prop| prop.name == "value"));
+    assert!(project.host().fact_versions_match(&fresh.fact_versions));
+
+    assert_eq!(
+        chain_of(&held),
+        held_chain,
+        "a result held across the edit keeps its own chain"
+    );
+    assert!(!held.accepted_props.iter().any(|prop| prop.name == "value"));
 }
 
 #[test]
@@ -5287,7 +5387,7 @@ const cond = true
                 condition_text: None,
                 props: vec![shared_rows[0].clone()],
                 events: Vec::new(),
-                root_chain: Vec::new(),
+                root_chain: Default::default(),
                 status: cm::BranchStatus::Resolved,
             },
             cm::FallthroughBranch {
@@ -5295,7 +5395,7 @@ const cond = true
                 condition_text: None,
                 props: vec![shared_rows[1].clone()],
                 events: Vec::new(),
-                root_chain: Vec::new(),
+                root_chain: Default::default(),
                 status: cm::BranchStatus::Resolved,
             },
         ],

@@ -485,6 +485,7 @@ impl CheckerDiagnosticRecipe {
                         }));
                         CheckerDiagnosticOccurrence::new(
                             failure.start,
+                            failure.end,
                             CheckerDiagnostic {
                                 code: CheckerDiagnosticCode::NoMatchingOverload,
                                 operation: self.diagnostic.operation,
@@ -496,7 +497,7 @@ impl CheckerDiagnosticRecipe {
                     .collect(),
             );
         }
-        let (start, arguments): (u32, Box<[Box<str>]>) = match self.arguments {
+        let (span, arguments): ((u32, u32), Box<[Box<str>]>) = match self.arguments {
             CheckerDiagnosticArguments::Types { source, target } => {
                 if let CheckerDiagnosticSubject::Argument(ordinal) = self.subject {
                     return printer.relation_failure(
@@ -508,43 +509,44 @@ impl CheckerDiagnosticRecipe {
                 }
                 let (source, target) = printer.relation_operands(source, target)?;
                 (
-                    self.subject_start(site)?,
+                    self.subject_span(site)?,
                     Box::new([source.into_boxed_str(), target.into_boxed_str()]),
                 )
             }
-            CheckerDiagnosticArguments::None => (self.subject_start(site)?, Box::new([])),
+            CheckerDiagnosticArguments::None => (self.subject_span(site)?, Box::new([])),
             CheckerDiagnosticArguments::ArgumentCount { min, max, got } => {
                 let expected = match max {
                     Some(max) if max != min => format!("{min}-{max}"),
                     _ => min.to_string(),
                 };
                 (
-                    self.subject_start(site)?,
+                    self.subject_span(site)?,
                     Box::new([expected.into_boxed_str(), count(got)]),
                 )
             }
             CheckerDiagnosticArguments::ArgumentCountGap { got, below, above } => (
-                self.subject_start(site)?,
+                self.subject_span(site)?,
                 Box::new([count(got), count(below), count(above)]),
             ),
         };
         Some(vec![CheckerDiagnosticOccurrence::new(
-            start,
+            span.0,
+            span.1,
             self.diagnostic,
             arguments,
             Box::new([]),
         )])
     }
 
-    /// The position `site` records for the recipe's subject.
-    fn subject_start(&self, site: &CheckerDiagnosticSite) -> Option<u32> {
+    /// The start and end `site` records for the recipe's subject.
+    fn subject_span(&self, site: &CheckerDiagnosticSite) -> Option<(u32, u32)> {
         match self.subject {
-            CheckerDiagnosticSubject::Operation => site.operation_start,
+            CheckerDiagnosticSubject::Operation => site.operation_start.zip(site.operation_end),
             CheckerDiagnosticSubject::Argument(ordinal)
             | CheckerDiagnosticSubject::ExcessArguments(ordinal) => site
                 .arguments
                 .get(ordinal as usize)
-                .map(|argument| argument.point),
+                .map(|argument| (argument.point, argument.end)),
         }
     }
 }
@@ -585,6 +587,8 @@ pub(crate) trait CheckerDiagnosticPrinter {
 pub(crate) struct CheckerDiagnosticSite {
     /// The operation's own report position (a call's callee).
     pub(crate) operation_start: Option<u32>,
+    /// The end of the node `operation_start` starts.
+    pub(crate) operation_end: Option<u32>,
     /// Each authored call argument's report site, in argument order.
     pub(crate) arguments: Arc<[verter_type_expr::IndexedReportSite]>,
 }
@@ -620,10 +624,12 @@ impl CheckerDiagnosticChainLine {
 /// byte offset into its file it starts at, its code, its message arguments
 /// as printed, and its message chain. It names no graph node, so it outlives
 /// every store. Occurrences order as the checker sorts its diagnostics
-/// (`compareDiagnostics`): by position, then by code, then by message.
+/// (`compareDiagnostics`): by start, then span length, then code, then
+/// message text.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CheckerDiagnosticOccurrence {
     start: u32,
+    end: u32,
     diagnostic: CheckerDiagnostic,
     arguments: Box<[Box<str>]>,
     chain: Box<[CheckerDiagnosticChainLine]>,
@@ -633,7 +639,9 @@ impl Ord for CheckerDiagnosticOccurrence {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.start
             .cmp(&other.start)
+            .then_with(|| self.end.cmp(&other.end))
             .then_with(|| self.code().code().cmp(&other.code().code()))
+            .then_with(|| self.full_message().cmp(&other.full_message()))
             .then_with(|| self.arguments.cmp(&other.arguments))
             .then_with(|| self.chain.cmp(&other.chain))
             .then_with(|| self.diagnostic.operation.cmp(&other.diagnostic.operation))
@@ -649,12 +657,14 @@ impl PartialOrd for CheckerDiagnosticOccurrence {
 impl CheckerDiagnosticOccurrence {
     pub(crate) fn new(
         start: u32,
+        end: u32,
         diagnostic: CheckerDiagnostic,
         arguments: Box<[Box<str>]>,
         chain: Box<[CheckerDiagnosticChainLine]>,
     ) -> Self {
         Self {
             start,
+            end,
             diagnostic,
             arguments,
             chain,
@@ -758,6 +768,7 @@ mod tests {
             let (source, target) = self.relation_operands(source, target)?;
             Some(vec![CheckerDiagnosticOccurrence::new(
                 site.point,
+                site.end,
                 head,
                 Box::new([source.into_boxed_str(), target.into_boxed_str()]),
                 Box::new([CheckerDiagnosticChainLine::new(1, "child".into())]),
@@ -768,9 +779,14 @@ mod tests {
     fn site(operation: u32, arguments: &[u32]) -> CheckerDiagnosticSite {
         CheckerDiagnosticSite {
             operation_start: Some(operation),
+            operation_end: Some(operation + 1),
             arguments: arguments
                 .iter()
-                .map(|&point| verter_type_expr::IndexedReportSite { point, form: None })
+                .map(|&point| verter_type_expr::IndexedReportSite {
+                    point,
+                    end: point + 1,
+                    form: None,
+                })
                 .collect(),
         }
     }
