@@ -3819,6 +3819,46 @@ async fn an_engine_that_rejects_replay_is_torn_down_and_never_serves() {
     );
 }
 
+/// A held write is the demand of an on-demand hub: driving it establishes the
+/// engine once, whose replay certifies the held bytes. A hub that establishes
+/// only explicitly has nothing to drive while no engine serves.
+#[tokio::test]
+async fn synchronizing_a_held_write_establishes_only_an_on_demand_hub() {
+    use crate::provider_hub::OverlayPriority;
+    use crate::traits::{AppliedContent, FileLoadDisposition};
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let hub = on_demand_hub(ScriptedBackend::new(
+        vec![MockProvider::new("tsgo")],
+        &attempts,
+    ));
+    let held = hub
+        .open_file_with_disposition("/w/a.ts", "const a = 1;", OverlayPriority::Foreground)
+        .await
+        .unwrap();
+    assert_eq!(held, FileLoadDisposition::Held);
+    assert_eq!(attempts.load(Ordering::SeqCst), 0);
+
+    hub.synchronize_pending_file("/w/a.ts").await.unwrap();
+    assert!(hub.is_serving());
+    assert!(matches!(
+        hub.applied_content("/w/a.ts"),
+        AppliedContent::Applied(bytes) if bytes.as_ref() == "const a = 1;"
+    ));
+    hub.synchronize_pending_file("/w/a.ts").await.unwrap();
+    assert_eq!(attempts.load(Ordering::SeqCst), 1, "one establishment");
+
+    let explicit_attempts = Arc::new(AtomicUsize::new(0));
+    let explicit = ProviderHub::new(
+        ScriptedBackend::new(vec![MockProvider::new("tsgo")], &explicit_attempts),
+        Arc::new(TracingNotifier),
+        HubPolicy::explicit(3),
+    );
+    explicit.open_file("/w/a.ts", "const a = 1;").await.unwrap();
+    explicit.synchronize_pending_file("/w/a.ts").await.unwrap();
+    assert!(!explicit.is_serving());
+    assert_eq!(explicit_attempts.load(Ordering::SeqCst), 0);
+}
+
 #[tokio::test]
 async fn a_forwarded_mutation_runs_under_the_submitters_absolute_deadline() {
     let initial = MockProvider::new("tsgo");
