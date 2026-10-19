@@ -7365,8 +7365,12 @@ pub fn indexed_literal_provenance(
         // The positions the composites nest, each written by every
         // composite that holds it, in source order.
         let mut nested: Vec<(IndexedLiteralStep, Vec<Arm<'_>>)> = Vec::new();
+        let mut nested_at: rustc_hash::FxHashMap<IndexedLiteralStep, usize> =
+            rustc_hash::FxHashMap::default();
         for (composite, pinned) in composites {
             let mut held: Vec<(IndexedLiteralStep, &Expression<'_>)> = Vec::new();
+            let mut held_at: rustc_hash::FxHashMap<IndexedLiteralStep, usize> =
+                rustc_hash::FxHashMap::default();
             match composite {
                 Expression::ObjectExpression(object) => {
                     for property in &object.properties {
@@ -7383,8 +7387,13 @@ pub fn indexed_literal_provenance(
                         let step = IndexedLiteralStep::Member(key);
                         // A later member of the same key is the one the
                         // object holds.
-                        held.retain(|(held, _)| *held != step);
-                        held.push((step, &property.value));
+                        match held_at.get(&step) {
+                            Some(&at) => held[at].1 = &property.value,
+                            None => {
+                                held_at.insert(step.clone(), held.len());
+                                held.push((step, &property.value));
+                            }
+                        }
                     }
                 }
                 Expression::ArrayExpression(array) => {
@@ -7409,9 +7418,12 @@ pub fn indexed_literal_provenance(
                 _ => {}
             }
             for (step, expr) in held {
-                match nested.iter_mut().find(|(nested, _)| *nested == step) {
-                    Some((_, arms)) => arms.push((expr, pinned)),
-                    None => nested.push((step, vec![(expr, pinned)])),
+                match nested_at.get(&step) {
+                    Some(&at) => nested[at].1.push((expr, pinned)),
+                    None => {
+                        nested_at.insert(step.clone(), nested.len());
+                        nested.push((step, vec![(expr, pinned)]));
+                    }
                 }
             }
         }
