@@ -10558,11 +10558,15 @@ pub(super) trait FlowDemandDriver {
         owner: verter_type_expr::TopLevelOwnerId,
         path: &[String],
     ) -> bool;
-    fn resolve_argument_literal_provenance(
+    fn resolve_scoped_argument_literal_provenance(
         &self,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         authored: Option<&verter_type_expr::IndexedLiteralProvenance>,
+        reads: &dyn Fn(
+            &verter_type_expr::ValueRef,
+            verter_span::Span,
+        ) -> super::call_resolve::ArgumentReadLiterals,
     ) -> Option<Arc<crate::semantic_query::ArgumentLiteralProvenance>>;
     fn arena(&self) -> super::arena_ops::ArenaOps<'_>;
     fn call_undecided_relations(&self) -> u64;
@@ -11214,14 +11218,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     ) -> bool {
         ProjectSemanticDispatch::value_read_widens(self, canonical, owner, path)
     }
-    fn resolve_argument_literal_provenance(
+    fn resolve_scoped_argument_literal_provenance(
         &self,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         authored: Option<&verter_type_expr::IndexedLiteralProvenance>,
+        reads: &dyn Fn(
+            &verter_type_expr::ValueRef,
+            verter_span::Span,
+        ) -> super::call_resolve::ArgumentReadLiterals,
     ) -> Option<Arc<crate::semantic_query::ArgumentLiteralProvenance>> {
-        ProjectSemanticDispatch::resolve_argument_literal_provenance(
-            self, canonical, owner, authored,
+        ProjectSemanticDispatch::resolve_scoped_argument_literal_provenance(
+            self, canonical, owner, authored, reads,
         )
     }
     fn arena(&self) -> super::arena_ops::ArenaOps<'_> {
@@ -11927,14 +11935,18 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     ) -> bool {
         self.driver.value_read_widens(canonical, owner, path)
     }
-    fn resolve_argument_literal_provenance(
+    fn resolve_scoped_argument_literal_provenance(
         &self,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         authored: Option<&verter_type_expr::IndexedLiteralProvenance>,
+        reads: &dyn Fn(
+            &verter_type_expr::ValueRef,
+            verter_span::Span,
+        ) -> super::call_resolve::ArgumentReadLiterals,
     ) -> Option<Arc<crate::semantic_query::ArgumentLiteralProvenance>> {
         self.driver
-            .resolve_argument_literal_provenance(canonical, owner, authored)
+            .resolve_scoped_argument_literal_provenance(canonical, owner, authored, reads)
     }
     fn arena(&self) -> super::arena_ops::ArenaOps<'_> {
         self.arena
@@ -18435,6 +18447,104 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             FlowBindingOccurrence::UnmodeledLocal => FlowIndexedArgumentBinding::UnmodeledLocal,
             FlowBindingOccurrence::Missing => FlowIndexedArgumentBinding::Missing,
         }
+    }
+
+    /// The literal provenance a call argument of this frame nests, its
+    /// reads of value bindings resolved in THIS frame's scope: a read of a
+    /// parameter or local is regular unless the binding keeps a widening
+    /// literal, a read of a binding outside the frame is the owner scope's,
+    /// and a read the frame does not model leaves its literals fresh. A
+    /// parameter that shadows a top-level binding is read as itself.
+    fn frame_argument_literal_provenance(
+        &mut self,
+        authored: Option<&verter_type_expr::IndexedLiteralProvenance>,
+    ) -> Option<Arc<crate::semantic_query::ArgumentLiteralProvenance>> {
+        use super::call_resolve::ArgumentReadLiterals;
+        let authored = authored?;
+        let mut reads: Vec<(verter_span::Span, ArgumentReadLiterals)> = Vec::new();
+        for source in authored
+            .positions
+            .iter()
+            .flat_map(|position| position.arms.iter())
+            .flat_map(|arm| arm.regular.iter())
+        {
+            let verter_type_expr::IndexedRegularLiteralSource::Read { value, root } = source else {
+                continue;
+            };
+            if reads.iter().any(|(at, _)| at == root) {
+                continue;
+            }
+            let read = self.frame_argument_read(value, *root);
+            reads.push((*root, read));
+        }
+        self.dispatch.resolve_scoped_argument_literal_provenance(
+            self.canonical,
+            self.owner,
+            Some(authored),
+            &|_, root| {
+                reads
+                    .iter()
+                    .find(|(at, _)| *at == root)
+                    .map_or(ArgumentReadLiterals::Unmodeled, |(_, read)| *read)
+            },
+        )
+    }
+
+    /// How one read in a call argument's literal provenance contributes,
+    /// by the binding its root identifier names here.
+    fn frame_argument_read(
+        &mut self,
+        value: &verter_type_expr::ValueRef,
+        root: verter_span::Span,
+    ) -> super::call_resolve::ArgumentReadLiterals {
+        use super::call_resolve::ArgumentReadLiterals;
+        use verter_session_query::flow::{binding::FlowBindingOccurrence, frame_span::FrameSpan};
+        let binding = match self
+            .bindings
+            .occurrence(FrameSpan::rebase(self.anchor, root))
+        {
+            FlowBindingOccurrence::Resolved(binding) => binding.clone(),
+            FlowBindingOccurrence::Free => return ArgumentReadLiterals::OwnerScope,
+            FlowBindingOccurrence::UnmodeledLocal | FlowBindingOccurrence::Missing => {
+                return ArgumentReadLiterals::Unmodeled;
+            }
+        };
+        if !value.type_args.is_empty() {
+            return ArgumentReadLiterals::Unmodeled;
+        }
+        // A member of a binding (`o.v`) is no declaration of its own: it
+        // reads the member's type as it is, never a widening literal.
+        let (node, widens) = if value.path.len() > 1 {
+            let ty = verter_type_expr::TypeExpr::TypeOf(value.clone());
+            (
+                self.frame_rooted_typeof_path_node(&ty, Some(&binding)),
+                false,
+            )
+        } else {
+            (
+                self.frame_binding_read(&binding),
+                self.widening_of(&binding),
+            )
+        };
+        match node {
+            Some(node) => ArgumentReadLiterals::Frame { widens, node },
+            None => ArgumentReadLiterals::Unmodeled,
+        }
+    }
+
+    /// The value a read of one of this frame's bindings sees: its narrowed
+    /// read, else its reaching value.
+    fn frame_binding_read(&mut self, binding: &FlowProductSubject) -> Option<SemanticNodeId> {
+        let name = Arc::<str>::from(self.products.identity(binding)?.name);
+        let subject = verter_session_query::flow::slice::SliceNarrowSubject {
+            root: verter_session_query::flow::slice::SliceNarrowRoot::Local {
+                name,
+                binding: binding.clone(),
+            },
+            path: Arc::from([]),
+        };
+        self.narrowed_read(&subject)
+            .or_else(|| self.read_local(binding))
     }
 
     /// tsc's `getAssignmentReducedType`: the union of the DECLARED
@@ -28079,17 +28189,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         if let FlowIndexedArgumentBinding::ValueRead(binding)
         | FlowIndexedArgumentBinding::SourceTypeQuery(binding) = binding
         {
-            let name = Arc::<str>::from(self.products.identity(binding)?.name);
-            let subject = verter_session_query::flow::slice::SliceNarrowSubject {
-                root: verter_session_query::flow::slice::SliceNarrowRoot::Local {
-                    name,
-                    binding: binding.clone(),
-                },
-                path: Arc::from([]),
-            };
             return self
-                .narrowed_read(&subject)
-                .or_else(|| self.read_local(binding))
+                .frame_binding_read(binding)
                 .map(|node| IndexedValue { node, fresh: false });
         }
         self.dispatch

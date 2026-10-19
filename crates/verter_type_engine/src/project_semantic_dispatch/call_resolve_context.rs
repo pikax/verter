@@ -17,6 +17,31 @@ use crate::semantic_query::{
     SignatureKind, TypeParamDecl,
 };
 
+/// How a call argument's read of a value binding contributes its literals,
+/// resolved in the scope the call is in.
+#[derive(Clone, Copy, Debug)]
+pub(in crate::project_semantic_dispatch) enum ArgumentReadLiterals {
+    /// The read names a binding of the call's owner scope: its declaration
+    /// decides whether it widens, and its type is the owner-scope `typeof`.
+    OwnerScope,
+    /// The read names a binding of the function body the call is in (a
+    /// parameter, a local), typed `node` there: regular unless the binding
+    /// keeps a widening literal.
+    Frame { widens: bool, node: SemanticNodeId },
+    /// A read the call's scope does not model: its literals stay fresh.
+    Unmodeled,
+}
+
+/// The type of one regular contributor to an argument position.
+enum RegularContributor {
+    /// An authored type, lowered in the owner scope.
+    Authored(verter_type_expr::TypeExpr),
+    /// A frame binding's type.
+    Resolved(SemanticNodeId),
+    /// A const-context composite, which holds no literal at its own level.
+    Composite,
+}
+
 /// A primitive kind a literal context is decided by.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LiteralKind {
@@ -617,6 +642,22 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         owner: verter_type_expr::TopLevelOwnerId,
         authored: Option<&verter_type_expr::IndexedLiteralProvenance>,
     ) -> Option<Arc<ArgumentLiteralProvenance>> {
+        self.resolve_scoped_argument_literal_provenance(canonical, owner, authored, &|_, _| {
+            ArgumentReadLiterals::OwnerScope
+        })
+    }
+
+    /// [`Self::resolve_argument_literal_provenance`] for a call whose
+    /// argument reads may name bindings of an enclosing function body:
+    /// `reads` resolves each read, by its value path and the span of the
+    /// identifier it starts from, in the call's own scope.
+    pub(in crate::project_semantic_dispatch) fn resolve_scoped_argument_literal_provenance(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        authored: Option<&verter_type_expr::IndexedLiteralProvenance>,
+        reads: &dyn Fn(&verter_type_expr::ValueRef, verter_span::Span) -> ArgumentReadLiterals,
+    ) -> Option<Arc<ArgumentLiteralProvenance>> {
         use verter_type_expr::{IndexedLiteralStep, IndexedRegularLiteralSource, TypeExpr};
         let authored = authored?;
         let graph = self.graph();
@@ -627,6 +668,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 ty,
                 crate::semantic_query::ProjectionReductionContext::structural_transit(),
             )
+        };
+        let type_of = |contributor: &RegularContributor| match contributor {
+            RegularContributor::Authored(ty) => lower(ty),
+            RegularContributor::Resolved(node) => Some(*node),
+            RegularContributor::Composite => None,
         };
         let mut positions = Vec::new();
         'positions: for position in authored.positions.iter() {
@@ -645,7 +691,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             let mut mixed = false;
             // Each arm's regular contributors' types, and the fresh
             // literals it writes when another arm can hold them regular.
-            let mut arms: Vec<(Vec<Option<TypeExpr>>, Vec<SemanticNodeId>)> =
+            let mut arms: Vec<(Vec<RegularContributor>, Vec<SemanticNodeId>)> =
                 Vec::with_capacity(position.arms.len());
             for arm in position.arms.iter() {
                 mixed |= arm.mixed;
@@ -658,19 +704,35 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 }
                 for source in arm.regular.iter() {
                     match source {
-                        IndexedRegularLiteralSource::Pinned(ty) => regular.push(Some(ty.clone())),
-                        IndexedRegularLiteralSource::PinnedComposite => regular.push(None),
-                        IndexedRegularLiteralSource::Read(read) => {
-                            let ty = TypeExpr::TypeOf(read.clone());
-                            if self.value_read_widens(canonical, owner, &read.path) {
+                        IndexedRegularLiteralSource::Pinned(ty) => {
+                            regular.push(RegularContributor::Authored(ty.clone()));
+                        }
+                        IndexedRegularLiteralSource::PinnedComposite => {
+                            regular.push(RegularContributor::Composite);
+                        }
+                        IndexedRegularLiteralSource::Read { value, root } => {
+                            let (widens, contributor) = match reads(value, *root) {
+                                ArgumentReadLiterals::OwnerScope => (
+                                    self.value_read_widens(canonical, owner, &value.path),
+                                    RegularContributor::Authored(TypeExpr::TypeOf(value.clone())),
+                                ),
+                                ArgumentReadLiterals::Frame { widens, node } => {
+                                    (widens, RegularContributor::Resolved(node))
+                                }
+                                ArgumentReadLiterals::Unmodeled => {
+                                    mixed = true;
+                                    continue;
+                                }
+                            };
+                            if widens {
                                 mixed = true;
                                 if separate {
-                                    if let Some(node) = lower(&ty) {
+                                    if let Some(node) = type_of(&contributor) {
                                         fresh.extend(literal_members(graph, node));
                                     }
                                 }
                             } else {
-                                regular.push(Some(ty));
+                                regular.push(contributor);
                             }
                         }
                     }
@@ -683,7 +745,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             let literals = if mixed {
                 let mut literals = Vec::new();
                 for (index, (regular, _)) in arms.iter().enumerate() {
-                    for node in regular.iter().flatten().filter_map(&lower) {
+                    for node in regular.iter().filter_map(&type_of) {
                         for literal in literal_members(graph, node) {
                             let fresh_elsewhere = arms.iter().enumerate().any(|(other, arm)| {
                                 other != index
