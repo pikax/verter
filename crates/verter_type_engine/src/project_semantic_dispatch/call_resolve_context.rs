@@ -121,6 +121,85 @@ enum PositionStep {
     ),
 }
 
+/// The shape of an array literal a contextual tuple types element by
+/// element (`getContextualTypeForElementExpression`'s `length`,
+/// `firstSpreadIndex` and `lastSpreadIndex`): its element count, when
+/// known, and the positions of its first and last spread.
+#[derive(Clone, Copy, Debug, Default)]
+pub(in crate::project_semantic_dispatch) struct ArrayLiteralShape {
+    pub(in crate::project_semantic_dispatch) length: Option<usize>,
+    pub(in crate::project_semantic_dispatch) first_spread: Option<usize>,
+    pub(in crate::project_semantic_dispatch) last_spread: Option<usize>,
+}
+
+impl ArrayLiteralShape {
+    /// The shape of the array literal an argument tuple of `elements` is:
+    /// a rest element is a spread.
+    fn of_tuple(elements: &[crate::semantic_query::TupleElement]) -> Self {
+        Self {
+            length: Some(elements.len()),
+            first_spread: elements.iter().position(|element| element.rest),
+            last_spread: elements.iter().rposition(|element| element.rest),
+        }
+    }
+}
+
+/// The contextual types a tuple whose elements are `elements` gives
+/// the array literal element at `index` of a literal shaped `shape`
+/// (the tuple arm of `getContextualTypeForElementExpression`): the
+/// tuple's own fixed element while no spread came before it; counted
+/// from the end, the tuple's trailing fixed element at the same
+/// distance when the literal's length is known and no spread follows
+/// the element; otherwise the element types of the tuple's middle — its
+/// rest element's, and its trailing fixed elements' unless the
+/// literal's length places the element before them. Empty when no
+/// element types the position. `rest_element` reads a rest element's
+/// element type off its array type.
+pub(in crate::project_semantic_dispatch) fn tuple_element_contexts(
+    elements: &[crate::semantic_query::TupleElement],
+    index: usize,
+    shape: ArrayLiteralShape,
+    rest_element: impl Fn(SemanticNodeId) -> Option<SemanticNodeId>,
+) -> Vec<SemanticNodeId> {
+    let fixed = elements.iter().take_while(|element| !element.rest).count();
+    if shape.first_spread.is_none_or(|spread| index < spread) && index < fixed {
+        return vec![elements[index].value];
+    }
+    let variadic = elements.iter().any(|element| element.rest);
+    let offset = match shape.length {
+        Some(length) if shape.last_spread.is_none_or(|spread| index > spread) => {
+            length.saturating_sub(index)
+        }
+        _ => 0,
+    };
+    let fixed_end = if offset > 0 && variadic {
+        elements
+            .iter()
+            .rev()
+            .take_while(|element| !element.rest)
+            .count()
+    } else {
+        0
+    };
+    if offset > 0 && offset <= fixed_end {
+        return vec![elements[elements.len() - offset].value];
+    }
+    let start = shape.first_spread.map_or(fixed, |spread| spread.min(fixed));
+    let end = elements.len() - if shape.length.is_some() { fixed_end } else { 0 };
+    elements
+        .get(start..end)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|element| {
+            if element.rest {
+                rest_element(element.value)
+            } else {
+                Some(element.value)
+            }
+        })
+        .collect()
+}
+
 /// The constraint a nested position reads the type parameter `param`
 /// through: the one its node carries, else its declaration's in
 /// `declared`. None for a `const` type parameter: every position under it
@@ -309,6 +388,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                 .take_while(|element| !element.rest)
                                 .map(|element| element.value)
                                 .collect();
+                            let shape = ArrayLiteralShape::of_tuple(elements);
                             drop(data);
                             for (index, value) in values.into_iter().enumerate() {
                                 let mut crossed = FxHashSet::default();
@@ -320,6 +400,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                             self.contextual_element_types(
                                                 contextual,
                                                 index,
+                                                shape,
                                                 declared,
                                                 &mut crossed,
                                             )
@@ -759,14 +840,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     /// The contextual types the array literal element at `index` takes
     /// from `contextual` (`getContextualTypeForElementExpression`): an
-    /// array's element type, or a tuple's element at the position (its
-    /// rest element's type past its fixed elements), per constituent; a
-    /// type parameter's through its base constraint, as
+    /// array's element type, or a tuple's element at the position
+    /// ([`tuple_element_contexts`]), per constituent; a type
+    /// parameter's through its base constraint, as
     /// [`Self::contextual_member_types`] reads it.
     fn contextual_element_types(
         &self,
         contextual: SemanticNodeId,
         index: usize,
+        shape: ArrayLiteralShape,
         declared: &[TypeParamDecl],
         visited: &mut FxHashSet<SemanticNodeId>,
     ) -> Vec<SemanticNodeId> {
@@ -785,7 +867,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 members
                     .into_iter()
                     .flat_map(|member| {
-                        self.contextual_element_types(member, index, declared, visited)
+                        self.contextual_element_types(member, index, shape, declared, visited)
                     })
                     .collect()
             }
@@ -794,24 +876,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 drop(data);
                 match constraint {
                     Some(constraint) if visited.insert(contextual) => {
-                        self.contextual_element_types(constraint, index, declared, visited)
+                        self.contextual_element_types(constraint, index, shape, declared, visited)
                     }
                     _ => Vec::new(),
                 }
             }
             Some(SemanticNodeData::Array { element, .. }) => vec![*element],
             Some(SemanticNodeData::Tuple { elements, .. }) => {
-                let fixed = elements.iter().take_while(|element| !element.rest).count();
-                if index < fixed {
-                    return vec![elements[index].value];
-                }
-                let Some(rest) = elements.iter().find(|element| element.rest) else {
-                    return Vec::new();
-                };
-                match graph.node_data(rest.value).as_deref() {
-                    Some(SemanticNodeData::Array { element, .. }) => vec![*element],
-                    _ => Vec::new(),
-                }
+                tuple_element_contexts(elements, index, shape, |rest| {
+                    match graph.node_data(rest).as_deref() {
+                        Some(SemanticNodeData::Array { element, .. }) => Some(*element),
+                        _ => None,
+                    }
+                })
             }
             _ => Vec::new(),
         }

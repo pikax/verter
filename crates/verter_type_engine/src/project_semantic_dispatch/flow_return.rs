@@ -13337,6 +13337,8 @@ struct ArrayEvalFrame<'e> {
     elements: &'e [verter_session_query::flow::slice::SliceArrayElement],
     const_asserted: bool,
     contextual: Option<SemanticNodeId>,
+    /// The literal's shape a contextual tuple reads its elements by.
+    shape: super::call_resolve::ArrayLiteralShape,
     tupled: bool,
     /// `(reduction operand, widening_nullish)` per element position of
     /// the join.
@@ -15075,7 +15077,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             SemanticNodeData::Tuple { .. } | SemanticNodeData::Array { .. } => {
                 drop(data);
                 let index = name.parse::<usize>().ok()?;
-                self.contextual_element_type(contextual, index, false)
+                self.contextual_element_type(
+                    contextual,
+                    index,
+                    super::call_resolve::ArrayLiteralShape::default(),
+                )
             }
             SemanticNodeData::TypeParam {
                 constraint: Some(constraint),
@@ -15120,17 +15126,18 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     }
 
     /// The checker's contextual type of the element at `position` of an
-    /// array literal typed by `contextual`
+    /// array literal shaped `shape` typed by `contextual`
     /// (`getContextualTypeForElementExpression`): per constituent of a
-    /// union, a tuple's element at the position while no spread came
-    /// before it (its rest element's type past its fixed elements), an
-    /// array's element type, or the object's numeric property or index; a
-    /// constrained type parameter's through its constraint.
+    /// union, a tuple's element at the position
+    /// ([`super::call_resolve::tuple_element_contexts`]), an array's
+    /// element type, or, while no spread came before it, the object's
+    /// numeric property or index; a constrained type parameter's through
+    /// its constraint.
     fn contextual_element_type(
         &self,
         contextual: SemanticNodeId,
         position: usize,
-        after_spread: bool,
+        shape: super::call_resolve::ArrayLiteralShape,
     ) -> Option<SemanticNodeId> {
         let graph = self.dispatch.graph();
         let contextual = self.dispatch.resolved_reduction_view(contextual);
@@ -15141,23 +15148,23 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 drop(data);
                 let types: Vec<SemanticNodeId> = members
                     .iter()
-                    .filter_map(|member| {
-                        self.contextual_element_type(*member, position, after_spread)
-                    })
+                    .filter_map(|member| self.contextual_element_type(*member, position, shape))
                     .collect();
                 (!types.is_empty()).then(|| self.union(&types))
             }
             SemanticNodeData::Array { element, .. } => Some(*element),
             SemanticNodeData::Tuple { elements, .. } => {
-                let fixed = elements.iter().take_while(|element| !element.rest).count();
-                if !after_spread && position < fixed {
-                    return Some(elements[position].value);
-                }
-                let rest = elements.iter().find(|element| element.rest)?;
-                match graph.node_data(rest.value).as_deref() {
-                    Some(SemanticNodeData::Array { element, .. }) => Some(*element),
-                    _ => None,
-                }
+                let types = super::call_resolve::tuple_element_contexts(
+                    elements,
+                    position,
+                    shape,
+                    |rest| match graph.node_data(rest).as_deref() {
+                        Some(SemanticNodeData::Array { element, .. }) => Some(*element),
+                        _ => None,
+                    },
+                );
+                drop(data);
+                (!types.is_empty()).then(|| self.union(&types))
             }
             SemanticNodeData::TypeParam {
                 constraint: Some(constraint),
@@ -15165,14 +15172,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             } => {
                 let constraint = *constraint;
                 drop(data);
-                self.contextual_element_type(constraint, position, after_spread)
+                self.contextual_element_type(constraint, position, shape)
             }
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
             | SemanticNodeData::TypeParam { .. } => None,
             _ => {
                 drop(data);
-                if after_spread {
+                if shape.first_spread.is_some_and(|spread| spread < position) {
                     return None;
                 }
                 self.contextual_property_type(contextual, &position.to_string())
@@ -15181,8 +15188,21 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     }
 
     /// Whether `contextual` makes an array literal a TUPLE: some
-    /// constituent of it is a tuple type (the checker's `inTupleContext`).
+    /// constituent of its apparent type is a tuple type (the checker's
+    /// `inTupleContext`), a constrained type parameter's through its
+    /// constraint, as [`Self::contextual_element_type`] reads it.
     fn is_tuple_context(&self, contextual: SemanticNodeId) -> bool {
+        let mut visited = rustc_hash::FxHashSet::default();
+        self.is_tuple_context_within(contextual, &mut visited)
+    }
+
+    /// [`Self::is_tuple_context`]; `visited` holds the type parameters
+    /// already read through, so a circular constraint is no tuple context.
+    fn is_tuple_context_within(
+        &self,
+        contextual: SemanticNodeId,
+        visited: &mut rustc_hash::FxHashSet<SemanticNodeId>,
+    ) -> bool {
         let graph = self.dispatch.graph();
         let contextual = self.dispatch.resolved_reduction_view(contextual);
         let data = graph.node_data(contextual);
@@ -15191,7 +15211,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             Some(SemanticNodeData::Union(members)) => {
                 let members = members.to_vec();
                 drop(data);
-                members.iter().any(|member| self.is_tuple_context(*member))
+                members
+                    .iter()
+                    .any(|member| self.is_tuple_context_within(*member, visited))
+            }
+            Some(SemanticNodeData::TypeParam {
+                constraint: Some(constraint),
+                ..
+            }) => {
+                let constraint = *constraint;
+                drop(data);
+                visited.insert(contextual) && self.is_tuple_context_within(constraint, visited)
             }
             _ => false,
         }
@@ -15328,10 +15358,21 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // `as const` path with mutable elements.
         let tuple_context = !const_asserted
             && contextual.is_some_and(|contextual| self.is_tuple_context(contextual));
+        let spread = |element: &verter_session_query::flow::slice::SliceArrayElement| {
+            matches!(
+                element,
+                verter_session_query::flow::slice::SliceArrayElement::Spread { .. }
+            )
+        };
         ArrayEvalFrame {
             elements,
             const_asserted,
             contextual,
+            shape: super::call_resolve::ArrayLiteralShape {
+                length: Some(elements.len()),
+                first_spread: elements.iter().position(spread),
+                last_spread: elements.iter().rposition(spread),
+            },
             tupled: const_asserted || tuple_context,
             parts: Vec::with_capacity(elements.len()),
             tuple: Vec::new(),
@@ -15365,7 +15406,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     pre_widening,
                 } => {
                     let element_context = frame.contextual.and_then(|contextual| {
-                        self.contextual_element_type(contextual, position, frame.spread_seen)
+                        self.contextual_element_type(contextual, position, frame.shape)
                     });
                     let outcome = match (delivered.take(), element_context) {
                         (Some(outcome), _) => outcome,
