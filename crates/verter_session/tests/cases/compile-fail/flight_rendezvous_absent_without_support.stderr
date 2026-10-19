@@ -1,0 +1,19 @@
+error[E0432]: unresolved import `verter_type_engine::semantic_query_memo::FlightRendezvous`
+ --> tests/cases/compile-fail/flight_rendezvous_absent_without_support.rs:6:47
+  |
+6 | use verter_type_engine::semantic_query_memo::{FlightRendezvous, SemanticGraphStore};
+  |                                               ^^^^^^^^^^^^^^^^ no `FlightRendezvous` in `semantic_query_memo`
+  |
+note: found an item that was configured out
+ --> $WORKSPACE/crates/verter_type_engine/src/semantic_query_memo/mod.rs
+  |
+  | #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+  |          ---------------------------------------------------------- the item is gated here
+  | pub use inflight::{FlightRendezvous, FlightRendezvousMiss, FlightRendezvousObservation};
+  |                    ^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `arm_flight_rendezvous` found for reference `&SemanticGraphStore` in the current scope
+ --> tests/cases/compile-fail/flight_rendezvous_absent_without_support.rs:9:45
+  |
+9 |     let _held: FlightRendezvous<'_> = store.arm_flight_rendezvous(key);
+  |                                             ^^^^^^^^^^^^^^^^^^^^^ method not found in `&SemanticGraphStore`
