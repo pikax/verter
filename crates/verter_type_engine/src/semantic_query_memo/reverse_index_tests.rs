@@ -511,3 +511,72 @@ fn candidates_sharing_a_dispatch_fence_register_its_canonicals_once() {
     let ops = store.reverse_index_edge_ops();
     assert_eq!(ops.linked, ops.unlinked);
 }
+
+/// A payload whose destructor reports whether its index's lock was held:
+/// a candidate's final owner may take other locks as it drops (an interned
+/// family key's interner, a root owner's arena), so the index releases
+/// every candidate it drops only after it unlocks.
+#[derive(Clone)]
+struct LockProbe {
+    index: &'static ReceiptReverseIndex<u32, LockProbe>,
+    seen: &'static std::sync::Mutex<Vec<bool>>,
+}
+
+impl Drop for LockProbe {
+    fn drop(&mut self) {
+        let locked = self.index.is_locked_for_test();
+        self.seen.lock().expect("probe log").push(locked);
+    }
+}
+
+#[test]
+fn every_dropped_candidate_is_released_after_the_index_unlocks() {
+    let index: &'static ReceiptReverseIndex<u32, LockProbe> =
+        Box::leak(Box::new(ReceiptReverseIndex::charging_registrations(
+            &SemanticRetentionAccount::new(RetentionLimits::defaults()),
+        )));
+    let seen: &'static std::sync::Mutex<Vec<bool>> =
+        Box::leak(Box::new(std::sync::Mutex::new(Vec::new())));
+    let probe = || LockProbe { index, seen };
+    let receipts = chain(2);
+    let drops = |path: &str, run: &dyn Fn()| {
+        seen.lock().expect("probe log").clear();
+        run();
+        let log = std::mem::take(&mut *seen.lock().expect("probe log"));
+        assert!(!log.is_empty(), "{path} drops a candidate");
+        assert!(
+            log.iter().all(|locked| !locked),
+            "{path} drops a candidate under the index lock"
+        );
+    };
+
+    index.register(1, probe(), &carrier(&receipts[1]), []);
+    drops("a replacing registration", &|| {
+        index.register(1, probe(), &carrier(&receipts[0]), []);
+    });
+    drops("an update that unregisters", &|| {
+        assert!(index.update(&1, |_| false));
+    });
+    index.register(2, probe(), &carrier(&receipts[1]), ["/w/extra.ts"]);
+    drops("an unregistration", &|| {
+        assert!(index.unregister(&2).is_some());
+    });
+    index.register(3, probe(), &carrier(&receipts[1]), []);
+    index.register(4, probe(), &carrier(&receipts[0]), []);
+    drops("a clear", &|| index.clear());
+    assert_eq!(index.occupancy(), ReverseIndexOccupancy::default());
+}
+
+/// The owners' share of the index's storage lies inside the blocks it
+/// holds; a share beyond them is broken accounting and fails, never a
+/// charge clamped to zero that would release the index's pin.
+#[test]
+#[should_panic(expected = "owner share lies inside the blocks the index holds")]
+fn an_owner_share_beyond_the_held_blocks_fails_instead_of_clamping() {
+    let mut state: super::IndexState<u32, ()> = super::IndexState::new(super::IndexStorage::new(
+        SemanticRetentionAccount::new(RetentionLimits::defaults()),
+        true,
+    ));
+    state.storage.owner_share = 1;
+    state.settle();
+}

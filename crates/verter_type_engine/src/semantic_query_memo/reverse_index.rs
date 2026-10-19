@@ -61,8 +61,9 @@
 //! replacement, and no read of the index ever owes registration work.
 //!
 //! **Locking.** One leaf mutex guards the whole index; no other lock is
-//! taken while it is held, and evidence the index drops is released after
-//! it unlocks. Callers register and unregister inside their own consistency
+//! taken while it is held, and the evidence and candidates (keys and
+//! payloads) the index drops are released after it unlocks, since their
+//! final owners may take other locks as they drop. Callers register and unregister inside their own consistency
 //! boundary, so a candidate's visibility and its registration change in one
 //! step.
 
@@ -387,7 +388,9 @@ impl<K: Eq + Hash, P> IndexState<K, P> {
     /// set's backing block, the candidates' extra-canonical lists and the
     /// canonicals' text — less the share each candidate's owner charges
     /// when it does. That share is a candidate's own buckets, list and
-    /// edges, all inside blocks counted here, so it never exceeds them.
+    /// edges, all inside blocks counted here, so it never exceeds them; a
+    /// share that did would be broken accounting, which fails here rather
+    /// than settling the index's charge at a plausible zero.
     fn storage_bytes(&self) -> usize {
         let held = self.canonicals.block_bytes()
             + self.evidence.block_bytes()
@@ -396,7 +399,8 @@ impl<K: Eq + Hash, P> IndexState<K, P> {
             + self.storage.set_blocks
             + self.storage.extras_blocks
             + self.storage.text;
-        held.saturating_sub(self.storage.owner_share)
+        held.checked_sub(self.storage.owner_share)
+            .expect("the candidates' owner share lies inside the blocks the index holds")
     }
 
     /// What candidate `node`'s owner charges of its registration, when the
@@ -589,13 +593,24 @@ impl<K: Eq + Hash + Clone, P> IndexState<K, P> {
         self.evidence.release_sparse();
     }
 
-    fn unregister(&mut self, key: &K, released: &mut Vec<EvidenceOwner>) -> Option<P> {
-        let id = self.candidate_ids.table.remove(key)?;
-        Some(self.unregister_id(id, released))
+    /// Unregister candidate `key`, answering its id-table key and its node
+    /// for the caller to drop after the index unlocks.
+    fn unregister(
+        &mut self,
+        key: &K,
+        released: &mut Vec<EvidenceOwner>,
+    ) -> Option<(K, CandidateNode<K, P>)> {
+        let (key, id) = self.candidate_ids.table.remove_entry(key)?;
+        Some((key, self.unregister_id(id, released)))
     }
 
-    /// Unregister the candidate numbered `id`, whose key no longer names it.
-    fn unregister_id(&mut self, id: CandidateId, released: &mut Vec<EvidenceOwner>) -> P {
+    /// Unregister the candidate numbered `id`, whose key no longer names it,
+    /// answering its node for the caller to drop after the index unlocks.
+    fn unregister_id(
+        &mut self,
+        id: CandidateId,
+        released: &mut Vec<EvidenceOwner>,
+    ) -> CandidateNode<K, P> {
         let node = self
             .candidates
             .table
@@ -612,7 +627,7 @@ impl<K: Eq + Hash + Clone, P> IndexState<K, P> {
         }
         self.candidates.release_sparse();
         self.candidate_ids.release_sparse();
-        node.payload
+        node
     }
 }
 
@@ -696,9 +711,9 @@ impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
     ) {
         let extras: SmallVec<[&str; 8]> = dedup_canonicals(extras);
         let mut released = Vec::new();
-        {
+        let replaced = {
             let mut state = self.state.lock();
-            let replaced = state.candidate_ids.table.remove(&key);
+            let replaced = state.candidate_ids.table.remove_entry(&key);
             if !(carrier.is_empty() && fence.is_empty() && extras.is_empty()) {
                 let id = state.next_candidate;
                 state.next_candidate += 1;
@@ -724,33 +739,33 @@ impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
                 state.candidates.table.insert(id, node);
                 state.candidates.note_inserted();
             }
-            if let Some(replaced) = replaced {
-                state.unregister_id(replaced, &mut released);
-            }
+            let replaced = replaced.map(|(key, id)| (key, state.unregister_id(id, &mut released)));
             state.settle();
-        }
+            replaced
+        };
         drop(released);
+        drop(replaced);
     }
 
     /// Unregister candidate `key`, dropping every node and canonical only
     /// it reached. Answers its payload when it was registered.
     pub fn unregister(&self, key: &K) -> Option<P> {
         let mut released = Vec::new();
-        let payload = {
+        let removed = {
             let mut state = self.state.lock();
-            let payload = state.unregister(key, &mut released);
+            let removed = state.unregister(key, &mut released);
             state.settle();
-            payload
+            removed
         };
         drop(released);
-        payload
+        removed.map(|(_, node)| node.payload)
     }
 
     /// Update candidate `key`'s payload; `retain` answering `false`
     /// unregisters it. Answers whether `key` was registered.
     pub fn update(&self, key: &K, retain: impl FnOnce(&mut P) -> bool) -> bool {
         let mut released = Vec::new();
-        let found = {
+        let removed = {
             let mut state = self.state.lock();
             let Some(&id) = state.candidate_ids.table.get(key) else {
                 return false;
@@ -760,14 +775,17 @@ impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
                 .table
                 .get_mut(&id)
                 .expect("every id names a node");
-            if !retain(&mut node.payload) {
-                state.unregister(key, &mut released);
+            if retain(&mut node.payload) {
+                None
+            } else {
+                let removed = state.unregister(key, &mut released);
                 state.settle();
+                removed
             }
-            true
         };
         drop(released);
-        found
+        drop(removed);
+        true
     }
 
     /// Every candidate whose receipts reach `canonical`, with its payload,
@@ -808,7 +826,7 @@ impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
 
     /// Unregister every candidate, giving back all of the index's storage.
     pub fn clear(&self) {
-        let released = {
+        let (released, candidate_ids, candidates) = {
             let mut state = self.state.lock();
             let released: Vec<EvidenceOwner> = std::mem::take(&mut state.evidence.table)
                 .into_values()
@@ -816,17 +834,19 @@ impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
                 .collect();
             state.canonicals = Tracked::default();
             state.evidence = Tracked::default();
-            state.candidate_ids = Tracked::default();
-            state.candidates = Tracked::default();
+            let candidate_ids = std::mem::take(&mut state.candidate_ids);
+            let candidates = std::mem::take(&mut state.candidates);
             state.edges = 0;
             state.storage.text = 0;
             state.storage.set_blocks = 0;
             state.storage.extras_blocks = 0;
             state.storage.owner_share = 0;
             state.settle();
-            released
+            (released, candidate_ids, candidates)
         };
         drop(released);
+        drop(candidate_ids);
+        drop(candidates);
     }
 
     /// What the index holds now.
@@ -854,6 +874,12 @@ impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
     #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     pub fn edge_ops(&self) -> ReverseIndexEdgeOps {
         self.state.lock().ops
+    }
+
+    /// Test-only: whether the index's lock is held right now.
+    #[cfg(test)]
+    pub(crate) fn is_locked_for_test(&self) -> bool {
+        self.state.is_locked()
     }
 }
 

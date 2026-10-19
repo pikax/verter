@@ -628,19 +628,12 @@ where
             validated_at_generation,
             facts: Arc::clone(&signature.facts),
         };
-        let registrations = {
-            let mut seen: rustc_hash::FxHashSet<Arc<str>> =
-                signature.canonical_ids().into_iter().collect();
-            seen.extend(self_root_canonicals.iter().cloned());
-            seen.len()
-        };
         let Ok(candidate) = Candidate::admit::<K>(
             discriminant,
             value,
             signature,
             self_root_canonicals,
             validated_at_generation,
-            registrations,
             footprint,
             account,
         ) else {
@@ -682,6 +675,12 @@ where
         &self,
     ) -> crate::semantic_query_memo::ReverseIndexOccupancy {
         self.canonical_index.occupancy()
+    }
+
+    /// Test-only: bytes the reverse index's own storage is charged.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn reverse_index_storage_charge_bytes_for_test(&self) -> usize {
+        self.canonical_index.storage_charge_bytes()
     }
 
     /// Test-only accessor for the lifecycle retention gate.

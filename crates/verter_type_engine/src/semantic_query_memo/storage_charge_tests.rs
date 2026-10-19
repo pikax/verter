@@ -91,11 +91,11 @@ fn a_retired_signature_epoch_releases_its_storage_with_its_last_holder() {
     );
 }
 
-/// The reverse index copies each registered canonical's text into its
-/// shard key: that copy, and the shard table's unused buckets, are charged
-/// to the index while it holds them and given back when the shard drains.
+/// The reverse index keeps its own copy of each registered canonical's
+/// text: that copy is charged to the index while it holds it and given back
+/// when the canonical's last holder drains.
 #[test]
-fn a_reverse_index_shard_charges_its_canonical_text_until_it_drains() {
+fn a_reverse_index_charges_its_canonical_text_until_it_drains() {
     use crate::semantic_query::{PrimitiveKind, RelateMemoKey, RelationContext, RelationOutcome};
     use verter_session_query::facts::fact_cache::{FactVersionRef, ReadSetSignature};
 
@@ -121,13 +121,13 @@ fn a_reverse_index_shard_charges_its_canonical_text_until_it_drains() {
     let charged = store.canonical_to_entries.storage_charge_bytes();
     assert!(
         charged >= arc_block_bytes(canonical.len()),
-        "the shard's copy of the oversized canonical is charged: {charged}"
+        "the index's copy of the oversized canonical is charged: {charged}"
     );
 
     assert_eq!(store.invalidate_canonical(&canonical), 1);
     assert!(
         store.canonical_to_entries.storage_charge_bytes() < arc_block_bytes(canonical.len()),
-        "the drained shard's text is no longer charged"
+        "the drained canonical's text is no longer charged"
     );
     store.invalidate_all();
     assert_eq!(

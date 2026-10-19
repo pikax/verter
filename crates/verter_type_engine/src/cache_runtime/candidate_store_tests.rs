@@ -706,3 +706,57 @@ fn chained_receipts_reach_their_candidates_and_drain_with_the_last() {
     );
     assert_eq!(store.live_count(), 0);
 }
+
+/// A candidate's own charge covers its own allocations only. The receipt
+/// chain its carrier reaches is registered once, as the reverse index's
+/// own storage, so a candidate over a deep chain is charged exactly what a
+/// candidate over a one-file chain is: charging it again per reached
+/// canonical would count the shared registrations twice.
+#[test]
+fn a_candidate_charge_does_not_grow_with_the_canonicals_its_receipts_reach() {
+    use verter_session_query::facts::fact_cache::ResultReceipt;
+    use verter_session_query::retention::RetainedFootprint;
+
+    let mut receipts: Vec<ResultReceipt> = Vec::new();
+    for i in 0..16 {
+        let mut facts = vec![FactVersionRef::FileWholeHash {
+            canonical_id: format!("/w/deep{i}.ts"),
+            hash: [6; 16],
+        }];
+        if let Some(below) = receipts.last() {
+            facts.push(FactVersionRef::Receipt(below.clone()));
+        }
+        receipts.push(ResultReceipt::new(facts));
+    }
+    let store: ReverseIndexedCandidateStore<u32, u32> =
+        ReverseIndexedCandidateStore::with_counter(Arc::new(AtomicU64::new(0)));
+    let account = verter_session_query::retention::SemanticRetentionAccount::new(
+        verter_session_query::retention::RetentionLimits::defaults(),
+    );
+    let retained = || account.snapshot().retained_bytes;
+    let insert = |key: u32, receipt: &ResultReceipt| {
+        store.insert_for_test(
+            key,
+            0,
+            ReadSetSignature::new(Arc::from(vec![FactVersionRef::Receipt(receipt.clone())])),
+            Arc::from(Vec::new()),
+            0,
+            0u32.retained_footprint(),
+            &account,
+        );
+    };
+    // The first admission claims every receipt of the chain, so the two
+    // measured admissions below charge only their own allocations.
+    insert(1, &receipts[15]);
+    let before = retained();
+    insert(2, &receipts[15]);
+    let deep = retained() - before;
+    let before = retained();
+    insert(3, &receipts[0]);
+    let shallow = retained() - before;
+    assert_eq!(
+        deep, shallow,
+        "a candidate reaching 16 canonicals is charged what one reaching 1 is"
+    );
+    assert!(store.reverse_index_storage_charge_bytes_for_test() > 0);
+}
