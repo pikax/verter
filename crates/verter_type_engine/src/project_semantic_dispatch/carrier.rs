@@ -1099,16 +1099,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             mode,
             ProjectionMode::Navigate | ProjectionMode::Skeleton | ProjectionMode::Shallow
         ) || (arg_count == 1
-            && resolved_root.symbol_name.as_ref() == "ThisType"
-            && self
-                .first_global_declaration(
-                    scope
-                        .canonical_file()
-                        .as_deref()
-                        .unwrap_or(&resolved_root.canonical_id),
-                    "ThisType",
-                )
-                .is_some_and(|global| global == resolved_root))
+            && self.names_contextual_this_marker(
+                scope
+                    .canonical_file()
+                    .as_deref()
+                    .unwrap_or(&resolved_root.canonical_id),
+                &resolved_root.canonical_id,
+                resolved_root.owner,
+                &resolved_root.symbol_name,
+            ))
         {
             if arg_count == 0 {
                 return CarrierResolutionPlan::complete(self.intern_ref_head_carrier(
