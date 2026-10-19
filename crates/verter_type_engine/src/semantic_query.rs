@@ -113,18 +113,18 @@ pub(crate) mod allocation_footprint;
 pub(crate) mod node_payload_footprint;
 /// Selector-aware projection facts for authored object-spread programs.
 ///
-/// The result is an opaque correlated formula. Exact absence, emptiness,
-/// `keyof`, exhaustive iteration, and closed materialisation are available
-/// only through the module's sealed complete-domain witnesses.
+/// The result is an opaque, factored correlated formula whose alternatives
+/// are read on demand. Exact absence, emptiness, `keyof`, exhaustive
+/// iteration, and closed materialisation are available only through the
+/// module's sealed complete-domain witness.
 pub mod object_spread_projection;
 pub use object_spread_projection::{
-    ClosedKeyLookup, ClosedObjectProjectionAlternative, ClosedObjectProjectionFormula,
-    ClosedObjectProjectionSurface, CompleteObjectDomain, ExactOptionalPropertyPolicy,
-    ExcessEligibility, IndexDomain, MemberFacets, ObjectProjectionAlternative,
-    ObjectProjectionFormula, ObjectProjectionIndex, ObjectProjectionSelector,
-    ObjectProjectionSignature, ObjectSignatureKind, ObjectSpreadProjectionContext,
-    OpenSafeKeyEvidence, PositiveAlternativeEvidence, PositiveKeyFact, PositiveKeyPresence,
-    ProjectionEvidence,
+    ClosedKeyLookup, ClosedObjectProjectionAlternative, ClosedObjectProjectionSurface,
+    CompleteObjectDomain, ExactOptionalPropertyPolicy, ExcessEligibility, IndexDomain,
+    MemberFacets, ObjectProjectionAlternative, ObjectProjectionFormula, ObjectProjectionIndex,
+    ObjectProjectionSelector, ObjectProjectionSignature, ObjectSignatureKind,
+    ObjectSpreadProjectionContext, OpenSafeKeyEvidence, PositiveAlternativeEvidence,
+    PositiveKeyFact, PositiveKeyPresence, ProjectionEvidence,
 };
 
 /// The [`IndexKey::Number`] payload domain: the proof-carrying

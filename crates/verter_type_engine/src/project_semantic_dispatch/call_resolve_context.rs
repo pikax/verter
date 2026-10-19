@@ -17,6 +17,31 @@ use crate::semantic_query::{
     SignatureKind, TypeParamDecl,
 };
 
+/// How a call argument's read of a value binding contributes its literals,
+/// resolved in the scope the call is in.
+#[derive(Clone, Copy, Debug)]
+pub(in crate::project_semantic_dispatch) enum ArgumentReadLiterals {
+    /// The read names a binding of the call's owner scope: its declaration
+    /// decides whether it widens, and its type is the owner-scope `typeof`.
+    OwnerScope,
+    /// The read names a binding of the function body the call is in (a
+    /// parameter, a local), typed `node` there: regular unless the binding
+    /// keeps a widening literal.
+    Frame { widens: bool, node: SemanticNodeId },
+    /// A read the call's scope does not model: its literals stay fresh.
+    Unmodeled,
+}
+
+/// The type of one regular contributor to an argument position.
+enum RegularContributor {
+    /// An authored type, lowered in the owner scope.
+    Authored(verter_type_expr::TypeExpr),
+    /// A frame binding's type.
+    Resolved(SemanticNodeId),
+    /// A const-context composite, which holds no literal at its own level.
+    Composite,
+}
+
 /// A primitive kind a literal context is decided by.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LiteralKind {
@@ -66,8 +91,8 @@ impl LiteralContext {
 /// One authored position of a call argument: the expression's type, its
 /// combined contextual type (the constituents of the parameter type that
 /// type it), the type parameters whose constraints that contextual type
-/// was read through, its steps from the argument, and whether it is the
-/// argument itself.
+/// was read through, its steps from the argument, whether it is the
+/// argument itself, and whether it is in a const context.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct ArgumentPosition {
     node: SemanticNodeId,
@@ -75,6 +100,10 @@ struct ArgumentPosition {
     through: Arc<[SemanticNodeId]>,
     path: Arc<[ArgumentPathStep]>,
     root: bool,
+    /// The checker's `isConstContext`: an enclosing object or array
+    /// literal of the argument is contextually typed by a `const` type
+    /// parameter, so the position's literals are kept as written.
+    const_context: bool,
 }
 
 impl ArgumentPosition {
@@ -86,6 +115,7 @@ impl ArgumentPosition {
         node: SemanticNodeId,
         contexts: Arc<[SemanticNodeId]>,
         through: Arc<[SemanticNodeId]>,
+        const_context: bool,
     ) -> Self {
         Self {
             node,
@@ -96,6 +126,7 @@ impl ArgumentPosition {
                 None => Arc::clone(&self.path),
             },
             root: false,
+            const_context,
         }
     }
 
@@ -293,6 +324,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             through: Arc::from([]),
             path: Arc::from([]),
             root: true,
+            const_context: false,
         };
         // The parameters the argument deposits into: a regular literal is
         // written as authored into each of them.
@@ -337,6 +369,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         typed.insert(position, node);
                         continue;
                     }
+                    // The positions this one's object or array literal holds
+                    // are in a const context when it is, or when its own
+                    // contextual type is a `const` type parameter.
+                    let nested_const = position.const_context
+                        || position
+                            .contexts
+                            .iter()
+                            .any(|&contextual| self.is_const_type_variable(contextual, declared));
                     let data = graph.node_data(node);
                     match data.as_deref() {
                         Some(SemanticNodeData::Object(surface)) => {
@@ -377,8 +417,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                     .cloned_known()
                                     .and_then(|key| self.argument_member_step(&key))
                                     .map(ArgumentPathStep::Member);
-                                children
-                                    .push((index, position.nested(step, value, contexts, through)));
+                                children.push((
+                                    index,
+                                    position.nested(step, value, contexts, through, nested_const),
+                                ));
                             }
                         }
                         Some(SemanticNodeData::Tuple { elements, .. }) => {
@@ -409,8 +451,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                 );
                                 let through = position.child_through(crossed);
                                 let step = u32::try_from(index).ok().map(ArgumentPathStep::Element);
-                                children
-                                    .push((index, position.nested(step, value, contexts, through)));
+                                children.push((
+                                    index,
+                                    position.nested(step, value, contexts, through, nested_const),
+                                ));
                             }
                         }
                         // An array literal holding a spread or an elision: its
@@ -448,6 +492,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                     element,
                                     contexts,
                                     through,
+                                    nested_const,
                                 ),
                             ));
                         }
@@ -473,6 +518,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                             member,
                                             Arc::clone(&position.contexts),
                                             Arc::clone(&position.through),
+                                            position.const_context,
                                         ),
                                     ));
                                 }
@@ -562,8 +608,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // every parameter the argument reaches is equal to one of them:
         // the decision is then made here, at the position it is for (`{ v:
         // "a" as "a", w: "a" }` deposited into a naked `T` keeps `v` alone).
+        // A const context keeps them as written whatever the argument
+        // reaches (`boxc<const T>(o: { a: T })` over `{ a: [v, "lit"] }`).
         if contexts.is_empty() {
-            return if reached.is_empty() {
+            return if reached.is_empty() || position.const_context {
                 Vec::new()
             } else {
                 fresh
@@ -588,6 +636,28 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             LiteralContext::Widen => fresh,
             LiteralContext::Unknown => Vec::new(),
         }
+    }
+
+    /// The checker's `isConstTypeVariable` over the call's declared type
+    /// parameters: `contextual` is a `const` type parameter, or a union or
+    /// intersection holding one.
+    fn is_const_type_variable(
+        &self,
+        contextual: SemanticNodeId,
+        declared: &[TypeParamDecl],
+    ) -> bool {
+        let is_const = |node: SemanticNodeId| {
+            declared
+                .iter()
+                .any(|decl| decl.is_const && decl.param == node)
+        };
+        is_const(contextual)
+            || self
+                .graph()
+                .node_data(contextual)
+                .as_deref()
+                .and_then(SemanticNodeData::composite_members)
+                .is_some_and(|members| members.iter().any(|&member| is_const(member)))
     }
 
     /// The step into an object literal's member keyed `key`: the literal
@@ -617,6 +687,22 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         owner: verter_type_expr::TopLevelOwnerId,
         authored: Option<&verter_type_expr::IndexedLiteralProvenance>,
     ) -> Option<Arc<ArgumentLiteralProvenance>> {
+        self.resolve_scoped_argument_literal_provenance(canonical, owner, authored, &|_, _| {
+            ArgumentReadLiterals::OwnerScope
+        })
+    }
+
+    /// [`Self::resolve_argument_literal_provenance`] for a call whose
+    /// argument reads may name bindings of an enclosing function body:
+    /// `reads` resolves each read, by its value path and the span of the
+    /// identifier it starts from, in the call's own scope.
+    pub(in crate::project_semantic_dispatch) fn resolve_scoped_argument_literal_provenance(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        authored: Option<&verter_type_expr::IndexedLiteralProvenance>,
+        reads: &dyn Fn(&verter_type_expr::ValueRef, verter_span::Span) -> ArgumentReadLiterals,
+    ) -> Option<Arc<ArgumentLiteralProvenance>> {
         use verter_type_expr::{IndexedLiteralStep, IndexedRegularLiteralSource, TypeExpr};
         let authored = authored?;
         let graph = self.graph();
@@ -627,6 +713,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 ty,
                 crate::semantic_query::ProjectionReductionContext::structural_transit(),
             )
+        };
+        let type_of = |contributor: &RegularContributor| match contributor {
+            RegularContributor::Authored(ty) => lower(ty),
+            RegularContributor::Resolved(node) => Some(*node),
+            RegularContributor::Composite => None,
         };
         let mut positions = Vec::new();
         'positions: for position in authored.positions.iter() {
@@ -645,7 +736,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             let mut mixed = false;
             // Each arm's regular contributors' types, and the fresh
             // literals it writes when another arm can hold them regular.
-            let mut arms: Vec<(Vec<Option<TypeExpr>>, Vec<SemanticNodeId>)> =
+            let mut arms: Vec<(Vec<RegularContributor>, Vec<SemanticNodeId>)> =
                 Vec::with_capacity(position.arms.len());
             for arm in position.arms.iter() {
                 mixed |= arm.mixed;
@@ -658,19 +749,35 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 }
                 for source in arm.regular.iter() {
                     match source {
-                        IndexedRegularLiteralSource::Pinned(ty) => regular.push(Some(ty.clone())),
-                        IndexedRegularLiteralSource::PinnedComposite => regular.push(None),
-                        IndexedRegularLiteralSource::Read(read) => {
-                            let ty = TypeExpr::TypeOf(read.clone());
-                            if self.value_read_widens(canonical, owner, &read.path) {
+                        IndexedRegularLiteralSource::Pinned(ty) => {
+                            regular.push(RegularContributor::Authored(ty.clone()));
+                        }
+                        IndexedRegularLiteralSource::PinnedComposite => {
+                            regular.push(RegularContributor::Composite);
+                        }
+                        IndexedRegularLiteralSource::Read { value, root } => {
+                            let (widens, contributor) = match reads(value, *root) {
+                                ArgumentReadLiterals::OwnerScope => (
+                                    self.value_read_widens(canonical, owner, &value.path),
+                                    RegularContributor::Authored(TypeExpr::TypeOf(value.clone())),
+                                ),
+                                ArgumentReadLiterals::Frame { widens, node } => {
+                                    (widens, RegularContributor::Resolved(node))
+                                }
+                                ArgumentReadLiterals::Unmodeled => {
+                                    mixed = true;
+                                    continue;
+                                }
+                            };
+                            if widens {
                                 mixed = true;
                                 if separate {
-                                    if let Some(node) = lower(&ty) {
+                                    if let Some(node) = type_of(&contributor) {
                                         fresh.extend(literal_members(graph, node));
                                     }
                                 }
                             } else {
-                                regular.push(Some(ty));
+                                regular.push(contributor);
                             }
                         }
                     }
@@ -683,7 +790,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             let literals = if mixed {
                 let mut literals = Vec::new();
                 for (index, (regular, _)) in arms.iter().enumerate() {
-                    for node in regular.iter().flatten().filter_map(&lower) {
+                    for node in regular.iter().filter_map(&type_of) {
                         for literal in literal_members(graph, node) {
                             let fresh_elsewhere = arms.iter().enumerate().any(|(other, arm)| {
                                 other != index

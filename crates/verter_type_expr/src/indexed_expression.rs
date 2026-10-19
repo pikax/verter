@@ -80,7 +80,14 @@ pub enum IndexedRegularLiteralSource {
     /// A read of a value binding. Its literals are regular unless the
     /// binding's declaration keeps a widening literal (`const s = "a"` is
     /// read as the fresh `"a"`), which only the binding's resolution knows.
-    Read(crate::ValueRef),
+    /// `root` is the span of the identifier the read starts from: the
+    /// scope the call is in resolves the binding it names there, so a
+    /// parameter or local that shadows a top-level binding is read as
+    /// itself.
+    Read {
+        value: crate::ValueRef,
+        root: verter_span::Span,
+    },
 }
 
 /// One authored nested position of a call argument that a regular
