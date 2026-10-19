@@ -570,10 +570,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             });
         }
         Some(ProjectedSurfaceFact {
-            members: std::sync::Arc::from(members.into_boxed_slice()),
-            call_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
-            construct_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
-            index_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+            members: From::from(members.into_boxed_slice()),
+            call_signatures: From::from(Vec::new().into_boxed_slice()),
+            construct_signatures: From::from(Vec::new().into_boxed_slice()),
+            index_signatures: From::from(Vec::new().into_boxed_slice()),
             has_index_signature: false,
         })
     }

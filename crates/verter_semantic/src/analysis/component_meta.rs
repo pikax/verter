@@ -2134,7 +2134,7 @@ fn synthesize_model_prop_and_event(
             SourcePosition::Present(SemanticTypeSource::Closed(ClosedTypeFact::Tuple(
                 TuplePayloadFact {
                     readonly: false,
-                    elements: std::sync::Arc::from(
+                    elements: From::from(
                         vec![TupleElementFact {
                             label: Some("value".to_string()),
                             optional: false,

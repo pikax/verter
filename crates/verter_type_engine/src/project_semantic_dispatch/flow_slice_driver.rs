@@ -14,7 +14,7 @@ use dashmap::DashMap;
 use std::sync::Arc;
 use verter_session_query::facts::fact_cache::ReadSetSignature;
 use verter_session_query::flow::binding::FlowBindingMapError;
-use verter_session_query::flow::flow_ir::FlowSliceIR;
+use verter_session_query::flow::flow_ir::SharedFlowSliceIR;
 use verter_session_query::flow::hashing::compute_flow_slice_hash;
 use verter_session_query::flow::lower::lower_slice_plan;
 use verter_session_query::flow::peeker::{ReturnPathPeeker, SliceDemand};
@@ -119,7 +119,7 @@ impl<'a> FlowSliceDriver<'a> {
         &self,
         key: FlowSliceLoweredKey,
         planned: &verter_session_query::retention::heap_size::OwnedTree<PlannedFlowSlice>,
-    ) -> Option<verter_session_query::retention::heap_size::OwnedTree<FlowSliceIR>> {
+    ) -> Option<SharedFlowSliceIR> {
         crate::cache_runtime::lookup(
             &FlowSliceLoweredBodyNodeDemand {
                 driver: self,
@@ -218,7 +218,7 @@ impl ArtifactNode for FlowSliceHashNodeDemand<'_> {
 
 impl ArtifactNode for FlowSliceLoweredBodyNodeDemand<'_> {
     type Key = FlowSliceLoweredKey;
-    type Value = verter_session_query::retention::heap_size::OwnedTree<FlowSliceIR>;
+    type Value = SharedFlowSliceIR;
 
     fn entries(&self) -> &DashMap<Self::Key, Arc<CacheEntry<Self::Value>>> {
         &self.driver.stores.lowered_node().entries
@@ -246,7 +246,7 @@ impl ArtifactNode for FlowSliceLoweredBodyNodeDemand<'_> {
             };
         }
         CacheAdmission::Cacheable {
-            value: verter_session_query::retention::heap_size::owned_tree(lower_slice_plan(
+            value: SharedFlowSliceIR::new(lower_slice_plan(
                 planned.selection(),
                 bundle.graph(),
                 bundle.skeleton(),

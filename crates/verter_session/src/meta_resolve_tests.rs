@@ -163,7 +163,7 @@ fn imported_registry_seed_refresh_does_not_engage_skip_under_graph_only_authorit
         text: Some("export interface Props { label?: string }".to_string()),
     };
     let object = verter_type_expr::facts::SemanticTypeSource::Synthesized(
-        verter_type_expr::facts::ResolvedLocalShape::Object(Arc::from(vec![
+        verter_type_expr::facts::ResolvedLocalShape::Object(From::from(vec![
             verter_type_expr::facts::SynthesizedMemberFact {
                 name: "label".to_string(),
                 optional: true,
@@ -212,7 +212,7 @@ fn imported_registry_seed_refresh_keeps_symbolic_imported_surfaces_refreshable()
                     },
                     path: verter_type_expr::OwnedSlice::default(),
                 },
-                index_path: Arc::from(vec!["variants".to_string()]),
+                index_path: From::from(vec!["variants".to_string()]),
             },
         ),
     );
@@ -7512,7 +7512,7 @@ defineEmits<Emits>()
         assert_eq!(tuple.elements[0].label.as_deref(), Some("payload"));
         assert_eq!(
             tuple.elements[0].ty,
-            FactOrLocator::LeafUnion(std::sync::Arc::from(
+            FactOrLocator::LeafUnion(From::from(
                 vec![
                     LeafTypeFact::Primitive(verter_type_expr::PrimitiveName::String),
                     LeafTypeFact::Primitive(verter_type_expr::PrimitiveName::Number),

@@ -174,6 +174,12 @@ impl AliasSet {
         Self::with(None, Some(Vec::new()), true)
     }
 
+    /// Whether this measures an owned cell's value, which reaches no raw
+    /// `Arc`.
+    pub(crate) fn measures_cell(&self) -> bool {
+        self.in_cell
+    }
+
     /// An empty set for a figure that charges nothing: it counts every
     /// owned handle it reaches in full, once.
     #[must_use]

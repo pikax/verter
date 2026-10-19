@@ -171,7 +171,7 @@ fn sink_projects_leaf_fact_or_preserves_fallback_across_carrier_shapes() {
         .expect("a leaf-union node publishes a source");
     assert_eq!(
         union_out.expr,
-        SemanticTypeSource::Closed(ClosedTypeFact::LeafUnion(Arc::from(
+        SemanticTypeSource::Closed(ClosedTypeFact::LeafUnion(From::from(
             vec![
                 LeafTypeFact::Primitive(PrimitiveName::String),
                 LeafTypeFact::Primitive(PrimitiveName::Number),

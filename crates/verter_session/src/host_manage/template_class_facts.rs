@@ -894,7 +894,7 @@ fn closed_domain_source(domain: &ClosedLiteralDomain) -> Option<SemanticTypeSour
         .collect::<Vec<_>>();
     let fact = match leaves.as_slice() {
         [leaf] => ClosedTypeFact::Leaf(leaf.clone()),
-        _ => ClosedTypeFact::LeafUnion(Arc::from(leaves.into_boxed_slice())),
+        _ => ClosedTypeFact::LeafUnion(From::from(leaves.into_boxed_slice())),
     };
     Some(SemanticTypeSource::Closed(fact))
 }

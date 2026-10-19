@@ -10,10 +10,10 @@ use super::{matched_slot_carrier_bindings, select_contract_slot};
 
 fn carrier_key(slot: &str, binding: &str, value_node: u64) -> Arc<SyntheticCarrierKey> {
     Arc::new(SyntheticCarrierKey {
-        scope_canonical_id: Arc::from("/src/Child.vue"),
+        scope_canonical_id: From::from("/src/Child.vue"),
         surface_kind: verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding,
-        slot_name: Some(Arc::from(slot)),
-        binding_name: Arc::from(binding),
+        slot_name: Some(From::from(slot)),
+        binding_name: From::from(binding),
         value_node,
     })
 }
