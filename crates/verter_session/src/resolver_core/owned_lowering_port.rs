@@ -119,6 +119,13 @@ trait SourceInputProvider {
     >;
     fn source_host(&self) -> &crate::VerterHost;
     fn source_session_view(&self) -> Option<&dyn crate::session_view::SessionView>;
+    /// The shared type-route policy's publication for this provider's
+    /// resolution view: admitted, unretained, or refused.
+    fn type_dependency_publication(
+        &self,
+        owner_canonical: &str,
+        import_source: &str,
+    ) -> verter_workspace::ResolutionPublication<String>;
 
     fn observed_fact_hash(
         &self,
@@ -191,6 +198,14 @@ where
     }
     fn source_session_view(&self) -> Option<&dyn crate::session_view::SessionView> {
         self.0.session_view()
+    }
+    fn type_dependency_publication(
+        &self,
+        owner_canonical: &str,
+        import_source: &str,
+    ) -> verter_workspace::ResolutionPublication<String> {
+        self.0
+            .type_dependency_publication(owner_canonical, import_source)
     }
     fn observed_fact_hash(
         &self,
@@ -296,6 +311,13 @@ impl SourceInputProvider for crate::VerterHost {
     }
     fn source_session_view(&self) -> Option<&dyn crate::session_view::SessionView> {
         None
+    }
+    fn type_dependency_publication(
+        &self,
+        owner_canonical: &str,
+        import_source: &str,
+    ) -> verter_workspace::ResolutionPublication<String> {
+        crate::VerterHost::resolve_type_dependency_canonical(self, owner_canonical, import_source)
     }
     fn observed_fact_hash(
         &self,
@@ -636,15 +658,27 @@ macro_rules! owned_lowering_from_source_inputs {
                 .ensure_populated(
                     &key,
                     |canonical, spec| {
-                        let resolved: Option<Arc<str>> =
-                            verter_type_engine::resolver_core::request_ports::RouteLookup::resolve_type_dependency_canonical(self, canonical, spec)
-                                .map(Arc::from);
+                        verter_type_engine::count_resolver_context_call!(
+                            "RouteLookup::resolve_type_dependency_canonical"
+                        );
+                        let publication =
+                            SourceInputProvider::type_dependency_publication(self, canonical, spec);
+                        let answer = crate::host_manage::source_augmentation::AugmentationTarget {
+                            retainable: matches!(
+                                publication,
+                                verter_workspace::ResolutionPublication::Admitted(_)
+                            ),
+                            target: crate::resolver_core::request_bound::type_route_answer(
+                                publication,
+                            )
+                            .map(Arc::from),
+                        };
                         resolutions
                             .borrow_mut()
                             .entry(Arc::from(canonical))
                             .or_default()
-                            .push((Arc::from(spec), resolved.clone()));
-                        resolved
+                            .push((Arc::from(spec), answer.target.clone()));
+                        answer
                     },
                     discriminator,
                 );

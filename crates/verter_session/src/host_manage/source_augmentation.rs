@@ -9,6 +9,44 @@ use verter_session_query::analysis::types::Hash16;
 use verter_session_query::resolution::AugmenterEntry;
 use verter_session_query::resolution::AugmenterSet;
 
+/// One augmenter target resolution as the cold scan consumes it.
+#[derive(Debug, Clone)]
+pub(crate) struct AugmentationTarget {
+    /// The module file the augmenter's specifier names; `None` skips it.
+    pub(crate) target: Option<Arc<str>>,
+    /// Whether a set computed from this answer may enter the shared index:
+    /// only an admitted resolution roots one. An unretained answer is
+    /// complete yet was not kept, and a refusal answers no target at all,
+    /// so a set either one fed is served to its request and never stored.
+    pub(crate) retainable: bool,
+}
+
+impl AugmentationTarget {
+    /// An admitted answer.
+    pub(crate) fn admitted(target: Option<Arc<str>>) -> Self {
+        Self {
+            target,
+            retainable: true,
+        }
+    }
+
+    /// The scan's reading of a type-route publication: a delivered target
+    /// (admitted or unretained) is matched, a refusal matches nothing, and
+    /// only an admitted answer is retainable.
+    pub(crate) fn from_publication(
+        publication: verter_workspace::ResolutionPublication<String>,
+    ) -> Self {
+        let retainable = matches!(
+            publication,
+            verter_workspace::ResolutionPublication::Admitted(_)
+        );
+        Self {
+            target: publication.into_delivered().flatten().map(Arc::from),
+            retainable,
+        }
+    }
+}
+
 pub(crate) struct AugmentationRequestDriver<'a> {
     db: &'a FileArtifactStore,
 }
@@ -23,7 +61,7 @@ impl<'a> AugmentationRequestDriver<'a> {
         overlay_discriminator: Option<Hash16>,
     ) -> Arc<AugmenterSet>
     where
-        R: Fn(&str, &str) -> Option<Arc<str>>,
+        R: Fn(&str, &str) -> AugmentationTarget,
     {
         if let Some(existing) = self.db.get_augmenter_set(key) {
             return existing;
@@ -49,6 +87,8 @@ impl<'a> AugmentationRequestDriver<'a> {
         let candidates = self.db.collect_augmenter_candidates(overlay_discriminator);
         let mut matched: Vec<AugmenterEntry> = Vec::new();
         let mut seen_canonicals: rustc_hash::FxHashSet<Arc<str>> = rustc_hash::FxHashSet::default();
+        // Whether every resolution the scan consumed was admitted.
+        let mut retainable = true;
         for candidate in &candidates {
             for fact in candidate.augmentations.iter() {
                 let resolved = if matches!(
@@ -58,7 +98,10 @@ impl<'a> AugmentationRequestDriver<'a> {
                     && verter_session_query::source::augmentation::fact_augments_resolved_module(
                         fact,
                     ) {
-                    resolve_module_file(candidate.canonical.as_ref(), fact.specifier.as_ref())
+                    let answer =
+                        resolve_module_file(candidate.canonical.as_ref(), fact.specifier.as_ref());
+                    retainable &= answer.retainable;
+                    answer.target
                 } else {
                     None
                 };
@@ -97,6 +140,12 @@ impl<'a> AugmentationRequestDriver<'a> {
             entries,
             fingerprint,
         });
+
+        // A set fed by a resolution the process did not keep (or could not
+        // trust) answers this request only: the shared index never holds it.
+        if !retainable {
+            return set;
+        }
 
         // Passive publication retains the shared route-surface clock bracket and
         // changes artifact generation only when the fingerprint changes.

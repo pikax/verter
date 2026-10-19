@@ -132,11 +132,14 @@ impl verter_session_query::retention::resolution_charge::ResolutionRetentionAcco
 
 /// Under retention pressure the leader's complete answer is not retained,
 /// yet still delivered: its subscribers adopt it, restating its witness,
-/// instead of each running the producer again.
+/// instead of each running the producer again. Every demand — leader and
+/// subscribers alike — delivers the answer unretained, so no consumer can
+/// root a retained entry on it.
 ///
-/// Mutation recipe: on a refused reservation, leave the flight without a
-/// delivery. Each subscriber then resolves for itself and the producer runs
-/// three times.
+/// Mutation recipes: on a refused reservation, leave the flight without a
+/// delivery (each subscriber then resolves for itself and the producer runs
+/// three times); or let a subscriber keep its adopted answer cacheable (it
+/// then publishes as admitted).
 #[test]
 fn a_refused_retention_still_serves_the_flight_subscribers() {
     let workspace = workspace(&[("/p/dep.ts", "export const dep = 1\n")]);
@@ -171,26 +174,35 @@ fn a_refused_retention_still_serves_the_flight_subscribers() {
         follower.join().unwrap();
     }
     assert_eq!(target(&leader), Some("/p/dep.ts".to_string()));
-    assert_eq!(
-        leader.non_admission_reason(),
-        Some(verter_audit::NonAdmissionReason::RetentionPressure)
-    );
     let fresh = WorkspaceRead::capture_resolution_world(workspace.as_ref()).expect("captured");
-    for outcome in outcomes.lock().unwrap().iter() {
-        assert_eq!(target(outcome), Some("/p/dep.ts".to_string()));
+    let assert_unretained = |outcome: ResolutionOutcome, who: &str| {
+        assert_eq!(
+            outcome.non_admission_reason(),
+            Some(verter_audit::NonAdmissionReason::RetentionPressure),
+            "{who}"
+        );
+        match outcome.into_publication() {
+            crate::ResolutionPublication::Unretained(unretained) => {
+                assert_eq!(
+                    unretained.result().map(|result| result.source_id.as_str()),
+                    Some("/p/dep.ts"),
+                    "{who} delivers the complete answer"
+                );
+                assert!(
+                    unretained.witness().validates(fresh.as_ref()),
+                    "{who}'s witness is the answer's own, valid in its world"
+                );
+            }
+            other => panic!("{who} delivers the answer unretained, got {other:?}"),
+        }
+    };
+    assert_unretained(leader, "the leader");
+    for outcome in outcomes.lock().unwrap().drain(..) {
         assert!(
             outcome.trace().reused(),
             "the subscriber adopted the delivery"
         );
-        match &outcome.admission {
-            verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(witness) => {
-                assert!(
-                    witness.validates(fresh.as_ref()),
-                    "the restated witness is the answer's own, valid in its world"
-                );
-            }
-            other => panic!("a subscriber's adopted answer is cacheable, got {other:?}"),
-        }
+        assert_unretained(outcome, "a subscriber");
     }
     assert_eq!(
         producer_runs(&workspace),

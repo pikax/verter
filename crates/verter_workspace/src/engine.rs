@@ -112,9 +112,10 @@ enum ResolutionLane {
     Workspace,
     /// An overlay-lane candidate, with its admission sequence number.
     RequestOverlay(u64),
-    /// A complete workspace answer its producer could not retain (the
-    /// retention account refused it): no slot holds it and no decision node
-    /// speaks for it, so a subscriber that adopts it restates its witness.
+    /// A complete answer — workspace or overlay — its producer could not
+    /// retain (the retention account refused it): no slot holds it and no
+    /// decision node speaks for it, so a subscriber that adopts it restates
+    /// its witness and delivers it unretained.
     Unretained,
 }
 
@@ -4074,6 +4075,9 @@ impl Engine {
 
             let mut reused = false;
             let mut restated_witness = false;
+            // Whether the reused candidate is an answer its producer could
+            // not retain: adopting it delivers that answer, unretained.
+            let mut reused_unretained = false;
             let mut publish_candidate = false;
             // The query of a reused workspace-lane candidate whose decision
             // node this demand roots on: re-checked under the final fence,
@@ -4227,6 +4231,7 @@ impl Engine {
                 } else {
                     reused_decision = Some(entry.query.clone());
                 }
+                reused_unretained = matches!(lane, ResolutionLane::Unretained);
                 reused = true;
                 entry.result.clone()
             } else {
@@ -4519,6 +4524,19 @@ impl Engine {
             // The witness of a complete answer the retention account
             // refused: it is delivered unretained, never withheld.
             let mut unretained_witness = None;
+            // An adopted unretained answer stays unretained: no slot holds
+            // it, so nothing derived from it may be kept either. Its
+            // restated witness, validated against this world above, is the
+            // answer's witness; any untrustworthy non-admission already
+            // withheld it.
+            if reused_unretained {
+                if let Some(signature) = cacheable_signature.as_ref() {
+                    admission = SignatureAdmission::NonCacheable(
+                        verter_audit::NonAdmissionReason::RetentionPressure,
+                    );
+                    unretained_witness = Some(signature.clone());
+                }
+            }
             if reused {
                 self.vfs_provenance
                     .import_resolution_cache_hit_count
@@ -4557,10 +4575,20 @@ impl Engine {
                         overlay.authority(),
                     );
                     published = seq.is_some();
-                    delivery = Some(FlightDelivery {
-                        lane: ResolutionLane::RequestOverlay(seq.unwrap_or(0)),
-                        entry,
-                    });
+                    // A refused charge is retention pressure: the complete
+                    // answer is served, and delivered to the flight's
+                    // subscribers, unretained.
+                    let lane = match seq {
+                        Some(seq) => ResolutionLane::RequestOverlay(seq),
+                        None => {
+                            admission = SignatureAdmission::NonCacheable(
+                                verter_audit::NonAdmissionReason::RetentionPressure,
+                            );
+                            unretained_witness = Some(entry.signature.clone());
+                            ResolutionLane::Unretained
+                        }
+                    };
+                    delivery = Some(FlightDelivery { lane, entry });
                 }
             } else if publish_candidate {
                 if let (Some(signature), Some(query)) = (cacheable_signature, query.clone()) {

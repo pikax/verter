@@ -77,6 +77,25 @@ fn import_row_mismatches() -> Vec<String> {
         .collect()
 }
 
+/// The account once it holds at most `ceiling` bytes, or as it stands
+/// when a bounded wait for that runs out. A dropped host's retained parse
+/// snapshots are released by its declaration-lowering workers as those
+/// threads wind down, after the host's own drop has returned; with no host
+/// alive the account only shrinks, so the wait ends as soon as they have.
+fn released_to(
+    account: &SemanticRetentionAccount,
+    ceiling: usize,
+) -> verter_session_query::retention::RetentionAccountSnapshot {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let snapshot = account.snapshot();
+        if snapshot.total_bytes() <= ceiling || std::time::Instant::now() >= deadline {
+            return snapshot;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 /// A direct import answers the same with no headroom as with it, and the
 /// pressure leaves nothing behind: every byte the pressured requests charged
 /// is released once their hosts and the pin are gone.
@@ -108,11 +127,11 @@ fn an_import_answers_as_with_headroom_and_retains_nothing_under_pressure() {
             "a pressured request retains nothing: {during:?}"
         );
         drop(held);
-        let after = account.snapshot();
-        assert_eq!(
-            after.total_bytes(),
-            baseline.total_bytes(),
-            "the account returns to its baseline once the pin drops: {after:?}"
+        let after = released_to(&account, baseline.total_bytes());
+        assert!(
+            after.total_bytes() <= baseline.total_bytes(),
+            "the account returns to its baseline once the pin drops: \
+             {after:?}, baseline {baseline:?}"
         );
     });
 }
@@ -217,4 +236,68 @@ fn a_cross_module_return_answers_when_only_its_resolutions_are_refused() {
         let failures = mismatches_on_host(&host, project, PROBE, ROWS);
         assert!(failures.is_empty(), "{read}: {}", failures.join("\n"));
     }
+}
+
+/// A cold augmentation scan whose relative target resolution the retention
+/// account refuses still matches its augmenter, yet stores nothing in the
+/// shared augmentation index: the set was computed from a resolution the
+/// process did not keep. With the account admitting, the same scan installs
+/// its set.
+///
+/// Mutation recipe: publish the scanned set whatever resolutions fed it.
+/// The pressured scan then installs its entry.
+#[test]
+fn an_augmentation_scan_over_an_unretained_resolution_stores_no_index_entry() {
+    use crate::file_artifact_store::{
+        AugmentationPopulation, AugmentationTargetKey, AugmentationTargetKind,
+    };
+    use crate::host_manage::source_augmentation::{AugmentationRequestDriver, AugmentationTarget};
+
+    const AUGMENTED: &str = "export interface A { a: 1 }";
+    const AUGMENTER: &str = "declare module './m-0' { interface A { b: 2 } }\nexport {};";
+    let project = ProbeProject {
+        files: &[("m-0.ts", AUGMENTED), ("aug.ts", AUGMENTER)],
+        ..Default::default()
+    };
+    let scan = |host: &crate::VerterHost| {
+        let _ = host.ensure_indexed_ready_serve("/wb/aug.ts");
+        let env = host.host_view_env_hashes_for("/wb/m-0.ts");
+        let key = AugmentationTargetKey {
+            project_identity: host.host_view_project_identity_for("/wb/m-0.ts"),
+            resolve_env_hash: env.resolve_env_hash,
+            lib_env_hash: env.lib_env_hash,
+            population: AugmentationPopulation::Base,
+            target: AugmentationTargetKind::ResolvedRelativeCanonical(std::sync::Arc::from(
+                "/wb/m-0.ts",
+            )),
+        };
+        let store = host.project_type_store().indexed();
+        let set = AugmentationRequestDriver::new(store).ensure_populated(
+            &key,
+            |augmenter, specifier| {
+                AugmentationTarget::from_publication(
+                    host.resolve_type_dependency_canonical(augmenter, specifier),
+                )
+            },
+            None,
+        );
+        (set.entries.len(), store.get_augmenter_set(&key).is_some())
+    };
+
+    let admitting = probe_host(project);
+    assert_eq!(
+        scan(&admitting),
+        (1, true),
+        "control: an admitted scan matches its augmenter and installs its set"
+    );
+
+    let pressed = probe_host(project);
+    pressed
+        .ws()
+        .install_resolution_retention(std::sync::Arc::new(RefusingResolutionAccount));
+    assert_eq!(
+        scan(&pressed),
+        (1, false),
+        "a scan over an unretained resolution matches its augmenter and stores nothing"
+    );
 }

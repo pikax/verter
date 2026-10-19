@@ -3451,7 +3451,15 @@ impl FileArtifactStore {
         R: Fn(&str, &str) -> Option<Arc<str>>,
     {
         crate::host_manage::source_augmentation::AugmentationRequestDriver::new(self)
-            .ensure_populated(key, resolve, discriminator)
+            .ensure_populated(
+                key,
+                |canonical, specifier| {
+                    crate::host_manage::source_augmentation::AugmentationTarget::admitted(resolve(
+                        canonical, specifier,
+                    ))
+                },
+                discriminator,
+            )
     }
 
     /// Invalidate every `augmentation_index` entry that the augmenter

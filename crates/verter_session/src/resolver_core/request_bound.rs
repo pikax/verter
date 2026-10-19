@@ -652,16 +652,18 @@ pub(crate) trait RequestBoundLifecycle: Sync {
             .observe_materialize_scope_with_context(ctx, canonical)
     }
 
-    fn resolve_type_dependency_canonical(
+    /// The shared type-route policy's publication for this request's
+    /// resolution view: admitted, unretained, or refused.
+    fn type_dependency_publication(
         &self,
         owner_canonical: &str,
         import_source: &str,
-    ) -> Option<String> {
-        type_route_answer(crate::VerterHost::resolve_type_dependency_canonical(
+    ) -> verter_workspace::ResolutionPublication<String> {
+        crate::VerterHost::resolve_type_dependency_canonical(
             self.host(),
             owner_canonical,
             import_source,
-        ))
+        )
     }
 }
 
@@ -1110,8 +1112,10 @@ where
         verter_type_engine::count_resolver_context_call!(
             "RouteLookup::resolve_type_dependency_canonical"
         );
-        self.0
-            .resolve_type_dependency_canonical(owner_canonical, import_source)
+        type_route_answer(
+            self.0
+                .type_dependency_publication(owner_canonical, import_source),
+        )
     }
 
     #[inline]
