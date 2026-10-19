@@ -417,7 +417,7 @@ impl ScopeStack {
             // A repeat is another handle on an owner the heir keeps.
             let _ = heir.adopt(lease);
         }
-        owners.delivered.clear();
+        owners.delivered = DeliveredOwners::default();
         None
     }
 
