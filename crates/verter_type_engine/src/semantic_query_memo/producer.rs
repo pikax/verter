@@ -853,13 +853,13 @@ impl Subscription<'_> {
         let prepared = &attempt.prepared;
         // The flight resolved: whatever it woke, this subscriber's waker
         // and wait-for edge are spent.
-        if let Some(Parked {
-            waker,
-            #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
-            mut rendezvous,
-            ..
-        }) = self.parked.take()
-        {
+        if let Some(parked) = self.parked.take() {
+            let Parked {
+                waker,
+                #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+                mut rendezvous,
+                ..
+            } = parked;
             if let Some(registration) = waker {
                 state.withdraw_waker(registration);
             }
