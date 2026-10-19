@@ -10168,7 +10168,7 @@ mod destructure;
 mod disjunction;
 #[path = "flow_return_footprint.rs"]
 mod footprint;
-#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+#[cfg(any(test, feature = "semantic-observe"))]
 pub use disjunction::{disjunction_work_observed, DisjunctionWork};
 
 #[path = "flow_return_schedule.rs"]

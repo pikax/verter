@@ -28,7 +28,7 @@ use super::{
 };
 use crate::semantic_query::SemanticNodeId;
 
-#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+#[cfg(any(test, feature = "semantic-observe"))]
 thread_local! {
     /// Narrowing entries disjunction narrowing wrote into its environments
     /// on this thread: a standing fact indexed, a per-alternative narrow
@@ -40,7 +40,7 @@ thread_local! {
 }
 
 /// The disjunction-narrowing work this thread performed so far.
-#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+#[cfg(any(test, feature = "semantic-observe"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DisjunctionWork {
     /// Narrowing entries written into disjunction environments.
@@ -50,7 +50,7 @@ pub struct DisjunctionWork {
 }
 
 /// The disjunction-narrowing work this thread performed so far.
-#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+#[cfg(any(test, feature = "semantic-observe"))]
 pub fn disjunction_work_observed() -> DisjunctionWork {
     DisjunctionWork {
         environment_entries: ENVIRONMENT_ENTRIES.with(std::cell::Cell::get),
@@ -60,7 +60,7 @@ pub fn disjunction_work_observed() -> DisjunctionWork {
 
 #[inline]
 fn note_entries(_entries: usize) {
-    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+    #[cfg(any(test, feature = "semantic-observe"))]
     ENVIRONMENT_ENTRIES.with(|count| count.set(count.get() + _entries));
 }
 
@@ -71,7 +71,7 @@ fn note_entry() {
 
 #[inline]
 fn note_probe() {
-    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+    #[cfg(any(test, feature = "semantic-observe"))]
     SUBJECT_PROBES.with(|count| count.set(count.get() + 1));
 }
 
@@ -202,9 +202,12 @@ impl StandingIndex {
 }
 
 /// One reference the first alternative narrowed, with its narrow in every
-/// alternative met so far, in alternative order.
-struct UnionCandidate {
-    root: Option<FlowProductSubject>,
+/// alternative met so far, in alternative order. `filed` is what a later
+/// alternative needs, beside the subject, to read the reference's narrow:
+/// the resolved root a guard alternative files it under, nothing for an
+/// arm join's explicit fact lists.
+struct UnionCandidate<K> {
+    filed: K,
     subject: SliceNarrowSubject,
     nodes: Vec<SemanticNodeId>,
 }
@@ -215,20 +218,20 @@ struct UnionCandidate {
 /// original type on that path, which the union would be, so it drops out
 /// — and since it must stand in the FIRST alternative, the candidates are
 /// that alternative's references, in the order they first stood there.
-struct AlternativeUnion {
-    candidates: Vec<UnionCandidate>,
+struct AlternativeUnion<K> {
+    candidates: Vec<UnionCandidate<K>>,
 }
 
-impl AlternativeUnion {
-    fn first(candidates: impl IntoIterator<Item = UnionCandidate>) -> Self {
-        let candidates: Vec<UnionCandidate> = candidates.into_iter().collect();
+impl<K> AlternativeUnion<K> {
+    fn first(candidates: impl IntoIterator<Item = UnionCandidate<K>>) -> Self {
+        let candidates: Vec<UnionCandidate<K>> = candidates.into_iter().collect();
         note_entries(candidates.len());
         Self { candidates }
     }
 
     /// Meet one more alternative, which reads each candidate's narrow
     /// through `narrow_of`.
-    fn meet(&mut self, mut narrow_of: impl FnMut(&UnionCandidate) -> Option<SemanticNodeId>) {
+    fn meet(&mut self, mut narrow_of: impl FnMut(&UnionCandidate<K>) -> Option<SemanticNodeId>) {
         self.candidates
             .retain_mut(|candidate| match narrow_of(candidate) {
                 Some(node) => {
@@ -255,13 +258,27 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         }
     }
 
+    /// The guard writes performed since `mark`. The ledger only grows
+    /// while a mark is outstanding, so a ledger shorter than its mark is a
+    /// broken invariant: re-installing an empty window would leak the
+    /// overlay into later alternatives, so it fails loudly instead.
+    fn narrowing_writes_since(&self, mark: &NarrowingWindowMark) -> &[NarrowingLedgerEntry] {
+        self.narrowing_writes.get(mark.writes..).unwrap_or_else(|| {
+            panic!(
+                "the guard ledger ({} writes) was truncated below an outstanding mark ({})",
+                self.narrowing_writes.len(),
+                mark.writes
+            )
+        })
+    }
+
     /// Restore the overlay to `mark`: every root a guard write named since
     /// the mark regains exactly the facts it held there, and the ledger
     /// returns to the mark's length.
     fn restore_narrowing_window(&mut self, mark: &NarrowingWindowMark) {
-        let start = mark.writes.min(self.narrowing_writes.len());
         let mut seen: FxHashSet<&FlowProductSubject> = FxHashSet::default();
-        let roots: Vec<FlowProductSubject> = self.narrowing_writes[start..]
+        let roots: Vec<FlowProductSubject> = self
+            .narrowing_writes_since(mark)
             .iter()
             .map(|entry| match entry {
                 NarrowingLedgerEntry::Established { root, .. }
@@ -298,27 +315,26 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     pub(super) fn apply_guard_union(&mut self, parts: &[SliceGuard], positive: bool) {
         let base = self.narrowing_window_mark();
         let mut prefix = StandingIndex::default();
-        let mut union: Option<AlternativeUnion> = None;
+        let mut union: Option<AlternativeUnion<FlowProductSubject>> = None;
         for (index, part) in parts.iter().enumerate() {
             let mark = self.narrowing_window_mark();
             self.apply_guard_scoped(part, positive);
             let mut delta = StandingIndex::default();
-            delta.fold(&self.narrowing_writes[mark.writes.min(self.narrowing_writes.len())..]);
+            delta.fold(self.narrowing_writes_since(&mark));
             match &mut union {
                 // The first alternative has no prefix: its delta is all
                 // of it.
                 None => {
                     union = Some(AlternativeUnion::first(delta.standing().map(|fact| {
                         UnionCandidate {
-                            root: Some(fact.root.clone()),
+                            filed: fact.root.clone(),
                             subject: fact.subject.clone(),
                             nodes: vec![fact.node],
                         }
                     })));
                 }
                 Some(union) => union.meet(|candidate| {
-                    let root = candidate.root.as_ref().expect("a guard candidate's root");
-                    delta.read_over(&prefix, root, &candidate.subject)
+                    delta.read_over(&prefix, &candidate.filed, &candidate.subject)
                 }),
             }
             self.restore_narrowing_window(&mark);
@@ -353,7 +369,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         let Some(first) = alternatives.next() else {
             return Vec::new();
         };
-        let mut order: Vec<UnionCandidate> = Vec::with_capacity(first.len());
+        let mut order: Vec<UnionCandidate<()>> = Vec::with_capacity(first.len());
         let mut by_subject: FxHashMap<SliceNarrowSubject, usize> = FxHashMap::default();
         for (subject, node) in first {
             note_probe();
@@ -362,7 +378,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
                 None => {
                     by_subject.insert(subject.clone(), order.len());
                     order.push(UnionCandidate {
-                        root: None,
+                        filed: (),
                         subject,
                         nodes: vec![node],
                     });

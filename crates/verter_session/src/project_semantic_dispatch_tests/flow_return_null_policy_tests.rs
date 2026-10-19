@@ -11654,9 +11654,35 @@ fn independent_or(subjects: usize) -> String {
     )
 }
 
+/// `anyMissing` over `subjects` parameters, answered on one fresh host.
+fn independent_or_answer(subjects: usize) -> String {
+    let host = four_policy_host();
+    let path = format!("{STRICT_ROOT}/independent-or-{subjects}.ts");
+    upsert(&host, &path, &independent_or(subjects));
+    observe(&host, &path, "anyMissing")
+}
+
+/// An `||` guard over independent references keeps the checker's answer
+/// however long the chain grows.
+///
+/// Measured on TypeScript 7.0.2 (`--declaration --emitDeclarationOnly`)
+/// over 4 and 128 subjects: `string | undefined` with `strictNullChecks`.
+#[test]
+fn an_or_guard_over_independent_subjects_answers_at_every_size() {
+    for subjects in [128, 256, 512, 1024] {
+        assert_eq!(
+            independent_or_answer(subjects),
+            "string | undefined",
+            "{subjects} subjects"
+        );
+    }
+}
+
 /// The disjunction work `anyMissing` over `subjects` parameters does on
 /// one fresh host, with its answer: the environment entries the guard
-/// union wrote and the subject identities it probed.
+/// union wrote and the subject identities it probed. The work counters are
+/// optional observation, so they exist only under `semantic-observe`.
+#[cfg(feature = "semantic-observe")]
 fn independent_or_work(subjects: usize) -> (String, usize, usize) {
     let host = four_policy_host();
     let path = format!("{STRICT_ROOT}/independent-or-{subjects}.ts");
@@ -11683,6 +11709,7 @@ fn independent_or_work(subjects: usize) -> (String, usize, usize) {
 ///
 /// Measured on TypeScript 7.0.2 (`--declaration --emitDeclarationOnly`)
 /// over 4 and 128 subjects: `string | undefined` with `strictNullChecks`.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn an_or_guard_over_independent_subjects_does_linear_environment_work() {
     let measured: Vec<(usize, (String, usize, usize))> = [128, 256, 512, 1024]
