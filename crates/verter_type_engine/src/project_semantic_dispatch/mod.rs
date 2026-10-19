@@ -1340,6 +1340,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.connected_demand.has_tripped()
     }
 
+    /// The meter a canonical construction inside this dispatch's connected
+    /// demand pays before it builds: a distribution's cross product is
+    /// charged to this demand's ledger, work units and construction bytes,
+    /// before its first constituent exists.
+    pub(super) fn construction_meter(&self) -> canonical_algebra::ConstructionMeter<'_> {
+        canonical_algebra::ConstructionMeter::charged(&self.connected_demand)
+    }
+
     pub fn charge_connected_work(&self) -> Result<(), crate::semantic_query::PartialReasonSet> {
         self.charge_connected_work_observed(self.snapshot.flags().is_cancelled())
     }
@@ -2120,6 +2128,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     pub fn deposit_canonical_evidence(&self, evidence: canonical_algebra::CanonicalEvidence) {
         if evidence.incomplete
             || evidence.refusal.is_some()
+            || !evidence.exhausted.is_empty()
             || !evidence.inspected_file_roots.is_empty()
         {
             self.canonical_evidence_epoch
@@ -2131,6 +2140,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.fold_local_partial_completeness(
                 crate::semantic_query::PartialReasonSet::OPERATION_BUDGET,
             );
+        }
+        // A construction the connected demand could not pay for is a
+        // partial of the rails it exhausted.
+        if !evidence.exhausted.is_empty() {
+            self.fold_local_partial_completeness(evidence.exhausted);
         }
         if evidence.incomplete {
             if self.build_local_taint.borrow().is_empty() {

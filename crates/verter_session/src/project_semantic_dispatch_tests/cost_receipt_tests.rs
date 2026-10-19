@@ -2357,3 +2357,130 @@ fn the_refusal_table_keeps_the_newest_and_refuses_torn_evaluations() {
         carrier(),
     ));
 }
+
+/// `[{ a: 0 } | … | { a: n - 1 }, { b: 0 } | … | { b: n - 1 }]`: two object
+/// unions whose intersection's cross product the checker builds whole.
+fn object_union_pair(n: usize) -> String {
+    let union = |key: &str| {
+        (0..n)
+            .map(|i| format!("{{ {key}: {i} }}"))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    format!("[{}, {}]", union("a"), union("b"))
+}
+
+/// The intersection of the two unions `probe` reads, as a root query key
+/// on `host` over `source`.
+fn intersection_root_key(
+    host: &Arc<VerterHost>,
+    source: &str,
+    probe: &str,
+) -> verter_type_engine::semantic_query::SemanticQueryKey {
+    super::checker_probe_lane_tests::with_probe_on_host(
+        host,
+        Default::default(),
+        source,
+        probe,
+        |dispatch, node| {
+            let arms: Vec<_> = match dispatch.graph().node_data(node).as_deref() {
+                Some(verter_type_engine::semantic_query::SemanticNodeData::Tuple {
+                    elements,
+                    ..
+                }) => elements.iter().map(|element| element.value).collect(),
+                other => panic!("the probe reads a pair of unions, got {other:?}"),
+            };
+            verter_type_engine::semantic_query::SemanticQueryKey::reduce_intersection_operands(
+                dispatch.graph(),
+                Arc::from(arms),
+            )
+        },
+    )
+}
+
+/// An intersection's distribution is paid for whole before its first
+/// constituent is built, so a root whose allowance cannot pay refuses as a
+/// function of the root and its allowance alone, and seals that refusal:
+/// an exact repeat answers it without evaluating; the same root entered
+/// inside another demand, or under another allowance, never inherits it
+/// and evaluates for itself; the production allowance distributes all 900
+/// constituents; and an edit to the file the arms are written in misses
+/// the refusal.
+#[test]
+fn an_unpaid_distribution_seals_its_refusal_under_its_own_allowance() {
+    use verter_type_engine::semantic_query::PartialReasonSet;
+    let host = super::checker_probe_lane_tests::default_probe_host();
+    // The key names the probe's nodes; the scope keeps them for every read.
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
+    let source = "export type Marker = 1;\n";
+    let key = intersection_root_key(&host, source, &object_union_pair(30));
+    let allowance = 500;
+    let limited = || root_read(&host, &key, allowance);
+
+    let refused = limited();
+    assert!(
+        refused.partial
+            && refused
+                .reasons
+                .contains(PartialReasonSet::PROJECTION_WORK_LIMIT),
+        "500 units cannot pay for a 900-constituent product: {refused:?}"
+    );
+    assert!(
+        refused.work <= allowance,
+        "the unpaid product charged nothing past the allowance: {refused:?}"
+    );
+    assert!(
+        host.project_type_store()
+            .semantic_graph()
+            .refusal_summary_count_for_tests()
+            >= 1,
+        "the refused root sealed its refusal"
+    );
+    let misses = semantic_misses(&host);
+    assert_eq!(limited(), refused, "the repeat answers the sealed refusal");
+    assert_eq!(semantic_misses(&host), misses, "and evaluates nothing");
+
+    let nested = root_read_with_context(&host, &key, allowance + 10, 24, 10);
+    assert!(nested.partial, "{nested:?}");
+    let after_nested = semantic_misses(&host);
+    assert!(
+        after_nested > misses,
+        "a root inside another demand evaluates for itself"
+    );
+    let other = root_read(&host, &key, allowance + 1);
+    assert!(other.partial, "{other:?}");
+    assert!(
+        semantic_misses(&host) > after_nested,
+        "another allowance is another profile, evaluated afresh"
+    );
+
+    let complete = root_read(
+        &host,
+        &key,
+        super::connected_demand::MAX_CONNECTED_PROJECTION_WORK,
+    );
+    assert!(
+        !complete.partial,
+        "the production allowance distributes: {complete:?}"
+    );
+    assert!(
+        complete.work > 900,
+        "every constituent was paid for: {complete:?}"
+    );
+
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        super::checker_probe_lane_tests::PROBE_FILE,
+        &crate::u6_flow_shape_corpus_tests::module_script("export type Marker = 2;\n"),
+        crate::FileLanguage::script_ts(),
+    );
+    let before_edit = semantic_misses(&host);
+    let _ = limited();
+    assert!(
+        semantic_misses(&host) > before_edit,
+        "an edit to what the refusal read evaluates afresh"
+    );
+}

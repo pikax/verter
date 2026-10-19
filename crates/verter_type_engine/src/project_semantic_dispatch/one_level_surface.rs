@@ -220,6 +220,7 @@ impl OneLevelSurface {
     pub(crate) fn from_spread_projection(
         graph: &SemanticGraphStore,
         formula: &crate::semantic_query::ObjectProjectionFormula,
+        meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
         evidence: &mut super::canonical_algebra::CanonicalEvidence,
     ) -> SurfaceResolution<Self> {
         use crate::semantic_query::{
@@ -230,16 +231,18 @@ impl OneLevelSurface {
         fn union_value(
             graph: &SemanticGraphStore,
             values: Vec<SemanticNodeId>,
+            meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
             evidence: &mut super::canonical_algebra::CanonicalEvidence,
         ) -> SemanticNodeId {
             // Canonical construction: the joined per-alternative value union
             // routes through the one authority (recursive flatten +
             // structural dedup replace the hand-rolled one-level splice);
             // the evidence threads to the caller's disposition boundary.
-            let composite = super::canonical_algebra::intern_ordered_union(
+            let composite = super::canonical_algebra::intern_ordered_union_charged(
                 graph,
                 &values,
                 verter_session_query::flow::policy::NullabilityPolicy::Strict,
+                meter,
             );
             evidence.absorb(composite.evidence);
             composite.node
@@ -362,7 +365,7 @@ impl OneLevelSurface {
                     crate::semantic_query::QueryError::OpenSurface,
                 ))
             } else {
-                union_value(graph, join.values, evidence)
+                union_value(graph, join.values, meter, evidence)
             };
             entries.push(SurfaceEntry::Member(SurfaceMember {
                 key: AuthoredPropertyKey::from_known(join.key),
@@ -391,7 +394,7 @@ impl OneLevelSurface {
             }
             entries.push(SurfaceEntry::IndexSignature(IndexSignature {
                 key_type,
-                value_type: union_value(graph, values, evidence),
+                value_type: union_value(graph, values, meter, evidence),
                 readonly,
                 spans: verter_type_expr::IndexSignatureSpans::default(),
                 declaration_origin: None,
@@ -598,8 +601,12 @@ pub fn project_one_level_surface<C: crate::resolver_core::ResolverCapabilities>(
                 }
             };
             let mut canonical_evidence = super::canonical_algebra::CanonicalEvidence::default();
-            let surface =
-                OneLevelSurface::from_spread_projection(graph, &formula, &mut canonical_evidence);
+            let surface = OneLevelSurface::from_spread_projection(
+                graph,
+                &formula,
+                dispatch.construction_meter(),
+                &mut canonical_evidence,
+            );
             dispatch.deposit_canonical_evidence(canonical_evidence);
             surface
         }
@@ -763,7 +770,12 @@ pub fn read_positive_surface_members<C: crate::resolver_core::ResolverCapabiliti
                 .map(|arm| read_positive_surface_members(ctx, dispatch, *arm))
                 .collect();
             join_arms(dispatch, &per_arm, |graph, per_arm, evidence| {
-                super::walk::presence_union_members(graph, per_arm, evidence)
+                super::walk::presence_union_members(
+                    graph,
+                    per_arm,
+                    dispatch.construction_meter(),
+                    evidence,
+                )
             })
         }
         // Intersection carriers merge under INTERSECTION rules (required
@@ -778,7 +790,12 @@ pub fn read_positive_surface_members<C: crate::resolver_core::ResolverCapabiliti
                 .map(|arm| read_positive_surface_members(ctx, dispatch, *arm))
                 .collect();
             join_arms(dispatch, &per_arm, |graph, per_arm, evidence| {
-                super::walk::presence_intersection_members(graph, per_arm, evidence)
+                super::walk::presence_intersection_members(
+                    graph,
+                    per_arm,
+                    dispatch.construction_meter(),
+                    evidence,
+                )
             })
         }
         Some(SemanticNodeData::Conditional {
@@ -802,7 +819,12 @@ pub fn read_positive_surface_members<C: crate::resolver_core::ResolverCapabiliti
                 read_positive_surface_members(ctx, dispatch, false_branch),
             ];
             join_arms(dispatch, &per_arm, |graph, per_arm, evidence| {
-                super::walk::presence_union_members(graph, per_arm, evidence)
+                super::walk::presence_union_members(
+                    graph,
+                    per_arm,
+                    dispatch.construction_meter(),
+                    evidence,
+                )
             })
         }
         // An OPERATIONALLY unresolved carrier contributes no members AND

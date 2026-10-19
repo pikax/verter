@@ -337,3 +337,41 @@ fn the_limit_answers_the_same_cold_warm_and_reordered() {
     ));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// A member read through an intersection intersects the members' types the
+/// way the checker's own intersection does, so unions of primitives
+/// intersect member-wise before any product is weighed: two thousand-member
+/// number unions read as the five hundred numbers they share, never refused
+/// on their million-wide written product. A union that also holds an object
+/// is not a union of primitives, and its cross product is weighed.
+///
+/// Measured: `IsAny<O["m"]>` is `"not-any"`, `[O["m"]] extends [500 | 501]
+/// ? 1 : 2` is `2` and `O["m"] extends number ? 1 : 2` is `1`, with no
+/// diagnostic; `IsAny<M["m"]>` (401 × 401 = 160,801) is `any` under TS2590.
+#[test]
+fn a_member_read_over_unions_of_primitives_intersects_them_member_wise() {
+    let numbers = |from: usize, count: usize| {
+        (from..from + count)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    let source = format!(
+        "{IS_ANY}{}type B = {};\ntype O = {{ m: A }} & {{ m: B }};\n\
+         type M = {{ m: {} | {{ x: 1 }} }} & {{ m: {} | {{ y: 1 }} }};\n",
+        literal_union("A", 1000, false, ""),
+        numbers(500, 1000),
+        numbers(0, 400),
+        numbers(0, 400),
+    );
+    let failures = mismatches(
+        &source,
+        &[
+            ("IsAny<O[\"m\"]>", "\"not-any\""),
+            ("[O[\"m\"]] extends [500 | 501] ? 1 : 2", "2"),
+            ("O[\"m\"] extends number ? 1 : 2", "1"),
+            ("IsAny<M[\"m\"]>", "any"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

@@ -2544,6 +2544,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 arguments.len(),
                 *argument,
                 graph,
+                self.construction_meter(),
                 &mut canonical_evidence,
             );
             // An argument relation whose operands need a demand its frame has
@@ -3012,6 +3013,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 arguments.len(),
                 *argument,
                 graph,
+                self.construction_meter(),
                 &mut canonical_evidence,
             );
             self.deposit_canonical_evidence(canonical_evidence);
@@ -4731,6 +4733,7 @@ fn mapped_parameter_type(
     argument_count: usize,
     argument: CallArgument,
     graph: &crate::semantic_query_memo::SemanticGraphStore,
+    meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
     evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> Option<SemanticNodeId> {
     // An INDEFINITE spread supplies an unknown-length tail, so it never
@@ -4739,7 +4742,7 @@ fn mapped_parameter_type(
     if !argument.indefinite_spread {
         if let Some(param) = params.get(index) {
             if !param.rest {
-                return Some(optional_parameter_target(param, graph, evidence));
+                return Some(optional_parameter_target(param, graph, meter, evidence));
             }
         }
     }
@@ -4802,6 +4805,7 @@ fn mapped_parameter_type(
 fn optional_parameter_target(
     param: &FunctionParam,
     graph: &crate::semantic_query_memo::SemanticGraphStore,
+    meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
     evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> SemanticNodeId {
     if !param.optional {
@@ -4815,11 +4819,13 @@ fn optional_parameter_target(
     // (`T | undefined`) routes through the one authority (which also
     // flattens a union-typed `T`); the evidence threads to the caller's
     // disposition boundary.
-    let composite = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-        graph,
-        &[param.ty, undefined],
-        verter_session_query::flow::policy::NullabilityPolicy::Strict,
-    );
+    let composite =
+        crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union_charged(
+            graph,
+            &[param.ty, undefined],
+            verter_session_query::flow::policy::NullabilityPolicy::Strict,
+            meter,
+        );
     evidence.absorb(composite.evidence);
     composite.node
 }

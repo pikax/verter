@@ -779,6 +779,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         original.len(),
                         *argument,
                         graph,
+                        self.construction_meter(),
                         &mut evidence,
                     )
                     .ok_or(ContextualCandidateFailure::Degraded(
