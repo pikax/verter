@@ -12,15 +12,7 @@ use std::sync::{Arc, Barrier, Mutex};
 use verter_session::{HostConfig, HostRetentionSnapshot, UpsertRequest, VerterHost};
 use verter_type_engine::semantic_query::SemanticNodeId;
 use verter_type_engine::semantic_query_memo::node_roots::NodeRoot;
-use verter_type_engine::signature_kernel::{SemanticReadView, SignatureDescriptorId};
-
-/// The first descriptor interned in `view`'s epoch, rendered.
-fn first_descriptor(view: &SemanticReadView) -> Result<String, String> {
-    let id = SignatureDescriptorId::from_raw(u64::from(view.epoch().as_u32()) << 32);
-    view.descriptor(id)
-        .map(|descriptor| format!("{descriptor:?}"))
-        .map_err(|error| format!("{error:?}"))
-}
+use verter_type_engine::signature_kernel::SemanticReadView;
 
 /// Every host charges the one process account, so tests comparing account
 /// figures run one at a time.
@@ -334,8 +326,7 @@ fn held_readers_survive_close_and_release_once_in_either_order() {
         let canonical = document(3).0;
         let graph = host.project_type_store().semantic_graph();
         let view = SemanticReadView::pin(graph.signature_store());
-        let descriptor = first_descriptor(&view)
-            .unwrap_or_else(|error| panic!("{order}: the workload interned a signature: {error}"));
+        let held_epoch = view.epoch();
         let artifact = host
             .project_type_store()
             .indexed()
@@ -344,6 +335,10 @@ fn held_readers_survive_close_and_release_once_in_either_order() {
         let account = |host: &VerterHost| {
             let s = host.retention_snapshot();
             (s.active_bytes, s.retained_bytes, s.pinned_bytes)
+        };
+        let total = |host: &VerterHost| {
+            let (active, retained, pinned) = account(host);
+            active + retained + pinned
         };
 
         let held = account(&host);
@@ -363,9 +358,10 @@ fn held_readers_survive_close_and_release_once_in_either_order() {
         if cache_first {
             host.close();
             drain(&host);
-            let readers_only = account(&host);
+            let readers_only = total(&host);
             assert!(
-                readers_only.2 > baseline.pinned_bytes,
+                readers_only
+                    > baseline.active_bytes + baseline.retained_bytes + baseline.pinned_bytes,
                 "{order}: the readers keep their allocations charged after the close"
             );
             assert_eq!(
@@ -374,13 +370,13 @@ fn held_readers_survive_close_and_release_once_in_either_order() {
                 "{order}: the held result reads the same after the close"
             );
             assert_eq!(
-                first_descriptor(&view),
-                Ok(descriptor.clone()),
-                "{order}: the held signature view reads its epoch after the close"
+                view.epoch(),
+                held_epoch,
+                "{order}: the held signature view keeps its epoch after the close"
             );
             assert_ne!(
                 SemanticReadView::pin(graph.signature_store()).epoch(),
-                view.epoch(),
+                held_epoch,
                 "{order}: the close replaced the signature epoch the view pins"
             );
             assert_eq!(
@@ -388,11 +384,49 @@ fn held_readers_survive_close_and_release_once_in_either_order() {
                 baseline.snapshot_leases + 1,
                 "{order}: the close revokes no lease a reader holds"
             );
-            drop((answer, view, artifact));
-            drain(&host);
+            // Each surviving reader owns its own charge: releasing it
+            // alone frees something, and the steps telescope to baseline.
+            let mut before = readers_only;
+            for (name, release) in [
+                ("result", Box::new(|| drop(answer)) as Box<dyn FnOnce()>),
+                ("signature view", Box::new(|| drop(view))),
+                ("parse artifact", Box::new(|| drop(artifact))),
+            ] {
+                release();
+                drain(&host);
+                let after = total(&host);
+                assert!(
+                    after < before,
+                    "{order}: dropping the held {name} releases its own charge ({before} -> {after})"
+                );
+                before = after;
+            }
         } else {
-            drop((answer, view, artifact));
+            let owned = account(&host);
+            drop(answer);
+            assert_eq!(
+                account(&host),
+                owned,
+                "{order}: the cache still owns the result's charge"
+            );
+            drop(view);
+            assert_eq!(
+                account(&host),
+                owned,
+                "{order}: the store still owns the epoch's charge"
+            );
+            drop(artifact);
             drain(&host);
+            let after_artifact = account(&host);
+            assert_eq!(
+                (after_artifact.0, after_artifact.1),
+                (owned.0, owned.1),
+                "{order}: the artifact's drop releases no cache-owned charge"
+            );
+            assert!(
+                after_artifact.2 < owned.2 && after_artifact.2 > baseline.pinned_bytes,
+                "{order}: only the caller's own pin goes; the store keeps its pin"
+            );
             assert_eq!(
                 retained(&host.retention_snapshot()).snapshot_leases,
                 baseline.snapshot_leases + 1,

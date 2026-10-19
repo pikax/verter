@@ -174,6 +174,8 @@ impl IdentityInterner {
         let mut inner = self.inner.lock();
         let before = inner.entries.len();
         Self::shed_pool_only_locked(&mut inner);
+        // A lifecycle shed also gives back the table's peak backing.
+        inner.entries.shrink_to_fit();
         before - inner.entries.len()
     }
 
@@ -453,6 +455,10 @@ mod tests {
             "the shed released the released identity's charges and nothing else"
         );
         assert!(
+            pool.with_entries_for_test(|entries| entries.capacity()) <= 3,
+            "a sparse pool gives back its surplus backing"
+        );
+        assert!(
             OwnedStr::ptr_eq(&pool.intern("/src/components/Held.vue"), &held),
             "a held identity stays pooled"
         );
@@ -461,6 +467,11 @@ mod tests {
         drop(held);
         assert_eq!(pool.shed_pool_only(), 1);
         assert!(pool.is_empty());
+        assert_eq!(
+            pool.with_entries_for_test(|entries| entries.capacity()),
+            0,
+            "an emptied pool releases its backing table"
+        );
         assert_eq!(account.snapshot().total_bytes(), 0);
     }
 
