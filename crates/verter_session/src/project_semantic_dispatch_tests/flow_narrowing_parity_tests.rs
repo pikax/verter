@@ -1335,6 +1335,11 @@ export function weak_primitive() { return po(1); }
 export function weak_object() { return po(wo); }
 const af: (x: number) => string = () => "";
 export function annotated_callee() { return af("x"); }
+declare const um: number | { a: 1 };
+export function weak_member() { return po(um); }
+declare function pn(x: { o: { a?: number } }): void;
+declare const on: { o: number };
+export function weak_nested() { return pn(on); }
 "#;
 
 /// An optional target property or parameter reports against its declared
@@ -1481,6 +1486,12 @@ fn call_diagnostics_follow_the_checkers_optionality_union_order_and_nullability(
         // The relation does not model the weak-type rule for an object source, so
         // the checker's TS2559 is not reported at all.
         ("weak_object", "(55,43)", &[], &[]),
+        // Below the head the checker explains a weak-type failure with TS2559's
+        // text, which the explanation chain cannot reproduce for a primitive:
+        // the whole diagnostic is withheld rather than reported with a wrong
+        // chain line.
+        ("weak_member", "(59,43)", &[], &[]),
+        ("weak_nested", "(62,43)", &[], &[]),
         (
             "annotated_callee",
             "(57,48)",

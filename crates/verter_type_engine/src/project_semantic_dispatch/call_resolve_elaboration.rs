@@ -504,9 +504,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         if let FailedStep::Missing { code, arguments } = self.failed_step(source, target)? {
             return Some(occurrence(span, code, arguments, Vec::new()));
         }
-        if self.weak_target_decides(source, target)? {
-            return None;
-        }
         let mut chain = Vec::new();
         let mut steps = CHAIN_STEP_LIMIT;
         self.explain_failure(source, target, 1, false, &mut chain, &mut steps)?;
@@ -524,9 +521,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// failure: a target whose properties are all optional, with no
     /// signatures, and a source with apparent members of its own (a
     /// primitive, an enum member, an array or a tuple) report TS2559 where
-    /// they share no property with it. Those apparent members are not
-    /// modelled, so the diagnostic is not reported rather than reported as
-    /// the argument head the checker does not print.
+    /// they share no property with it — as the diagnostic itself, or as the
+    /// chain line of a union member or property the failure descends into.
+    /// Those apparent members are not modelled, so the diagnostic is not
+    /// reported rather than reported with a head or chain line the checker
+    /// does not print.
     fn weak_target_decides(&self, source: SemanticNodeId, target: SemanticNodeId) -> Option<bool> {
         let Some(target_view) = self.object_view(target) else {
             return Some(false);
@@ -570,6 +569,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         steps: &mut u32,
     ) -> Option<()> {
         *steps = steps.checked_sub(1)?;
+        if self.weak_target_decides(source, target)? {
+            return None;
+        }
         let step = self.failed_step(source, target)?;
         let push = |chain: &mut Vec<CheckerDiagnosticChainLine>, depth, text: String| {
             chain.push(CheckerDiagnosticChainLine::new(
