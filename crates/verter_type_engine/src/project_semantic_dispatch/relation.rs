@@ -7618,7 +7618,38 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
         if let Some(target_conditional) = target_conditional {
-            if source.extends == target_conditional.extends {
+            // Equivalent instantiated operands can have different arena ids
+            // (notably object literals written at different source spans).
+            // Constituent identity belongs to the canonical comparator.
+            let identity = if source.extends == target_conditional.extends {
+                super::canonical_algebra::StructuralIdentity::Equal
+            } else {
+                let concrete = |node| match self.unwrap_identity_carrier_for_relation(node) {
+                    IdentityCarrierUnwrap::Concrete(node) => Some(node),
+                    IdentityCarrierUnwrap::Unresolvable => None,
+                };
+                let (Some(source_extends), Some(target_extends)) = (
+                    concrete(source.extends),
+                    concrete(target_conditional.extends),
+                ) else {
+                    return RelationResult::Unknown;
+                };
+                let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
+                let mut budget = super::canonical_algebra::COMPARE_WORK_BUDGET;
+                let identity = super::canonical_algebra::compare_structural(
+                    self.graph(),
+                    source_extends,
+                    target_extends,
+                    &mut evidence,
+                    &mut budget,
+                );
+                self.deposit_canonical_evidence(evidence);
+                identity
+            };
+            if identity == super::canonical_algebra::StructuralIdentity::Incomplete {
+                return RelationResult::Unknown;
+            }
+            if identity == super::canonical_algebra::StructuralIdentity::Equal {
                 let checks = match self.relate_member(
                     source.check,
                     target_conditional.check,
@@ -7815,11 +7846,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// Whether `node` is a type no constraint or reduction stands behind: a
-    /// primitive, a literal, or an object, array, tuple or function type.
+    /// primitive, a literal, an object, array, tuple or function type, or a
+    /// union composed only of those. A closed union's rejected conditional
+    /// target is a complete negative, including a deferred conditional's
+    /// default constraint (`1 | 2`), never a reason to lose that verdict.
     fn relation_source_is_closed(&self, node: SemanticNodeId) -> bool {
-        matches!(
-            self.graph().node_data(node).as_deref(),
-            Some(
+        let terminal = |data: &SemanticNodeData| {
+            matches!(
+                data,
                 SemanticNodeData::Primitive(_)
                     | SemanticNodeData::Literal(_)
                     | SemanticNodeData::EnumLiteral(_)
@@ -7828,7 +7862,33 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     | SemanticNodeData::Tuple { .. }
                     | SemanticNodeData::Signature { .. }
             )
-        )
+        };
+        let graph = self.graph();
+        let Some(data) = graph.node_data(node) else {
+            return false;
+        };
+        if terminal(&data) {
+            return true;
+        }
+        let SemanticNodeData::Union(members) = data.as_ref() else {
+            return false;
+        };
+        let mut pending = members.to_vec();
+        let mut seen = FxHashSet::default();
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            let Some(data) = graph.node_data(node) else {
+                return false;
+            };
+            if let SemanticNodeData::Union(members) = data.as_ref() {
+                pending.extend(members.iter().copied());
+            } else if !terminal(&data) {
+                return false;
+            }
+        }
+        true
     }
 
     /// `source` related to a deferred conditional target
@@ -8125,6 +8185,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(SemanticNodeData::Opaque(err)) => !matches!(
                 query_error_disposition(err),
                 QueryErrorDisposition::Failure
+                    | QueryErrorDisposition::PermissiveWildcard
                     | QueryErrorDisposition::CheckerRecovery
                     | QueryErrorDisposition::BudgetRecovery
                     | QueryErrorDisposition::RecursionCarrier

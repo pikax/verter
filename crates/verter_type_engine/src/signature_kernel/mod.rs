@@ -21,9 +21,9 @@ mod substitution;
 #[allow(unused_imports)]
 pub use discovery::{
     append_signatures, heritage_signatures, intersection_signatures, merged_declaration_signatures,
-    publish_signature, resolution_order, set_from_candidates, signatures_identical,
-    union_signatures, BinderInput, DiscoveryError, DiscoveryTypes, ForcedResult, MatchOptions,
-    ParamInput, RestInput, ResultInput, SignatureInput,
+    publish_signature, resolution_order, set_from_candidates, signature_binder_correspondence,
+    signatures_identical, union_signatures, BinderInput, DiscoveryError, DiscoveryTypes,
+    ForcedResult, MatchOptions, ParamInput, RestInput, ResultInput, SignatureInput,
 };
 #[allow(unused_imports)]
 pub use lifetime::{SignatureEpochLease, SignatureStore, StoreError, EPOCH_RECORD_CAP};

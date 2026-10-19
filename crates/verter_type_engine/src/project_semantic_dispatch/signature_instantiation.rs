@@ -1,7 +1,7 @@
 //! The checker's `instantiateSignatureInContextOf` for a relation: a
-//! generic source signature relates to a target signature once its type
-//! parameters are inferred from the target's parameter types, and, for a
-//! type parameter no parameter infers, from the target's return type.
+//! generic source signature first aligns matching binder spaces, otherwise
+//! its type parameters are inferred from the target's parameter types, and,
+//! for a type parameter no parameter infers, from the target's return type.
 
 use std::sync::Arc;
 
@@ -9,15 +9,16 @@ use super::dispatch_txn::RelationStep;
 use super::inference::session::{FixationInput, InferenceInfoSetup, InferenceSessionSetup};
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    ConstParamPolicy, ContextualInferenceMode, InferenceCandidatePriority, InferencePassKind,
-    NoInferMask, SemanticNodeData, SemanticNodeId, SignatureKind, SignatureReturnCarrier,
-    TypeParamDecl, VariancePhase,
+    CanonicalTypeSubstitution, ConstParamPolicy, ContextualInferenceMode,
+    InferenceCandidatePriority, InferencePassKind, NoInferMask, SemanticNodeData, SemanticNodeId,
+    SignatureKind, SignatureReturnCarrier, TypeParamDecl, VariancePhase,
 };
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// `source` instantiated in the context of `target` when `source` is a
     /// generic signature `target` does not share its type parameters with:
-    /// each type parameter fixes, as a call's does, from the candidates the
+    /// matching clauses align through the kernel's binder correspondence;
+    /// otherwise each type parameter fixes, as a call's does, from the candidates the
     /// target's parameter types give the source's parameter types, else
     /// those the target's return gives the source's return, else its
     /// default, else `unknown`, and an inference its constraint does not
@@ -57,6 +58,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let plan = self
             .signature_comparison_plan(source, target, kind, false)
             .ok()?;
+        // Matching generic clauses compare in one binder space before
+        // contextual inference. Inferring an unused binder from a deferred
+        // return would erase the very conditional the relation must compare.
+        if let Some(correspondence) = plan.binder_correspondence {
+            let substitution = CanonicalTypeSubstitution::new(graph, correspondence);
+            return Some(self.substitute_canonical(
+                self.signature_without_type_parameters(source),
+                &substitution,
+            ));
+        }
         let pairs: Vec<(SemanticNodeId, SemanticNodeId)> = plan
             .positions
             .iter()

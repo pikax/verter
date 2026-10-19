@@ -1513,6 +1513,8 @@ pub(super) type SharedPositionalReads = Result<Vec<PositionalRead>, IncompleteRe
 /// [`ProjectSemanticDispatch::signature_comparison_plan`].
 #[derive(Debug, Clone)]
 pub(super) struct SignatureComparisonPlan {
+    /// Matching generic clauses, with source binders mapped to target binders.
+    pub binder_correspondence: Option<Vec<(SemanticNodeId, SemanticNodeId)>>,
     /// The source demands more arguments than the target supplies.
     pub source_has_more_parameters: bool,
     /// Each signature's authored `this` receiver, when it declares one.
@@ -1523,9 +1525,10 @@ pub(super) struct SignatureComparisonPlan {
     pub positions: Vec<(SemanticNodeId, SemanticNodeId)>,
 }
 
-/// [`SignatureComparisonPlan`] as read under a pinned view, before any
-/// node is interned.
+/// [`SignatureComparisonPlan`] as read under a pinned view, before the
+/// positional types are materialized.
 struct RawComparisonPlan {
+    binder_correspondence: Option<Vec<(SemanticNodeId, SemanticNodeId)>>,
     source_has_more_parameters: bool,
     source_receiver: Option<SemanticNodeId>,
     target_receiver: Option<SemanticNodeId>,
@@ -2069,6 +2072,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .filter_map(|(source, target)| Some((materialize(source)?, materialize(target)?)))
             .collect();
         Ok(SignatureComparisonPlan {
+            binder_correspondence: read.binder_correspondence,
             source_has_more_parameters: read.source_has_more_parameters,
             source_receiver: read.source_receiver,
             target_receiver: read.target_receiver,
@@ -2246,6 +2250,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
         }
         Ok(RawComparisonPlan {
+            binder_correspondence: crate::signature_kernel::signature_binder_correspondence(
+                &view,
+                &facts,
+                only(source)?,
+                only(target)?,
+            )
+            .map_err(|error| {
+                if is_retired_handle(&error) {
+                    SignatureSetReadFailure::Retired
+                } else {
+                    SignatureSetReadFailure::Incomplete(error.incomplete_reason())
+                }
+            })?,
             source_has_more_parameters: PositionalShape::source_has_more_parameters(
                 &source_shape,
                 &target_shape,

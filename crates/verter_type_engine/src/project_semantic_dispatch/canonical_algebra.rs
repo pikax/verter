@@ -93,6 +93,7 @@ use verter_type_expr::OwnedStr;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::absorb::SpecialKind;
+use super::query_error_disposition::{query_error_disposition, QueryErrorDisposition};
 use crate::semantic_query::checker_policy;
 use crate::semantic_query::{
     authored_property_key_child, ChildWalk, LiteralValue, NodeScopeId, PrimitiveKind,
@@ -1062,6 +1063,7 @@ fn canonicalize_with(
     //    transparent Alias redirects, so an aliased extreme absorbs too.
     let mut specials: Vec<Option<SpecialKind>> = Vec::with_capacity(flat.len());
     let mut error_node: Option<SemanticNodeId> = None;
+    let mut wildcard_node: Option<SemanticNodeId> = None;
     let mut has_any = false;
     let mut has_unknown = false;
     let mut has_never = false;
@@ -1075,6 +1077,9 @@ fn canonicalize_with(
                 error_node = Some(id);
             }
             Some((SpecialKind::Error, _)) => {}
+            Some((SpecialKind::Wildcard, id)) => {
+                wildcard_node.get_or_insert(id);
+            }
             None => {}
         }
         specials.push(special.map(|(kind, _)| kind));
@@ -1085,6 +1090,12 @@ fn canonicalize_with(
     if let Some(err) = error_node {
         return CanonicalComposite {
             node: err,
+            evidence,
+        };
+    }
+    if let Some(wildcard) = wildcard_node {
+        return CanonicalComposite {
+            node: wildcard,
             evidence,
         };
     }
@@ -2413,6 +2424,11 @@ pub(super) fn peek_special_via_graph(
             }
             SemanticNodeData::Primitive(PrimitiveKind::Unknown) => {
                 return Some((SpecialKind::Unknown, cur))
+            }
+            SemanticNodeData::Opaque(error)
+                if query_error_disposition(error) == QueryErrorDisposition::PermissiveWildcard =>
+            {
+                return Some((SpecialKind::Wildcard, cur))
             }
             SemanticNodeData::Opaque(err) if err.is_error_type() => {
                 return Some((SpecialKind::Error, cur))

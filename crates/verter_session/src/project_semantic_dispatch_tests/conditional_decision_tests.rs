@@ -16,6 +16,58 @@
 
 use super::differential_harness_tests::{Matrix, Read, Setting, ALL};
 
+#[test]
+fn generic_signature_conditional_identity_decides_closed_arguments() {
+    let source = r#"
+type Exclude<T, U> = T extends U ? never : T;
+type Extract<T, U> = T extends U ? T : never;
+type Eq<X, Y> = (<T>() => T extends X ? 1 : 2) extends (<T>() => T extends Y ? 1 : 2) ? true : false;
+type Renamed<X, Y> = (<S>() => S extends X ? 1 : 2) extends (<T>() => T extends Y ? 1 : 2) ? true : false;
+type Left = { a: 1 };
+type Right = { a: 1 };
+type __BenchInit = 0;
+export function open<X, Y>() { return null! as Eq<X, Y>; }
+export function reflexive<X>() { return null! as Eq<X, X>; }
+"#;
+    let matrix = Matrix::new(source).settings(&ALL);
+    let mut failures = matrix.types(&[
+        ("Eq<{ a: 1 }, { a: 1 }>", "true"),
+        ("Eq<{ a: 1 }, { a: 2 }>", "false"),
+        ("Eq<{ a: 1 }, { a: number }>", "false"),
+        ("Eq<any, unknown>", "false"),
+        ("Eq<unknown, any>", "false"),
+        ("Eq<Left, Right>", "true"),
+        ("Renamed<{ a: 1 }, { a: 1 }>", "true"),
+        ("Renamed<{ a: 1 }, { a: 2 }>", "false"),
+    ]);
+    failures.extend(matrix.returns(&[
+        (
+            "open",
+            "(<T>() => T extends X ? 1 : 2) extends (<T>() => T extends Y ? 1 : 2) ? true : false",
+        ),
+        ("reflexive", "true"),
+    ]));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn any_infer_tuple_uses_unknown_and_preserves_open_checks() {
+    let source = r#"
+export function open<T>() { return null! as (T extends [infer A] ? A : 0); }
+"#;
+    let matrix = Matrix::new(source).settings(&ALL);
+    let mut failures = matrix.types(&[
+        ("any extends [infer A] ? A : 0", "unknown"),
+        ("any extends [infer A] ? [A] : 0", "[unknown] | 0"),
+        ("any extends [infer A extends string] ? A : 0", "string | 0"),
+        ("any extends infer A ? A : 0", "any"),
+        ("[1] extends [infer A] ? A : 0", "1"),
+        ("unknown extends [infer A] ? A : 0", "0"),
+    ]);
+    failures.extend(matrix.returns(&[("open", "T extends [infer A] ? A : 0")]));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// Generic functions holding each conditional; overloads choosing between a
 /// parameter a deferred conditional argument may relate to and `unknown`;
 /// and method overloads choosing between a deferred conditional parameter
