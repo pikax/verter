@@ -7935,8 +7935,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ///
     /// The arms are read as the checker holds them: a nested intersection
     /// flattens and a name stands for the type it resolves to, so an
-    /// intersection of union aliases is weighed by those unions, as the
-    /// one distribution authority weighs it
+    /// intersection of union aliases is weighed by those unions. A product
+    /// taken whole under the checker's limit is accepted from its widths
+    /// alone; only one at the limit is weighed as the one distribution
+    /// authority weighs it
     /// ([`intersection_cross_product_refused`](super::canonical_algebra::intersection_cross_product_refused)),
     /// building only the halves it divides into and paying for them first.
     pub(super) fn intersection_too_complex(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
@@ -7987,7 +7989,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 _ => arms.push(resolved),
             }
         }
-        if !any_union {
+        // A product taken whole under the checker's limit stays under it
+        // however the checker divides or simplifies it: accepted from the
+        // widths alone, with nothing built or charged.
+        if !any_union || super::canonical_algebra::cross_product_under_limit(graph, &arms) {
             return None;
         }
         let nullability =

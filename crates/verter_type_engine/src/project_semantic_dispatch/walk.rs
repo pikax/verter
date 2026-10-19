@@ -8600,13 +8600,15 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                 merge_union_surfaces_for_macro(
                                     self.graph(),
                                     &arm_surfaces,
-                                    self.dispatch.construction_meter(), &mut canonical_evidence,
+                                    self.dispatch.construction_meter(),
+                                    &mut canonical_evidence,
                                 )
                             } else {
                                 merge_union_surfaces(
                                     self.graph(),
                                     &arm_surfaces,
-                                    self.dispatch.construction_meter(), &mut canonical_evidence,
+                                    self.dispatch.construction_meter(),
+                                    &mut canonical_evidence,
                                 )
                             };
                             self.dispatch.deposit_canonical_evidence(canonical_evidence);
@@ -10484,7 +10486,8 @@ construction_ordinal_seam! {
     fn merge_union_surfaces(
         graph: &SemanticGraphStore,
         arm_surfaces: &[Option<ShallowSurface>],
-        meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,        evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
+        meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
+        evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
     ) -> Option<ShallowSurface> {
         if arm_surfaces.is_empty() {
             return None;
@@ -10714,7 +10717,8 @@ construction_ordinal_seam! {
     fn merge_union_surfaces_for_macro(
         graph: &SemanticGraphStore,
         arm_surfaces: &[Option<ShallowSurface>],
-        meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,        evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
+        meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
+        evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
     ) -> Option<ShallowSurface> {
         if arm_surfaces.is_empty() {
             return None;

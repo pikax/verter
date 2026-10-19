@@ -10,7 +10,7 @@ use verter_type_engine::project_semantic_dispatch::canonical_algebra::{
     weigh_cross_product_for_tests, PaidConstruction,
 };
 use verter_type_engine::semantic_query::{
-    LiteralValue, PartialReasonSet, PrimitiveKind, SemanticNodeData, SemanticNodeId,
+    DeclIdentity, LiteralValue, PartialReasonSet, PrimitiveKind, SemanticNodeData, SemanticNodeId,
 };
 use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
@@ -158,32 +158,131 @@ fn an_unpaid_product_builds_nothing() {
 
 /// A divided intersection's halves are built, so each is paid for before it
 /// is: `X & Y & Z` divides into `X` and `Y & Z`, and an allowance one unit
-/// short of `Y & Z`'s product builds nothing at all.
+/// short of `Y & Z`'s product builds nothing at all. Measured cold, before
+/// anything of the product exists, the refused construction allocates with
+/// the arms it reads: halves whose arms are ten times wider, a product
+/// ninety-four times wider, allocate at most twenty times as much.
 #[test]
 fn a_divided_half_is_paid_for_before_it_is_built() {
+    {
+        let graph = SemanticGraphStore::new();
+        let _scope = graph.enter_node_root_scope();
+        let arms = [
+            numbers(&graph, 0, 40, true),
+            numbers(&graph, 100, 50, true),
+            numbers(&graph, 200, 50, true),
+        ];
+        let half = 51 * 51;
+        let built =
+            intern_ordered_intersection_paying_for_tests(&graph, &arms, usize::MAX, usize::MAX);
+        assert_eq!(built.exhausted, PartialReasonSet::empty());
+        // `Y & Z` keeps only `object` (the numbers are disjoint), so the
+        // product of the halves is `X`'s 41.
+        assert_eq!(
+            built.work,
+            half + 41,
+            "both products are paid for: {built:?}"
+        );
+    }
+    let mut measured = Vec::new();
+    for count in [30, 300] {
+        // A graph of its own: nothing of the product is interned before the
+        // refused construction runs.
+        let graph = SemanticGraphStore::new();
+        let _scope = graph.enter_node_root_scope();
+        let arms = [
+            numbers(&graph, 0, 40, true),
+            numbers(&graph, 1_000, count, true),
+            numbers(&graph, 2_000, count, true),
+        ];
+        let half = (count + 1) * (count + 1);
+        let (
+            PaidConstruction {
+                exhausted,
+                work,
+                bytes,
+                ..
+            },
+            calls,
+            allocated,
+        ) = allocations(|| {
+            intern_ordered_intersection_paying_for_tests(&graph, &arms, half - 1, usize::MAX)
+        });
+        assert_eq!(exhausted, PartialReasonSet::PROJECTION_WORK_LIMIT);
+        assert_eq!(
+            (work, bytes),
+            (0, 0),
+            "{count}: the unpaid half pays nothing"
+        );
+        measured.push((calls, allocated));
+    }
+    let [(_, narrow), (_, wide)] = measured[..] else {
+        unreachable!()
+    };
+    assert!(
+        wide <= 20 * narrow,
+        "the unpaid half builds nothing: it allocates with its arms, not its product: \
+         {measured:?}"
+    );
+}
+
+/// `<prefix>0 | … | <prefix><count - 1>`: a union of distinct type
+/// parameters, no two of which an intersection reduces.
+fn parameters(graph: &SemanticGraphStore, prefix: &str, count: usize) -> SemanticNodeId {
+    let members: Vec<SemanticNodeId> = (0..count)
+        .map(|i| {
+            let name = format!("{prefix}{i}");
+            graph.intern_node(SemanticNodeData::TypeParam {
+                decl: DeclIdentity::synthetic(&name),
+                param_index: 0,
+                constraint: None,
+                default: None,
+                display_name: verter_type_expr::OwnedStr::from(name.as_str()),
+            })
+        })
+        .collect();
+    intern_ordered_union(graph, &members, NullabilityPolicy::Strict).node
+}
+
+/// A divided product's constituents hold every member its halves'
+/// constituents hold: `A & B & C & D` over four ten-member unions divides
+/// into `A & B` and `C & D`, a hundred two-member intersections each, and
+/// its ten thousand constituents are four-member intersections. Each is
+/// paid for at the members it flattens to: beside the two halves and the
+/// two-member product `E & F` of the same width, the divided product pays
+/// exactly two more member slots per constituent.
+#[test]
+fn a_divided_product_pays_for_the_members_its_constituents_flatten_to() {
     let graph = SemanticGraphStore::new();
     let _scope = graph.enter_node_root_scope();
-    let arms = [
-        numbers(&graph, 0, 40, true),
-        numbers(&graph, 100, 50, true),
-        numbers(&graph, 200, 50, true),
-    ];
-    let half = 51 * 51;
-    let built = intern_ordered_intersection_paying_for_tests(&graph, &arms, usize::MAX, usize::MAX);
-    assert_eq!(built.exhausted, PartialReasonSet::empty());
-    // `Y & Z` keeps only `object` (the numbers are disjoint), so the
-    // product of the halves is `X`'s 41.
+    let [a, b, c, d] = ["a", "b", "c", "d"].map(|prefix| parameters(&graph, prefix, 10));
+    let [e, f] = ["e", "f"].map(|prefix| parameters(&graph, prefix, 100));
+    let paid = |arms: &[SemanticNodeId]| {
+        let paid =
+            intern_ordered_intersection_paying_for_tests(&graph, arms, usize::MAX, usize::MAX);
+        assert_eq!(paid.exhausted, PartialReasonSet::empty(), "{paid:?}");
+        paid
+    };
+    let half = paid(&[a, b]);
+    assert_eq!(half.work, 100, "a half is a hundred constituents");
+    let divided = paid(&[a, b, c, d]);
+    assert_eq!(divided.work, 100 + 100 + 10_000, "{divided:?}");
+    let pair = paid(&[e, f]);
+    assert_eq!(pair.work, 10_000, "{pair:?}");
     assert_eq!(
-        built.work,
-        half + 41,
-        "both products are paid for: {built:?}"
+        divided.bytes - 2 * half.bytes - pair.bytes,
+        10_000 * 2 * std::mem::size_of::<SemanticNodeId>(),
+        "each constituent pays for the four members it holds, not two"
     );
-    let PaidConstruction {
-        exhausted,
-        work,
-        bytes,
-        ..
-    } = intern_ordered_intersection_paying_for_tests(&graph, &arms, half - 1, usize::MAX);
-    assert_eq!(exhausted, PartialReasonSet::PROJECTION_WORK_LIMIT);
-    assert_eq!((work, bytes), (0, 0), "the unpaid half builds nothing");
+    let short = intern_ordered_intersection_paying_for_tests(
+        &graph,
+        &[a, b, c, d],
+        usize::MAX,
+        divided.bytes - 1,
+    );
+    assert_eq!(
+        short.exhausted,
+        PartialReasonSet::CONNECTED_MEMORY_LIMIT,
+        "an enabled byte rail one byte short of that footprint refuses it"
+    );
 }

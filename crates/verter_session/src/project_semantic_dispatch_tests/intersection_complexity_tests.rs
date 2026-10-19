@@ -375,3 +375,100 @@ fn a_member_read_over_unions_of_primitives_intersects_them_member_wise() {
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// The factors a member read distributes `probe`'s tuple elements as (each
+/// element's union members, or the element alone), and the elements as
+/// the written intersection.
+fn tuple_factors(
+    dispatch: &super::ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
+) -> (
+    Vec<Vec<verter_type_engine::semantic_query::SemanticNodeId>>,
+    Vec<verter_type_engine::semantic_query::SemanticNodeId>,
+) {
+    let graph = dispatch.graph();
+    let elements: Vec<_> = match graph.node_data(node).as_deref() {
+        Some(SemanticNodeData::Tuple { elements, .. }) => {
+            elements.iter().map(|element| element.value).collect()
+        }
+        other => panic!("the probe reads a tuple, got {other:?}"),
+    };
+    let factors = elements
+        .iter()
+        .map(|element| match graph.node_data(*element).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
+            _ => vec![*element],
+        })
+        .collect();
+    (factors, elements)
+}
+
+/// The work units a member read's distribution of `probe`'s tuple
+/// elements charges its connected demand, under `strictNullChecks`.
+fn distribution_work(probe: &str) -> usize {
+    use verter_session_query::flow::policy::NullabilityPolicy;
+    with_probe("", probe, |dispatch, node| {
+        let (factors, origin) = tuple_factors(dispatch, node);
+        let (_demand, trip) = dispatch.enter_connected_demand(false);
+        assert!(trip.is_none(), "a fresh demand has not tripped");
+        let before = dispatch.connected_demand().work_used_for_tests();
+        dispatch
+            .distribute_intersection_for_tests(&factors, &origin, NullabilityPolicy::Strict)
+            .expect("the intersection distributes");
+        dispatch.connected_demand().work_used_for_tests() - before
+    })
+}
+
+/// A member read divides `X & (A | B | undefined) & (C | D | undefined)`
+/// as the checker does, into `X` and a half, and intersects that half the
+/// way the checker's own intersection does: its factors all hold
+/// `undefined`, so it intersects without it — four combinations, not the
+/// nine its written width multiplies to — and adds it back. Beside the same
+/// read without `undefined`, the half pays for no combination more: the
+/// read pays only for the `undefined` part the half adds back and the one
+/// `X & undefined` combination of the halves' product. Weighed at its
+/// written width, the half would pay for five combinations more.
+#[test]
+fn a_divided_half_intersects_without_the_nullish_member_its_factors_share() {
+    let nullish = distribution_work(
+        "[{ x: 1 }, { a: 1 } | { b: 1 } | undefined, { c: 1 } | { d: 1 } | undefined]",
+    );
+    let plain = distribution_work("[{ x: 1 }, { a: 1 } | { b: 1 }, { c: 1 } | { d: 1 }]");
+    assert_eq!(
+        nullish - plain,
+        2,
+        "the shared `undefined` costs its part and one combination, not the half's \
+         five more: {nullish} against {plain}"
+    );
+}
+
+/// A distribution outside any connected demand is weighed against the
+/// checker's limit and charged to no ledger: an earlier demand's trip,
+/// which the ledger still holds once that demand ends, is never inherited
+/// as the distribution's own refusal.
+#[test]
+fn a_distribution_outside_a_demand_never_inherits_an_earlier_trip() {
+    use verter_session_query::flow::policy::NullabilityPolicy;
+    with_probe(
+        "",
+        "[{ x: 1 } | { y: 1 }, { a: 1 } | { b: 1 }]",
+        |dispatch, node| {
+            let (factors, origin) = tuple_factors(dispatch, node);
+            dispatch.set_connected_limits_for_tests(1, 24);
+            {
+                let (_demand, _) = dispatch.enter_connected_demand(false);
+                assert!(
+                    dispatch.connected_demand().charge_units(2).is_err(),
+                    "the earlier demand trips"
+                );
+            }
+            assert!(
+                dispatch
+                    .distribute_intersection_for_tests(&factors, &origin, NullabilityPolicy::Strict)
+                    .is_some(),
+                "the intersection distributes outside the demand, never stopped by the \
+                 earlier demand's trip"
+            );
+        },
+    );
+}

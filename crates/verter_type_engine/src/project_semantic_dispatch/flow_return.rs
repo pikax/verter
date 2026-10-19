@@ -1330,20 +1330,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return None;
         }
         let graph = self.graph();
-        let presimplified = super::canonical_algebra::presimplify_factors(graph, factors);
-        let (factors, nullish) = match &presimplified {
-            Some(presimplified) => (
-                presimplified.factors.as_slice(),
-                presimplified.nullish.as_slice(),
-            ),
-            None => (factors, &[][..]),
-        };
         let mut undecided = false;
-        let mut parts = if factors.iter().any(Vec::is_empty) {
-            // The factors share no member: the intersection is empty.
-            Vec::new()
-        } else {
-            match self.intersection_parts(factors, false, nullability, ordered, &mut undecided) {
+        let parts =
+            match self.simplified_parts(factors, false, nullability, ordered, &mut undecided) {
                 Ok(Some(parts)) => parts,
                 Ok(None) => return None,
                 Err(refusal) => {
@@ -1353,13 +1342,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         undecided,
                     });
                 }
-            }
-        };
-        parts.extend(
-            nullish
-                .iter()
-                .map(|kind| graph.intern_node(SemanticNodeData::Primitive(*kind))),
-        );
+            };
         let origin_count: usize = origin
             .iter()
             .map(|node| self.constituent_count(*node))
@@ -1380,6 +1363,63 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.intern_normalized_union(&parts, nullability)
         };
         Some(DistributedIntersection { node, undecided })
+    }
+
+    /// [`Self::distribute_intersection`] of `factors`, unordered, with
+    /// `origin` as the written intersection: the type the distribution
+    /// forms, `None` where it formed none. Test-only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn distribute_intersection_for_tests(
+        &self,
+        factors: &[Vec<SemanticNodeId>],
+        origin: &[SemanticNodeId],
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
+    ) -> Option<SemanticNodeId> {
+        self.distribute_intersection(factors, origin, nullability, false)
+            .map(|distributed| distributed.node)
+    }
+
+    /// The parts of the intersection of `factors`, as the checker's
+    /// `getIntersectionType` forms them each time it intersects — the whole
+    /// intersection and each half it divides into alike: its strategies ahead
+    /// of a cross product run first
+    /// ([`presimplify_factors`](super::canonical_algebra::presimplify_factors)),
+    /// so a half is weighed at what it reduces to, then the surviving
+    /// combinations ([`Self::intersection_parts`]), with any nullish member
+    /// every factor held added back as a part of its own.
+    fn simplified_parts(
+        &self,
+        factors: &[Vec<SemanticNodeId>],
+        divided: bool,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        ordered: bool,
+        undecided: &mut bool,
+    ) -> Result<Option<Vec<SemanticNodeId>>, crate::semantic_query::checker_policy::OperationRefusal>
+    {
+        let graph = self.graph();
+        let presimplified = super::canonical_algebra::presimplify_factors(graph, factors);
+        let (factors, nullish) = match &presimplified {
+            Some(presimplified) => (
+                presimplified.factors.as_slice(),
+                presimplified.nullish.as_slice(),
+            ),
+            None => (factors, &[][..]),
+        };
+        let mut parts = if factors.iter().any(Vec::is_empty) {
+            // The factors share no member: the intersection is empty.
+            Vec::new()
+        } else {
+            match self.intersection_parts(factors, divided, nullability, ordered, undecided)? {
+                Some(parts) => parts,
+                None => return Ok(None),
+            }
+        };
+        parts.extend(
+            nullish
+                .iter()
+                .map(|kind| graph.intern_node(SemanticNodeData::Primitive(*kind))),
+        );
+        Ok(Some(parts))
     }
 
     /// The combinations of `factors` that survive, each interned, in the
@@ -1410,16 +1450,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             for half in [&factors[..middle], &factors[middle..]] {
                 let parts = match half {
                     [only] => only.clone(),
-                    _ => match self.intersection_parts(
-                        half,
-                        false,
-                        nullability,
-                        ordered,
-                        undecided,
-                    )? {
-                        Some(parts) => parts,
-                        None => return Ok(None),
-                    },
+                    _ => {
+                        match self.simplified_parts(half, false, nullability, ordered, undecided)? {
+                            Some(parts) => parts,
+                            None => return Ok(None),
+                        }
+                    }
                 };
                 // The half is a union: identical constituents are one.
                 let mut seen = rustc_hash::FxHashSet::default();
@@ -1430,24 +1466,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .collect(),
                 );
             }
-            return self.intersection_parts(&halves, true, nullability, ordered, undecided);
+            return self.simplified_parts(&halves, true, nullability, ordered, undecided);
         }
-        // A combination of a divided half's parts holds each part's members.
-        let arity = factors
-            .iter()
-            .map(|arms| {
-                arms.iter()
-                    .map(|arm| match graph.node_data(*arm).as_deref() {
-                        Some(SemanticNodeData::Intersection(members)) if divided => members.len(),
-                        _ => 1,
-                    })
-                    .max()
-                    .unwrap_or(1)
-            })
-            .sum();
         let combinations = match super::canonical_algebra::admit_cross_product(
             factors.iter().map(Vec::len),
-            arity,
+            // A combination holds each part's members once it is interned.
+            || super::canonical_algebra::flattened_arity(graph, factors.iter().map(Vec::as_slice)),
             Some(self.construction_meter()),
         ) {
             Ok(combinations) => combinations,

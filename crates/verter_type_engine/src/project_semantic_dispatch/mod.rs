@@ -1344,8 +1344,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// The meter a canonical construction inside this dispatch's connected
     /// demand pays before it builds: a distribution's cross product is
     /// charged to this demand's ledger, work units and construction bytes,
-    /// before its first constituent exists.
+    /// before its first constituent exists. Outside any connected demand
+    /// there is no ledger to pay: the construction is weighed against the
+    /// checker's limit and charged to nothing, so it never reads a trip an
+    /// earlier demand left behind.
     pub(super) fn construction_meter(&self) -> canonical_algebra::ConstructionMeter<'_> {
+        if !self.connected_demand.is_active() {
+            return canonical_algebra::ConstructionMeter::UNMETERED;
+        }
         canonical_algebra::ConstructionMeter::charged(&self.connected_demand)
     }
 

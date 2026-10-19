@@ -1953,8 +1953,10 @@ pub struct ConstructionMeter<'m>(Option<&'m dyn ConstructionLedger>);
 /// What a [`ConstructionMeter`] pays: the connected-demand ledger's work
 /// units and construction bytes, both taken before anything is built.
 pub(crate) trait ConstructionLedger {
-    /// Pay `units` work units and `bytes` construction bytes at once. `Err`
-    /// carries the rails that refused, and nothing may be built.
+    /// Pay `units` work units and `bytes` construction bytes at once. The
+    /// bytes are the construction's footprint, always charged; they refuse
+    /// only where the ledger's advisory byte rail is enabled. `Err` carries
+    /// the rails that refused, and nothing may be built.
     fn pay_construction(
         &self,
         units: usize,
@@ -1968,8 +1970,7 @@ impl ConstructionLedger for super::connected_demand::ConnectedDemandLedger<'_> {
         units: usize,
         bytes: usize,
     ) -> Result<(), crate::semantic_query::PartialReasonSet> {
-        self.charge_units(units)?;
-        self.reserve_bytes(bytes)
+        self.charge_construction(units, bytes)
     }
 }
 
@@ -2013,12 +2014,14 @@ pub(super) enum DistributionStop {
 /// (`checkCrossProductUnion`) from the counts alone, with nothing built
 /// and nothing allocated. A product that is built (`meter` given) is then
 /// paid for at once, before its first constituent exists: one work unit
-/// and one derived node of `arity` members per constituent, and the union
-/// over them. `Ok` is the product's width; a product only weighed (`meter`
-/// `None`) is never built and charges nothing.
+/// and one derived node of `arity` members per constituent — the members
+/// a constituent holds once its nested intersections flatten
+/// ([`flattened_arity`]), read only for a product that is built — and the
+/// union over them. `Ok` is the product's width; a product only weighed
+/// (`meter` `None`) is never built and charges nothing.
 pub(super) fn admit_cross_product(
     widths: impl Iterator<Item = usize>,
-    arity: usize,
+    arity: impl FnOnce() -> usize,
     meter: Option<ConstructionMeter<'_>>,
 ) -> Result<usize, DistributionStop> {
     use checker_policy::ProductFactor;
@@ -2034,7 +2037,7 @@ pub(super) fn admit_cross_product(
     if let Some(meter) = meter {
         if width > 0 {
             meter
-                .pay(width, cross_product_bytes(width, arity))
+                .pay(width, cross_product_bytes(width, arity()))
                 .map_err(DistributionStop::Exhausted)?;
         }
     }
@@ -2061,9 +2064,57 @@ fn weigh_cross_product(
 ) -> Result<usize, DistributionStop> {
     admit_cross_product(
         arms.iter().map(|arm| product_width(graph, *arm)),
-        arms.len(),
+        || arms.len(),
         None,
     )
+}
+
+/// Whether the checker's cross product of `arms`, taken whole as they
+/// stand, is under its limit ([`weigh_cross_product`]): no strategy the
+/// checker runs ahead of it adds a constituent, and a divided product's
+/// halves multiply to no more than it, so such an intersection is never
+/// refused. Allocates nothing.
+pub(super) fn cross_product_under_limit(
+    graph: &SemanticGraphStore,
+    arms: &[SemanticNodeId],
+) -> bool {
+    weigh_cross_product(graph, arms).is_ok()
+}
+
+/// The members one constituent of a cross product over `factors` holds at
+/// most once it is built: each factor contributes the most members any of
+/// its choices holds when nested intersections flatten into the
+/// constituent (`canonicalize_with`'s same-kind flattening), a
+/// non-intersection choice one. The arity [`admit_cross_product`] pays a
+/// constituent's footprint at.
+pub(super) fn flattened_arity<'f>(
+    graph: &SemanticGraphStore,
+    factors: impl Iterator<Item = &'f [SemanticNodeId]>,
+) -> usize {
+    let mut stack: Vec<SemanticNodeId> = Vec::new();
+    let mut leaves = |choice: SemanticNodeId| -> usize {
+        stack.clear();
+        stack.push(choice);
+        let mut count = 0usize;
+        while let Some(node) = stack.pop() {
+            match graph.node_data(node).as_deref() {
+                Some(SemanticNodeData::Intersection(members)) => {
+                    stack.extend(members.iter().copied());
+                }
+                _ => count += 1,
+            }
+        }
+        count
+    };
+    factors
+        .map(|choices| {
+            choices
+                .iter()
+                .map(|choice| leaves(*choice))
+                .max()
+                .unwrap_or(1)
+        })
+        .fold(0usize, usize::saturating_add)
 }
 
 /// [`weigh_cross_product`], for the allocation canaries: the checker's
@@ -2464,7 +2515,16 @@ fn intersect_over_unions(
     let build = origin != DistributionOrigin::Weighed;
     let width = admit_cross_product(
         arms.iter().map(|arm| product_width(graph, *arm)),
-        arms.len(),
+        // A constituent holds each choice's members once flattened: a
+        // divided half's constituents are themselves intersections.
+        || {
+            flattened_arity(
+                graph,
+                arms.iter()
+                    .zip(&unions)
+                    .map(|(arm, members)| members.as_deref().unwrap_or(std::slice::from_ref(arm))),
+            )
+        },
         build.then_some(meter),
     )?;
     if !build || width == 0 {

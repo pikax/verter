@@ -649,6 +649,7 @@ fn a_budget_profile_is_one_interned_identity() {
     let spec = BudgetProfileSpec {
         work: 100,
         bytes: 1_000,
+        construction_byte_refusal: false,
         query_depth: 24,
         instantiation_depth: 10,
         tail_steps: 10,
@@ -1239,12 +1240,25 @@ fn root_read_with_context(
     depth: u16,
     preceding: usize,
 ) -> RootAnswer {
+    root_read_configured(host, key, preceding, |dispatch| {
+        dispatch.set_connected_limits_for_tests(work, depth);
+    })
+}
+
+/// [`root_read_with_context`] with the dispatcher's allowances set by
+/// `configure` before the demand enters.
+fn root_read_configured(
+    host: &Arc<VerterHost>,
+    key: &verter_type_engine::semantic_query::SemanticQueryKey,
+    preceding: usize,
+    configure: impl FnOnce(&ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>),
+) -> RootAnswer {
     use verter_type_engine::semantic_query::{QueryResult, SemanticQueryValue};
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&ctx);
-    dispatch.set_connected_limits_for_tests(work, depth);
+    configure(&dispatch);
     let _connected = (preceding != 0).then(|| dispatch.enter_connected_demand(false).0);
     if preceding != 0 {
         dispatch.connected_demand().charge_units(preceding).unwrap();
@@ -2198,6 +2212,7 @@ fn the_refusal_table_keeps_the_newest_and_refuses_torn_evaluations() {
     let profile = BudgetProfile::intern(BudgetProfileSpec {
         work: 64,
         bytes: 1_024,
+        construction_byte_refusal: false,
         query_depth: 24,
         instantiation_depth: 10,
         tail_steps: 10,
@@ -2482,6 +2497,53 @@ fn an_unpaid_distribution_seals_its_refusal_under_its_own_allowance() {
     assert!(
         semantic_misses(&host) > before_edit,
         "an edit to what the refusal read evaluates afresh"
+    );
+}
+
+/// An intersection's distribution charges its construction footprint to
+/// the demand whatever the byte allowance; the advisory construction-byte
+/// rail is off unless enabled, so an allowance half that footprint still
+/// distributes all 900 constituents, complete. Enabled, the same allowance
+/// refuses the construction before it builds, a partial of the memory
+/// rail. Each read is cold, on a host of its own.
+#[test]
+fn construction_byte_refusal_is_opt_in() {
+    use verter_type_engine::semantic_query::PartialReasonSet;
+    let work = super::connected_demand::MAX_CONNECTED_PROJECTION_WORK;
+    let cold_read = |bytes: u64, refusal: bool| {
+        let host = super::checker_probe_lane_tests::default_probe_host();
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
+        let key = intersection_root_key(&host, "export type Marker = 1;\n", &object_union_pair(30));
+        root_read_configured(&host, &key, 0, |dispatch| {
+            dispatch.set_connected_limits_for_tests(work, 24);
+            dispatch.set_construction_byte_limit_for_tests(bytes);
+            dispatch
+                .connected_demand()
+                .set_construction_byte_refusal_for_tests(refusal);
+        })
+    };
+    let unlimited = cold_read(u64::MAX, false);
+    assert!(!unlimited.partial, "{unlimited:?}");
+    let allowance = unlimited.bytes / 2;
+    let default_off = cold_read(allowance, false);
+    assert!(
+        !default_off.partial && default_off.answer == unlimited.answer,
+        "the rail is off by default: the distribution completes: {default_off:?}"
+    );
+    assert!(
+        default_off.bytes > allowance,
+        "its footprint is still charged: {default_off:?}"
+    );
+    let enabled = cold_read(allowance, true);
+    assert!(
+        enabled.partial
+            && enabled
+                .reasons
+                .contains(PartialReasonSet::CONNECTED_MEMORY_LIMIT),
+        "the enabled rail refuses the construction: {enabled:?}"
     );
 }
 

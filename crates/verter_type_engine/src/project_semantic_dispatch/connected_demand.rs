@@ -290,6 +290,11 @@ pub struct ConnectedDemandLedger<'a> {
     work_limit: Cell<usize>,
     bytes_used: Cell<u64>,
     bytes_limit: Cell<u64>,
+    /// Whether a canonical construction's footprint
+    /// ([`Self::charge_construction`]) may be refused at `bytes_limit`: the
+    /// advisory construction-byte rail, off unless explicitly enabled. Off,
+    /// the footprint is still charged to `bytes_used`.
+    construction_byte_refusal: Cell<bool>,
     query_depth: Cell<u16>,
     query_depth_limit: Cell<u16>,
     instantiation_depth_limit: u32,
@@ -537,6 +542,10 @@ impl std::fmt::Debug for ConnectedDemandLedger<'_> {
             .field("work_limit", &self.work_limit.get())
             .field("bytes_used", &self.bytes_used.get())
             .field("bytes_limit", &self.bytes_limit.get())
+            .field(
+                "construction_byte_refusal",
+                &self.construction_byte_refusal.get(),
+            )
             .field("query_depth", &self.query_depth.get())
             .field("query_depth_limit", &self.query_depth_limit.get())
             .field("instantiation_depth_limit", &self.instantiation_depth_limit)
@@ -569,6 +578,7 @@ impl<'a> ConnectedDemandLedger<'a> {
             work_limit,
             bytes_used,
             bytes_limit,
+            construction_byte_refusal,
             query_depth,
             query_depth_limit,
             instantiation_depth_limit,
@@ -590,6 +600,7 @@ impl<'a> ConnectedDemandLedger<'a> {
         work_limit.swap(&other.work_limit);
         bytes_used.swap(&other.bytes_used);
         bytes_limit.swap(&other.bytes_limit);
+        construction_byte_refusal.swap(&other.construction_byte_refusal);
         query_depth.swap(&other.query_depth);
         query_depth_limit.swap(&other.query_depth_limit);
         tripped.swap(&other.tripped);
@@ -622,6 +633,7 @@ impl<'a> ConnectedDemandLedger<'a> {
             ),
             bytes_used: Cell::new(0),
             bytes_limit: Cell::new(MAX_CONNECTED_CONSTRUCTION_BYTES),
+            construction_byte_refusal: Cell::new(false),
             query_depth: Cell::new(0),
             query_depth_limit: Cell::new(MAX_CONNECTED_QUERY_DEPTH),
             #[cfg(not(any(test, feature = "test-support")))]
@@ -903,6 +915,34 @@ impl<'a> ConnectedDemandLedger<'a> {
         }
     }
 
+    /// Pay for a canonical construction before it builds: `units` work
+    /// units, refused past the work allowance, and `bytes` of construction
+    /// footprint. The footprint is always charged; it is refused at the
+    /// byte allowance only when the advisory construction-byte rail is
+    /// enabled ([`Self::set_construction_byte_refusal_for_tests`]), and
+    /// otherwise never stops the construction. `Err` carries the sticky
+    /// trip set, and nothing is charged for the refused part.
+    pub(crate) fn charge_construction(
+        &self,
+        units: usize,
+        bytes: usize,
+    ) -> Result<(), PartialReasonSet> {
+        self.charge_units(units)?;
+        if self.construction_byte_refusal.get() {
+            return self.reserve_bytes(bytes);
+        }
+        verter_debug_assert!(
+            self.active.get(),
+            "construction bytes must be charged inside a connected-demand guard"
+        );
+        let bytes = bytes as u64;
+        self.bytes_used
+            .set(self.bytes_used.get().saturating_add(bytes));
+        remember_bytes(bytes);
+        self.accrue(0, usize::try_from(bytes).unwrap_or(usize::MAX));
+        Ok(())
+    }
+
     /// What the active demand has charged so far.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn usage(&self) -> DemandUsage {
@@ -962,6 +1002,19 @@ impl<'a> ConnectedDemandLedger<'a> {
             "test limits must be set before entering a connected demand"
         );
         self.bytes_limit.set(bytes);
+    }
+
+    /// Enable or disable the advisory construction-byte rail for the next
+    /// connected demand: enabled, a canonical construction whose footprint
+    /// passes the byte allowance is refused. Test-only, and refused inside
+    /// an active demand.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_construction_byte_refusal_for_tests(&self, enabled: bool) {
+        assert!(
+            !self.active.get(),
+            "test limits must be set before entering a connected demand"
+        );
+        self.construction_byte_refusal.set(enabled);
     }
 
     /// The construction bytes the last connected demand reserved. Test-only:
@@ -1192,6 +1245,7 @@ impl ConnectedDemandLedger<'_> {
         BudgetProfileSpec {
             work: self.work_limit.get(),
             bytes: self.bytes_limit.get(),
+            construction_byte_refusal: self.construction_byte_refusal.get(),
             query_depth: self.query_depth_limit.get(),
             instantiation_depth: self.instantiation_depth_limit,
             tail_steps: self.tail_steps_limit,

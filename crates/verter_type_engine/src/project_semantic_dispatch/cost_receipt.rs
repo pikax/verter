@@ -719,6 +719,9 @@ pub struct BudgetProfileSpec {
     pub work: usize,
     /// The connected demand's construction-byte allowance.
     pub bytes: u64,
+    /// Whether the advisory construction-byte rail refuses a canonical
+    /// construction at `bytes` (off by default).
+    pub construction_byte_refusal: bool,
     /// The connected demand's nested query-depth allowance.
     pub query_depth: u16,
     /// The continuation runtime's instantiation-depth allowance.
@@ -741,6 +744,7 @@ impl BudgetProfileSpec {
         Self {
             work: 0,
             bytes: 0,
+            construction_byte_refusal: false,
             query_depth: 0,
             instantiation_depth: 0,
             tail_steps: 0,
