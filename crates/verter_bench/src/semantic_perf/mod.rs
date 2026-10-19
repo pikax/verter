@@ -148,6 +148,9 @@ pub struct Observation {
     /// `conditional` / `infer` nodes in the answer: a conditional left
     /// unevaluated.
     pub conditional_nodes: usize,
+    /// The checker diagnostic code (`2590`, …) when the answer is the
+    /// checker's recovered error type rather than a type the engine built.
+    pub checker_recovery: Option<u32>,
 }
 
 impl Observation {
@@ -160,6 +163,7 @@ impl Observation {
             unknown_leaves: 0,
             unknown_samples: Vec::new(),
             conditional_nodes: 0,
+            checker_recovery: None,
         }
     }
 }
@@ -549,6 +553,18 @@ fn wire_node_counts(root: &serde_json::Value) -> (usize, Vec<String>, usize) {
     (unknown, samples, conditional)
 }
 
+/// The diagnostic code of `node` when it is the checker's recovered error
+/// type: the wire form spells that type (`any`), not the diagnostic.
+fn checker_recovery_code(node: &NodeRoot) -> Option<u32> {
+    let data = node.node_ref().ok()?.read().ok()?;
+    match &*data {
+        verter_type_engine::semantic_query::SemanticNodeData::Opaque(
+            verter_type_engine::semantic_query::QueryError::CheckerRecovery { diagnostic, .. },
+        ) => Some(diagnostic.code.code()),
+        _ => None,
+    }
+}
+
 /// The wire bytes of `node`'s answer, or why there are none.
 fn wire_bytes(host: &VerterHost, node: Option<&NodeRoot>) -> Result<Vec<u8>, String> {
     let node = node.ok_or_else(|| "no value to observe".to_string())?;
@@ -638,6 +654,7 @@ fn observe_on_stack(bytes: &[u8]) -> Observation {
             unknown_leaves,
             unknown_samples,
             conditional_nodes,
+            checker_recovery: None,
         },
         Err(err) => Observation {
             error: Some(format!("render the answer: {err:?}")),
@@ -764,7 +781,9 @@ pub fn run_job(
     for (probe, (node, warm_nodes)) in result.probes.iter_mut().zip(&nodes) {
         let start = Instant::now();
         let cold_bytes = wire_bytes(&host, node.as_ref());
-        probe.observation = Some(observe(cold_bytes.as_deref().map_err(Clone::clone)));
+        let mut observation = observe(cold_bytes.as_deref().map_err(Clone::clone));
+        observation.checker_recovery = node.as_ref().and_then(checker_recovery_code);
+        probe.observation = Some(observation);
         for (record, warm_node) in probe.warm.iter_mut().zip(warm_nodes) {
             record.same_answer_as_cold = Some(match (node, warm_node) {
                 (Some(cold), Some(warm)) if cold.id() == warm.id() => true,

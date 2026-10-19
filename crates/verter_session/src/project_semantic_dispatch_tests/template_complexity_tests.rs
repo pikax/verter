@@ -417,3 +417,150 @@ fn a_relation_refused_inside_a_span_is_not_the_templates_ts2590() {
         },
     );
 }
+
+/// `W` is the 1,000 three-digit strings.
+const THREE_DIGITS: &str = "type W = `${D}${D}${D}`;\n";
+
+/// A `never` span empties the product wherever it sits: the template is
+/// `never` whatever the other spans are — open, or a product far past the
+/// checker's limit — and nothing is concatenated.
+///
+/// Measured: each of the first four probes is `never`, with no diagnostic
+/// (`W × W` alone is 1,000,000 concatenations, TS2590). Past them, seven
+/// `W` spans before or after `never` overflow any machine count before the
+/// empty span is reached; the checker distributes such a template span by
+/// span and does not finish, while the product is empty, so `never` answers
+/// beyond it.
+#[test]
+fn an_empty_span_empties_the_product_wherever_it_sits() {
+    let source = format!("{DIGITS}{THREE_DIGITS}");
+    let failures = mismatches(
+        &source,
+        &[
+            (
+                "ReturnType<<T extends string>() => `${T}${never}`>",
+                "never",
+            ),
+            (
+                "ReturnType<<T extends string>() => `x${never}${T}`>",
+                "never",
+            ),
+            ("`${W}${W}${never}`", "never"),
+            ("`${never}${W}${W}`", "never"),
+            ("`${W}${W}${W}${W}${W}${W}${W}${never}`", "never"),
+            ("`${never}${W}${W}${W}${W}${W}${W}${W}`", "never"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The wire answer of `type __Probe = <probe>` resolved by name, as the
+/// semantic benchmark demands it, with the connected work it charged.
+fn named_template_probe(
+    source: &str,
+    probe: &str,
+) -> (
+    verter_type_expr::TypeExpr,
+    verter_type_engine::project_semantic_dispatch::connected_demand::DemandUsage,
+) {
+    const SCENARIO: &str = "/template/scenario.ts";
+    let host = crate::VerterHost::new_standalone_with_tsconfig_projects(
+        crate::HostConfig::default(),
+        &[("/template", r#"{ "compilerOptions": { "strict": true } }"#)],
+    );
+    let _ = host
+        .upsert(crate::UpsertRequest {
+            canonical_id: Some(SCENARIO.into()),
+            input_id: SCENARIO.into(),
+            source: std::sync::Arc::from(format!(
+                "{source}type __Probe = {probe};\nexport {{}};\n"
+            )),
+            file_language: crate::FileLanguage::script_ts(),
+            aliases: vec![],
+        })
+        .expect("fixture admitted");
+    let ((outcome, _), usage) =
+        verter_type_engine::project_semantic_dispatch::connected_demand::with_connected_work_capture_for_tests(
+            || {
+                host.resolve_named_symbol_with_audit(SCENARIO, "__Probe", None)
+                    .into_parts()
+            },
+        );
+    let node = outcome
+        .expect("the named demand completes")
+        .expect("the probe exists");
+    let bytes = host
+        .project_node_to_type_expr_json_bytes(&node)
+        .expect("the answer projects");
+    (
+        serde_json::from_slice(&bytes).expect("a wire answer"),
+        usage,
+    )
+}
+
+/// Resolved by name, as the benchmark asks for it, a template at the
+/// checker's limit answers its TS2590 recovery — never the probe
+/// expression unevaluated — and one under the limit its union.
+#[test]
+fn a_named_template_at_the_limit_answers_its_recovery() {
+    use verter_type_expr::TypeExpr;
+    let spans = |count: usize| "${D}".repeat(count);
+    let (under, _) = named_template_probe(DIGITS, &format!("`{}`", spans(4)));
+    assert!(
+        matches!(&under, TypeExpr::Union(arms) if arms.len() == 10_000),
+        "four digit spans are 10,000 strings"
+    );
+    let two_spans = format!(
+        "{}{}",
+        string_union("C", "c", 400),
+        string_union("F", "f", 250)
+    );
+    for (source, probe) in [
+        (DIGITS.to_owned(), format!("`{}`", spans(5))),
+        (two_spans, "`${C}-${F}`".to_owned()),
+    ] {
+        let (answer, _) = named_template_probe(&source, &probe);
+        let rendered = format!("{answer:?}");
+        assert!(
+            !matches!(answer, TypeExpr::TemplateLiteral { .. }),
+            "`{probe}` is the checker's recovery, not the probe unevaluated: {rendered:.300}"
+        );
+        assert!(
+            rendered.contains("2590") || matches!(answer, TypeExpr::Primitive(_)),
+            "`{probe}` answers the TS2590 recovery: {rendered:.300}"
+        );
+    }
+}
+
+/// The work and the construction bytes a template charges grow with the
+/// concatenations it builds: four times the concatenations charge at most
+/// six times the work and the bytes (a quadratic term would charge
+/// sixteen), and the work is never below one unit per concatenation.
+#[test]
+fn a_template_charges_in_the_linear_class() {
+    let measure = |a: usize, b: usize| {
+        let source = format!("{}{}", string_union("A", "a", a), string_union("B", "b", b));
+        let (answer, usage) = named_template_probe(&source, "`${A}-${B}`");
+        assert!(
+            matches!(&answer, verter_type_expr::TypeExpr::Union(arms) if arms.len() == a * b),
+            "{a} × {b} concatenations"
+        );
+        assert!(
+            usage.work >= a * b,
+            "one unit per concatenation at {a} × {b}"
+        );
+        assert!(usage.bytes > 0, "bytes charged at {a} × {b}");
+        (usage.work as u64, usage.bytes)
+    };
+    let (small_work, small_bytes) = measure(50, 40);
+    let (large_work, large_bytes) = measure(100, 80);
+    println!("work {small_work} -> {large_work}, bytes {small_bytes} -> {large_bytes}");
+    assert!(
+        large_work <= 6 * small_work,
+        "work grew from {small_work} to {large_work}"
+    );
+    assert!(
+        large_bytes <= 6 * small_bytes,
+        "bytes grew from {small_bytes} to {large_bytes}"
+    );
+}

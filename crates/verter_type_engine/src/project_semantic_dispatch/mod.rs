@@ -180,6 +180,7 @@ mod signature_instantiation;
 pub(crate) mod substitute;
 pub mod symbol_identity;
 pub mod symbolic_root;
+mod template_product;
 mod template_relation;
 pub mod walk;
 

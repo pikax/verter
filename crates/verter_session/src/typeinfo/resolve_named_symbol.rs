@@ -1176,6 +1176,15 @@ pub(crate) fn classify_operator_reduction_step(
             // non-fault miss preserves the carrier (never degrades to a
             // `semanticMiss` terminal).
             if let Some(SemanticNodeData::Opaque(err)) = store.read_in_scope(next).as_deref() {
+                // The checker's recovered error type (a TS2590 cross product,
+                // say) is the operator's answer, never a miss: deliver it
+                // rather than the unevaluated operator shell.
+                if matches!(
+                    err,
+                    verter_type_engine::semantic_query::QueryError::CheckerRecovery { .. }
+                ) {
+                    return Ok(MaterializationStep::Stop(next));
+                }
                 return match classify_dispatch_error(err, Some(carrier)) {
                     Ok(_) => Ok(MaterializationStep::Stop(carrier)),
                     Err(fault) => Err(fault),

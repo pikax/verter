@@ -190,6 +190,37 @@ fn a_template_holds_no_more_than_it_reserved() {
     );
 }
 
+/// The allocations and allocated bytes (reallocations included) of
+/// reducing `R` over `a` × `b` concatenations, its spans already reduced.
+fn template_allocations(a: usize, b: usize) -> (u64, u64) {
+    let host = host_with(&template_over(a, b));
+    let _ = verter_session::for_tests::reduce_named_template_for_tests(&host, FILE, "A", None);
+    let _ = verter_session::for_tests::reduce_named_template_for_tests(&host, FILE, "B", None);
+    reset_alloc_counter();
+    let (complete, _) =
+        verter_session::for_tests::reduce_named_template_for_tests(&host, FILE, "R", None);
+    assert!(complete, "{a} × {b} concatenations are within the limit");
+    (super::alloc_count(), super::alloc_bytes())
+}
+
+/// A template builds each concatenation alone, in a buffer sized for it,
+/// and holds no prefix of its product: four times the concatenations make
+/// at most six times the allocations and the allocated bytes (a product
+/// built prefix by prefix, or a buffer regrown as it fills, grows faster).
+#[test]
+fn a_template_allocates_in_the_linear_class() {
+    let (small_count, small_bytes) = template_allocations(60, 50);
+    let (large_count, large_bytes) = template_allocations(120, 100);
+    assert!(
+        large_count <= 6 * small_count,
+        "allocations grew from {small_count} to {large_count}"
+    );
+    assert!(
+        large_bytes <= 6 * small_bytes,
+        "allocated bytes grew from {small_bytes} to {large_bytes}"
+    );
+}
+
 /// `S` and `T` unions of `count` single-property objects aligned arm for
 /// arm; the target property is `number` when `related` and `string` when
 /// not, so the relation holds or fails at the first arm.
