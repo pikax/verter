@@ -360,7 +360,10 @@ quota): `IdentityInterner` (each pooled `OwnedStr` is held by the pool and
 charged by its own cell, its map slot is a separate charge,
 `pooled_entry_bytes`; sheds pool-only entries and retries once on refusal,
 else returns the string un-pooled; when the pool lets go, the string's
-charge passes to the identities still holding it),
+charge passes to the identities still holding it; a host close and a
+completed host release boundary also shed its pool-only entries
+(`shed_pool_only`), so a closed host keeps pooled only the identities a live
+reader still holds),
 `ComponentMetaResultDb` via `BoundedCandidateMap` (the charge rides the
 `RetentionCandidate`), the `SemanticGraphStore` family memo (the charges
 ride `MemoEntry::retention`; `warm_publish_one` refusal returns

@@ -439,11 +439,13 @@ pub use block_content::hash_block_content;
 pub use host_audit_runtime::{
     ActiveRegistration, AuditRequestRegistration, AuditRuntimeSnapshot, HostAuditRuntime,
 };
+pub use host_lifecycle::HostReleaseCompletion;
 pub use types::*;
 pub use verter_language::{
     CapabilityId, FileLanguage, FrameworkAdapterId, GatedCandidate, LanguageId, LanguageRegistry,
     LanguageRow, ScriptSourceType, StaticClassification, SVELTE_RUNE_MODULE_LANGUAGE_ID,
 };
+pub use verter_semantic_source::decl_lowering::ParseReleaseError;
 
 // Per-call-site instrumentation accessors. Production-on; the counter map is bumped on every `HostStoreView::from_host` invocation.
 // The coherent-build sweep counter is the batch-saturation gate's actual base-view sweep count; warm batches sweep ~O(1).
