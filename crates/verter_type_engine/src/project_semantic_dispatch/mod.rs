@@ -310,17 +310,90 @@ pub(super) type InstantiateIdentity = (
 
 /// One build on the active-instantiation stack: the declaration it
 /// materialises and the arguments it materialises it over.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct ActiveInstantiation {
     identity: InstantiateIdentity,
     args: Arc<[SemanticNodeId]>,
 }
 
-impl ActiveInstantiation {
-    fn is(&self, identity: &InstantiateIdentity) -> bool {
-        self.identity.0.as_ref() == identity.0.as_ref()
-            && self.identity.1 == identity.1
-            && self.identity.2.as_ref() == identity.2.as_ref()
+/// A declaration identity borrowed from its parts, hashed exactly as the
+/// owned [`InstantiateIdentity`] tuple hashes, so the declaration index is
+/// read without building an owned key.
+#[derive(Hash)]
+struct DeclarationRef<'a>(&'a str, verter_type_expr::TopLevelOwnerId, &'a str);
+
+impl indexmap::Equivalent<InstantiateIdentity> for DeclarationRef<'_> {
+    fn equivalent(&self, key: &InstantiateIdentity) -> bool {
+        self.0 == key.0.as_ref() && self.1 == key.1 && self.2 == key.2.as_ref()
+    }
+}
+
+/// The dispatcher's active instantiations ([`ProjectSemanticDispatch::instantiate_active`]):
+/// the ordered stack, with its membership indexed both by instantiation
+/// and by declaration. Every membership question is one lookup, never a
+/// scan of the stack, so a chain of `n` nested instantiations asks `O(n)`
+/// questions at constant cost each, never `O(n²)` comparisons. The indexes
+/// change only with the stack: an entry enters all three on a push and
+/// leaves all three on a pop or a leave, so they hold nothing once the
+/// outermost build ends.
+#[derive(Debug, Default)]
+pub(super) struct ActiveInstantiations {
+    order: Vec<ActiveInstantiation>,
+    instances: rustc_hash::FxHashSet<ActiveInstantiation>,
+    /// How many active instantiations materialise each declaration.
+    declarations: indexmap::IndexMap<InstantiateIdentity, u32, rustc_hash::FxBuildHasher>,
+}
+
+impl ActiveInstantiations {
+    pub(super) fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    /// Push `entry`; `false` (and nothing pushed) when it is active.
+    fn push(&mut self, entry: ActiveInstantiation) -> bool {
+        if !self.instances.insert(entry.clone()) {
+            return false;
+        }
+        *self.declarations.entry(entry.identity.clone()).or_insert(0) += 1;
+        self.order.push(entry);
+        true
+    }
+
+    fn forget(&mut self, entry: &ActiveInstantiation) {
+        self.instances.remove(entry);
+        if let Some(count) = self.declarations.get_mut(&entry.identity) {
+            *count -= 1;
+            if *count == 0 {
+                self.declarations.swap_remove(&entry.identity);
+            }
+        }
+    }
+
+    fn pop(&mut self) {
+        if let Some(entry) = self.order.pop() {
+            self.forget(&entry);
+        }
+    }
+
+    /// Remove `entry` wherever it stands on the stack.
+    fn leave(&mut self, entry: &ActiveInstantiation) {
+        if !self.instances.contains(entry) {
+            return;
+        }
+        if let Some(position) = self.order.iter().rposition(|existing| existing == entry) {
+            let entry = self.order.remove(position);
+            self.forget(&entry);
+        }
+    }
+
+    fn declares(
+        &self,
+        canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+    ) -> bool {
+        self.declarations
+            .contains_key(&DeclarationRef(canonical_id, owner, name))
     }
 }
 
@@ -351,7 +424,7 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// The request's host attachment, selected once at construction. The
     /// engine never reads it; host facades borrow it beside the dispatch.
     host_attachment: &'a C::HostAttachment,
-    pub(super) instantiate_active: std::cell::RefCell<smallvec::SmallVec<[ActiveInstantiation; 8]>>,
+    pub(super) instantiate_active: std::cell::RefCell<ActiveInstantiations>,
     /// The operands each awaited relation is unwrapping on the current
     /// path — the checker's `awaitedTypeStack`. A run pushes every operand
     /// it reaches, its query-free tail steps included, and pops them when
@@ -385,6 +458,10 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// dispatch-wide in-flight set refuses (`Unavailable` — never a proof),
     /// while sibling diamonds stay fine (entries pop on exit).
     pub(super) closedness_active: std::cell::RefCell<smallvec::SmallVec<[InstantiateIdentity; 8]>>,
+    /// The binder-aware free-type-variable summary of every node a
+    /// conditional decision or relation asked about, kept for this
+    /// dispatcher's lifetime ([`conditional_decision::FreeTypeVariables`]).
+    free_type_variables: std::cell::RefCell<conditional_decision::FreeTypeVariableSummaries>,
     /// Memoized transitive CLASS ANCESTRY, keyed by the rooted declaration
     /// identity ([`build::ClassAncestryReading`],
     /// [`Self::class_heritage_ancestry`]).
@@ -1012,10 +1089,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             host_attachment:
                 crate::resolver_core::request_ports::HostAttachmentPort::host_attachment(ctx),
             ctx,
-            instantiate_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
+            instantiate_active: std::cell::RefCell::new(ActiveInstantiations::default()),
             awaited_active: std::cell::RefCell::new(build::AwaitedPath::default()),
             carrier_normalizing: std::cell::RefCell::new(smallvec::SmallVec::new()),
             closedness_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
+            free_type_variables: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             heritage_ancestry: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             build_local_taint: std::cell::RefCell::new(smallvec::SmallVec::new()),
             homomorphic_aliases: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
@@ -1065,10 +1143,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// Exchange all of this dispatcher's request state with `other`, a
     /// dispatcher of the same request ([`Self::task_dispatcher`]): every
-    /// active instantiation and recursion guard, the checker transaction
-    /// with its inference sessions, the build taint stack, the connected
-    /// demand and its cost recordings, and the request's kept results. A
-    /// semantic task borrows the state for its drive and gives it back.
+    /// active instantiation and recursion guard, the free-type-variable
+    /// summaries, the checker transaction with its inference sessions, the
+    /// build taint stack, the connected demand and its cost recordings, and
+    /// the request's kept results. A semantic task borrows the state for
+    /// its drive and gives it back.
     pub(super) fn exchange_request_state(&self, other: &Self) {
         let Self {
             binding: _,
@@ -1081,6 +1160,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             awaited_active,
             carrier_normalizing,
             closedness_active,
+            free_type_variables,
             heritage_ancestry,
             build_local_taint,
             homomorphic_aliases,
@@ -1111,6 +1191,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         awaited_active.swap(&other.awaited_active);
         carrier_normalizing.swap(&other.carrier_normalizing);
         closedness_active.swap(&other.closedness_active);
+        free_type_variables.swap(&other.free_type_variables);
         heritage_ancestry.swap(&other.heritage_ancestry);
         build_local_taint.swap(&other.build_local_taint);
         homomorphic_aliases.swap(&other.homomorphic_aliases);
@@ -2788,15 +2869,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         identity: InstantiateIdentity,
         args: Arc<[SemanticNodeId]>,
     ) -> bool {
-        let mut active = self.instantiate_active.borrow_mut();
-        if active
-            .iter()
-            .any(|existing| existing.is(&identity) && existing.args == args)
-        {
-            return false;
-        }
-        active.push(ActiveInstantiation { identity, args });
-        true
+        self.instantiate_active
+            .borrow_mut()
+            .push(ActiveInstantiation { identity, args })
     }
 
     /// Leave `identity`'s active instantiation over `args` wherever it
@@ -2807,20 +2882,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         identity: &InstantiateIdentity,
         args: &Arc<[SemanticNodeId]>,
     ) {
-        let mut active = self.instantiate_active.borrow_mut();
-        if let Some(position) = active
-            .iter()
-            .rposition(|existing| existing.is(identity) && existing.args == *args)
-        {
-            active.remove(position);
-        }
+        self.instantiate_active
+            .borrow_mut()
+            .leave(&ActiveInstantiation {
+                identity: identity.clone(),
+                args: Arc::clone(args),
+            });
     }
 
     /// Pop the most-recent active-instantiation entry. Caller MUST only
     /// call this after a successful `push_instantiate_active`.
     pub fn pop_instantiate_active(&self) {
-        let mut active = self.instantiate_active.borrow_mut();
-        active.pop();
+        self.instantiate_active.borrow_mut().pop();
     }
 
     /// Push `identity` onto the in-flight closedness-evaluation stack.
@@ -2856,12 +2929,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> bool {
-        let active = self.instantiate_active.borrow();
-        active.iter().any(|existing| {
-            existing.identity.0.as_ref() == canonical_id
-                && existing.identity.1 == owner
-                && existing.identity.2.as_ref() == name
-        })
+        self.instantiate_active
+            .borrow()
+            .declares(canonical_id, owner, name)
     }
 
     pub(super) fn flow_slice_driver(&self) -> flow_slice_driver::FlowSliceDriver<'_> {
