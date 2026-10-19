@@ -518,6 +518,14 @@ fn held_readers_survive_close_and_release_once_in_either_order() {
                 held_set_charge(0b111) <= total_before_close - base_total,
                 "{order}: no reader is charged more than the live workload held"
             );
+            // Distinct allocations: each reader's charge is its own, so the
+            // set's charge never exceeds the sum of the lone readers' (shared
+            // structure is charged once).
+            let (lone_result, lone_view) = (held_set_charge(0b001), held_set_charge(0b010));
+            assert!(
+                held_set_charge(0b111) <= lone_result + lone_view + lone_artifact,
+                "{order}: the held set keeps no more than one charge per allocation"
+            );
             // Each release leaves exactly the charge of the readers still held.
             for (name, remaining, release) in [
                 (
