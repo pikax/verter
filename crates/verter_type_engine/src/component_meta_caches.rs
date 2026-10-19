@@ -161,7 +161,7 @@ impl<V> From<Option<(V, Arc<[FactVersionRef]>)>> for ComputedEntry<V> {
 
 #[derive(Clone)]
 pub struct ImportedRegistryEntry {
-    pub value: Option<Arc<ResolvedImportedRegistrySymbol>>,
+    pub value: ImportedRegistryValue,
     /// R3/R26/R28 fact-precise dependency signature recorded during the
     /// cold-compute pass that produced this entry. Validated on every
     /// warm-hit read — and on post-compute revalidation — against the
@@ -192,8 +192,19 @@ pub type ImportedRegistryKey = (
     verter_type_expr::OwnedStr,
 );
 
-/// The value the imported-registry store holds per candidate.
-pub type ImportedRegistryValue = Option<Arc<ResolvedImportedRegistrySymbol>>;
+/// The value the imported-registry store holds per candidate: a
+/// self-charged cell every reader of the candidate shares.
+pub type ImportedRegistryValue =
+    Option<verter_session_query::retention::heap_size::OwnedValue<ResolvedImportedRegistrySymbol>>;
+
+/// What an imported-registry candidate keeps beyond its inline bytes: its
+/// key's owned names and its value's cell, each charged by its own cell.
+fn imported_registry_footprint(
+    key: &ImportedRegistryKey,
+    value: &ImportedRegistryValue,
+) -> verter_session_query::retention::Footprint {
+    verter_session_query::retention::heap_size::footprint(&(key, value))
+}
 
 pub struct ImportedRegistryDb {
     /// The shared reverse-indexed multi-candidate store. No retention
@@ -211,9 +222,20 @@ pub struct ImportedRegistryDb {
     /// Cache-cluster schema version this Db was constructed under. See
     /// [`crate::cache_schema`] for the contract.
     schema_version: u32,
+    /// The account a published candidate is charged to.
+    retention: verter_session_query::retention::StoreAccount,
 }
 
 impl ImportedRegistryDb {
+    /// This cache, its candidates charged to `account`.
+    pub(crate) fn charged_to(
+        mut self,
+        account: verter_session_query::retention::StoreAccount,
+    ) -> Self {
+        self.retention = account;
+        self
+    }
+
     pub(crate) fn attach_output(
         &self,
     ) -> crate::project_semantic_dispatch::memo::CandidateAttachment<
@@ -224,6 +246,8 @@ impl ImportedRegistryDb {
         crate::project_semantic_dispatch::memo::CandidateAttachment::new(
             &self.store,
             &self.inflight,
+            self.retention.get(),
+            imported_registry_footprint,
         )
     }
     #[cfg(any(test, feature = "test-support"))]
@@ -261,6 +285,7 @@ impl ImportedRegistryDb {
             store: crate::cache_runtime::ReverseIndexedCandidateStore::with_counter(live_counter),
             inflight: InflightTable::new(),
             schema_version,
+            retention: verter_session_query::retention::StoreAccount::default(),
         }
     }
 
@@ -310,12 +335,15 @@ impl ImportedRegistryDb {
         let signature = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::clone(
             &entry.fact_dep_signature,
         ));
+        let footprint = imported_registry_footprint(&key, &entry.value);
         self.store.insert_for_test(
             key,
             entry.value.clone(),
             signature,
             self_roots,
             entry.validated_at_generation,
+            footprint,
+            self.retention.get(),
         );
     }
 
@@ -1624,10 +1652,10 @@ mod retention_tests {
         let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
         let db = ShapeCacheDb::new().charged_to(StoreAccount::new(Arc::clone(&account)));
         let carrier = SyntheticCarrierKey {
-            scope_canonical_id: Arc::from("/c.vue"),
+            scope_canonical_id: From::from("/c.vue"),
             surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
-            slot_name: Some(Arc::from("default")),
-            binding_name: Arc::from("item"),
+            slot_name: Some(From::from("default")),
+            binding_name: From::from("item"),
             value_node: 1,
         };
         let deep = TypeExpr::Union(Arc::from(vec![
@@ -1641,6 +1669,131 @@ mod retention_tests {
             "the entry and its type tree are charged: {retained}"
         );
         db.invalidate_all();
+        let kept = account.snapshot().total_bytes();
+        assert!(
+            kept < TEXT,
+            "the entry's type tree is released with it; only the carrier \
+             names this caller still holds stay charged: {kept}"
+        );
+        drop(carrier);
         assert_eq!(account.snapshot().total_bytes(), 0);
+    }
+
+    /// An imported-registry candidate charges its own allocations and holds
+    /// its value's cell: a long resolved name costs its text while the
+    /// candidate lives; a reader keeping the value past the candidate keeps
+    /// exactly that cell charged, pinned, until its own drop; at zero
+    /// headroom nothing is admitted and nothing is retained.
+    #[test]
+    fn an_imported_registry_candidate_charges_itself_and_its_value_through_its_last_holder() {
+        use verter_session_query::retention::heap_size::OwnedValue;
+        use verter_session_query::retention::ChargeClass;
+        const NAME: usize = 8192;
+        let symbol =
+            || verter_session_query::declarations::metadata::ResolvedImportedRegistrySymbol {
+                canonical_id: "/imports/source.ts".into(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                exported_name: "n".repeat(NAME),
+                body: verter_type_expr::facts::PreparedTypeBodyFacts {
+                    classification: verter_type_expr::facts::TypeBodyClass::Alias,
+                    body_slot: verter_type_expr::locators::TypeBodySlot {
+                        anchor: verter_type_expr::locators::AuthoredAnchor {
+                            canonical_id: verter_type_expr::OwnedStr::from("/imports/source.ts"),
+                            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                            symbol: verter_type_expr::OwnedStr::from("Probe"),
+                            space: verter_type_expr::locators::LocatorSymbolSpace::Type,
+                        },
+                        path: verter_type_expr::OwnedSlice::default(),
+                    },
+                    merged_contributor_slots: Arc::from(Vec::new().into_boxed_slice()),
+                },
+                canonical_dependencies: Box::from(["/imports/source.ts".to_owned()]),
+            };
+        let key = || {
+            (
+                verter_type_expr::OwnedStr::from("/imports/source.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                verter_type_expr::OwnedStr::from("Probe"),
+            )
+        };
+
+        let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+        let db =
+            super::ImportedRegistryDb::new().charged_to(StoreAccount::new(Arc::clone(&account)));
+        let value = OwnedValue::new(symbol());
+        db.insert_for_test(
+            key(),
+            Arc::new(super::ImportedRegistryEntry {
+                value: Some(value.clone()),
+                fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
+                validated_at_generation: 0,
+            }),
+        );
+        let held = account.snapshot();
+        assert_eq!(value.charge_class(), Some(ChargeClass::Retained));
+        let cell = value.charge_bytes().expect("the value cell is charged");
+        assert!(
+            cell > NAME,
+            "the value is charged its resolved name: {cell}"
+        );
+        assert!(
+            held.retained_bytes > cell,
+            "the candidate charges its own allocations beside its value: {} of {cell}",
+            held.retained_bytes
+        );
+
+        // What the value and its nested owned names cost on their own.
+        let alone = {
+            let solo = SemanticRetentionAccount::new(RetentionLimits::defaults());
+            let value = OwnedValue::new(symbol());
+            value.pin(verter_session_query::retention::owned::ChargeCtx::new(
+                &solo,
+            ));
+            solo.snapshot().total_bytes()
+        };
+        assert!(alone >= cell);
+
+        db.invalidate_all();
+        assert_eq!(
+            account.snapshot().retained_bytes,
+            0,
+            "the candidate's part is gone"
+        );
+        assert_eq!(
+            account.snapshot().pinned_bytes,
+            alone,
+            "the reader keeps exactly the value and its own names charged"
+        );
+        drop(value);
+        assert_eq!(account.snapshot().total_bytes(), 0);
+
+        let tight = SemanticRetentionAccount::new(RetentionLimits {
+            aggregate_ceiling_bytes: 0,
+            active_ceiling_bytes: 0,
+            max_entry_bytes: 0,
+            pin_threshold_bytes: 0,
+        });
+        let refused =
+            super::ImportedRegistryDb::new().charged_to(StoreAccount::new(Arc::clone(&tight)));
+        let footprint =
+            super::imported_registry_footprint(&key(), &Some(OwnedValue::new(symbol())));
+        let admitted = crate::cache_runtime::Candidate::admit::<super::ImportedRegistryKey>(
+            crate::cache_runtime::FactCandidateDiscriminant {
+                validated_at_generation: 0,
+                facts: crate::fact_signature_helpers::empty_fact_signature(),
+            },
+            (),
+            verter_session_query::facts::fact_cache::ReadSetSignature::new(
+                crate::fact_signature_helpers::empty_fact_signature(),
+            ),
+            Arc::from(Vec::<Arc<str>>::new()),
+            0,
+            1,
+            footprint,
+            &tight,
+        );
+        assert!(admitted.is_err(), "zero headroom admits no candidate");
+        assert_eq!(tight.snapshot().retained_bytes, 0, "and retains nothing");
+        assert_eq!(refused.live_count(), 0);
     }
 }

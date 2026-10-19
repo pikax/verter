@@ -230,7 +230,7 @@ fn decl_body_source(canonical: &str, symbol: &str) -> SemanticTypeSource {
 
 /// A synthesized closed object SOURCE with leaf-fact member values.
 fn synthesized_object(members: &[(&str, LeafTypeFact)]) -> SemanticTypeSource {
-    SemanticTypeSource::Synthesized(ResolvedLocalShape::Object(Arc::from(
+    SemanticTypeSource::Synthesized(ResolvedLocalShape::Object(From::from(
         members
             .iter()
             .map(|(name, leaf)| SynthesizedMemberFact {

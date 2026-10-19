@@ -219,6 +219,7 @@ fn shallow() -> ProjectionReductionContext {
 fn single_callable_arm_returns_bare_function() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let void = prim(&graph, PrimitiveKind::Void);
@@ -237,6 +238,7 @@ fn single_callable_arm_returns_bare_function() {
 fn single_callable_arm_unwraps_alias_to_function() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let void = prim(&graph, PrimitiveKind::Void);
@@ -255,6 +257,7 @@ fn single_callable_arm_unwraps_alias_to_function() {
 fn single_callable_arm_strips_nullish_undefined() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let void = prim(&graph, PrimitiveKind::Void);
@@ -275,6 +278,7 @@ fn single_callable_arm_strips_nullish_undefined() {
 fn single_callable_arm_strips_nullish_null() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let void = prim(&graph, PrimitiveKind::Void);
@@ -327,6 +331,7 @@ fn single_callable_arm_duplicate_identical_node_id_arms_dedupe_to_one() {
     // (the narrowed refuse direction of the same comparison).
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let void = prim(&graph, PrimitiveKind::Void);
@@ -452,6 +457,7 @@ fn single_callable_arm_nullish_union_is_exact_node_and_consistent_with_realizer(
     // arm IS `realize_callable_member`'s realized node (both node-domain).
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let void = prim(&graph, PrimitiveKind::Void);
@@ -499,6 +505,7 @@ fn single_callable_arm_intersection_with_nullish_refuses() {
     // a nullish arm refuses (`None`).
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let void = prim(&graph, PrimitiveKind::Void);
@@ -573,6 +580,7 @@ fn single_callable_arm_never_intersection_under_union_refuses() {
 fn event_names_single_string_literal() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let void = prim(&graph, PrimitiveKind::Void);
@@ -591,6 +599,7 @@ fn event_names_single_string_literal() {
 fn event_names_union_of_string_literals() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let void = prim(&graph, PrimitiveKind::Void);
@@ -648,6 +657,7 @@ fn event_names_no_params_is_none() {
 fn slot_param_and_return_single_function() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let void = prim(&graph, PrimitiveKind::Void);
@@ -678,6 +688,7 @@ fn slot_param_and_return_single_function() {
 fn slot_param_and_return_every_arm_has_first_param_intersects() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     // DISTINCT return nodes (`number` vs `string`) so the combiner mode is
@@ -765,6 +776,7 @@ fn slot_param_and_return_every_arm_has_first_param_intersects() {
 fn slot_param_and_return_one_arm_lacks_first_param_drops_binding() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let void = prim(&graph, PrimitiveKind::Void);
@@ -815,6 +827,7 @@ fn slot_param_and_return_intersection_with_nullish_fails_closed() {
     // the nullish arm and yields parts.
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let void = prim(&graph, PrimitiveKind::Void);
@@ -857,6 +870,7 @@ fn slot_param_and_return_span_present_for_single_arm_absent_for_composed() {
     // arm's span onto the composed parts fails the second.
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let p1 = prim(&graph, PrimitiveKind::Number);
@@ -902,6 +916,7 @@ fn slot_param_and_return_span_present_for_single_arm_absent_for_composed() {
 fn positional_params_skips_this_and_expands_rest_tuple() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let void = prim(&graph, PrimitiveKind::Void);
@@ -946,6 +961,7 @@ fn positional_params_skips_this_and_expands_rest_tuple() {
 fn positional_params_plain_two_params() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let void = prim(&graph, PrimitiveKind::Void);
@@ -977,6 +993,7 @@ fn positional_params_plain_two_params() {
 fn signature_accessors_read_function_facts() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let row = prim(&graph, PrimitiveKind::Number);
@@ -1025,6 +1042,7 @@ fn raw_params_preserves_this_optional_and_rest_verbatim() {
     // FAILS every assertion below.
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let void = prim(&graph, PrimitiveKind::Void);
@@ -1120,6 +1138,7 @@ fn signature_is_none_for_multi_arm_composite() {
 fn realized_callable_root_normalizes_alias() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let void = prim(&graph, PrimitiveKind::Void);
@@ -1140,6 +1159,7 @@ fn realized_callable_root_normalizes_alias() {
 fn first_param_object_surface_projects_param_members() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let void = prim(&graph, PrimitiveKind::Void);
@@ -2131,6 +2151,7 @@ fn single_callable_arm_strips_nested_nullish_union() {
     // `undefined` too, and surfaces `f`.
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let void = prim(&graph, PrimitiveKind::Void);
@@ -2461,6 +2482,7 @@ fn normalize_node_for_fact_demand_unresolvable_declref_is_stable_complete() {
     // file backs the synthetic identity.
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let fake = graph.intern_node(SemanticNodeData::DeclRef {
@@ -2813,6 +2835,7 @@ fn event_names_mutual_cycle_fails_whole_via_visited_set() {
 
     let fixture_dispatch_12 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let _builder = fixture_dispatch_12.enter_construction_scope();
     let surface =
         navigate_param_to_object_surface(&ctx, &fixture_dispatch_12, component, props_type)
             .resolved_for_tests()
@@ -2886,6 +2909,7 @@ fn event_names_over_deep_nested_union_trips_collect_fuse() {
     // assertion.
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let void = prim(&graph, PrimitiveKind::Void);
@@ -2946,6 +2970,7 @@ fn event_names_finite_deep_dag_union_enumerates_completely() {
     //       visited set would WRONGLY fail here (→ `None` → the `.expect` panics).
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let void = prim(&graph, PrimitiveKind::Void);
@@ -3006,6 +3031,7 @@ fn event_names_residual_carrier_arm_fails_whole_not_partial() {
     // cycle paths the sibling fail-closed tests cover).
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let void = prim(&graph, PrimitiveKind::Void);
@@ -3068,6 +3094,7 @@ fn event_names_concrete_non_literal_arm_is_skipped_not_failed() {
     // this would return `None` and the assertion would fail.
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let void = prim(&graph, PrimitiveKind::Void);
@@ -3124,6 +3151,7 @@ fn event_names_constructor_type_arm_is_skipped_not_failed() {
     // (`None`) and GREEN post-fix (`Some(["a"])`).
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let void = prim(&graph, PrimitiveKind::Void);
@@ -3265,6 +3293,7 @@ fn peel_unwraps_alias_to_instantiation_ref() {
     // `InstantiationRef` (and stops there).
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let item = prim(&graph, PrimitiveKind::Number);
@@ -3367,6 +3396,7 @@ fn validated_snippet_params_expands_instantiation_ref_tuple() {
     // legacy `positional_params` (needs a realized `Function`) DROPPED.
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let item = prim(&graph, PrimitiveKind::String);
@@ -3403,6 +3433,7 @@ fn validated_snippet_params_empty_args_is_present_bindingless() {
     // binding-less slot — `Some(vec![])`, never a dropped slot (`None`).
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let snippet = instantiation_ref(&graph, "Snippet", vec![]);
     assert_eq!(
@@ -3419,6 +3450,7 @@ fn validated_snippet_params_complete_nontuple_arg_is_present_bindingless() {
     // binding-less slot — NOT a dropped slot.
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let open = prim(&graph, PrimitiveKind::String);
     let snippet = instantiation_ref(&graph, "Snippet", vec![open]);
@@ -3510,6 +3542,7 @@ fn validated_snippet_params_function_fallback_skips_this_expands_rest() {
     // the rest-tuple expands element-wise.
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let void = prim(&graph, PrimitiveKind::Void);
@@ -3548,6 +3581,7 @@ fn validated_snippet_params_union_combines_by_index() {
     // the count, the first arm supplies the label).
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let a = prim(&graph, PrimitiveKind::String);
@@ -3651,6 +3685,7 @@ fn validated_snippet_params_declref_tuple_arg_resolves_the_superset_flip() {
 
     let fixture_dispatch_16 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let _builder = fixture_dispatch_16.enter_construction_scope();
     let surface =
         navigate_param_to_object_surface(&ctx, &fixture_dispatch_16, component, props_type)
             .resolved_for_tests()
@@ -3705,6 +3740,7 @@ fn validated_snippet_params_union_of_tuples_is_present_bindingless() {
     // binding-less slot (`Some(vec![])`), NOT a dropped slot (`None`).
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let a = prim(&graph, PrimitiveKind::String);
@@ -3735,6 +3771,7 @@ fn validated_snippet_params_intersection_of_tuples_is_present_bindingless() {
     // RESOLVED non-tuple shape → a PRESENT, binding-less slot (was dropped pre-fix).
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let a = prim(&graph, PrimitiveKind::String);
@@ -3766,6 +3803,7 @@ fn validated_snippet_params_conditional_is_present_bindingless() {
     // slot (was dropped by the pre-fix whitelist arm).
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let t = typeparam(&graph, "T");
@@ -3800,6 +3838,7 @@ fn validated_snippet_params_conditional_is_present_bindingless() {
 fn realize_of_derived_union_collapses_duplicate_realized_arms() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let void = prim(&graph, PrimitiveKind::Void);
@@ -3834,6 +3873,7 @@ fn a_builtin_nominal_carrier_realizes_to_a_complete_non_callable() {
     use verter_type_engine::semantic_query::surface_resolution::SurfaceResolution;
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let date = instantiation_ref(&graph, "Date", vec![]);

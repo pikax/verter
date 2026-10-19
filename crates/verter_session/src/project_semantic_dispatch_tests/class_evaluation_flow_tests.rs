@@ -128,6 +128,7 @@ fn observe(host: &Arc<VerterHost>, name: &str) -> (verter_type_expr::TypeExpr, b
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     let key = verter_type_engine::semantic_query::FlowReturnKey {
         function: dispatch.flow_function_slot_for(
             Arc::from(FILE),

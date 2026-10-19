@@ -229,7 +229,7 @@ fn imported_symbol(canonical: &str, marker: &str) -> ResolvedImportedRegistrySym
             },
             merged_contributor_slots: Arc::from(Vec::new().into_boxed_slice()),
         },
-        canonical_dependencies: BTreeSet::new(),
+        canonical_dependencies: Box::default(),
     }
 }
 
@@ -258,7 +258,9 @@ fn imported_registry_db_untracked_self_root_rejects_warm_entry() {
         .get_or_compute_admit_traced_for_test(&key, || {
             verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                 verter_type_engine::component_meta_caches::ImportedRegistryEntry {
-                    value: Some(Arc::new(imported_symbol(c, "stale"))),
+                    value: Some(verter_session_query::retention::heap_size::OwnedValue::new(
+                        imported_symbol(c, "stale"),
+                    )),
                     fact_dep_signature: planted_self_root(c),
                     validated_at_generation: ctx.request_flags().current_project_generation(),
                 },
@@ -272,7 +274,9 @@ fn imported_registry_db_untracked_self_root_rejects_warm_entry() {
             cold_ran = true;
             verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                 verter_type_engine::component_meta_caches::ImportedRegistryEntry {
-                    value: Some(Arc::new(imported_symbol(c, "recomputed"))),
+                    value: Some(verter_session_query::retention::heap_size::OwnedValue::new(
+                        imported_symbol(c, "recomputed"),
+                    )),
                     fact_dep_signature: empty_fact_signature(),
                     validated_at_generation: ctx.request_flags().current_project_generation(),
                 },
@@ -664,10 +668,10 @@ fn shape_cache_db_synthetic_binding_untracked_self_root_rejects_warm_entry() {
     // the identity drops it, so the key roots on `c` via
     // `scope_canonical_id`.
     let carrier = SyntheticCarrierKey {
-        scope_canonical_id: Arc::<str>::from(c),
+        scope_canonical_id: From::from(c),
         surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
-        slot_name: Some(Arc::from("default")),
-        binding_name: Arc::from("items"),
+        slot_name: Some(From::from("default")),
+        binding_name: From::from("items"),
         value_node: 7,
     };
     let key = verter_type_engine::component_meta_caches::ShapeCacheKey::synthetic_binding_whole(
@@ -1075,7 +1079,9 @@ fn imported_registry_db_self_root_sibling_edit_rejects_warm_entry() {
             .facts;
             verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                 verter_type_engine::component_meta_caches::ImportedRegistryEntry {
-                    value: Some(Arc::new(imported_symbol(c, "stale"))),
+                    value: Some(verter_session_query::retention::heap_size::OwnedValue::new(
+                        imported_symbol(c, "stale"),
+                    )),
                     fact_dep_signature: sig,
                     validated_at_generation: ctx.request_flags().current_project_generation(),
                 },
@@ -1093,7 +1099,9 @@ fn imported_registry_db_self_root_sibling_edit_rejects_warm_entry() {
             cold_ran = true;
             verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                 verter_type_engine::component_meta_caches::ImportedRegistryEntry {
-                    value: Some(Arc::new(imported_symbol(c, "recomputed"))),
+                    value: Some(verter_session_query::retention::heap_size::OwnedValue::new(
+                        imported_symbol(c, "recomputed"),
+                    )),
                     fact_dep_signature: empty_fact_signature(),
                     validated_at_generation: ctx2.request_flags().current_project_generation(),
                 },
@@ -3261,7 +3269,9 @@ fn imported_registry_base_and_overlay_candidates_coexist() {
                 base_cold_ran.set(true);
                 verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                     verter_type_engine::component_meta_caches::ImportedRegistryEntry {
-                        value: Some(Arc::new(imported_symbol(canonical, "winner-base"))),
+                        value: Some(verter_session_query::retention::heap_size::OwnedValue::new(
+                            imported_symbol(canonical, "winner-base"),
+                        )),
                         fact_dep_signature: Arc::clone(&base_self_root),
                         validated_at_generation: ctx.request_flags().current_project_generation(),
                     },
@@ -3311,7 +3321,9 @@ fn imported_registry_base_and_overlay_candidates_coexist() {
                 overlay_cold_ran.set(true);
                 verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                     verter_type_engine::component_meta_caches::ImportedRegistryEntry {
-                        value: Some(Arc::new(imported_symbol(canonical, "follower-overlay"))),
+                        value: Some(verter_session_query::retention::heap_size::OwnedValue::new(
+                            imported_symbol(canonical, "follower-overlay"),
+                        )),
                         fact_dep_signature: Arc::from(vec![FactVersionRef::FileWholeHash {
                             canonical_id: canonical.to_string(),
                             hash: overlay_hash,
@@ -3411,7 +3423,9 @@ fn imported_registry_coexisting_candidates_keep_live_counter_consistent() {
             .get_or_compute_admit_traced_for_test(&key, || {
                 verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                     verter_type_engine::component_meta_caches::ImportedRegistryEntry {
-                        value: Some(Arc::new(imported_symbol(canonical, "winner-base"))),
+                        value: Some(verter_session_query::retention::heap_size::OwnedValue::new(
+                            imported_symbol(canonical, "winner-base"),
+                        )),
                         fact_dep_signature: Arc::clone(&base_self_root),
                         validated_at_generation: ctx.request_flags().current_project_generation(),
                     },
@@ -3446,7 +3460,9 @@ fn imported_registry_coexisting_candidates_keep_live_counter_consistent() {
             .get_or_compute_admit_traced_for_test(&key, || {
                 verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                     verter_type_engine::component_meta_caches::ImportedRegistryEntry {
-                        value: Some(Arc::new(imported_symbol(canonical, "follower-overlay"))),
+                        value: Some(verter_session_query::retention::heap_size::OwnedValue::new(
+                            imported_symbol(canonical, "follower-overlay"),
+                        )),
                         fact_dep_signature: Arc::from(vec![FactVersionRef::FileWholeHash {
                             canonical_id: canonical.to_string(),
                             hash: overlay_hash,
@@ -4337,7 +4353,7 @@ fn component_meta_result_db_get_with_view_rejects_entry_from_superseded_generati
         }
     };
     let cached = CachedComponentMetaResult {
-        analysis,
+        analysis: crate::component_meta_cached_result::shared_component_meta_analysis(analysis),
         resolution_template: ResolutionTemplate {
             mode: verter_type_engine::semantic_query::ProjectionMode::Expanded,
             whole_hash: owner_whole_hash,

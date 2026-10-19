@@ -171,7 +171,7 @@ fn quiescent_persist_still_warm_serves_at_its_own_generation() {
         .as_ref()
         .expect("the warm read carries the template");
     assert!(
-        Arc::ptr_eq(warm_tpl, cold_tpl),
+        verter_session_query::retention::heap_size::OwnedValue::ptr_eq(warm_tpl, cold_tpl),
         "the warm read serves the persisted slot value, not a recompute — \
          the rail accepts at the persisting flight's own generation",
     );

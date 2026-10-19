@@ -18,15 +18,16 @@ use verter_type_expr::ResolvedSymbolIdentity;
 
 fn expected() -> ResolvedSymbolIdentity {
     ResolvedSymbolIdentity {
-        canonical_id: Arc::from("/node_modules/svelte/index.d.ts"),
+        canonical_id: "/node_modules/svelte/index.d.ts".into(),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        symbol: Arc::from("Snippet"),
+        symbol: "Snippet".into(),
     }
 }
 
 fn demand_error(error: QueryError) -> SymbolIdentityDemandOutcome {
     let host = crate::VerterHost::new_standalone(crate::types::HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let node = dispatch
         .graph()
         .intern_node(SemanticNodeData::Opaque(error));
@@ -87,6 +88,7 @@ fn cancelled_and_unstable_carriers_keep_dedicated_partial_classes() {
 fn unsupported_and_work_limited_identity_demands_fail_closed() {
     let host = crate::VerterHost::new_standalone(crate::types::HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let raw = dispatch.graph().intern_node(SemanticNodeData::RawFallback {
         value: verter_type_expr::UnknownValue::wire_opaque("unsupported"),
     });
@@ -128,6 +130,7 @@ fn real_carrier_path_preserves_partial_reason_classes() {
         "export type Target = { value: string };\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/identity.ts");
 
     let missing = bare_ref_carrier(&dispatch, "Missing", scope.clone(), &[]);
@@ -156,6 +159,7 @@ fn real_carrier_path_preserves_partial_reason_classes() {
     );
     upsert_ts(&limited_host, "/limited.ts", "export type Seed = string;\n");
     let limited_dispatch = ProjectSemanticDispatch::new(&limited_host);
+    let _limited_builder = limited_dispatch.enter_construction_scope();
     let limited_scope = file_scope(&limited_dispatch, "/limited.ts");
     let import_carrier = import_type_carrier(
         &limited_dispatch,

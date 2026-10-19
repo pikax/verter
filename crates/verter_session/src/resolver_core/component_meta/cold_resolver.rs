@@ -572,9 +572,7 @@ where
                         // owner-local surface is the shape authority).
                         type_source: verter_type_expr::facts::SourcePosition::Present(
                             verter_type_expr::facts::SemanticTypeSource::Synthesized(
-                                verter_type_expr::facts::ResolvedLocalShape::Object(
-                                    std::sync::Arc::from([]),
-                                ),
+                                verter_type_expr::facts::ResolvedLocalShape::Object(From::from([])),
                             ),
                         ),
                         type_expansion: None,

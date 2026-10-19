@@ -46,7 +46,7 @@ fn public_type(expression: TypeExpr, terminal_decoy: &str) -> PublicTypeReferenc
     PublicTypeReference {
         publication: verter_session::meta_resolve::MaterializedTypePublication::for_test(
             verter_type_expr::PublicationResult::Published {
-                selected_source: Arc::new(selected_source),
+                selected_source: verter_type_expr::SharedTypeSource::new(selected_source),
                 semantic_authority: verter_type_expr::SemanticAuthority::Resolved,
                 exactness: verter_type_expr::ResolutionExactness::ExactConcrete,
                 reason: Box::new(verter_type_expr::PublicationReason::ResolvedExactConcrete),
@@ -2213,7 +2213,7 @@ fn b4_svelte_analysis(source: &str, token_name: &str) -> FileAnalysisSnapshot {
     let token_start = source.find(&needle).unwrap() + 7;
     FileAnalysisSnapshot {
         template: None,
-        markup_class_tokens: std::sync::Arc::new(vec![
+        markup_class_tokens: verter_session_query::analysis::file_analysis::SharedList::new(vec![
             verter_session_query::analysis::template::MarkupClassToken {
                 name: token_name.to_string(),
                 span: verter_span::Span::new(

@@ -371,7 +371,7 @@ pub struct SemanticTask<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilitie
     /// [`ProjectSemanticDispatch::return_semantic_task`], or by its drop
     /// through `home`.
     program: Option<QueryProgram<'p, 'a, C>>,
-    construction: crate::semantic_query_memo::node_roots::TaskConstructionOwner,
+    construction: Option<crate::semantic_query_memo::node_roots::TaskConstructionOwner>,
     validity: crate::request_context::TaskExecutionValidity,
     /// The scheduler job the task was lent under: its aggregate token
     /// decides cancellation on every thread the task is polled on.
@@ -391,6 +391,7 @@ struct TaskAccounting {
     spans: super::connected_demand::TaskSpanCarry,
     spend: crate::request_budget::TaskSpendCarry,
     refusals: crate::fact_tracing::refusal_scope::TaskRefusalCarry,
+    completeness: crate::request_context::TaskCompletenessCarry,
 }
 
 impl TaskAccounting {
@@ -399,6 +400,7 @@ impl TaskAccounting {
             spans: super::connected_demand::TaskSpanCarry::lend(),
             spend: crate::request_budget::TaskSpendCarry::lend(),
             refusals: crate::fact_tracing::refusal_scope::TaskRefusalCarry::lend(),
+            completeness: crate::request_context::TaskCompletenessCarry::lend(),
         }
     }
 
@@ -406,22 +408,27 @@ impl TaskAccounting {
         self.spans.return_to_lender();
         self.spend.return_to_lender();
         self.refusals.return_to_lender();
+        self.completeness.return_to_lender();
     }
 }
 
 /// What a task dropped without being returned leaves for its lender: the
-/// request state its dispatcher borrowed, the abort its polls observed and
-/// the accounting it recorded.
+/// request state its dispatcher borrowed, its construction ownership, the
+/// abort its polls observed and the accounting it recorded.
 struct UnreturnedTask<'a, C: crate::resolver_core::ResolverCapabilities> {
     dispatch: ProjectSemanticDispatch<'a, C>,
     validity: crate::request_context::TaskExecutionValidity,
     accounting: TaskAccounting,
+    construction: crate::semantic_query_memo::node_roots::TaskConstructionOwner,
 }
 
 impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> SemanticTask<'p, 'a, C> {
     /// Advance the task as far as it can go: `Ready` with its root's
     /// delivery (`Err` when a stop abandoned it), or `Pending` once it
-    /// waits on a producer outside it that will wake `waker`.
+    /// waits on a producer outside it that will wake `waker`. Cancelling
+    /// the request wakes nothing: the stop is seen at the next poll, so the
+    /// executor re-polls or drops a pending task its request cancelled
+    /// ([`crate::semantic_execution::SemanticExecution::poll`]).
     pub(super) fn poll(
         &mut self,
         waker: &std::task::Waker,
@@ -430,7 +437,11 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> SemanticTask<'p,
             .program
             .as_mut()
             .expect("a task holds its program until it gives its state back");
-        let _construction = self.construction.install();
+        let _construction = self
+            .construction
+            .as_mut()
+            .expect("a task holds its construction owner until it gives its state back")
+            .install();
         let _task = program.graph.install_execution(&program.task);
         let _validity = self.validity.install();
         let _job = verter_execution::cancellation::JobCancellationGuard::replace(
@@ -439,6 +450,7 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> SemanticTask<'p,
         let _spans = self.accounting.spans.install();
         let _spend = self.accounting.spend.install();
         let _refusals = self.accounting.refusals.install();
+        let _completeness = self.accounting.completeness.install();
         self.execution.poll(program, self.root.take(), waker)
     }
 
@@ -572,6 +584,10 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Drop for Semanti
             dispatch,
             validity: std::mem::take(&mut self.validity),
             accounting: std::mem::take(&mut self.accounting),
+            construction: self
+                .construction
+                .take()
+                .expect("an unreturned task retains its construction owner"),
         });
     }
 }
@@ -608,8 +624,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         SemanticTask {
             execution,
             program: Some(program),
-            construction: crate::semantic_query_memo::node_roots::TaskConstructionOwner::new(
-                self.binding.construction.arena(),
+            construction: Some(
+                crate::semantic_query_memo::node_roots::TaskConstructionOwner::new(
+                    self.binding.construction.arena(),
+                ),
             ),
             validity: crate::request_context::TaskExecutionValidity::inherit(),
             job_cancellation: verter_execution::cancellation::current_job_cancellation_token(),
@@ -632,6 +650,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.exchange_request_state(&program.dispatch);
         std::mem::take(&mut task.accounting).return_to_lender();
         task.validity.bubble();
+        drop(task.construction.take());
     }
 
     /// Take back the request state a task this dispatcher lent left in
@@ -641,6 +660,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.exchange_request_state(&unreturned.dispatch);
             unreturned.accounting.return_to_lender();
             unreturned.validity.bubble();
+            // Only the lender's thread may absorb these roots. Keep them
+            // until its request state has been restored, just as on return.
+            drop(unreturned.construction);
         }
     }
 }

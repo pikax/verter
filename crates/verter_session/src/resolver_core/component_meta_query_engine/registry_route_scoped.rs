@@ -142,12 +142,12 @@ impl ComponentMetaQueryEngine<'_> {
         let body_root = {
             let dispatch = self.semantic_dispatch();
             dispatch
-                .raise_authored_locator_to_hot(
+                .owning().raise_authored_locator_to_hot(
                     &body_locator,
                     verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Navigate,
                     ),
-                )
+                ).into_value_in(self.builder())
                 .at_optional_boundary()
                 .map(|hot: verter_type_engine::semantic_query::HotTypeRef| hot.node())?
         };
@@ -207,10 +207,10 @@ impl ComponentMetaQueryEngine<'_> {
             });
         }
         Some(ProjectedSurfaceFact {
-            members: std::sync::Arc::from(members.into_boxed_slice()),
-            call_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
-            construct_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
-            index_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+            members: From::from(members.into_boxed_slice()),
+            call_signatures: From::from(Vec::new().into_boxed_slice()),
+            construct_signatures: From::from(Vec::new().into_boxed_slice()),
+            index_signatures: From::from(Vec::new().into_boxed_slice()),
             has_index_signature: false,
         })
     }
@@ -257,12 +257,11 @@ impl ComponentMetaQueryEngine<'_> {
                 if let Some(fact) = prepared.member_index.get(member_key) {
                     return Some((fact.clone(), crossed));
                 }
-                let Some(root) =
-                    crate::resolver_core::component_meta_registry::prepared_body_root_node(
-                        self.dispatch,
-                        prepared.as_ref(),
-                    )
-                else {
+                let raised = crate::resolver_core::component_meta_registry::prepared_body_root_node(
+                    self.dispatch,
+                    prepared.as_ref(),
+                );
+                let Some(root) = *raised.value() else {
                     continue;
                 };
                 match self

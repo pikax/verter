@@ -29,7 +29,10 @@ fn bundle_with_imports(
     names: &[&str],
     type_bindings: &[&str],
     import_names: &[&str],
-) -> (Arc<PreparedDeclBundle>, verter_type_expr::TopLevelOwnerId) {
+) -> (
+    crate::resolver_core::CachedValue<PreparedDeclBundle>,
+    verter_type_expr::TopLevelOwnerId,
+) {
     use crate::resolver_core::prepared_decl::{build_prepared_decl_bundle, ImportCanonicalization};
     use verter_session_query::inputs::prepared::ImportBinding;
     let scope_type_names: rustc_hash::FxHashSet<String> =
@@ -64,14 +67,13 @@ fn bundle_with_imports(
         &interner,
     );
     let owner = verter_type_expr::TopLevelOwnerId::instance(0);
-    let owner_scope = Arc::get_mut(&mut bundle.owner_scopes)
-        .expect("fixture owns its scope collection before projection")
-        .entry(owner)
-        .or_default();
+    let mut owner_scopes = (*bundle.owner_scopes).clone();
+    let owner_scope = owner_scopes.entry(owner).or_default();
     owner_scope.scope_type_names = scope_type_names;
     owner_scope.import_bindings = import_bindings;
     owner_scope.script_setup_type_bindings = bindings;
-    (Arc::new(bundle), owner)
+    bundle.owner_scopes = verter_session_query::inputs::prepared::OwnerScopes::new(owner_scopes);
+    (crate::resolver_core::CachedValue::new(bundle), owner)
 }
 
 #[test]
@@ -165,13 +167,13 @@ fn a_shadow_set_views_its_bundle_without_copying_names() {
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
     let (bundle, owner) = bundle_with_imports(&names, &[], &[]);
     let pure_bundle = bundle.input_record();
-    let raw_before = Arc::strong_count(&bundle);
-    let before = Arc::strong_count(&pure_bundle);
+    let raw_before = crate::resolver_core::CachedValue::strong_count(&bundle);
+    let before = crate::resolver_core::CachedValue::strong_count(&pure_bundle);
     let shadows: Vec<ScopeShadowing> = (0..8)
         .map(|_| ScopeShadowing::from_prepared_decl_bundle(&*bundle, owner))
         .collect();
     assert_eq!(
-        Arc::strong_count(&pure_bundle),
+        crate::resolver_core::CachedValue::strong_count(&pure_bundle),
         before + shadows.len(),
         "each shadow set holds the bundle it reads"
     );
@@ -179,13 +181,19 @@ fn a_shadow_set_views_its_bundle_without_copying_names() {
         let payload = shadow
             .payload_for_tests()
             .expect("a bundle-backed shadow set");
-        assert!(Arc::ptr_eq(payload.bundle_for_tests(), &pure_bundle));
+        assert!(crate::resolver_core::CachedValue::ptr_eq(
+            payload.bundle_for_tests(),
+            &pure_bundle
+        ));
         assert!(shadow.is_shadowing_lib("T2999"));
     }
     drop(shadows);
-    assert_eq!(Arc::strong_count(&pure_bundle), before);
     assert_eq!(
-        Arc::strong_count(&bundle),
+        crate::resolver_core::CachedValue::strong_count(&pure_bundle),
+        before
+    );
+    assert_eq!(
+        crate::resolver_core::CachedValue::strong_count(&bundle),
         raw_before,
         "pure shadow views never retain source workers"
     );

@@ -328,6 +328,82 @@ pub struct Candidate<D, V> {
     pub admission_seq: u64,
     /// World generation the candidate was computed under.
     pub validated_at_generation: u64,
+    /// The candidate's own charge — its slot share, block, fact slice,
+    /// self-roots, reverse-index registrations and the heap its value keeps
+    /// outside owned cells — holding the value's owned cells; released with
+    /// the candidate and its last clone ([`Candidate::admit`]).
+    pub retention: Arc<verter_session_query::retention::RetentionCharge>,
+}
+
+impl<D, V> Candidate<D, V> {
+    /// Charge a candidate keeping `value` in a multi-candidate slot keyed by
+    /// `K` and registered under `registrations` canonicals of its store's
+    /// reverse index. `footprint` is what the key and the value keep beyond
+    /// their inline bytes: the heap the candidate owns alone, and the value's
+    /// owned cells. Each candidate pays for its key's slot (a declared
+    /// convention: a slot is shared by at most its per-slot cap of
+    /// candidates) and one index record per registration.
+    ///
+    /// # Errors
+    ///
+    /// The account's refusal: nothing is retained, the complete value comes
+    /// back, and its owned cells are charged to its callers.
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit<K>(
+        discriminant: D,
+        value: V,
+        signature: ReadSetSignature,
+        self_root_canonicals: Arc<[Arc<str>]>,
+        validated_at_generation: u64,
+        registrations: usize,
+        footprint: verter_session_query::retention::Footprint,
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) -> Result<Self, RefusedEntry<V>> {
+        use verter_session_query::retention::allocation::{
+            arc_block_bytes, arc_str_list_bytes, fact_slice_bytes, AliasSet,
+        };
+        use verter_session_query::retention::{RetentionAdmission, ENTRY_OVERHEAD_BYTES};
+        let ctx = verter_session_query::retention::owned::ChargeCtx::new(account);
+        let mut aliases = AliasSet::new();
+        let own = ENTRY_OVERHEAD_BYTES
+            + std::mem::size_of::<(K, usize)>()
+            + std::mem::size_of::<Arc<Self>>()
+            + arc_block_bytes(std::mem::size_of::<Self>())
+            + fact_slice_bytes(&signature.facts, &mut aliases)
+            + arc_str_list_bytes(&self_root_canonicals, &mut aliases)
+            + registrations * (ENTRY_OVERHEAD_BYTES + std::mem::size_of::<(K, u64)>())
+            + footprint.bytes;
+        let handles = aliases.take_handles().merge(footprint.handles);
+        let refused = |value, signature, self_root_canonicals| RefusedEntry {
+            value,
+            signature,
+            self_root_canonicals,
+            validated_at_generation,
+        };
+        let Ok(holds) = handles.hold_or_pin(ctx) else {
+            return Err(refused(value, signature, self_root_canonicals));
+        };
+        match verter_session_query::facts::receipt::reserve_retained_with_evidence(
+            account,
+            own,
+            &[&signature.facts],
+        ) {
+            RetentionAdmission::Admitted(charge) => Ok(Self {
+                discriminant,
+                value,
+                signature,
+                self_root_canonicals,
+                admission_seq: 0,
+                validated_at_generation,
+                retention: Arc::new(charge.holding(holds)),
+            }),
+            // Dropping the holds hands each cell back to its callers.
+            RetentionAdmission::Refused(_) => {
+                drop(holds);
+                Err(refused(value, signature, self_root_canonicals))
+            }
+        }
+    }
 }
 
 /// Outcome of admitting a candidate into a query-identity slot.

@@ -87,6 +87,68 @@ impl std::task::Wake for CountingWaker {
 
 fn assert_send<T: Send>(_: &T) {}
 
+#[test]
+fn semantic_task_partiality_returns_to_its_lender_without_tainting_the_poller() {
+    use verter_type_engine::request_context::{
+        current_cold_compute_completeness, ColdComputeCompletenessScope,
+    };
+
+    for (source, partial) in [
+        ("const y = 1;", false),
+        ("const y = undefinedFn(1);", true),
+        ("declare const o: any; const y = o.m();", true),
+        (
+            "declare function f<T>(x: T): T; const y = f(undefinedVal);",
+            true,
+        ),
+    ] {
+        for cross_thread in [false, true] {
+            for drop_task in [false, true] {
+                let host =
+                    crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+                crate::u6_flow_shape_corpus_tests::upsert(
+                    &host,
+                    TASK_FILE,
+                    &crate::u6_flow_shape_corpus_tests::module_script(source),
+                    crate::FileLanguage::script_ts(),
+                );
+                let dispatch = ProjectSemanticDispatch::new(&*host);
+                let lender = ColdComputeCompletenessScope::enter();
+                dispatch
+                    .with_semantic_task_for_tests(typeof_key(&dispatch, "y"), |slot| {
+                        let mut poll = || {
+                            let poller = ColdComputeCompletenessScope::enter();
+                            let waker = Waker::from(Arc::new(CountingWaker::default()));
+                            assert!(matches!(
+                                slot.as_mut().unwrap().poll_for_tests(&waker),
+                                Poll::Ready(TaskOutcomeForTests::Answered(_))
+                            ));
+                            let polluted = current_cold_compute_completeness().is_partial();
+                            poller.discard();
+                            if drop_task {
+                                drop(slot.take());
+                            }
+                            polluted
+                        };
+                        let polluted = if cross_thread {
+                            std::thread::scope(|scope| scope.spawn(poll).join().unwrap())
+                        } else {
+                            poll()
+                        };
+                        assert!(
+                            !polluted,
+                            "the poller's compute must stay independent: {source}"
+                        );
+                    })
+                    .expect("the cold root runs as a task");
+                let observed = current_cold_compute_completeness().is_partial();
+                lender.discard();
+                assert_eq!(observed, partial, "lender partiality: {source}, cross_thread={cross_thread}, drop_task={drop_task}");
+            }
+        }
+    }
+}
+
 const NOTHING_OPEN: OpenRequestStateForTests = OpenRequestStateForTests {
     active_instantiations: 0,
     open_cost_scopes: 0,
@@ -642,20 +704,26 @@ fn a_semantic_task_resumed_on_another_thread_charges_the_compute_that_lent_it() 
 /// charges and the dispatcher's open state are what returning it leaves.
 #[test]
 fn a_semantic_task_dropped_without_returning_gives_its_lender_the_request_state() {
-    let charged = |drop_task: bool| {
-        let host = chain_host();
+    let charged = |drop_task: bool, generic: bool| {
+        let host = if generic { call_host() } else { chain_host() };
         let dispatch = ProjectSemanticDispatch::new(&*host);
         let waker = Waker::from(Arc::new(CountingWaker::default()));
+        let key = if generic {
+            call_result_key(&dispatch)
+        } else {
+            typeof_key(&dispatch, "x5")
+        };
         let answer = dispatch
-            .with_semantic_task_for_tests(typeof_key(&dispatch, "x5"), |slot| {
+            .with_semantic_task_for_tests(key, |slot| {
                 let answer = match slot
                     .as_mut()
                     .expect("the task is lent")
                     .poll_for_tests(&waker)
                 {
                     Poll::Ready(TaskOutcomeForTests::Answered(answer)) => answer,
-                    other => panic!("a chain nothing else produces answers at once: {other:?}"),
+                    other => panic!("a root nothing else produces answers at once: {other:?}"),
                 };
+                let live_nodes = dispatch.graph().node_count();
                 if drop_task {
                     let task = slot.take().expect("the task is lent");
                     std::thread::scope(|scope| {
@@ -665,20 +733,30 @@ fn a_semantic_task_dropped_without_returning_gives_its_lender_the_request_state(
                             .expect("the task drops on another thread");
                     });
                 }
+                assert_eq!(
+                    dispatch.graph().node_count(),
+                    live_nodes,
+                    "construction nodes stay alive until the lender reclaims its state"
+                );
                 answer
             })
             .expect("the cold root runs as a task");
-        assert_eq!(display(&dispatch, &answer), "\"ok\"");
+        assert_eq!(
+            display(&dispatch, &answer),
+            if generic { "Union(2 | 1)" } else { "\"ok\"" }
+        );
         assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
         dispatch.connected_demand().work_used_for_tests()
     };
-    let returned = charged(false);
-    assert!(returned > 0, "the drive charges its connected demand");
-    assert_eq!(
-        charged(true),
-        returned,
-        "a dropped task's charges reach its lender"
-    );
+    for generic in [false, true] {
+        let returned = charged(false, generic);
+        assert!(returned > 0, "the drive charges its connected demand");
+        assert_eq!(
+            charged(true, generic),
+            returned,
+            "a dropped task's charges reach its lender"
+        );
+    }
 }
 
 const CALL_FILE: &str = "/semantic-task/call.ts";

@@ -37,7 +37,7 @@ pub struct FunctionDeclarationRef {
     /// Lexical top-level owner of the contributing statement.
     pub owner: verter_type_expr::TopLevelOwnerId,
     /// Registered merged-symbol name.
-    pub name: Arc<str>,
+    pub name: verter_type_expr::OwnedStr,
     /// Type-space vs value-space discriminator (functions are value-space;
     /// the discriminator keeps the ref shape aligned with slot identity).
     pub space: SymbolSpace,
@@ -607,7 +607,7 @@ pub struct ProgramExpressionRecord {
 #[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct FlowBindingIdentity {
     /// The binding name.
-    pub name: Arc<str>,
+    pub name: verter_type_expr::OwnedStr,
     /// The binding kind in the DEFINING frame.
     pub kind: FunctionBindingKind,
     /// The frame whose binding inventory declares this binding.
@@ -1460,7 +1460,7 @@ impl FunctionProgramIndex {
             by_key.entry(entry.key.clone()).or_insert(ordinal);
             if entry.key.declaration.space == SymbolSpace::Value {
                 value_functions
-                    .entry(Arc::clone(&entry.key.declaration.name))
+                    .entry(entry.key.declaration.name.clone())
                     .or_default()
                     .entry((
                         entry.key.declaration.owner,
@@ -1497,7 +1497,7 @@ impl FunctionProgramIndex {
 }
 
 pub type ValueFunctionLookup = rustc_hash::FxHashMap<
-    Arc<str>,
+    verter_type_expr::OwnedStr,
     rustc_hash::FxHashMap<(verter_type_expr::TopLevelOwnerId, FunctionPartIdentity, u32), usize>,
 >;
 

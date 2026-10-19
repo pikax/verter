@@ -184,12 +184,11 @@ pub(crate) fn structural_member_value_source<
     // A replay address does not establish a value when reducing its source
     // failed. Validate the original carrier through the shared demand before
     // using it to construct a projected member source.
-    let resolved = dispatch
-        .normalize_node_for_structural_fact_demand(
-            node,
-            verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit(),
-        )
-        .into_usable_node()?;
+    let normalized = dispatch.owning().normalize_node_for_structural_fact_demand(
+        node,
+        verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit(),
+    );
+    let resolved = normalized.value().into_usable_node()?;
     let data = dispatch.graph().read_in_scope(resolved)?;
     if matches!(
         data.as_ref(),
@@ -211,7 +210,7 @@ pub(crate) fn structural_member_value_source<
     Some(verter_type_expr::facts::SemanticTypeSource::Projected(
         verter_type_expr::facts::ProjectedTypeFact::MemberPath {
             base: base.clone(),
-            path: std::sync::Arc::from(vec![member_key.clone()].into_boxed_slice()),
+            path: From::from(vec![member_key.clone()].into_boxed_slice()),
         },
     ))
 }

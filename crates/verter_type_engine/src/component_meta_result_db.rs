@@ -776,29 +776,34 @@ impl<P> ComponentMetaResultDb<P> {
             use verter_session_query::retention::RetainedFootprint as _;
             entry.retained_footprint()
         };
+        // The owned allocations the entry reaches are retained by their own
+        // cells, all or nothing with the entry. They are held before the
+        // entry and its evidence are claimed, so a refusal of either claims
+        // no evidence and hands every cell back to its callers.
+        let holds =
+            match footprint
+                .handles
+                .hold(verter_session_query::retention::owned::ChargeCtx::new(
+                    self.retention_account(),
+                )) {
+                Ok(holds) => holds,
+                Err(refusal) => {
+                    crate::cache_runtime::admission::propagate_non_admission(
+                        refusal.non_admission_reason(),
+                    );
+                    return false;
+                }
+            };
         let charge = match verter_session_query::facts::receipt::reserve_retained_with_evidence(
             self.retention_account(),
             footprint.bytes,
             &[&entry.read_set_signature.facts],
         ) {
             verter_session_query::retention::RetentionAdmission::Admitted(charge) => {
-                // The owned allocations the entry reaches are retained by
-                // their own cells, all or nothing with the entry.
-                match footprint.handles.hold(
-                    verter_session_query::retention::owned::ChargeCtx::new(
-                        self.retention_account(),
-                    ),
-                ) {
-                    Ok(holds) => charge.holding(holds),
-                    Err(refusal) => {
-                        crate::cache_runtime::admission::propagate_non_admission(
-                            refusal.non_admission_reason(),
-                        );
-                        return false;
-                    }
-                }
+                charge.holding(holds)
             }
             verter_session_query::retention::RetentionAdmission::Refused(refusal) => {
+                drop(holds);
                 crate::cache_runtime::admission::propagate_non_admission(
                     refusal.non_admission_reason(),
                 );

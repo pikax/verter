@@ -205,7 +205,11 @@ impl VerterLanguageServer {
                 let profile = self.documents.tsx_profile.read().clone();
                 host.get_ide(canonical_id, &profile)
                     .filter(|ide| &*ide.code == ide_code)
-                    .and_then(|ide| ide.source_map.clone())
+                    .and_then(|ide| {
+                        ide.source_map
+                            .as_ref()
+                            .map(|map| std::sync::Arc::<str>::from(map.as_str()))
+                    })
             }
         };
         let map_json = source_map_json.or(owned_map.as_deref());
