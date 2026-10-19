@@ -1616,6 +1616,12 @@ declare function tqo<T extends { v: string; f: (n: number) => void }>(o?: T): T;
 declare function tqu<T, U>(x: T | { extra: U; f: (n: number) => void }): U;
 export function l53() { return tqo({ v: "a", f: (n) => {} }); }
 export function l54() { return tqu({ extra: 1, f: (n) => {} }); }
+declare function tt2<T extends string>(x: [...string[], T]): T;
+declare function tup<T extends [string, "a" | "b"]>(x: { t: T; f: (n: number) => void }): T;
+declare function tup2<T extends [...string[], "a" | "b"]>(x: { t: T; f: (n: number) => void }): T;
+export function l55() { return tt2(["x", "a"]); }
+export function l56() { return tup({ t: ["x", "a"], f: (n) => {} }); }
+export function l57() { return tup2({ t: ["x", "a"], f: (n) => {} }); }
 "##;
 
 /// Each candidate evaluates a nested argument literal under its own type
@@ -1643,6 +1649,9 @@ export function l54() { return tqu({ extra: 1, f: (n) => {} }); }
 /// by a context-sensitive literal's first pass, which deposits nothing
 /// into a naked type parameter, so a callback member is typed by the
 /// constraint; a numeric key names the member its string spelling names.
+/// A contextual tuple types an element counted from the end by its
+/// trailing fixed element, and a constraint that is a tuple makes the
+/// literal it types a tuple.
 #[test]
 fn candidate_literal_contexts() {
     let failures = Matrix::new(CANDIDATE_LITERAL_CONTEXTS).four(&[
@@ -2017,6 +2026,27 @@ fn candidate_literal_contexts() {
             r#"number"#,
             r#"number"#,
             r#"number"#,
+        ),
+        (
+            Read::Return(r#"l55"#),
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+        ),
+        (
+            Read::Return(r#"l56"#),
+            r#"[string, "a"]"#,
+            r#"[string, "a"]"#,
+            r#"[string, "a"]"#,
+            r#"[string, "a"]"#,
+        ),
+        (
+            Read::Return(r#"l57"#),
+            r#"[string, "a"]"#,
+            r#"[string, "a"]"#,
+            r#"[string, "a"]"#,
+            r#"[string, "a"]"#,
         ),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
