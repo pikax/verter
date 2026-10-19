@@ -281,6 +281,28 @@ fn live_artifact_bound(cycle: usize) -> usize {
     pinned + lowering
 }
 
+/// Live (never closed) figures for a lone result and a lone signature view:
+/// an upper bound from the non-pinned account growth, and the signature
+/// store's own exact epoch charge.
+fn live_reader_bounds(cycle: usize) -> (usize, usize, usize) {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let base = total(&host);
+    let base_pinned = host.retention_snapshot().pinned_bytes;
+    let (answer, _) = demand(&host, cycle);
+    let pinned = host.retention_snapshot().pinned_bytes - base_pinned;
+    let result_bound = total(&host) - base - pinned;
+    let _ = issued_signature_set(&host, cycle);
+    let view_bound = host
+        .project_type_store()
+        .semantic_graph()
+        .signature_store()
+        .current_epoch_storage_charge();
+    drop(answer);
+    host.close();
+    drain(&host);
+    (result_bound, view_bound, pinned)
+}
+
 /// The charge a set of readers keeps alive across a close: a control
 /// host runs the same workload, holds exactly the readers in `held` (bit 0
 /// result, bit 1 signature view, bit 2 parse artifact), closes, and reports
@@ -521,6 +543,15 @@ fn held_readers_survive_close_and_release_once_in_either_order() {
             // set's charge never exceeds the sum of the lone readers' (shared
             // structure is charged once).
             let (lone_result, lone_view) = (held_set_charge(0b001), held_set_charge(0b010));
+            let (result_bound, view_bound, live_pinned_bound) = live_reader_bounds(3);
+            assert!(
+                lone_result > 0 && lone_result <= result_bound,
+                "{order}: a lone held result keeps a charge no larger than its live one"
+            );
+            assert!(
+                lone_view >= view_bound && lone_view <= live_pinned_bound,
+                "{order}: a lone held signature view keeps at least the epoch charge the live store reports and no more than the live pinned growth ({lone_view} vs {view_bound}, result {lone_result} vs {result_bound})"
+            );
             assert!(
                 held_set_charge(0b111) <= lone_result + lone_view + lone_artifact,
                 "{order}: the held set keeps no more than one charge per allocation"
