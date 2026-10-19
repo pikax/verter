@@ -670,9 +670,25 @@ fn chained_receipts_reach_their_candidates_and_drain_with_the_last() {
     };
     let store: ReverseIndexedCandidateStore<u32, u32> =
         ReverseIndexedCandidateStore::with_counter(Arc::new(AtomicU64::new(0)));
-    store.insert_for_test(1, 10, carrier(&receipts[15]), Arc::from(Vec::new()), 0);
-    store.insert_for_test(2, 20, carrier(&receipts[15]), Arc::from(Vec::new()), 1);
-    store.insert_for_test(3, 30, carrier(&receipts[4]), Arc::from(Vec::new()), 0);
+    let account = verter_session_query::retention::SemanticRetentionAccount::new(
+        verter_session_query::retention::RetentionLimits::defaults(),
+    );
+    let insert = |key: u32, value: u32, receipt: &ResultReceipt, generation: u64| {
+        use verter_session_query::retention::RetainedFootprint;
+        let footprint = value.retained_footprint();
+        store.insert_for_test(
+            key,
+            value,
+            carrier(receipt),
+            Arc::from(Vec::new()),
+            generation,
+            footprint,
+            &account,
+        );
+    };
+    insert(1, 10, &receipts[15], 0);
+    insert(2, 20, &receipts[15], 1);
+    insert(3, 30, &receipts[4], 0);
     let occupancy = store.reverse_index_occupancy_for_test();
     assert_eq!(occupancy.canonicals, 16);
     // Sixteen results and three carriers; each file, consumed edge,
