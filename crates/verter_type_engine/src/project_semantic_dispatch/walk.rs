@@ -6161,40 +6161,92 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     /// every other member value is untouched. Non-owning normalization:
     /// names resolve to declaration identities through the existing shared
     /// routes; nothing lowers, nothing instantiates.
+    ///
+    /// Nested inline surfaces are presented from an explicit stack, so a
+    /// terminal of any nesting depth presents every level; each surface node
+    /// is presented once per terminal (a revisit keeps the node as is).
     fn present_terminal_member_carriers(&mut self, node: SemanticNodeId) -> SemanticNodeId {
+        /// One inline surface being presented: its members presented so far.
+        struct Presenting {
+            node: SemanticNodeId,
+            view: SurfaceView,
+            values: Vec<SemanticNodeId>,
+            changed: bool,
+        }
         let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
-        self.present_terminal_surface_carriers(node, &mut visited, 0)
+        let mut enter = |this: &Self, node: SemanticNodeId| -> Option<Presenting> {
+            if !visited.insert(node) {
+                return None;
+            }
+            match this.graph().node_data(node).as_deref() {
+                Some(SemanticNodeData::Object(view)) => Some(Presenting {
+                    node,
+                    view: view.clone(),
+                    values: Vec::with_capacity(view.positive_members().len()),
+                    changed: false,
+                }),
+                _ => None,
+            }
+        };
+        let Some(root) = enter(self, node) else {
+            return node;
+        };
+        let mut stack = vec![root];
+        loop {
+            let top = stack.last_mut().expect("a surface is being presented");
+            if let Some(member) = top.view.positive_members().get(top.values.len()) {
+                let value = member.value;
+                let inline = matches!(
+                    self.graph().node_data(value).as_deref(),
+                    Some(SemanticNodeData::Object(_))
+                );
+                if inline {
+                    if let Some(nested) = enter(self, value) {
+                        stack.push(nested);
+                        continue;
+                    }
+                    let top = stack.last_mut().expect("a surface is being presented");
+                    top.values.push(value);
+                    continue;
+                }
+                let presented = self.present_terminal_member_value(value);
+                let top = stack.last_mut().expect("a surface is being presented");
+                top.changed |= presented != value;
+                top.values.push(presented);
+                continue;
+            }
+            let done = stack.pop().expect("a surface is being presented");
+            let presented =
+                self.rebuild_presented_surface(done.node, &done.view, done.values, done.changed);
+            let Some(parent) = stack.last_mut() else {
+                return presented;
+            };
+            let original = parent.view.positive_members()[parent.values.len()].value;
+            parent.changed |= presented != original;
+            parent.values.push(presented);
+        }
     }
 
-    fn present_terminal_surface_carriers(
+    /// `node`'s Object surface with its members' values replaced by
+    /// `values`, or `node` itself when none changed.
+    fn rebuild_presented_surface(
         &mut self,
         node: SemanticNodeId,
-        visited: &mut rustc_hash::FxHashSet<SemanticNodeId>,
-        depth: usize,
+        view: &SurfaceView,
+        values: Vec<SemanticNodeId>,
+        changed: bool,
     ) -> SemanticNodeId {
-        if depth >= 8 || !visited.insert(node) {
-            return node;
-        }
-        let view = match self.graph().node_data(node).as_deref() {
-            Some(SemanticNodeData::Object(view)) => view.clone(),
-            _ => return node,
-        };
-        let mut changed = false;
-        let mut members: Vec<SurfaceMember> = Vec::with_capacity(view.positive_members().len());
-        for member in view.positive_members().iter() {
-            let value = self.present_terminal_member_value(member.value, visited, depth);
-            if value != member.value {
-                changed = true;
-            }
-            members.push(SurfaceMember {
-                value,
-                ..member.clone()
-            });
-        }
         if !changed {
             return node;
         }
-        let mut members = members.into_iter();
+        let mut members = view
+            .positive_members()
+            .iter()
+            .zip(values)
+            .map(|(member, value)| SurfaceMember {
+                value,
+                ..member.clone()
+            });
         let entries = view
             .entries
             .iter()
@@ -6215,15 +6267,11 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         )
     }
 
-    fn present_terminal_member_value(
-        &mut self,
-        value: SemanticNodeId,
-        visited: &mut rustc_hash::FxHashSet<SemanticNodeId>,
-        depth: usize,
-    ) -> SemanticNodeId {
+    /// A non-inline member value presented: an imported synthesized
+    /// component default as its instance-identity `DeclRef` carrier, any
+    /// other value as is.
+    fn present_terminal_member_value(&mut self, value: SemanticNodeId) -> SemanticNodeId {
         enum MemberShape {
-            /// Inline structural interior — recurse.
-            Inline,
             /// An unresolved bare reference — identity-resolve; adopt only a
             /// synthesized-component-default target.
             Unresolved,
@@ -6232,7 +6280,6 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             InstanceTypeOf(crate::semantic_query::ValueRootKey),
         }
         let shape = match self.graph().node_data(value).as_deref() {
-            Some(SemanticNodeData::Object(_)) => MemberShape::Inline,
             Some(data @ (SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_))) => {
                 let head_name = data.bare_ref_head().map(|(name, _)| Arc::<str>::from(name));
                 let args = data.carrier_type_args();
@@ -6281,9 +6328,6 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             _ => return value,
         };
         match shape {
-            MemberShape::Inline => {
-                self.present_terminal_surface_carriers(value, visited, depth + 1)
-            }
             MemberShape::Unresolved => {
                 let resolved = self.resolve_carrier_subject(
                     value,

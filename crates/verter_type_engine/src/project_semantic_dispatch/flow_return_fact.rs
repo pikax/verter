@@ -550,6 +550,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         } else {
             let _ = read.discard();
         }
+        // A structural source may be complete when an ordinary eager probe
+        // is declined. A pending continuation operand must instead prevent
+        // that tentative source shape from warming before its retry.
+        if self.decision_waits() {
+            self.fold_local_partial_completeness(
+                crate::semantic_query::PartialReasonSet::PROPAGATED,
+            );
+        }
         SignatureReturnProbe::Deferred(DeferredFlowReturnSource {
             source: verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone()),
             bindings: std::sync::Arc::from([]),

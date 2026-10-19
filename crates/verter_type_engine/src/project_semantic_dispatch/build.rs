@@ -26,6 +26,10 @@ use crate::semantic_query::{
 };
 use verter_session_query::inputs::prepared::PreparedTypeDeclResolution;
 
+#[path = "tuple_product.rs"]
+mod tuple_product;
+pub(super) use tuple_product::ExpressionSplice;
+
 /// The node budget of one transitive self-root walk
 /// ([`ProjectSemanticDispatch::transitive_self_roots_from_nodes`]). A walk
 /// that exceeds it has NOT established its root set and the result it
@@ -902,6 +906,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         path: &[verter_type_expr::OwnedStr],
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        let _site = self
+            .checking_site_scope(crate::semantic_query::checker_policy::TupleSplicePosition::Type);
         self.build_typeof_suspending(value_root, path, context, None)
     }
 
@@ -920,6 +926,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         path: &[verter_type_expr::OwnedStr],
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> TypeofStart {
+        let _site = self
+            .checking_site_scope(crate::semantic_query::checker_policy::TupleSplicePosition::Type);
         let mut suspended = None;
         let output = self.build_typeof_suspending(value_root, path, context, Some(&mut suspended));
         match suspended {
@@ -1176,6 +1184,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         build: &mut TypeofBuild,
         delivery: Option<super::query_frames::FrameDelivery>,
     ) -> InstantiatePoll {
+        let _site = self.checking_site_scope(build.checking_site());
         let mut delivery = match &mut build.body {
             TypeofBody::Unstarted => unreachable!("a build begins its first body before it drains"),
             TypeofBody::Lowering(_) => {
@@ -6275,11 +6284,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// Cross-file declaration-augmentation stitch (`declare module "./local"`
-    /// relative interface merging from sibling files).
+    /// or `declare module "<package>"` interface merging from other files).
     ///
     /// Given a base declaration `(decl_canonical, decl_name)` and its
     /// already-lowered base body `base_result`, this finds every augmenter file
-    /// whose `declare module "<rel>"` block resolves to `decl_canonical` and
+    /// whose `declare module "<specifier>"` block resolves to `decl_canonical` and
     /// augments `decl_name`, lowers each augmenter's RETAINED inner body in the
     /// augmenter's own file context, and folds all contributions into a single
     /// [`SemanticNodeData::MergedDecl`] peer-merge carrier — the ONE
@@ -6838,7 +6847,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.ctx.augmentation_index_with_resolutions(target.clone());
         // A specifier the index population resolved in this read is not
         // resolved again: the answer is the one the same fold just read.
-        let resolve_rel = |augmenter: &str, spec: &str| -> Option<Arc<str>> {
+        let resolve_module_file = |augmenter: &str, spec: &str| -> Option<Arc<str>> {
             if let Some(resolved) = index_resolutions.get(augmenter).and_then(|specs| {
                 specs
                     .iter()
@@ -7014,14 +7023,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     {
                         continue;
                     }
-                    let relative = if matches!(key.target, verter_session_query::resolution::AugmentationTargetKind::ResolvedRelativeCanonical(_))
-                    && verter_session_query::resolution::is_relative_specifier(fact.specifier.as_ref()) {
-                    resolve_rel(augmenter_canonical, fact.specifier.as_ref())
+                    let resolved = if matches!(key.target, verter_session_query::resolution::AugmentationTargetKind::ResolvedRelativeCanonical(_))
+                    && verter_session_query::source::augmentation::fact_augments_resolved_module(fact) {
+                    resolve_module_file(augmenter_canonical, fact.specifier.as_ref())
                 } else { None };
                     if !verter_session_query::source::augmentation::augmenter_matches_target(
                         fact,
                         &key,
-                        relative.as_deref(),
+                        resolved.as_deref(),
                     ) {
                         continue;
                     }
@@ -8199,7 +8208,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         demand_canonical: &str,
         name: &str,
     ) -> Option<ResolvedRootIdentity> {
-        use verter_session_query::inputs::contributors::{ContributorOrigin, FileModuleKind};
         if let Some(lib) = self.lib_global_declaration(demand_canonical, name, GlobalSpace::Type) {
             return Some(lib);
         }
@@ -8208,23 +8216,74 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             name,
             verter_session_query::facts::SymbolSpace::Type,
         );
-        let first = population.entries.iter().find(|entry| {
-            !entry.is_automatic_lib
-                && match entry.origin {
-                    ContributorOrigin::DeclareGlobal => entry.module_kind == FileModuleKind::Module,
-                    ContributorOrigin::FileScopeInterface | ContributorOrigin::FileScopeType => {
-                        true
-                    }
-                    ContributorOrigin::FileScopeNamespace
-                    | ContributorOrigin::FileScopeValue
-                    | ContributorOrigin::ModuleAugmentation => false,
-                }
-        })?;
+        let first = population
+            .entries
+            .iter()
+            .find(|entry| declares_global_type(entry))?;
         Some(ResolvedRootIdentity::new_in_owner(
             Arc::clone(&first.artifact_key.canonical),
             first.owner,
             name,
         ))
+    }
+
+    /// Whether `(canonical, owner, name)` addresses ONE declaration of the
+    /// merged GLOBAL type `name` a reference in `demand_canonical` reads —
+    /// the project's library declaration, a module's `declare global`
+    /// contribution or a script's file-scope declaration — not only the
+    /// first of them ([`Self::first_global_declaration`]): every one of
+    /// them declares the same global symbol. A module's `declare global`
+    /// contribution is not addressed by the identity when the module also
+    /// declares a module-scope type of the name, which the identity names
+    /// instead.
+    fn is_global_type_declaration(
+        &self,
+        demand_canonical: &str,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+    ) -> bool {
+        use verter_session_query::inputs::contributors::ContributorOrigin;
+        if self
+            .lib_global_declaration(demand_canonical, name, GlobalSpace::Type)
+            .is_some_and(|lib| lib.canonical_id.as_ref() == canonical && lib.owner == owner)
+        {
+            return true;
+        }
+        let population = self.global_contributors_in(
+            demand_canonical,
+            name,
+            verter_session_query::facts::SymbolSpace::Type,
+        );
+        population.entries.iter().any(|entry| {
+            entry.artifact_key.canonical.as_ref() == canonical
+                && entry.owner == owner
+                && declares_global_type(entry)
+                && (entry.origin != ContributorOrigin::DeclareGlobal
+                    || self
+                        .ctx
+                        .ensure_indexed_ready_serve(canonical)
+                        .is_some_and(|serve| {
+                            !serve.indexed.shallow_state.has_type_symbol_in(owner, name)
+                        }))
+        })
+    }
+
+    /// Whether the declaration `(canonical, owner, name)` a reference in
+    /// `demand_canonical` resolves to is the contextual-this marker: a
+    /// declaration of the GLOBAL `ThisType`, whichever of its declarations
+    /// it is ([`Self::is_global_type_declaration`]). The checker identifies
+    /// the marker by the merged global symbol, so a module-scope
+    /// `ThisType` is an ordinary type.
+    pub(in crate::project_semantic_dispatch) fn names_contextual_this_marker(
+        &self,
+        demand_canonical: &str,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+    ) -> bool {
+        name == "ThisType"
+            && self.is_global_type_declaration(demand_canonical, canonical, owner, name)
     }
 
     /// The declaration the qualified type name `name` (`Ns.T`,
@@ -8783,6 +8842,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             super::dispatch_txn::FlowMemberReuse,
         )>,
     ) {
+        let Some(recording) = self.begin_transaction_read() else {
+            return (read(), None);
+        };
+        let value = read();
+        let complete = complete(&value);
+        let recorded = recording.finish(self, complete);
+        (value, recorded)
+    }
+
+    /// Begin recording a transaction read whose work does not run inside one
+    /// closure (the explicit-stack form of [`Self::record_transaction_read`]):
+    /// every channel the reads in between reach is recorded until
+    /// [`TransactionReadRecording::finish`]. `None` when the read could not
+    /// be replayed — no live tracer, no live build-local frame, or a
+    /// cold-compute completeness already partial. Recordings nest, and each
+    /// finishes before the one begun before it.
+    pub(super) fn begin_transaction_read(&self) -> Option<TransactionReadRecording<'_>> {
         // A recording is only replayable when every channel an enclosing
         // build observes is observable here: a live tracer, a live
         // build-local frame and a cold-compute completeness that can show
@@ -8794,41 +8870,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             && !(completeness_scope_active
                 && crate::request_context::current_cold_compute_completeness().is_partial());
         if !recordable {
-            return (read(), None);
+            return None;
         }
         let private_completeness = (!completeness_scope_active)
             .then(crate::request_context::ColdComputeCompletenessScope::enter);
         let evidence_epoch = self.canonical_evidence_epoch.get();
         let frame = super::BuildLocalTaintGuard::push(&self.build_local_taint);
         let refusals = crate::fact_tracing::RefusalObservationScope::enter();
-        let (value, reads) = crate::resolver_core::resolver_context::record_fact_reads(read);
-        let refused = refusals.observed();
-        drop(refusals);
-        let observed = frame.finish();
-        let folded_partial =
-            crate::request_context::current_cold_compute_completeness().is_partial();
-        if let Some(scope) = private_completeness {
-            scope.discard();
-        }
-        self.fold_observed_frame_into_top(&observed);
-        let refusal = match refused {
-            Some(reason) => verter_session_query::facts::reuse::ObservedRefusal::Typed(reason),
-            None if reads.non_cacheable || observed.cache_suppress => {
-                verter_session_query::facts::reuse::ObservedRefusal::Unattributed
-            }
-            None => verter_session_query::facts::reuse::ObservedRefusal::None,
-        };
-        let complete = !observed.result_is_partial && !folded_partial && complete(&value);
-        let reuse = verter_session_query::facts::reuse::classify_reuse(refusal, complete);
-        if !reuse.is_request_reusable() {
-            return (value, None);
-        }
-        let replay = super::dispatch_txn::FlowMemberReuse {
+        let reads = crate::resolver_core::resolver_context::FactReadRecording::begin();
+        Some(TransactionReadRecording {
             reads,
-            observed_self_roots: observed.observed_self_roots,
-            canonical_evidence_deposited: self.canonical_evidence_epoch.get() != evidence_epoch,
-        };
-        (value, Some((reuse, replay)))
+            refusals,
+            frame,
+            private_completeness,
+            evidence_epoch,
+        })
     }
 
     /// Replay a read [`Self::record_transaction_read`] recorded into the
@@ -12502,176 +12558,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             found
-        }
-    }
-
-    // (See `NormalizedTupleShape` at module scope below the impl block.)
-
-    construction_ordinal_seam! {
-        /// Spread-normalise a tuple's element list (the shared
-        /// normalize-on-intern rule for every tuple intern site that can
-        /// receive substituted / signature-derived elements):
-        ///
-        /// 1. **Variadic splice** — a `rest: true` element whose value is a
-        ///    settled `Tuple` (through transparent aliases) splices that
-        ///    tuple's elements in place, preserving the inner labels /
-        ///    optional / rest markers. This is what makes a userland
-        ///    `Concat<A, B> = [...A, ...B]` concatenate once `A` / `B`
-        ///    substitute to concrete tuples — no utility name special-casing.
-        ///    Splicing recurses into the spliced elements under a small depth
-        ///    budget (nested `[...[...T]]` shapes); budget exhaustion keeps
-        ///    the element verbatim.
-        /// 2. **Non-trailing optional reconciliation** — an `optional` marker
-        ///    followed anywhere later by a REQUIRED (non-optional, non-rest)
-        ///    element converts to a REQUIRED `T | undefined` slot.
-        ///    Optional-before-required is unrepresentable TS (TS1257); the
-        ///    pinned tsgo materialises `[...[a?: number], string]` as
-        ///    `[number | undefined, string]` (length 2). A trailing optional
-        ///    run — including one followed only by a rest tail, which IS
-        ///    legal (`[a?: number, ...boolean[]]`) — keeps its `?`.
-        /// 3. **Sole-rest collapse** — a tuple consisting SOLELY of one
-        ///    rest-of-array element IS that array (`[...E[]]` ≡ `E[]`,
-        ///    the `(...args: E[])` parameters surface). The collapsed
-        ///    array's `readonly` mirrors the OUTER tuple (`readonly`
-        ///    parameter — pinned tsgo: `readonly [...number[]]` ≡
-        ///    `readonly number[]`; `[...(readonly number[])]` ≡ MUTABLE
-        ///    `number[]`), never the inner array's flag.
-        ///
-        /// A rest element whose value is open / unresolved (a generic, a
-        /// carrier, anything not a settled tuple/array) is preserved
-        /// verbatim — normalization never forces materialisation.
-        fn normalize_tuple_spread(
-            &self,
-            elements: &[crate::semantic_query::TupleElement],
-            readonly: bool,
-        ) -> NormalizedTupleShape {
-            let mut out: Vec<crate::semantic_query::TupleElement> = Vec::with_capacity(elements.len());
-            self.splice_tuple_elements(elements, &mut out);
-            // Non-trailing optional reconciliation (reverse scan: a slot's
-            // conversion depends only on LATER elements; a converted slot is
-            // itself required and forces conversion of earlier optionals).
-            let mut required_follows = false;
-            for index in (0..out.len()).rev() {
-                if out[index].optional && required_follows {
-                    let undefined_node = self.graph().intern_node(SemanticNodeData::Primitive(
-                        crate::semantic_query::PrimitiveKind::Undefined,
-                    ));
-                    let widened = self.intern_normalized_union_or_intersection(
-                        &[out[index].value, undefined_node],
-                        /* is_union */ true,
-                    );
-                    out[index].value = widened;
-                    out[index].optional = false;
-                }
-                if !out[index].optional && !out[index].rest {
-                    required_follows = true;
-                }
-            }
-            if out.len() == 1 && out[0].rest {
-                if let Some(array_node) = self.settled_node_through_aliases(out[0].value, |data| {
-                    matches!(data, SemanticNodeData::Array { .. })
-                }) {
-                    if let Some(SemanticNodeData::Array {
-                        element,
-                        readonly: inner_readonly,
-                    }) = self.graph().node_data(array_node).as_deref()
-                    {
-                        // The collapsed array's readonly mirrors the OUTER
-                        // tuple; reuse the inner node only when the flags
-                        // already agree. The replacement intern preserves the
-                        // inner node's origin scope so `ProjectPath`
-                        // self-rooting over the collapsed base still records
-                        // the origin file's `(canonical, whole_hash)` root.
-                        if *inner_readonly == readonly {
-                            return NormalizedTupleShape::Array(array_node);
-                        }
-                        let element = *element;
-                        return NormalizedTupleShape::Array(self.graph().intern_preserving_scope(
-                            array_node,
-                            SemanticNodeData::Array { element, readonly },
-                        ));
-                    }
-                }
-            }
-            NormalizedTupleShape::Tuple(out)
-        }
-    }
-
-    /// The splice body of [`Self::normalize_tuple_spread`]: every rest
-    /// element whose value settles on a tuple is replaced by that tuple's
-    /// elements, spliced in turn, so `[...[...[1, 2]]]` is `[1, 2]` at any
-    /// nesting. The tuples being spliced are read from a work list; a tuple
-    /// spread into itself (a cycle) keeps its rest element as it is.
-    fn splice_tuple_elements(
-        &self,
-        elements: &[crate::semantic_query::TupleElement],
-        out: &mut Vec<crate::semantic_query::TupleElement>,
-    ) {
-        // Each level: the elements it splices, the next one, and the tuple
-        // it came from (none for the outermost).
-        let mut levels: Vec<(
-            Arc<[crate::semantic_query::TupleElement]>,
-            usize,
-            Option<SemanticNodeId>,
-        )> = vec![(
-            elements
-                .iter()
-                .map(crate::semantic_query::TupleElement::copy)
-                .collect(),
-            0,
-            None,
-        )];
-        let mut splicing: FxHashSet<SemanticNodeId> = FxHashSet::default();
-        while let Some((elements, next, _)) = levels.last_mut() {
-            let Some(element) = elements
-                .get(*next)
-                .map(crate::semantic_query::TupleElement::copy)
-            else {
-                if let Some((_, _, Some(tuple))) = levels.pop() {
-                    splicing.remove(&tuple);
-                }
-                continue;
-            };
-            *next += 1;
-            if element.rest {
-                let inner = self
-                    .settled_node_through_aliases(element.value, |data| {
-                        matches!(data, SemanticNodeData::Tuple { .. })
-                    })
-                    .filter(|tuple| !splicing.contains(tuple))
-                    .and_then(|tuple| match self.graph().node_data(tuple).as_deref() {
-                        Some(SemanticNodeData::Tuple {
-                            elements: inner, ..
-                        }) => Some((tuple, Arc::clone(inner.as_arc()))),
-                        _ => None,
-                    });
-                if let Some((tuple, inner)) = inner {
-                    splicing.insert(tuple);
-                    levels.push((inner, 0, Some(tuple)));
-                    continue;
-                }
-            }
-            out.push(element);
-        }
-    }
-
-    /// Follow `node`'s transparent `Alias` redirects, however long the
-    /// chain, and return the settled node iff its data matches `predicate`.
-    /// `None` for open / unresolved carriers and for an alias cycle —
-    /// callers preserve those verbatim.
-    fn settled_node_through_aliases(
-        &self,
-        node: SemanticNodeId,
-        predicate: impl Fn(&SemanticNodeData) -> bool,
-    ) -> Option<SemanticNodeId> {
-        let graph = self.graph();
-        match graph.alias_chain_end(node, |_| {}) {
-            crate::semantic_query_memo::AliasChainEnd::Node(settled) => graph
-                .node_data(settled)
-                .is_some_and(|data| predicate(&data))
-                .then_some(settled),
-            crate::semantic_query_memo::AliasChainEnd::Dangling(_)
-            | crate::semantic_query_memo::AliasChainEnd::Cycle => None,
         }
     }
 
@@ -17263,7 +17149,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let on_path = self.awaited_active.borrow().contains(relation, operand)
             || self
                 .graph()
-                .is_same_path_claim(&relation.key(operand, context));
+                .is_same_path_claim_at(&relation.key(operand, context), self.checking_site.get());
         if on_path {
             self.fold_into_top_build_local_taint(false, true);
         }
@@ -17901,7 +17787,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// answer, a complete one.
     fn lib_awaited_read(&self, argument: SemanticNodeId) -> Option<Option<SemanticNodeId>> {
         let application = self.declaration_carrier_key(self.lib_awaited_carrier(argument))?;
-        if self.graph().is_same_path_claim(&application) {
+        if self
+            .graph()
+            .is_same_path_claim_at(&application, self.checking_site.get())
+        {
             return Some(Some(self.lib_awaited_recurs()));
         }
         let body = match self.execute_read(application).value {
@@ -19800,8 +19689,10 @@ pub(super) enum GlobalSpace {
 }
 
 /// The result of [`ProjectSemanticDispatch::normalize_tuple_spread`]: either a
-/// (possibly spliced) element list that interns as a `Tuple`, or the array
-/// node a sole rest-of-array tuple collapses to (`[...E[]]` ≡ `E[]`).
+/// (possibly spliced) element list that interns as a `Tuple`, or the one
+/// node the tuple already is — the array a sole rest-of-array tuple
+/// collapses to (`[...E[]]` ≡ `E[]`), or the checker's error-type recovery
+/// of a splice past its tuple-size limit (TS2799 / TS2800).
 #[derive(Debug)]
 pub enum NormalizedTupleShape {
     Tuple(Vec<crate::semantic_query::TupleElement>),
@@ -20251,6 +20142,18 @@ pub(super) struct TypeofBuild {
     observed_hash: verter_session_query::analysis::types::Hash16,
 }
 
+impl TypeofBuild {
+    pub(super) fn checking_site(
+        &self,
+    ) -> crate::semantic_query::checker_policy::TupleSplicePosition {
+        use crate::semantic_query::checker_policy::TupleSplicePosition;
+        match self.body {
+            TypeofBody::Expression(_) => TupleSplicePosition::Expression,
+            _ => TupleSplicePosition::Type,
+        }
+    }
+}
+
 /// What a `typeof` build evaluates between its frame's steps.
 enum TypeofBody {
     /// Nothing yet: the build is about to begin its first body.
@@ -20542,4 +20445,86 @@ pub fn index_key_probes_for_tests() -> usize {
 struct ClauseBaseSubstitution<'n> {
     names: Vec<&'n str>,
     bases: Vec<SemanticNodeId>,
+}
+
+/// Whether the contributor `entry` declares the GLOBAL type of its name: a
+/// module's `declare global` interface or alias, or a script's file-scope
+/// one. A `declare global` block in a SCRIPT is an error that binds
+/// nothing; the automatic libraries are read through the project's library.
+fn declares_global_type(
+    entry: &verter_session_query::inputs::contributors::ContributorEntry,
+) -> bool {
+    use verter_session_query::inputs::contributors::{ContributorOrigin, FileModuleKind};
+    !entry.is_automatic_lib
+        && match entry.origin {
+            ContributorOrigin::DeclareGlobal => entry.module_kind == FileModuleKind::Module,
+            ContributorOrigin::FileScopeInterface | ContributorOrigin::FileScopeType => true,
+            ContributorOrigin::FileScopeNamespace
+            | ContributorOrigin::FileScopeValue
+            | ContributorOrigin::ModuleAugmentation => false,
+        }
+}
+
+/// A transaction read being recorded across the steps of its work
+/// ([`ProjectSemanticDispatch::begin_transaction_read`]). Dropped unfinished
+/// — an unwind — it uninstalls every scope it installed and records nothing.
+pub(super) struct TransactionReadRecording<'g> {
+    // Uninstalled innermost first: the recorder, then the refusal scope,
+    // the build-local frame and the private completeness scope.
+    reads: crate::resolver_core::resolver_context::FactReadRecording,
+    refusals: crate::fact_tracing::RefusalObservationScope,
+    frame: super::BuildLocalTaintGuard<'g>,
+    private_completeness: Option<crate::request_context::ColdComputeCompletenessScope>,
+    evidence_epoch: u64,
+}
+
+impl TransactionReadRecording<'_> {
+    /// End the recording: fold what it observed into the enclosing build,
+    /// and return what reusing the read must replay — `None` when it is not
+    /// reusable (it was partial, `complete` is false, or its refusal is not
+    /// one a later reader of this transaction may share).
+    pub(super) fn finish<C: crate::resolver_core::ResolverCapabilities>(
+        self,
+        dispatch: &ProjectSemanticDispatch<'_, C>,
+        complete: bool,
+    ) -> Option<(
+        verter_session_query::facts::reuse::ReuseClass,
+        super::dispatch_txn::FlowMemberReuse,
+    )> {
+        let Self {
+            reads,
+            refusals,
+            frame,
+            private_completeness,
+            evidence_epoch,
+        } = self;
+        let reads = reads.finish();
+        let refused = refusals.observed();
+        drop(refusals);
+        let observed = frame.finish();
+        let folded_partial =
+            crate::request_context::current_cold_compute_completeness().is_partial();
+        if let Some(scope) = private_completeness {
+            scope.discard();
+        }
+        dispatch.fold_observed_frame_into_top(&observed);
+        let refusal = match refused {
+            Some(reason) => verter_session_query::facts::reuse::ObservedRefusal::Typed(reason),
+            None if reads.non_cacheable || observed.cache_suppress => {
+                verter_session_query::facts::reuse::ObservedRefusal::Unattributed
+            }
+            None => verter_session_query::facts::reuse::ObservedRefusal::None,
+        };
+        let complete = !observed.result_is_partial && !folded_partial && complete;
+        let reuse = verter_session_query::facts::reuse::classify_reuse(refusal, complete);
+        if !reuse.is_request_reusable() {
+            return None;
+        }
+        let replay = super::dispatch_txn::FlowMemberReuse {
+            reads,
+            observed_self_roots: observed.observed_self_roots,
+            canonical_evidence_deposited: dispatch.canonical_evidence_epoch.get() != evidence_epoch,
+        };
+        Some((reuse, replay))
+    }
 }
