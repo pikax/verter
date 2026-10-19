@@ -17077,7 +17077,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let on_path = self.awaited_active.borrow().contains(relation, operand)
             || self
                 .graph()
-                .is_same_path_claim(&relation.key(operand, context));
+                .is_same_path_claim_at(&relation.key(operand, context), self.checking_site.get());
         if on_path {
             self.fold_into_top_build_local_taint(false, true);
         }
@@ -17715,7 +17715,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// answer, a complete one.
     fn lib_awaited_read(&self, argument: SemanticNodeId) -> Option<Option<SemanticNodeId>> {
         let application = self.declaration_carrier_key(self.lib_awaited_carrier(argument))?;
-        if self.graph().is_same_path_claim(&application) {
+        if self
+            .graph()
+            .is_same_path_claim_at(&application, self.checking_site.get())
+        {
             return Some(Some(self.lib_awaited_recurs()));
         }
         let body = match self.execute_read(application).value {

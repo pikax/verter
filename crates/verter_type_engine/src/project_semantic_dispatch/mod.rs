@@ -4081,8 +4081,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Option<connected_demand::ConnectedDemandGuard<'_>>,
         CacheRead<QueryResult<SemanticQueryValue>>,
     > {
-        let exact_same_path =
-            self.graph().is_same_path_claim(key) || self.request_local_is_open(key);
+        let exact_same_path = self
+            .graph()
+            .is_same_path_claim_at(key, self.checking_site.get())
+            || self.request_local_is_open(key);
         let mut query_depth_guard = None;
         if preexisting_trip.is_some_and(|reasons| {
             reasons.contains(crate::semantic_query::PartialReasonSet::CANCELLED)
@@ -4928,7 +4930,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             && completes_request_locally(key)
             && self.active_operand_evidence.borrow().is_empty()
             && self.dispatch_txn.borrow().obligations.decides_root()
-            && !graph.is_same_path_claim(key);
+            && !graph.is_same_path_claim_at(key, self.checking_site.get());
         let cache_read = if self.request_local_is_open(key) {
             // The key's own request-local completion is open: the same-path
             // re-entry a family-memo claim answers with its recursion carrier.

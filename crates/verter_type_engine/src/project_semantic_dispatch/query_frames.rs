@@ -1098,7 +1098,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         super::completes_request_locally(key)
             && self.active_operand_evidence.borrow().is_empty()
             && self.dispatch_txn.borrow().obligations.decides_root()
-            && !self.graph().is_same_path_claim(key)
+            && !self
+                .graph()
+                .is_same_path_claim_at(key, self.checking_site.get())
     }
 
     /// Whether `key` runs on the continuation runtime when it is evaluated

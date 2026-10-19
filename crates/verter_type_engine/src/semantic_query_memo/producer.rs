@@ -362,13 +362,32 @@ impl SemanticGraphStore {
 
     construction_ordinal_seam! {
         /// Whether the task installed on this thread already has `key`'s
-        /// producer open, so a claim would answer with the same-path carrier.
-        /// A read-only preflight: the claim stays the sole authority that
-        /// records and returns the carrier.
+        /// type-site producer open, so a type-site claim would answer with
+        /// the same-path carrier ([`Self::is_same_path_claim_at`]).
+        #[cfg_attr(
+            not(any(test, feature = "test-support")),
+            expect(
+                dead_code,
+                reason = "production preflights name their checking site; this \
+                          type-site form is the fixtures' public seam"
+            )
+        )]
         fn is_same_path_claim(&self, key: &SemanticQueryKey) -> bool {
-            ExecutionScope::current(&self.task_registry)
-                .is_some_and(|task| task.produces_key(key, prepared::hash_key(key)))
+            self.is_same_path_claim_at(key, TupleSplicePosition::Type)
         }
+    }
+
+    /// Whether the task installed on this thread already has `key`'s
+    /// producer open at `site`, so a claim at that site would answer with
+    /// the same-path carrier. A read-only preflight: the claim stays the
+    /// sole authority that records and returns the carrier.
+    pub(crate) fn is_same_path_claim_at(
+        &self,
+        key: &SemanticQueryKey,
+        site: TupleSplicePosition,
+    ) -> bool {
+        ExecutionScope::current(&self.task_registry)
+            .is_some_and(|task| task.produces_key(key, prepared::hash_key(key), site))
     }
 
     /// The recursion carrier for `recursion`, with `sentinel` as its value.
@@ -599,9 +618,10 @@ impl SemanticGraphStore {
             }
 
             // 2. Same-path recursion: the claiming task already produces this
-            //    key. Its producer is still open, so answering it would wait on
-            //    itself.
-            if task.produces(prepared) {
+            //    key at this checking site. Its producer is still open, so
+            //    answering it would wait on itself. The task's producer of the
+            //    key at the other site is a different computation.
+            if task.produces(prepared, attempt.site) {
                 self.stats
                     .same_path_sentinel_returns
                     .fetch_add(1, Ordering::Relaxed);
@@ -678,7 +698,7 @@ impl SemanticGraphStore {
         // RAII guards sharing the prepared key, so a producer abandoned
         // before it settles (a panic, an early return) closes itself and
         // releases its subscribers.
-        let open = task.open_producer(prepared.clone());
+        let open = task.open_producer(prepared.clone(), inflight.site);
         let panic_guard = if independent {
             InflightPanicGuard::new_independent(
                 Arc::clone(&inflight),

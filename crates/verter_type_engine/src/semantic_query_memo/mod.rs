@@ -1054,7 +1054,10 @@ impl SemanticGraphStore {
     ) -> T {
         use tasks::SemanticProducers as _;
         let execution = self.enter_execution();
-        let _open = execution.task().open_producer(self.prepare_rooted_key(key));
+        let _open = execution.task().open_producer(
+            self.prepare_rooted_key(key),
+            crate::semantic_query::checker_policy::TupleSplicePosition::Type,
+        );
         body()
     }
 

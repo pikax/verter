@@ -2112,6 +2112,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// continuation awaits it as an expression demand, so an alias chain
     /// grows heap frames rather than nested native calls. Complete returns
     /// retain their authored carrier; a refused return delivers its recovery.
+    ///
+    /// The check instantiates the return only as deep as the checker's call
+    /// instantiation constructs it: a structural-transit (`Shallow`) demand
+    /// builds the alias body — its tuples and their splices — and keeps
+    /// member values as carriers, which the checker defers and never
+    /// instantiates at the call. It is never a publication demand.
     fn indexed_call_return_key(
         &self,
         node: SemanticNodeId,
@@ -2145,9 +2151,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 args,
                 self.instantiate_context_for(
                     &base.canonical_id,
-                    crate::semantic_query::ProjectionReductionContext::published(
-                        crate::semantic_query::ProjectionMode::Expanded,
-                    ),
+                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
                 ),
             ),
         ))

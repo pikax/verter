@@ -1297,6 +1297,69 @@ fn a_suspended_indexed_call_keeps_its_recovery_site_on_another_thread() {
     assert_eq!(dispatch.open_request_state_for_tests().open_cost_scopes, 0);
 }
 
+/// One task producing a query at the type site still evaluates its demand of
+/// the same query at the expression site: the two recover differently, so
+/// only a demand at the producer's own site is same-path recursion.
+#[test]
+fn a_task_producing_a_query_at_one_site_still_evaluates_it_at_the_other() {
+    use verter_type_engine::resolver_core::fact_validation_port::FactValidation as _;
+    use verter_type_engine::semantic_query::{
+        ProjectionMode, ProjectionReductionContext, ScopeId, ValueRootKey,
+    };
+    use verter_type_engine::semantic_query_memo::{Claim, ReadCapture, Recursion};
+    let host = default_probe_host();
+    let source = format!("export declare const z: {};\n", zeros(4));
+    with_probe_on_host(&host, ProbeProject::default(), &source, "1", |_, _| ());
+    let dispatch = ProjectSemanticDispatch::new(&*host);
+    let _builder = dispatch.enter_construction_scope();
+    let graph = dispatch.graph();
+    let key = dispatch.typeof_key_for(
+        ValueRootKey {
+            scope: ScopeId::file(
+                PROBE_FILE,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
+            name: verter_type_expr::OwnedStr::from("z"),
+        },
+        ProjectionReductionContext::published(ProjectionMode::Navigate),
+    );
+    let task = graph.task_registry_for_tests().register_task();
+    let claim = |mut capture: ReadCapture<'_>| {
+        let mut attempt = graph
+            .begin_query_claim(&*host, host.request_flags(), key.clone(), &mut capture)
+            .unwrap_or_else(|_| panic!("the demand is cold"));
+        graph.claim_query(
+            &*host,
+            host.request_flags(),
+            &mut attempt,
+            &task,
+            &mut capture,
+        )
+    };
+    let Claim::Produce(type_lease) = claim(ReadCapture::default()) else {
+        panic!("the type demand produces");
+    };
+    let Claim::Produce(expression_lease) = claim(ReadCapture::expression_for_tests()) else {
+        panic!("an opposite-site demand on the producing task is its own computation");
+    };
+    assert!(
+        matches!(
+            claim(ReadCapture::default()),
+            Claim::Recursive(Recursion::SamePath)
+        ),
+        "a same-site demand on the producing task is same-path recursion"
+    );
+    assert!(
+        matches!(
+            claim(ReadCapture::expression_for_tests()),
+            Claim::Recursive(Recursion::SamePath)
+        ),
+        "the expression producer closes same-path recursion at its own site"
+    );
+    drop(expression_lease);
+    drop(type_lease);
+}
+
 /// Rest discovery and transparent aliases use the same metered traversal
 /// as nested tuples; sufficient credit preserves each unaffected position.
 #[test]
