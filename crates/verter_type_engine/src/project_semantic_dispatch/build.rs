@@ -6284,11 +6284,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// Cross-file declaration-augmentation stitch (`declare module "./local"`
-    /// relative interface merging from sibling files).
+    /// or `declare module "<package>"` interface merging from other files).
     ///
     /// Given a base declaration `(decl_canonical, decl_name)` and its
     /// already-lowered base body `base_result`, this finds every augmenter file
-    /// whose `declare module "<rel>"` block resolves to `decl_canonical` and
+    /// whose `declare module "<specifier>"` block resolves to `decl_canonical` and
     /// augments `decl_name`, lowers each augmenter's RETAINED inner body in the
     /// augmenter's own file context, and folds all contributions into a single
     /// [`SemanticNodeData::MergedDecl`] peer-merge carrier — the ONE
@@ -6847,7 +6847,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.ctx.augmentation_index_with_resolutions(target.clone());
         // A specifier the index population resolved in this read is not
         // resolved again: the answer is the one the same fold just read.
-        let resolve_rel = |augmenter: &str, spec: &str| -> Option<Arc<str>> {
+        let resolve_module_file = |augmenter: &str, spec: &str| -> Option<Arc<str>> {
             if let Some(resolved) = index_resolutions.get(augmenter).and_then(|specs| {
                 specs
                     .iter()
@@ -7023,14 +7023,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     {
                         continue;
                     }
-                    let relative = if matches!(key.target, verter_session_query::resolution::AugmentationTargetKind::ResolvedRelativeCanonical(_))
-                    && verter_session_query::resolution::is_relative_specifier(fact.specifier.as_ref()) {
-                    resolve_rel(augmenter_canonical, fact.specifier.as_ref())
+                    let resolved = if matches!(key.target, verter_session_query::resolution::AugmentationTargetKind::ResolvedRelativeCanonical(_))
+                    && verter_session_query::source::augmentation::fact_augments_resolved_module(fact) {
+                    resolve_module_file(augmenter_canonical, fact.specifier.as_ref())
                 } else { None };
                     if !verter_session_query::source::augmentation::augmenter_matches_target(
                         fact,
                         &key,
-                        relative.as_deref(),
+                        resolved.as_deref(),
                     ) {
                         continue;
                     }

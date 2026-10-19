@@ -1328,6 +1328,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if !(oc || ic) {
                     return (node, false);
                 }
+                // An access of the permissive instantiation's wildcard, or by
+                // it, is the wildcard (`getIndexedAccessType` returns
+                // `wildcardType` for either operand).
+                let wildcard = |id: SemanticNodeId| {
+                    matches!(
+                        self.graph().node_data(id).as_deref(),
+                        Some(SemanticNodeData::Opaque(QueryError::PermissiveWildcard))
+                    )
+                };
+                if wildcard(sub_object) {
+                    return (sub_object, true);
+                }
+                if let crate::semantic_query::IndexKey::Computed(index) = &sub_index {
+                    if wildcard(*index) {
+                        return (*index, true);
+                    }
+                }
                 (
                     self.graph().intern_preserving_scope(
                         node,
