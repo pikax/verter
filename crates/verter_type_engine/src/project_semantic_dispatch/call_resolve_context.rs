@@ -66,16 +66,14 @@ impl LiteralContext {
 /// One authored position of a call argument: the expression's type, its
 /// combined contextual type (the constituents of the parameter type that
 /// type it), the type parameters whose constraints that contextual type
-/// was read through, its steps from the argument, whether an enclosing
-/// position's literals are all regular, and whether it is the argument
-/// itself.
+/// was read through, its steps from the argument, and whether it is the
+/// argument itself.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct ArgumentPosition {
     node: SemanticNodeId,
     contexts: Arc<[SemanticNodeId]>,
     through: Arc<[SemanticNodeId]>,
     path: Arc<[ArgumentPathStep]>,
-    regular: bool,
     root: bool,
 }
 
@@ -88,7 +86,6 @@ impl ArgumentPosition {
         node: SemanticNodeId,
         contexts: Arc<[SemanticNodeId]>,
         through: Arc<[SemanticNodeId]>,
-        regular: bool,
     ) -> Self {
         Self {
             node,
@@ -98,7 +95,6 @@ impl ArgumentPosition {
                 Some(step) => self.path.iter().copied().chain([step]).collect(),
                 None => Arc::clone(&self.path),
             },
-            regular,
             root: false,
         }
     }
@@ -217,7 +213,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             contexts: Arc::from([target]),
             through: Arc::from([]),
             path: Arc::from([]),
-            regular: false,
             root: true,
         };
         // The parameters the argument deposits into: a regular literal is
@@ -241,27 +236,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     let node = position.node;
                     let mut children = Vec::new();
                     let mut widen = Vec::new();
-                    // Whether every literal at and inside the position is
-                    // regular; otherwise the position's own regular
-                    // literals, when it lists any.
-                    let (regular_inside, regular_here) = if position.regular {
-                        (true, None)
-                    } else {
-                        match provenance.and_then(|provenance| provenance.position(&position.path))
-                        {
-                            Some(ArgumentRegularPosition { literals: None, .. }) => (true, None),
-                            Some(ArgumentRegularPosition {
-                                literals: Some(literals),
-                                ..
-                            }) => (false, Some(Arc::clone(literals))),
-                            None => (false, None),
-                        }
-                    };
+                    // The position's own regular literals, when it lists
+                    // some; `None` inside, when every literal at and inside
+                    // the position is regular.
+                    let regular_here = provenance
+                        .and_then(|provenance| provenance.position(&position.path))
+                        .map(|regular| regular.literals.clone());
                     // A position whose literals are all regular is written
                     // as authored, nested composites included: it keeps its
                     // type, and every parameter the argument deposits into
                     // takes it as it is.
-                    if regular_inside && !position.root {
+                    if matches!(regular_here, Some(None)) && !position.root {
                         for literal in std::iter::once(node).chain(literal_members(graph, node)) {
                             keeps.extend(
                                 reached
@@ -313,10 +298,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                     .cloned_known()
                                     .and_then(|key| self.argument_member_step(&key))
                                     .map(ArgumentPathStep::Member);
-                                children.push((
-                                    index,
-                                    position.nested(step, value, contexts, through, regular_inside),
-                                ));
+                                children
+                                    .push((index, position.nested(step, value, contexts, through)));
                             }
                         }
                         Some(SemanticNodeData::Tuple { elements, .. }) => {
@@ -345,10 +328,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                 );
                                 let through = position.child_through(crossed);
                                 let step = u32::try_from(index).ok().map(ArgumentPathStep::Element);
-                                children.push((
-                                    index,
-                                    position.nested(step, value, contexts, through, regular_inside),
-                                ));
+                                children
+                                    .push((index, position.nested(step, value, contexts, through)));
                             }
                         }
                         Some(SemanticNodeData::Union(members)) => {
@@ -373,7 +354,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                             member,
                                             Arc::clone(&position.contexts),
                                             Arc::clone(&position.through),
-                                            regular_inside,
                                         ),
                                     ));
                                 }
@@ -381,8 +361,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             if !position.root {
                                 widen = self.decide_literal_position(
                                     &position,
-                                    regular_inside,
-                                    regular_here.as_deref(),
+                                    regular_here.flatten().as_deref(),
                                     declared,
                                     &reached,
                                     &mut keeps,
@@ -393,8 +372,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             drop(data);
                             widen = self.decide_literal_position(
                                 &position,
-                                regular_inside,
-                                regular_here.as_deref(),
+                                regular_here.flatten().as_deref(),
                                 declared,
                                 &reached,
                                 &mut keeps,
@@ -431,15 +409,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// argument's type — its fresh ones, when every constituent of its
     /// contextual type is known to be no literal context for them.
     ///
-    /// A regular literal (every one when `regular_inside`, else those in
-    /// `regular_here`) is no fresh literal a mutable location widens: it
-    /// keeps its type at any contextual type, and each parameter the
-    /// argument deposits into (`reached`) keeps it as written.
+    /// A regular literal (one in `regular`) is no fresh literal a mutable
+    /// location widens: it keeps its type at any contextual type, and each
+    /// parameter the argument deposits into (`reached`) keeps it as
+    /// written.
     fn decide_literal_position(
         &self,
         position: &ArgumentPosition,
-        regular_inside: bool,
-        regular_here: Option<&[SemanticNodeId]>,
+        regular: Option<&[SemanticNodeId]>,
         declared: &[TypeParamDecl],
         reached: &[SemanticNodeId],
         keeps: &mut Vec<ContextKeptLiteral>,
@@ -448,9 +425,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let (regular, fresh): (Vec<SemanticNodeId>, Vec<SemanticNodeId>) =
             literal_members(self.graph(), node)
                 .into_iter()
-                .partition(|literal| {
-                    regular_inside || regular_here.is_some_and(|here| here.contains(literal))
-                });
+                .partition(|literal| regular.is_some_and(|regular| regular.contains(literal)));
         for &literal in &regular {
             keeps.extend(
                 reached
