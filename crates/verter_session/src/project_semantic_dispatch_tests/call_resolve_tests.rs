@@ -3967,6 +3967,7 @@ fn union_partial_applicability_answers_the_synthesized_signatures_recovery() {
 fn a_relation_refusal_reports_the_checkers_formatted_ts2859() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let source = graph.intern_node(SemanticNodeData::Literal(
         verter_type_engine::semantic_query::LiteralValue::String("a".to_owned()),

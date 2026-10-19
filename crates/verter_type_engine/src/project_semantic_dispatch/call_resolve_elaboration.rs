@@ -25,7 +25,11 @@ use super::super::dispatch_txn::RelationStep;
 use super::super::ProjectSemanticDispatch;
 
 /// How many relation steps one diagnostic's chain explains before it gives
-/// up on the explanation (and with it, the diagnostic).
+/// up on the explanation (and with it, the diagnostic). This is an
+/// elaboration budget of this surface, not a checker value: the checker
+/// bounds its explanation only through its relation depth limits, so a
+/// chain past the budget fails closed — no diagnostic is reported rather
+/// than a truncated chain the checker would not print.
 const CHAIN_STEP_LIMIT: u32 = 64;
 
 /// The relation step a failed relation's pair fails at: the child pair it
@@ -319,17 +323,22 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             let Some(target_member) = member_named(&target_view, &property.name) else {
                 continue;
             };
-            // An optional target property relates without its `undefined`,
-            // which this surface does not separate.
-            if target_member.optional {
-                return None;
-            }
             let Some(source_member) = member_named(&source_view, &property.name) else {
                 continue;
             };
             let (source_type, target_type) = (source_member.value, target_member.value);
             if self.relation_holds(source_type, target_type)? {
                 continue;
+            }
+            // An optional target property also admits `undefined`, which
+            // its declared type (the one the checker prints) does not hold.
+            if target_member.optional {
+                let undefined = self
+                    .graph()
+                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
+                if self.relation_holds(source_type, undefined)? {
+                    continue;
+                }
             }
             if let Some(value) = &property.value {
                 if let Some(elaborated) =
@@ -462,7 +471,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 )
             })
             .flatten();
-        let printed = self.print_diagnostic_type(target);
+        let printed = self.print_diagnostic_type(target)?;
         let (code, arguments) = match suggestion {
             Some(suggestion) => (
                 CheckerDiagnosticCode::ExcessPropertySuggestion,
@@ -490,7 +499,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let mut chain = Vec::new();
         let mut steps = CHAIN_STEP_LIMIT;
         self.explain_failure(source, target, 1, false, &mut chain, &mut steps)?;
-        let (source, target) = self.print_relation_operands(source, target);
+        let (source, target) = self.print_relation_operands(source, target)?;
         Some(CheckerDiagnosticOccurrence::new(
             point,
             head,
@@ -524,7 +533,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             return Some(());
         }
         let depth = if own_line {
-            let (source, target) = self.print_relation_operands(source, target);
+            let (source, target) = self.print_relation_operands(source, target)?;
             push(
                 chain,
                 depth,
@@ -627,6 +636,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         if self.relation_holds(source, target)? {
             return None;
         }
+        let (source, target) = (
+            self.without_unbuilt_nullish(source)?,
+            self.without_unbuilt_nullish(target)?,
+        );
         let source_data = self.settled_data(source)?;
         let target_data = self.settled_data(target)?;
         if let SemanticNodeData::Union(members) = source_data.as_ref() {
@@ -640,7 +653,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }) {
                 return Some(FailedStep::Leaf);
             }
-            for &member in members.iter() {
+            for member in self.in_relation_order(members.iter().copied()) {
                 if !self.relation_holds(member, target)? {
                     return Some(FailedStep::Member {
                         source: member,
@@ -656,7 +669,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             return is_atomic(&source_data).then_some(FailedStep::Leaf);
         }
         if let SemanticNodeData::Intersection(members) = target_data.as_ref() {
-            for &member in members.iter() {
+            for member in self.in_relation_order(members.iter().copied()) {
                 if !self.relation_holds(source, member)? {
                     return Some(FailedStep::Member {
                         source,
@@ -751,8 +764,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 let missing = self.missing_required_properties(source, target)?;
                 if !missing.is_empty() {
                     let (source_printed, target_printed) = (
-                        self.print_diagnostic_type(source),
-                        self.print_diagnostic_type(target),
+                        self.print_diagnostic_type(source)?,
+                        self.print_diagnostic_type(target)?,
                     );
                     let (code, arguments) = match missing.as_slice() {
                         [name] => (
@@ -938,9 +951,61 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         printed.push_str(subject);
         if let Some(ty) = predicate.ty {
             printed.push_str(" is ");
-            printed.push_str(&self.print_diagnostic_type(ty));
+            printed.push_str(&self.print_diagnostic_type(ty)?);
         }
         Some(printed)
+    }
+
+    /// `node` as the checker builds it under `strictNullChecks: false`: a
+    /// union without its `null` and `undefined` arms, the one arm left
+    /// standing for itself. Every other node, and every node under strict
+    /// null checks, is its own.
+    fn without_unbuilt_nullish(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        if self.relation_strict_config().strict_null_checks {
+            return Some(node);
+        }
+        let data = self.settled_data(node)?;
+        let SemanticNodeData::Union(members) = data.as_ref() else {
+            return Some(node);
+        };
+        let kept = self.in_relation_order(members.iter().copied());
+        if kept.len() == members.iter().count() {
+            return Some(node);
+        }
+        Some(match kept.as_slice() {
+            [only] => *only,
+            _ => self.intern_normalized_union_or_intersection(&kept, true),
+        })
+    }
+
+    /// The constituents of a union or intersection in the order the checker
+    /// relates them — by type id (see
+    /// [`checker_relation_order_rank`](crate::semantic_query::display::checker_relation_order_rank))
+    /// — with `null` and `undefined` left out under `strictNullChecks:
+    /// false`, where the checker never builds them.
+    fn in_relation_order(
+        &self,
+        members: impl Iterator<Item = SemanticNodeId>,
+    ) -> Vec<SemanticNodeId> {
+        let graph = self.graph();
+        let mut ordered: Vec<SemanticNodeId> = members.collect();
+        if !self.relation_strict_config().strict_null_checks {
+            let nullish = |node: &SemanticNodeId| {
+                matches!(
+                    graph.node_data(*node).as_deref(),
+                    Some(SemanticNodeData::Primitive(
+                        PrimitiveKind::Null | PrimitiveKind::Undefined
+                    ))
+                )
+            };
+            if ordered.iter().any(|node| !nullish(node)) {
+                ordered.retain(|node| !nullish(node));
+            }
+        }
+        ordered.sort_by_key(|&node| {
+            crate::semantic_query::display::checker_relation_order_rank(graph, node)
+        });
+        ordered
     }
 
     /// Whether `source` relates to `target` (`isTypeAssignableTo`); `None`
@@ -1099,6 +1164,12 @@ fn incompatible_path_message(path: &[PathHop]) -> String {
 
 /// The candidate whose name `name` most likely misspells
 /// (`getSpellingSuggestion`), if any is close enough.
+///
+/// The 34% length allowance, the 40% distance threshold and the 0.1 / 2.0
+/// edit costs are the checker's own (`getSpellingSuggestion` and
+/// `levenshteinWithMax` in TypeScript's `src/compiler/core.ts`, unchanged
+/// through the pinned 7.0.2 port); they select TS2353 versus TS2561 and the
+/// suggestion text, so they are copied, never tuned.
 fn spelling_suggestion<'c>(
     name: &str,
     candidates: impl Iterator<Item = &'c str>,

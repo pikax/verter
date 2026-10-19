@@ -234,9 +234,22 @@ fn pattern_declares_infer(
 pub(crate) struct DisplayContext {
     substitution: DisplaySubstitution,
     ancestors: Vec<(SemanticNodeId, DisplaySubstitution)>,
+    /// Print a union without its `null` and `undefined` arms: under
+    /// `strictNullChecks: false` the checker never builds them, so a
+    /// message names neither. A union of only those arms prints whole.
+    pub(crate) omit_nullish: bool,
 }
 
 impl DisplayContext {
+    /// A context printing as the checker does when `strictNullChecks` is
+    /// `omit_nullish`'s opposite.
+    pub(crate) fn for_checker(strict_null_checks: bool) -> Self {
+        Self {
+            omit_nullish: !strict_null_checks,
+            ..Self::default()
+        }
+    }
+
     fn contains(&self, node: &SemanticNodeId) -> bool {
         self.ancestors.iter().any(|(ancestor, substitution)| {
             ancestor == node && substitution.remaining() == self.substitution.remaining()
@@ -409,7 +422,7 @@ pub(crate) fn display_type_node(
 
 /// Where a checker-spelled union print places one constituent: the
 /// intrinsic primitives in their creation order — `any`-class first, then
-/// `string`, `number`, `bigint`, `boolean`, `symbol`, `null`, `undefined` —
+/// `string`, `number`, `bigint`, `symbol`, `boolean`, `null`, `undefined` —
 /// before the types a program declares, with the literals a check interned
 /// last. Measured on TypeScript 7.0.2, whose unions sort by type id
 /// (`sortAndDeduplicateTypes`) and intern those classes in this order.
@@ -431,8 +444,8 @@ fn checker_union_constituent_rank(
         Some(SemanticNodeData::Primitive(PrimitiveKind::String)) => 1,
         Some(SemanticNodeData::Primitive(PrimitiveKind::Number)) => 2,
         Some(SemanticNodeData::Primitive(PrimitiveKind::BigInt)) => 3,
-        Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => 4,
-        Some(SemanticNodeData::Primitive(PrimitiveKind::Symbol)) => 5,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Symbol)) => 4,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => 5,
         Some(SemanticNodeData::Primitive(PrimitiveKind::Null)) => 6,
         Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined)) => 7,
         Some(
@@ -441,6 +454,38 @@ fn checker_union_constituent_rank(
             | SemanticNodeData::TemplateLiteral { .. },
         ) => 9,
         _ => 8,
+    }
+}
+
+/// Where the checker meets one constituent of a union when it relates
+/// the members one by one: by type id, so `unknown`, `undefined` and
+/// `null` come first, then `void`, `string`, `number`, `bigint`, `symbol`
+/// and `boolean` in the order the checker interns those intrinsics, then the types a program declares and the literals a check
+/// interned last. Measured on TypeScript 7.0.2. It differs from the print
+/// order, which moves `null` and `undefined` last. A stable sort by this
+/// rank keeps the stored order of constituents it leaves unranked.
+pub(crate) fn checker_relation_order_rank(store: &SemanticGraphStore, node: SemanticNodeId) -> u8 {
+    match store.node_data(node).as_deref() {
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Any)) => 0,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown)) => 1,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined)) => 2,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Null)) => 3,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Void | PrimitiveKind::Never)) => 4,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::String)) => 5,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Number)) => 6,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::BigInt)) => 7,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Symbol)) => 8,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => 9,
+        // A literal is met where its base primitive is: the checker orders
+        // `1 | "a" | true` as `"a"`, `1`, `true`.
+        Some(SemanticNodeData::Literal(value)) => match value {
+            LiteralValue::String(_) => 5,
+            LiteralValue::Number(_) => 6,
+            LiteralValue::BigInt(_) => 7,
+            _ => 9,
+        },
+        Some(SemanticNodeData::EnumLiteral(_) | SemanticNodeData::TemplateLiteral { .. }) => 12,
+        _ => 11,
     }
 }
 
@@ -624,6 +669,23 @@ fn display_resolved_type_node(
             // Function). A same-kind nested union arm (`A | (B | C)`) and a
             // tighter intersection arm (`A | B & C`) both render bare.
             let mut printed = crate::semantic_query::printed_union_arms(store, arms);
+            if visited.omit_nullish {
+                let is_nullish = |arm: &crate::semantic_query::PrintedUnionArm| {
+                    matches!(
+                        arm,
+                        crate::semantic_query::PrintedUnionArm::Node(node)
+                            if matches!(
+                                store.node_data(*node).as_deref(),
+                                Some(SemanticNodeData::Primitive(
+                                    PrimitiveKind::Null | PrimitiveKind::Undefined
+                                ))
+                            )
+                    )
+                };
+                if printed.iter().any(|arm| !is_nullish(arm)) {
+                    printed.retain(|arm| !is_nullish(arm));
+                }
+            }
             // A checker-spelled union prints its constituents in the
             // checker's own id order (`sortAndDeduplicateTypes`), not the
             // stored one: the intrinsics by their creation — `string`,

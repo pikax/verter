@@ -506,7 +506,7 @@ impl CheckerDiagnosticRecipe {
                         argument(ordinal)?,
                     );
                 }
-                let (source, target) = printer.relation_operands(source, target);
+                let (source, target) = printer.relation_operands(source, target)?;
                 (
                     self.subject_start(site)?,
                     Box::new([source.into_boxed_str(), target.into_boxed_str()]),
@@ -557,8 +557,11 @@ const LAST_OVERLOAD_GAVE_THE_FOLLOWING_ERROR: &str = "The last overload gave the
 /// it.
 pub(crate) trait CheckerDiagnosticPrinter {
     /// A failed relation's two types as its message prints them.
-    fn relation_operands(&self, source: SemanticNodeId, target: SemanticNodeId)
-        -> (String, String);
+    fn relation_operands(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> Option<(String, String)>;
     /// The occurrences the checker reports for `source` failing `target`
     /// at the authored expression `site` under `head` — elaborated into the
     /// expression's parts where its form allows, else one diagnostic at the
@@ -716,12 +719,13 @@ impl CheckerDiagnosticOccurrence {
         &self,
         aliases: &mut verter_session_query::retention::allocation::AliasSet,
     ) -> usize {
+        use verter_session_query::retention::allocation::heap_block_bytes;
         verter_session_query::retention::owned::Measured::heap_bytes(&self.arguments, aliases)
-            + self.chain.len() * std::mem::size_of::<CheckerDiagnosticChainLine>()
+            + heap_block_bytes(self.chain.len() * std::mem::size_of::<CheckerDiagnosticChainLine>())
             + self
                 .chain
                 .iter()
-                .map(|line| line.message.len())
+                .map(|line| heap_block_bytes(line.message.len()))
                 .sum::<usize>()
     }
 }
@@ -740,8 +744,8 @@ mod tests {
             &self,
             source: SemanticNodeId,
             target: SemanticNodeId,
-        ) -> (String, String) {
-            (format!("T{}", source.0), format!("T{}", target.0))
+        ) -> Option<(String, String)> {
+            Some((format!("T{}", source.0), format!("T{}", target.0)))
         }
 
         fn relation_failure(
@@ -751,7 +755,7 @@ mod tests {
             head: CheckerDiagnostic,
             site: &verter_type_expr::IndexedReportSite,
         ) -> Option<Vec<CheckerDiagnosticOccurrence>> {
-            let (source, target) = self.relation_operands(source, target);
+            let (source, target) = self.relation_operands(source, target)?;
             Some(vec![CheckerDiagnosticOccurrence::new(
                 site.point,
                 head,

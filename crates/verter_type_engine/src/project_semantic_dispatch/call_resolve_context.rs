@@ -1101,6 +1101,10 @@ pub(super) fn checker_property_name(key: &AuthoredPropertyKey) -> Option<String>
     }
 }
 
+/// The length past which the checker abbreviates a type in a message
+/// (`defaultMaximumTruncationLength`).
+const DIAGNOSTIC_TYPE_TRUNCATION_LENGTH: usize = 160;
+
 /// How many levels of unions, intersections and constraints a relation's
 /// target is read through to decide whether it could hold a literal.
 const SINGLETON_SCAN_DEPTH: u32 = 16;
@@ -1114,16 +1118,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
-    ) -> (String, String) {
+    ) -> Option<(String, String)> {
         let generalized = if self.could_hold_top_level_singleton(target, SINGLETON_SCAN_DEPTH) {
             None
         } else {
             self.literal_base_spelling(source)
         };
-        (
-            generalized.unwrap_or_else(|| self.print_diagnostic_type(source)),
-            self.print_diagnostic_type(target),
-        )
+        Some((
+            match generalized {
+                Some(generalized) => generalized,
+                None => self.print_diagnostic_type(source)?,
+            },
+            self.print_diagnostic_type(target)?,
+        ))
     }
 
     /// The checker's diagnostic for one walker diagnostic the checker
@@ -1141,8 +1148,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     "TS{}: {}",
                     code.code(),
                     code.format(&[
-                        self.print_diagnostic_type(*source),
-                        self.print_diagnostic_type(*target),
+                        self.print_diagnostic_type(*source)?,
+                        self.print_diagnostic_type(*target)?,
                     ])
                 ))
             }
@@ -1218,12 +1225,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         Some((canonical, span))
     }
 
-    /// One type as a diagnostic message prints it.
+    /// One type as a diagnostic message prints it. `None` past the
+    /// checker's truncation length: `typeToString` abbreviates such a type
+    /// by a running length count this printer does not model, so no text
+    /// is claimed for it (`defaultMaximumTruncationLength`, TypeScript
+    /// 7.0.2).
     pub(in crate::project_semantic_dispatch) fn print_diagnostic_type(
         &self,
         node: SemanticNodeId,
-    ) -> String {
-        crate::semantic_query::display::display_type_node(
+    ) -> Option<String> {
+        let printed = crate::semantic_query::display::display_type_node(
             self.graph(),
             node,
             crate::semantic_query::DisplayNeeds::single(
@@ -1233,9 +1244,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 crate::semantic_query::DisplayFacet::IncludeReadonlyModifier,
             )),
             crate::semantic_query::display::MAX_DISPLAY_DEPTH,
-            &mut crate::semantic_query::display::DisplayContext::default(),
+            &mut crate::semantic_query::display::DisplayContext::for_checker(
+                self.relation_strict_config().strict_null_checks,
+            ),
         )
-        .0
+        .0;
+        (printed.chars().count() <= DIAGNOSTIC_TYPE_TRUNCATION_LENGTH).then_some(printed)
     }
 
     /// The properties `target` requires that `source` lacks, named as the
@@ -1356,6 +1370,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 bases.push(spelled);
             }
         }
+        // The checker prints the bases in its intrinsic type-id order, the
+        // enums a program declares after them.
+        bases.sort_by_key(|base| {
+            ["string", "number", "bigint", "boolean"]
+                .iter()
+                .position(|intrinsic| intrinsic == base)
+                .unwrap_or(4)
+        });
         Some(bases.join(" | "))
     }
 }

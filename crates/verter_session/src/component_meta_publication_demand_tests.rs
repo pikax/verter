@@ -1757,3 +1757,36 @@ fn slot_binding_synthesis_admission_refusal_is_not_partial() {
          result_is_partial — the false-partial class"
     );
 }
+
+const RELATION_REFUSAL_SFC: &str = r#"<script setup lang="ts">
+type Keep<T, U> = T extends U ? T : never;
+type Wide = { a: string } | { b: number };
+defineProps<Keep<Wide, { a: string }>>();
+</script>
+<template><div /></template>
+"#;
+
+/// A relation the checker refuses at its comparison allowance (TS2859)
+/// reaches the component-meta consumer as the checker's formatted message
+/// naming the two compared types, through the macro payload's diagnostics.
+#[test]
+fn a_macro_payload_relation_refusal_reports_the_checkers_message() {
+    use verter_type_engine::semantic_query::checker_policy::with_relation_comparisons_for_tests;
+    let host = build_host(&[("/workspace/src/Refused.vue", RELATION_REFUSAL_SFC)]);
+    let resolved = with_relation_comparisons_for_tests(0, || {
+        host.get_component_meta_with_resolution("/workspace/src/Refused.vue")
+    });
+    let (meta, _) = resolved.expect("the component resolves");
+    let contexts: Vec<&str> = meta
+        .macro_expansion_diagnostics
+        .iter()
+        .flat_map(|d| d.diagnostics.iter().map(|diag| diag.context.as_str()))
+        .collect();
+    assert_eq!(
+        contexts,
+        [
+            "TS2859: Excessive complexity comparing types '{ a: string; }' and '{ a: string; }'.",
+            "TS2859: Excessive complexity comparing types '{ b: number; }' and '{ a: string; }'.",
+        ]
+    );
+}

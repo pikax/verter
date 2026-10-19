@@ -1276,6 +1276,190 @@ fn call_diagnostics_carry_the_checkers_code_message_position_and_order() {
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
 
+/// Declarations and calls whose messages depend on how the checker orders,
+/// prints and elaborates what an optional position or a nullable union holds.
+const CALL_REPORT_FORMS: &str = r#"
+declare function one(x: string): number;
+declare function obj(x: { a?: number }): void;
+declare function g3<T>(x: T, y: T, z: T): T;
+declare function g3<T>(x: T): T;
+declare function op2(x?: string): void;
+declare function opu(x?: string | undefined): void;
+declare const nu: number | undefined;
+declare const nl: null | number;
+declare const bu2: boolean | undefined;
+declare const bs: boolean | symbol;
+declare function bsf(x: string | number): void;
+declare const mix: true | 1 | "a";
+declare function big(x: bigint): void;
+export function optional() { return obj({ a: "bad" }); }
+export function optional_undefined() { return obj({ a: undefined }); }
+export function reversed_explicit() { return g3<string>(1); }
+export function optional_param() { return op2(1); }
+export function optional_param_undefined() { return opu(1); }
+export function nullish_number() { return one(nu); }
+export function null_number() { return one(nl); }
+export function boolean_undefined() { return one(bu2); }
+export function boolean_symbol() { return bsf(bs); }
+export function mixed_literals() { return big(mix); }
+"#;
+
+/// An optional target property or parameter reports against its declared
+/// type (`Type 'string' is not assignable to type 'number'.`), an overload
+/// set under explicit type arguments reports its one arity-fitting
+/// candidate's argument error, a union is related and printed in the
+/// checker's own order, and `strictNullChecks: false` leaves `null` and
+/// `undefined` out of every message. Measured on TypeScript 7.0.2.
+#[test]
+fn call_diagnostics_follow_the_checkers_optionality_union_order_and_nullability() {
+    const ARG: &str = "is not assignable to parameter of type";
+    let argument =
+        |source: &str, target: &str| format!("Argument of type '{source}' {ARG} '{target}'.");
+    let rows: Vec<(&str, &str, Vec<String>, Vec<String>)> = {
+        let number_string = vec![format!("error TS2345: {}", argument("number", "string"))];
+        vec![
+            (
+                "optional",
+                "(15,43)",
+                vec!["error TS2322: Type 'string' is not assignable to type 'number'.".into()],
+                vec!["error TS2322: Type 'string' is not assignable to type 'number'.".into()],
+            ),
+            ("optional_undefined", "", vec![], vec![]),
+            (
+                "reversed_explicit",
+                "(17,57)",
+                number_string.clone(),
+                number_string.clone(),
+            ),
+            (
+                "optional_param",
+                "(18,47)",
+                number_string.clone(),
+                number_string.clone(),
+            ),
+            (
+                "optional_param_undefined",
+                "(19,57)",
+                number_string.clone(),
+                number_string.clone(),
+            ),
+        ]
+    };
+    let nullable: &[(&str, &str, &[&str], &[&str])] = &[
+        (
+            "nullish_number",
+            "(20,47)",
+            &["error TS2345: Argument of type 'number | undefined' is not assignable to parameter of type 'string'.\n  Type 'undefined' is not assignable to type 'string'."],
+            &["error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'."],
+        ),
+        (
+            "null_number",
+            "(21,44)",
+            &["error TS2345: Argument of type 'number | null' is not assignable to parameter of type 'string'.\n  Type 'null' is not assignable to type 'string'."],
+            &["error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'."],
+        ),
+        (
+            "boolean_undefined",
+            "(22,50)",
+            &["error TS2345: Argument of type 'boolean | undefined' is not assignable to parameter of type 'string'.\n  Type 'undefined' is not assignable to type 'string'."],
+            &["error TS2345: Argument of type 'boolean' is not assignable to parameter of type 'string'."],
+        ),
+        (
+            "boolean_symbol",
+            "(23,47)",
+            &["error TS2345: Argument of type 'symbol | boolean' is not assignable to parameter of type 'string | number'.\n  Type 'symbol' is not assignable to type 'string | number'."],
+            &["error TS2345: Argument of type 'symbol | boolean' is not assignable to parameter of type 'string | number'.\n  Type 'symbol' is not assignable to type 'string | number'."],
+        ),
+        (
+            "mixed_literals",
+            "(24,47)",
+            &["error TS2345: Argument of type 'string | number | boolean' is not assignable to parameter of type 'bigint'.\n  Type 'string' is not assignable to type 'bigint'."],
+            &["error TS2345: Argument of type 'string | number | boolean' is not assignable to parameter of type 'bigint'.\n  Type 'string' is not assignable to type 'bigint'."],
+        ),
+    ];
+    let host = host_with(CALL_REPORT_FORMS);
+    let mut mismatches = Vec::new();
+    for pass in ["cold", "warm"] {
+        for (root, strict) in [(STRICT_ROOT, true), (LOOSE_ROOT, false)] {
+            let mut check = |function: &str, position: &str, expected: Vec<String>| {
+                let expected: Vec<String> = expected
+                    .into_iter()
+                    .map(|message| format!("{position}: {message}"))
+                    .collect();
+                let reported = super::signature_predicate_inference_tests::checker_report(
+                    &host,
+                    root,
+                    function,
+                    CALL_REPORT_FORMS,
+                );
+                if reported != expected {
+                    mismatches.push(format!(
+                        "{pass} `{function}` in {root}: {reported:#?}, expected {expected:#?}"
+                    ));
+                }
+            };
+            for (function, position, strict_rows, loose_rows) in &rows {
+                let expected = if strict { strict_rows } else { loose_rows };
+                check(function, position, expected.clone());
+            }
+            for (function, position, strict_rows, loose_rows) in nullable {
+                let expected = if strict { strict_rows } else { loose_rows };
+                check(
+                    function,
+                    position,
+                    expected.iter().map(|row| (*row).to_owned()).collect(),
+                );
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
+/// A message the printer cannot reproduce is not reported: the checker
+/// abbreviates a type past its truncation length by a running count this
+/// printer does not model, and an explanation chain past the elaboration
+/// budget would be cut where the checker's is not. Each answers without
+/// the diagnostic, never with a wrong one — and a short sibling call in the
+/// same source still reports.
+#[test]
+fn a_message_beyond_the_printers_reach_is_not_reported() {
+    let arms: Vec<String> = (0..40)
+        .map(|ordinal| format!("{{ member{ordinal}: {ordinal} }}"))
+        .collect();
+    let nest = |inner: &str, depth: usize| {
+        let mut ty = inner.to_owned();
+        for _ in 0..depth {
+            ty = format!("{{ a: {ty} }}");
+        }
+        ty
+    };
+    let source = format!(
+        "\ndeclare function one(x: string): number;\n\
+         declare function nested(x: {}): void;\n\
+         declare const wide: {};\n\
+         declare const deep: {};\n\
+         export function wide_union() {{ return one(wide); }}\n\
+         export function deep_chain() {{ return nested(deep); }}\n\
+         export function short() {{ return one(1); }}\n",
+        nest("number", 70),
+        arms.join(" | "),
+        nest("string", 70),
+    );
+    let host = host_with(&source);
+    for root in [STRICT_ROOT, LOOSE_ROOT] {
+        for function in ["wide_union", "deep_chain"] {
+            let reported = super::signature_predicate_inference_tests::checker_report(
+                &host, root, function, &source,
+            );
+            assert!(reported.is_empty(), "`{function}` in {root}: {reported:#?}");
+        }
+        let short = super::signature_predicate_inference_tests::checker_report(
+            &host, root, "short", &source,
+        );
+        assert_eq!(short.len(), 1, "`short` in {root}: {short:#?}");
+    }
+}
+
 /// A diagnostic whose position the call's route cannot establish is not
 /// reported, never moved to another position. TypeScript 7.0.2 reports
 /// TS2345 for `un1`'s argument, which the route cannot type, while the

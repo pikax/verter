@@ -131,7 +131,7 @@ fn slice_growth<T>(count: usize) -> usize {
 struct NoTypes;
 
 impl crate::semantic_query::CheckerDiagnosticPrinter for NoTypes {
-    fn relation_operands(&self, _: SemanticNodeId, _: SemanticNodeId) -> (String, String) {
+    fn relation_operands(&self, _: SemanticNodeId, _: SemanticNodeId) -> Option<(String, String)> {
         unreachable!("the message has no type argument")
     }
     fn relation_failure(
@@ -365,4 +365,38 @@ fn a_relation_is_charged_for_its_recursion_identities() {
     let without = relation(None);
     let lists = 2 * heap_block_bytes(IDENTITIES * std::mem::size_of::<(u64, u16)>());
     assert!(value_bytes(with) >= value_bytes(without) + lists);
+}
+
+#[test]
+fn a_diagnostic_chain_is_charged_one_block_per_allocation() {
+    use crate::semantic_query::{
+        CheckerDiagnostic, CheckerDiagnosticChainLine, CheckerDiagnosticCode,
+        CheckerDiagnosticOccurrence, CheckerDiagnosticOperation,
+    };
+    use verter_session_query::retention::allocation::heap_block_bytes;
+
+    const TEXT: usize = 37;
+    let occurrence = |chain: Vec<CheckerDiagnosticChainLine>| {
+        CheckerDiagnosticOccurrence::new(
+            0,
+            CheckerDiagnostic {
+                code: CheckerDiagnosticCode::TypeNotAssignable,
+                operation: CheckerDiagnosticOperation::CallResolution,
+            },
+            Box::new([]),
+            chain.into_boxed_slice(),
+        )
+    };
+    let bare = occurrence(Vec::new()).heap_bytes(&mut AliasSet::estimating());
+    let chained = occurrence(vec![
+        CheckerDiagnosticChainLine::new(1, "a".repeat(TEXT).into_boxed_str()),
+        CheckerDiagnosticChainLine::new(2, "b".repeat(TEXT).into_boxed_str()),
+    ])
+    .heap_bytes(&mut AliasSet::estimating());
+    let line = std::mem::size_of::<CheckerDiagnosticChainLine>();
+    assert_eq!(
+        chained - bare,
+        heap_block_bytes(2 * line) + 2 * heap_block_bytes(TEXT),
+        "the chain backing and each message are separate allocations"
+    );
 }

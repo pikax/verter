@@ -10500,7 +10500,7 @@ pub(super) trait FlowDemandDriver {
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
-    ) -> (String, String);
+    ) -> Option<(String, String)>;
     /// The occurrences the checker reports for `source` failing `target`
     /// at the authored expression `site` under `head`, elaborated.
     fn checker_relation_failure(
@@ -11128,7 +11128,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
-    ) -> (String, String) {
+    ) -> Option<(String, String)> {
         ProjectSemanticDispatch::print_relation_operands(self, source, target)
     }
     fn checker_relation_failure(
@@ -11347,7 +11347,7 @@ impl<D: FlowDemandDriver> crate::semantic_query::CheckerDiagnosticPrinter
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
-    ) -> (String, String) {
+    ) -> Option<(String, String)> {
         self.0.print_relation_operands(source, target)
     }
     fn relation_failure(
@@ -11876,7 +11876,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
-    ) -> (String, String) {
+    ) -> Option<(String, String)> {
         self.driver.print_relation_operands(source, target)
     }
     fn checker_relation_failure(

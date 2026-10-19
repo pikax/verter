@@ -2660,7 +2660,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         && (visible_type_params.is_empty() || contextual_diagnostic.is_some()) =>
                 {
                     if failure.is_none() {
-                        failure = Some(argument_not_assignable(argument.authored, source, target));
+                        failure = Some(argument_not_assignable(
+                            argument.authored,
+                            source,
+                            self.declared_report_target(ordinary_params, index, target),
+                        ));
                     }
                 }
                 RelationStep::NotAssignable => {
@@ -3066,7 +3070,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 Ok(Some(true)) => {}
                 Ok(Some(false)) if recovery => {
                     if failure.is_none() {
-                        failure = Some(argument_not_assignable(argument.authored, source, target));
+                        failure = Some(argument_not_assignable(
+                            argument.authored,
+                            source,
+                            self.declared_report_target(ordinary_params, index, target),
+                        ));
                     }
                 }
                 Ok(Some(false)) => {
@@ -3078,7 +3086,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .as_ref()
                         .is_some_and(|state| state.was_context_sensitive(index))
                     {
-                        let recipe = argument_not_assignable(argument.authored, source, target);
+                        let recipe = argument_not_assignable(
+                            argument.authored,
+                            source,
+                            self.declared_report_target(ordinary_params, index, target),
+                        );
                         if let Some(state) = self.dispatch_txn.borrow_mut().call.contextual.as_mut()
                         {
                             state.diagnostic = Some(recipe);
@@ -4755,7 +4767,61 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 fitting = Some(position);
             }
         }
-        fitting.filter(|&position| longest == Some(position))
+        // The checker reports the fitting candidate's argument error but
+        // recovers with the longest candidate's signature
+        // (`getLongestCandidateIndex`). Recovery here is the fitting
+        // candidate, which answers the same only when both return the same
+        // instantiated type.
+        let (fitting, longest) = (fitting?, longest?);
+        if fitting == longest {
+            return Some(fitting);
+        }
+        let return_of =
+            |position: usize| match self.graph().node_data(visible[position].node)?.as_ref() {
+                SemanticNodeData::Signature { return_type, .. } => Some(*return_type),
+                _ => None,
+            };
+        (return_of(fitting)? == return_of(longest)?).then_some(fitting)
+    }
+
+    /// The parameter type a TS2345 names for the argument at `index`: an
+    /// optional parameter's declared type, without the `undefined` its
+    /// relation target adds (`optional_parameter_target`) — the checker
+    /// prints it without the optionality's `undefined`, even where the
+    /// declaration spells one (`x?: string | undefined` is `'string'`).
+    fn declared_report_target(
+        &self,
+        params: &[FunctionParam],
+        index: usize,
+        target: SemanticNodeId,
+    ) -> SemanticNodeId {
+        if !params
+            .get(index)
+            .is_some_and(|param| param.optional && !param.rest)
+        {
+            return target;
+        }
+        let graph = self.graph();
+        let Some(data) = graph.node_data(target) else {
+            return target;
+        };
+        let SemanticNodeData::Union(members) = data.as_ref() else {
+            return target;
+        };
+        let rest: Vec<SemanticNodeId> = members
+            .iter()
+            .copied()
+            .filter(|&m| {
+                !matches!(
+                    graph.node_data(m).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined))
+                )
+            })
+            .collect();
+        if rest.len() == members.iter().count() || rest.is_empty() {
+            return target;
+        }
+        self.intern_normalized_union_or_intersection(&rest, true)
     }
 
     fn rest_shape(&self, ty: SemanticNodeId) -> RestShape {
