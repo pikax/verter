@@ -1148,12 +1148,24 @@ impl ConnectedDemandLedger<'_> {
     }
 
     /// Fold an ended recording into the recording below it, if any: the
-    /// usage it charged, and the prerequisites it consumed.
+    /// usage it charged, and the prerequisites it consumed — more than one
+    /// as a single failed-prefix receipt
+    /// ([`DemandCostReceipt::failed_prefix`]), so a chain of recordings
+    /// that each fail moves a bounded list per level, never every
+    /// prerequisite the levels above it already folded.
     fn fold_into_consumer(&self, scope: CostScope) {
         if let Some(consumer) = self.scopes.borrow_mut().last_mut() {
             consumer.exclusive = consumer.exclusive.saturating_add(scope.exclusive);
-            consumer.prerequisites.extend(scope.prerequisites);
             consumer.tail_steps = consumer.tail_steps.max(scope.tail_steps);
+            let mut prerequisites = scope.prerequisites;
+            match prerequisites.len() {
+                0 => {}
+                1 => consumer.prerequisites.append(&mut prerequisites),
+                _ => consumer.prerequisites.push(CostDependency {
+                    receipt: DemandCostReceipt::failed_prefix(prerequisites),
+                    nesting: Nesting::Folded,
+                }),
+            }
         }
     }
 
@@ -1249,7 +1261,7 @@ impl ConnectedDemandLedger<'_> {
         let first_frame = match nesting {
             Nesting::Frame { depth } => Some(depth),
             Nesting::Drive => Some(1),
-            Nesting::InPlace | Nesting::Entered => None,
+            Nesting::InPlace | Nesting::Entered | Nesting::Folded => None,
         };
         if footprint.instantiation_required > self.instantiation_depth_limit
             || first_frame.is_some_and(|depth| {
