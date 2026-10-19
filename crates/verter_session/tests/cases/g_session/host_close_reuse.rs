@@ -682,3 +682,115 @@ fn a_close_racing_a_publication_settles_to_the_baseline() {
     assert_eq!(rendered, fresh_answer(30));
     drop(answer);
 }
+
+/// A parse artifact held across the close keeps the parse snapshot pin it
+/// held live, as observed on the owning worker, and releases it once with
+/// the artifact: the fall is that pin plus the artifact's own small charge,
+/// never a second pin.
+#[test]
+fn a_held_artifact_keeps_and_releases_its_inspected_parse_pin_once() {
+    let _serial = serial();
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let baseline = retained(&host.retention_snapshot());
+    let (answer, _) = demand(&host, 3);
+    drop(answer);
+    let artifact = host
+        .project_type_store()
+        .indexed()
+        .get_any(&document(3).0)
+        .expect("the demanded document has a live artifact");
+    let live_pin = host.parse_pin_bytes_for_tests();
+    assert!(live_pin > 0, "the workload retains a parse snapshot");
+
+    host.close();
+    drain(&host);
+    assert_eq!(
+        host.parse_pin_bytes_for_tests(),
+        live_pin,
+        "the close neither duplicates nor loses the held snapshot's pin"
+    );
+
+    let before = total(&host);
+    drop(artifact);
+    drain(&host);
+    let fall = before - total(&host);
+    assert_eq!(host.parse_pin_bytes_for_tests(), 0, "the snapshot is freed");
+    assert!(
+        fall >= live_pin && fall < 2 * live_pin,
+        "the artifact's release returns its pin once ({live_pin}) plus its own charge, not {fall}"
+    );
+    assert_at_baseline(&host, &baseline, "after the artifact's release");
+}
+
+/// A release is exact when the account falls by each inspected allocation
+/// charge once plus a remainder smaller than the smallest of them (the held
+/// nodes' own small records): a charge duplicated while held falls with the
+/// reader and pushes the remainder past that bound, a lost one pulls the
+/// fall under the inspected sum.
+fn release_is_exact(fall: usize, inspected: &[usize]) -> bool {
+    let sum: usize = inspected.iter().sum();
+    let smallest = inspected.iter().copied().min().unwrap_or(0);
+    fall >= sum && fall - sum < smallest
+}
+
+/// A signature read view held across the close keeps, and its last drop
+/// returns, each allocation it keeps alive exactly once: the epoch storage
+/// and the node arena storage its records root, both read from the
+/// allocations themselves before the close and after it.
+#[test]
+fn a_held_view_keeps_and_releases_each_inspected_allocation_once() {
+    let _serial = serial();
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let baseline = retained(&host.retention_snapshot());
+    let graph = host.project_type_store().semantic_graph();
+    let (answer, _) = demand(&host, 3);
+    let _ = issued_signature_set(&host, 3);
+    drop(answer);
+    let view = SemanticReadView::pin(graph.signature_store());
+    let live = (
+        view.epoch_storage_charge_for_tests(),
+        graph.graph_storage_charge_for_tests(),
+    );
+    assert!(
+        live.0 > 0 && live.1 > 0,
+        "the workload charges both allocations"
+    );
+
+    host.close();
+    drain(&host);
+    // The close drops what only the cache held, so the arena shrinks to the
+    // nodes the view's records root; the epoch is the same allocation.
+    let held = (
+        view.epoch_storage_charge_for_tests(),
+        graph.graph_storage_charge_for_tests(),
+    );
+    assert_eq!(held.0, live.0, "the close keeps the held epoch's charge");
+    assert!(
+        held.1 > 0 && held.1 <= live.1,
+        "the close creates no arena charge and loses none the view roots"
+    );
+
+    let before = total(&host);
+    drop(view);
+    drain(&host);
+    let fall = before - total(&host);
+    assert!(
+        release_is_exact(fall, &[held.0, held.1]),
+        "the last drop returns the inspected {held:?} once, not {fall}"
+    );
+    assert_eq!(graph.graph_storage_charge_for_tests(), 0);
+    assert_at_baseline(&host, &baseline, "after the view's release");
+
+    assert!(
+        !release_is_exact(fall + held.0, &[held.0, held.1]),
+        "a duplicated epoch charge is rejected"
+    );
+    assert!(
+        !release_is_exact(fall + held.1, &[held.0, held.1]),
+        "a duplicated arena charge is rejected"
+    );
+    assert!(
+        !release_is_exact(fall - held.0, &[held.0, held.1]),
+        "a lost epoch charge is rejected"
+    );
+}

@@ -959,6 +959,14 @@ impl VerterHost {
             .open_active_window(owner)
     }
 
+    /// Bytes the retained parse snapshots pin against the account. An
+    /// observation that retains nothing.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    #[must_use]
+    pub fn parse_pin_bytes_for_tests(&self) -> usize {
+        self.decl_lowering.snapshot_pin_bytes_for_tests()
+    }
+
     /// What the host retains right now, as object counts and aggregate
     /// bytes ([`HostRetentionSnapshot`]).
     ///

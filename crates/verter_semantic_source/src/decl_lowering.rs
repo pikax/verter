@@ -1124,6 +1124,29 @@ impl DeclLoweringService {
     }
 
     /// Caller-blocking worker rendezvous performed so far (see the field).
+    /// Bytes every retained parse snapshot pins against the account, read on
+    /// the owning workers. An observation that retains nothing and changes
+    /// no refcount.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    #[must_use]
+    pub fn snapshot_pin_bytes_for_tests(&self) -> usize {
+        let Some(workers) = self.workers.get() else {
+            return 0;
+        };
+        workers
+            .iter()
+            .map(|worker| {
+                let (reply, answer) = crossbeam_channel::bounded::<usize>(1);
+                let read: WorkerJob = Box::new(move |shard| {
+                    let _ =
+                        reply.send(shard.entries.values().map(|entry| entry._pin.bytes()).sum());
+                });
+                worker.jobs.send(read).expect("the worker takes the read");
+                answer.recv().expect("the worker answers the read")
+            })
+            .sum()
+    }
+
     #[must_use]
     pub fn handoff_count(&self) -> u64 {
         self.handoffs.load(std::sync::atomic::Ordering::Relaxed)
