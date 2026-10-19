@@ -549,6 +549,9 @@ pub(crate) fn compute_specifier_replacements(
             },
         ) {
             verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
+            verter_workspace::ResolutionPublication::Unretained(unretained) => {
+                unretained.into_result()
+            }
             verter_workspace::ResolutionPublication::Refused(_) => return None,
         };
         let Some(resolved) = resolved else {
@@ -950,6 +953,9 @@ pub(crate) fn collect_resolved_provider_dependencies(
                         verter_workspace::ResolutionPublication::Admitted(admitted) => {
                             admitted.into_result()
                         }
+                        verter_workspace::ResolutionPublication::Unretained(unretained) => {
+                            unretained.into_result()
+                        }
                         verter_workspace::ResolutionPublication::Refused(_) => return None,
                     };
                     if let Some(result) = result {
@@ -974,6 +980,9 @@ pub(crate) fn collect_resolved_provider_dependencies(
                     ) {
                         verter_workspace::ResolutionPublication::Admitted(admitted) => {
                             admitted.into_result()
+                        }
+                        verter_workspace::ResolutionPublication::Unretained(unretained) => {
+                            unretained.into_result()
                         }
                         verter_workspace::ResolutionPublication::Refused(_) => return None,
                     };
@@ -1028,6 +1037,9 @@ pub(super) fn collect_resolved_provider_dependencies_from_analyzed_refs(
             ) {
                 verter_workspace::ResolutionPublication::Admitted(admitted) => {
                     admitted.into_result()
+                }
+                verter_workspace::ResolutionPublication::Unretained(unretained) => {
+                    unretained.into_result()
                 }
                 verter_workspace::ResolutionPublication::Refused(_) => return None,
             };
@@ -1598,6 +1610,9 @@ where
         };
         let canonical_id = match resolve_import(parent, &import.source) {
             verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
+            verter_workspace::ResolutionPublication::Unretained(unretained) => {
+                unretained.into_result()
+            }
             verter_workspace::ResolutionPublication::Refused(refusal) => {
                 return Err(refusal);
             }
@@ -1637,6 +1652,9 @@ where
     for import in imports {
         let canonical_id = match resolve_import(parent, &import.source) {
             verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
+            verter_workspace::ResolutionPublication::Unretained(unretained) => {
+                unretained.into_result()
+            }
             verter_workspace::ResolutionPublication::Refused(refusal) => {
                 return Err(refusal);
             }
@@ -1687,6 +1705,9 @@ pub(super) fn collect_priority_carrier_public_api_targets_from_module_references
             ) {
                 verter_workspace::ResolutionPublication::Admitted(admitted) => {
                     admitted.into_result()
+                }
+                verter_workspace::ResolutionPublication::Unretained(unretained) => {
+                    unretained.into_result()
                 }
                 verter_workspace::ResolutionPublication::Refused(_) => return None,
             };

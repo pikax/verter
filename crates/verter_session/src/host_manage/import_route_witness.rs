@@ -141,14 +141,15 @@ pub(crate) fn normalization_builds_for_tests() -> usize {
 impl VerterHost {
     /// `canonical`'s normalization: the one the active request already
     /// made under the same generations — its observations replayed into
-    /// the open witness scopes and its refusal re-noted — or `normalize()`
-    /// run once and kept for the request. `normalize` answers the
-    /// canonical it normalizes to (`None`: itself) and whether a resolution
-    /// it drove was refused, noting that refusal itself.
+    /// the open witness scopes and its refusal or unretained resolution
+    /// re-noted — or `normalize()` run once and kept for the request.
+    /// `normalize` answers the canonical it normalizes to (`None`: itself),
+    /// whether a resolution it drove was refused, and whether one was
+    /// delivered unretained, noting each itself.
     pub(crate) fn request_normalized_canonical(
         &self,
         canonical: &str,
-        normalize: impl FnOnce() -> (Option<std::sync::Arc<str>>, bool),
+        normalize: impl FnOnce() -> (Option<std::sync::Arc<str>>, bool, bool),
     ) -> std::sync::Arc<NormalizedCanonical> {
         let request = verter_type_engine::request_context::current_request_context();
         let key = request.as_ref().map(|_| NormalizedCanonicalKey {
@@ -166,6 +167,11 @@ impl VerterHost {
                         verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                     );
                 }
+                if hit.unretained {
+                    verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                        verter_session_query::facts::reuse::NonCacheableReadReason::UnretainedResolution,
+                    );
+                }
                 return hit;
             }
         }
@@ -173,10 +179,11 @@ impl VerterHost {
         NORMALIZATION_BUILDS.with(|builds| builds.set(builds.get() + 1));
         let normalization = {
             let scope = ResolutionWitnessScope::enter();
-            let (normalized, refused) = normalize();
+            let (normalized, refused, unretained) = normalize();
             std::sync::Arc::new(NormalizedCanonical {
                 normalized,
                 refused,
+                unretained,
                 observed: scope.collected(),
             })
         };
@@ -244,6 +251,27 @@ pub(crate) fn record_resolution_witness<T>(
             frame.extend_from_slice(facts);
         }
     });
+}
+
+/// Mark every enclosing cold compute non-cacheable when it consumes an
+/// unretained resolution.
+///
+/// The answer is complete and current, so the compute stays complete and
+/// its consumer gets the answer; what the compute derives from it must not
+/// be retained in a persistent or shared store, as the resolution itself
+/// was not. Every session entry that converts a resolution outcome into a
+/// publication calls this once, beside [`record_resolution_witness`].
+pub(crate) fn note_unretained_resolution<T>(
+    publication: &verter_workspace::ResolutionPublication<T>,
+) {
+    if matches!(
+        publication,
+        verter_workspace::ResolutionPublication::Unretained(_)
+    ) {
+        verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+            verter_session_query::facts::reuse::NonCacheableReadReason::UnretainedResolution,
+        );
+    }
 }
 
 impl VerterHost {
@@ -375,7 +403,10 @@ impl VerterHost {
                         // projected target is not consumed here.
                         let _ = admitted.into_result();
                     }
-                    verter_workspace::ResolutionPublication::Refused(_) => {
+                    // A witness roots a retained entry, and an unretained
+                    // resolution is one no entry may root on.
+                    verter_workspace::ResolutionPublication::Unretained(_)
+                    | verter_workspace::ResolutionPublication::Refused(_) => {
                         refused = true;
                     }
                 }

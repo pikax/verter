@@ -574,17 +574,22 @@ impl VerterHost {
         let mut blocker_ids = std::collections::BTreeSet::new();
         let mut pending_routes = Vec::new();
 
+        // Blocker hydration and dependency edges are import-graph
+        // bookkeeping: they take every complete answer, retained or not.
         for request in blockers.external_source_requests {
-            let resolved = match self.resolve_for_persistent_state(
-                canonical_id,
-                &request.specifier,
-                verter_session_query::resolution::ResolutionContext {
-                    phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
-                    kind: verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
-                },
-            ) {
-                verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                    let Some(resolution) = admitted.into_result() else {
+            let resolved = match self
+                .resolve_for_persistent_state(
+                    canonical_id,
+                    &request.specifier,
+                    verter_session_query::resolution::ResolutionContext {
+                        phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                        kind: verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
+                    },
+                )
+                .into_delivered()
+            {
+                Some(resolution) => {
+                    let Some(resolution) = resolution else {
                         if request.resolved_canonical_id != canonical_id {
                             blocker_ids.insert(request.resolved_canonical_id);
                         }
@@ -597,7 +602,7 @@ impl VerterHost {
                     ));
                     resolution.source_id
                 }
-                verter_workspace::ResolutionPublication::Refused(_) => return,
+                None => return,
             };
             if resolved != canonical_id {
                 blocker_ids.insert(resolved);
@@ -613,39 +618,40 @@ impl VerterHost {
                     kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
                 },
             );
-            let resolved = match type_resolution {
-                verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                    match admitted.into_result() {
-                        Some(resolution) => {
-                            pending_routes.push((
-                                dep.import_source.clone(),
-                                resolution.source_id.clone(),
-                                verter_session_query::resolution::ResolveRequestKind::TypeImport,
-                            ));
-                            Some(resolution)
-                        }
-                        None => match self.resolve_for_persistent_state(
+            let resolved = match type_resolution.into_delivered() {
+                Some(resolution) => match resolution {
+                    Some(resolution) => {
+                        pending_routes.push((
+                            dep.import_source.clone(),
+                            resolution.source_id.clone(),
+                            verter_session_query::resolution::ResolveRequestKind::TypeImport,
+                        ));
+                        Some(resolution)
+                    }
+                    None => match self
+                        .resolve_for_persistent_state(
                             canonical_id,
                             &dep.import_source,
                             verter_session_query::resolution::ResolutionContext {
-                                phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
-                                kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
+                                phase:
+                                    verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                                kind:
+                                    verter_session_query::resolution::ResolveRequestKind::EsmImport,
                             },
-                        ) {
-                            verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                                admitted.into_result().inspect(|resolution| {
-                                    pending_routes.push((
-                                        dep.import_source.clone(),
-                                        resolution.source_id.clone(),
-                                        verter_session_query::resolution::ResolveRequestKind::EsmImport,
-                                    ));
-                                })
-                            }
-                            verter_workspace::ResolutionPublication::Refused(_) => return,
-                        },
-                    }
-                }
-                verter_workspace::ResolutionPublication::Refused(_) => return,
+                        )
+                        .into_delivered()
+                    {
+                        Some(resolution) => resolution.inspect(|resolution| {
+                            pending_routes.push((
+                                dep.import_source.clone(),
+                                resolution.source_id.clone(),
+                                verter_session_query::resolution::ResolveRequestKind::EsmImport,
+                            ));
+                        }),
+                        None => return,
+                    },
+                },
+                None => return,
             }
             .map(|resolution| resolution.source_id);
             if let Some(resolved) = resolved.filter(|resolved| resolved != canonical_id) {
@@ -726,6 +732,10 @@ impl VerterHost {
         // Session tracer scope so the session-slot admission declines
         // (ReturnOnly never publishes).
         let mut fenced_serve_observed = false;
+        // A complete resolution the retention account declined to keep:
+        // the prefetch follows it, and the compile built on it is served,
+        // never published — the same decline a fenced serve takes.
+        let mut unretained_resolution = false;
         let mut note_serve =
             |serve: &Option<crate::host_manage::prepared_decl::IndexedReadyServe>| {
                 if let Some(serve) = serve {
@@ -754,34 +764,43 @@ impl VerterHost {
                     kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
                 },
             );
-            let resolved = match type_resolution {
-                verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                    match admitted.into_result() {
-                        Some(resolution) => {
-                            Some((resolution, verter_session_query::resolution::ResolveRequestKind::TypeImport))
-                        }
-                        None => match self.resolve_for_persistent_state(
-                            owner_canonical,
-                            &dep.import_source,
-                            verter_session_query::resolution::ResolutionContext {
-                                phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
-                                kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
-                            },
-                        ) {
-                            verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                                admitted.into_result().map(|resolution| {
-                                    (resolution, verter_session_query::resolution::ResolveRequestKind::EsmImport)
-                                })
-                            }
-                            verter_workspace::ResolutionPublication::Refused(_) => {
-                                return CompileTierPrefetchObservation {
-                                    fenced_serve_observed: true,
-                                };
-                            }
+            unretained_resolution |= matches!(
+                type_resolution,
+                verter_workspace::ResolutionPublication::Unretained(_)
+            );
+            let resolved = match type_resolution.into_delivered() {
+                Some(Some(resolution)) => Some((
+                    resolution,
+                    verter_session_query::resolution::ResolveRequestKind::TypeImport,
+                )),
+                Some(None) => {
+                    let runtime_resolution = self.resolve_for_persistent_state(
+                        owner_canonical,
+                        &dep.import_source,
+                        verter_session_query::resolution::ResolutionContext {
+                            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
                         },
+                    );
+                    unretained_resolution |= matches!(
+                        runtime_resolution,
+                        verter_workspace::ResolutionPublication::Unretained(_)
+                    );
+                    match runtime_resolution.into_delivered() {
+                        Some(resolution) => resolution.map(|resolution| {
+                            (
+                                resolution,
+                                verter_session_query::resolution::ResolveRequestKind::EsmImport,
+                            )
+                        }),
+                        None => {
+                            return CompileTierPrefetchObservation {
+                                fenced_serve_observed: true,
+                            };
+                        }
                     }
                 }
-                verter_workspace::ResolutionPublication::Refused(_) => {
+                None => {
                     return CompileTierPrefetchObservation {
                         fenced_serve_observed: true,
                     };
@@ -809,16 +828,21 @@ impl VerterHost {
             } else {
                 verter_session_query::resolution::ResolveRequestKind::EsmImport
             };
-            match self.resolve_for_persistent_state(
+            let publication = self.resolve_for_persistent_state(
                 owner_canonical,
                 import.source.as_str(),
                 verter_session_query::resolution::ResolutionContext {
                     phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
                     kind,
                 },
-            ) {
-                verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                    if let Some(resolution) = admitted.into_result() {
+            );
+            unretained_resolution |= matches!(
+                publication,
+                verter_workspace::ResolutionPublication::Unretained(_)
+            );
+            match publication.into_delivered() {
+                Some(resolution) => {
+                    if let Some(resolution) = resolution {
                         pending_routes.push((
                             import.source.clone(),
                             resolution.source_id.clone(),
@@ -829,7 +853,7 @@ impl VerterHost {
                         }
                     }
                 }
-                verter_workspace::ResolutionPublication::Refused(_) => {
+                None => {
                     return CompileTierPrefetchObservation {
                         fenced_serve_observed: true,
                     };
@@ -873,19 +897,23 @@ impl VerterHost {
                 // specifier that becomes resolvable repairs itself
                 // because the appearance advances exactly the
                 // `PathProbe` the miss observed.
-                let resolved = match self.resolve_for_persistent_state(
+                let publication = self.resolve_for_persistent_state(
                     owner_canonical,
                     &request.specifier,
                     verter_session_query::resolution::ResolutionContext {
                         phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
                         kind: verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
                     },
-                ) {
-                    verter_workspace::ResolutionPublication::Admitted(admitted) => admitted
-                        .into_result()
+                );
+                unretained_resolution |= matches!(
+                    publication,
+                    verter_workspace::ResolutionPublication::Unretained(_)
+                );
+                let resolved = match publication.into_delivered() {
+                    Some(resolution) => resolution
                         .map(|resolution| resolution.source_id)
                         .unwrap_or_else(|| request.resolved_canonical_id.clone()),
-                    verter_workspace::ResolutionPublication::Refused(_) => {
+                    None => {
                         return CompileTierPrefetchObservation {
                             fenced_serve_observed: true,
                         };
@@ -918,7 +946,7 @@ impl VerterHost {
         }
 
         CompileTierPrefetchObservation {
-            fenced_serve_observed,
+            fenced_serve_observed: fenced_serve_observed || unretained_resolution,
         }
     }
 

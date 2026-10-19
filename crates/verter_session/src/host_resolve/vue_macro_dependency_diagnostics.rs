@@ -148,8 +148,14 @@ fn import_backed_surface_arm_is_missing(
         &import.source,
         verter_session_query::resolution::ResolveRequestKind::TypeImport,
     ) {
-        verter_workspace::ResolutionPublication::Admitted(admitted) => {
-            let Some(target) = admitted.into_result() else {
+        verter_workspace::ResolutionPublication::Refused(_) => {
+            verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
+            );
+            false
+        }
+        publication => {
+            let Some(target) = publication.into_delivered().flatten() else {
                 return true;
             };
             let requested = binding.imported_name.as_deref().unwrap_or(&binding.name);
@@ -158,12 +164,6 @@ fn import_backed_surface_arm_is_missing(
                 export_surface_verdict(host, &target, requested, &mut visited, 0),
                 ExportSurfaceVerdict::Absent
             )
-        }
-        verter_workspace::ResolutionPublication::Refused(_) => {
-            verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
-                verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
-            );
-            false
         }
     }
 }
@@ -236,17 +236,15 @@ fn follow_export_surface_route(
         source,
         verter_session_query::resolution::ResolveRequestKind::TypeImport,
     ) {
-        verter_workspace::ResolutionPublication::Admitted(admitted) => {
-            match admitted.into_result() {
-                Some(target) => export_surface_verdict(host, &target, name, visited, depth + 1),
-                None => ExportSurfaceVerdict::Unknowable,
-            }
-        }
         verter_workspace::ResolutionPublication::Refused(_) => {
             verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
                 verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
             );
             ExportSurfaceVerdict::Unknowable
         }
+        publication => match publication.into_delivered().flatten() {
+            Some(target) => export_surface_verdict(host, &target, name, visited, depth + 1),
+            None => ExportSurfaceVerdict::Unknowable,
+        },
     }
 }

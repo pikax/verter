@@ -655,15 +655,13 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
             import_source,
             verter_session_query::resolution::ResolveRequestKind::EsmImport,
         ) {
-            verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                admitted.into_result()?
-            }
             verter_workspace::ResolutionPublication::Refused(_) => {
                 verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                 );
                 return None;
             }
+            publication => publication.into_delivered().flatten()?,
         };
 
         let derived_import_binding = self
@@ -1005,29 +1003,29 @@ impl ExportGraphResolver for HostExportGraphResolver<'_> {
             source,
             verter_session_query::resolution::ResolveRequestKind::EsmImport,
         ) {
-            verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                if let Some(resolved) = admitted.into_result() {
-                    return Some(resolved);
-                }
-            }
             verter_workspace::ResolutionPublication::Refused(_) => {
                 verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                 );
                 return None;
             }
+            publication => {
+                if let Some(resolved) = publication.into_delivered().flatten() {
+                    return Some(resolved);
+                }
+            }
         }
         match self
             .host
             .resolve_type_dependency_canonical(canonical_id, source)
         {
-            verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
             verter_workspace::ResolutionPublication::Refused(_) => {
                 verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                 );
                 None
             }
+            publication => publication.into_delivered().flatten(),
         }
     }
 }

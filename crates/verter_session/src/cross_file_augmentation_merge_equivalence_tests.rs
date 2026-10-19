@@ -178,6 +178,9 @@ fn relative_augmentation_pre_stitch_pipeline_matches_external_control() {
                 verter_workspace::ResolutionPublication::Admitted(admitted) => {
                     admitted.into_result().map(Arc::from)
                 }
+                verter_workspace::ResolutionPublication::Unretained(_) => {
+                    panic!("fixture dependency resolution was not retained")
+                }
                 verter_workspace::ResolutionPublication::Refused(refusal) => {
                     panic!(
                         "fixture dependency resolution was refused: {:?}",
@@ -1804,6 +1807,9 @@ fn live_augmenter_canonicals_for_types(host: &VerterHost) -> Vec<String> {
             {
                 verter_workspace::ResolutionPublication::Admitted(admitted) => {
                     admitted.into_result().map(Arc::from)
+                }
+                verter_workspace::ResolutionPublication::Unretained(unretained) => {
+                    unretained.into_result().map(Arc::from)
                 }
                 verter_workspace::ResolutionPublication::Refused(_) => None,
             },

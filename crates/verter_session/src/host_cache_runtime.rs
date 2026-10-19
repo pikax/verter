@@ -157,6 +157,12 @@ impl VerterHost {
                     verter_workspace::ResolutionPublication::Admitted(admitted) => {
                         admitted.into_result().map(Arc::<str>::from)
                     }
+                    // The complete target answers the probe; the mode it
+                    // selects stays the conservative one, as for a refusal.
+                    verter_workspace::ResolutionPublication::Unretained(unretained) => {
+                        resolution_refused.set(true);
+                        unretained.into_result().map(Arc::<str>::from)
+                    }
                     verter_workspace::ResolutionPublication::Refused(_) => {
                         resolution_refused.set(true);
                         None

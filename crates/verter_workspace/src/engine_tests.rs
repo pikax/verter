@@ -948,11 +948,14 @@ impl verter_session_query::retention::resolution_charge::ResolutionRetentionAcco
 }
 
 /// A complete answer the account refuses to retain is served uncached —
-/// typed as retention pressure, with no slot and no decision — and every
-/// retained answer's charge drains when its importer retires.
+/// typed as retention pressure, delivered as an unretained publication
+/// with its own witness, with no slot and no decision — and every retained
+/// answer's charge drains when its importer retires.
 ///
 /// Mutation recipe: ignore the reservation result and admit the candidate
 /// anyway. The refused resolution then occupies a slot and a decision.
+/// Or let `into_publication` refuse every non-cacheable outcome: the
+/// complete answer is then withheld from its consumer.
 #[test]
 fn refused_retention_serves_complete_answers_uncached_and_owners_drain() {
     let workspace = ownership_workspace();
@@ -973,6 +976,22 @@ fn refused_retention_serves_complete_answers_uncached_and_owners_drain() {
             Some(verter_audit::NonAdmissionReason::RetentionPressure),
             "a refused retention is retention pressure, not a budget or work refusal"
         );
+        match outcome.into_publication() {
+            crate::ResolutionPublication::Unretained(unretained) => {
+                let captured = WorkspaceRead::capture_resolution_world(&workspace)
+                    .expect("an engine-backed workspace publishes a resolution world");
+                assert_eq!(
+                    unretained.result().map(|result| result.source_id.as_str()),
+                    Some(OWNERSHIP_DEP),
+                    "the complete answer is delivered, only not kept"
+                );
+                assert!(
+                    unretained.witness().validates(captured.as_ref()),
+                    "the delivered answer carries its own complete witness"
+                );
+            }
+            other => panic!("retention pressure delivers the answer unretained, got {other:?}"),
+        }
         let after = residency(&workspace);
         assert_eq!(after.slots, baseline.slots, "{after:?}");
         assert_eq!(after.derived_nodes, baseline.derived_nodes, "{after:?}");

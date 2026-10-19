@@ -704,14 +704,12 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                     continue;
                 };
                 let resolved =
-                    match resolve_import_specifier_standalone(host, &canonical_id, import_source) {
-                        verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                            let Some(resolved) = admitted.into_result() else {
-                                continue;
-                            };
-                            resolved
-                        }
-                        verter_workspace::ResolutionPublication::Refused(_) => return false,
+                    match resolve_import_specifier_standalone(host, &canonical_id, import_source)
+                        .into_delivered()
+                    {
+                        Some(Some(resolved)) => resolved,
+                        Some(None) => continue,
+                        None => return false,
                     };
                 if verter_session_query::resolution::path_is_carrier(&resolved) {
                     continue; // a directly-resolved carrier is already handled by the carrier pass
@@ -732,16 +730,12 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                             if verter_session_query::resolution::path_is_carrier(specifier) {
                                 let carrier_id = match resolve_import_specifier_standalone(
                                     host, &resolved, specifier,
-                                ) {
-                                    verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                                        let Some(carrier_id) = admitted.into_result() else {
-                                            continue;
-                                        };
-                                        carrier_id
-                                    }
-                                    verter_workspace::ResolutionPublication::Refused(_) => {
-                                        return false;
-                                    }
+                                )
+                                .into_delivered()
+                                {
+                                    Some(Some(carrier_id)) => carrier_id,
+                                    Some(None) => continue,
+                                    None => return false,
                                 };
                                 if verter_session_query::resolution::path_is_carrier(&carrier_id)
                                     && seen_barrel_carrier.insert(carrier_id.clone())

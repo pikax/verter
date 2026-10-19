@@ -4516,6 +4516,9 @@ impl Engine {
             let complete_answer = cacheable_signature.is_some();
 
             let mut published = false;
+            // The witness of a complete answer the retention account
+            // refused: it is delivered unretained, never withheld.
+            let mut unretained_witness = None;
             if reused {
                 self.vfs_provenance
                     .import_resolution_cache_hit_count
@@ -4625,6 +4628,7 @@ impl Engine {
                         Err(refusal) => {
                             if let Some(reason) = refusal {
                                 admission = SignatureAdmission::NonCacheable(reason);
+                                unretained_witness = Some(entry.signature.clone());
                             }
                             delivery = Some(FlightDelivery {
                                 lane: ResolutionLane::Unretained,
@@ -4721,6 +4725,15 @@ impl Engine {
             );
             input_ledger.release_applied_outputs();
 
+            if let Some(witness) = unretained_witness {
+                return ResolutionOutcome::unretained(
+                    result,
+                    witness,
+                    rejected_exact_targets,
+                    !reused,
+                    reused,
+                );
+            }
             return ResolutionOutcome::new(
                 result,
                 admission,
@@ -5637,12 +5650,17 @@ impl Engine {
                         captured_world,
                         input_ledger,
                     );
-                    match outcome.into_publication() {
-                        crate::ResolutionPublication::Admitted(admitted)
-                            if admitted.result().is_some() =>
-                        {
-                            let result =
-                                admitted.into_result().expect("guarded admitted resolution");
+                    // Import-graph bookkeeping takes every complete answer,
+                    // retained or not.
+                    let answer = match outcome.into_publication() {
+                        crate::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
+                        crate::ResolutionPublication::Unretained(unretained) => {
+                            unretained.into_result()
+                        }
+                        crate::ResolutionPublication::Refused(refusal) => return Err(refusal),
+                    };
+                    match answer {
+                        Some(result) => {
                             if let (Some(key), Some(results)) =
                                 (batch_key, relative_results.as_deref_mut())
                             {
@@ -5650,7 +5668,7 @@ impl Engine {
                             }
                             parsed_resolved.insert(result.source_id);
                         }
-                        crate::ResolutionPublication::Admitted(_) if specifier.starts_with('.') => {
+                        None if specifier.starts_with('.') => {
                             if let (Some(key), Some(results)) =
                                 (batch_key, relative_results.as_deref_mut())
                             {
@@ -5660,8 +5678,7 @@ impl Engine {
                                 .expect("relative specifiers have a relative candidate");
                             unresolved_pairs.push(((normalized, *kind), joined_stem));
                         }
-                        crate::ResolutionPublication::Admitted(_) => {}
-                        crate::ResolutionPublication::Refused(refusal) => return Err(refusal),
+                        None => {}
                     }
                 }
                 crate::types::ParsedEdge::ExternalSrc {
@@ -5688,6 +5705,12 @@ impl Engine {
                                 };
                                 parsed_resolved.insert(result.source_id);
                             }
+                            crate::ResolutionPublication::Unretained(unretained) => {
+                                let Some(result) = unretained.into_result() else {
+                                    continue;
+                                };
+                                parsed_resolved.insert(result.source_id);
+                            }
                             crate::ResolutionPublication::Refused(refusal) => {
                                 return Err(refusal);
                             }
@@ -5708,6 +5731,12 @@ impl Engine {
                         match outcome.into_publication() {
                             crate::ResolutionPublication::Admitted(admitted) => {
                                 let Some(result) = admitted.into_result() else {
+                                    continue;
+                                };
+                                parsed_resolved.insert(result.source_id);
+                            }
+                            crate::ResolutionPublication::Unretained(unretained) => {
+                                let Some(result) = unretained.into_result() else {
                                     continue;
                                 };
                                 parsed_resolved.insert(result.source_id);

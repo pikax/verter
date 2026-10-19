@@ -1297,12 +1297,18 @@ impl crate::VerterHost {
                 kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
             },
         );
-        match outcome
+        let publication = outcome
             .into_publication()
-            .map_result(|target| target.source_id)
-        {
+            .map_result(|target| target.source_id);
+        crate::host_manage::import_route_witness::note_unretained_resolution(&publication);
+        match publication {
             verter_workspace::ResolutionPublication::Admitted(admitted) => {
                 admitted.result().map(|target| Arc::from(target.as_str()))
+            }
+            // The complete target, served and never stored.
+            verter_workspace::ResolutionPublication::Unretained(unretained) => {
+                *provisional = true;
+                unretained.result().map(|target| Arc::from(target.as_str()))
             }
             verter_workspace::ResolutionPublication::Refused(_) => {
                 *provisional = true;

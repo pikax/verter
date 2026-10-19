@@ -129,6 +129,7 @@ mod relation_operand_tests;
 pub(crate) mod relation_reverse_ownership_tests;
 mod relation_variance_tests;
 mod relation_work_tests;
+mod retention_pressure_answer_tests;
 mod return_equation_tests;
 mod semantic_operand_binder_tests;
 /// Unified dead-operand deep-work matrix (cross-operator table over

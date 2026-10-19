@@ -1229,14 +1229,21 @@ where
 }
 
 /// A type-route publication as a resolver context answers it: the admitted
-/// target, or — for a refusal — `None` marked non-cacheable, so a refused
-/// route never becomes a cacheable "not found". Every context answers
-/// through this, whichever resolution snapshot produced the publication.
+/// target; an unretained target, the same complete answer, marking the
+/// compute that reads it non-cacheable so nothing derived from it is
+/// retained; or — for a refusal — `None` marked non-cacheable, so a
+/// refused route never becomes a cacheable "not found". Every context
+/// answers through this, whichever resolution snapshot produced the
+/// publication.
 pub(crate) fn type_route_answer(
     publication: verter_workspace::ResolutionPublication<String>,
 ) -> Option<String> {
     match publication {
         verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
+        verter_workspace::ResolutionPublication::Unretained(unretained) => {
+            note_non_cacheable_read_fan_out(NonCacheableReadReason::UnretainedResolution);
+            unretained.into_result()
+        }
         verter_workspace::ResolutionPublication::Refused(_) => {
             note_non_cacheable_read_fan_out(NonCacheableReadReason::UnrootableRoute);
             None
