@@ -39,7 +39,7 @@ use crate::semantic_query::{
     NodeScopeId, PrimitiveKind, ProjectionMode, ProjectionReductionContext, QueryError,
     QueryResult, ReductionDemand, ResolveDeclKey, ResultCompleteness, ScopeId, SemanticNodeData,
     SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SurfaceMember,
-    SurfaceView, TupleElement, TypeParamDecl, ValueRootKey,
+    SurfaceView, TupleElement, TypeParamDecl,
 };
 
 #[must_use]
@@ -242,22 +242,12 @@ pub(super) struct ProjectionDelivery {
 }
 
 /// A member-path or applied `typeof` a reference projection reads: the
-/// `TypeOf` query reading it now, the namespace-qualified read a member
-/// path falls back to when that one answers no value, and the type
-/// arguments the answer applies.
+/// one `TypeOf` query of its root and member path, and the type arguments
+/// the answer applies.
 pub(super) struct TypeofRead {
     key: SemanticQueryKey,
-    fallback: Option<SemanticQueryKey>,
     type_args: Arc<[SemanticNodeId]>,
     argument_context: ProjectionReductionContext,
-}
-
-/// Where a `typeof` read stands after one of its queries answered.
-enum TypeofReadStep {
-    /// It reads its fallback next.
-    Read(Box<TypeofRead>),
-    /// The reference's projection plan.
-    Plan(ReferenceProjectionPlan),
 }
 
 /// A projection run the caller can resume: the explicit stack of what
@@ -549,22 +539,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         self.typeof_key_with_path(value_root, path, context),
                     );
                 }
-                // A member path whose read answers no value falls back to the
-                // namespace-qualified value its first step names.
-                let fallback = path.first().map(|first| {
-                    let joined: Arc<str> = Arc::from(format!("{}.{first}", value_root.name));
-                    self.typeof_key_with_path(
-                        ValueRootKey {
-                            scope: value_root.scope.clone(),
-                            name: verter_type_expr::OwnedStr::from(joined),
-                        },
-                        verter_type_expr::OwnedSlice::from(&path[1..]),
-                        context,
-                    )
-                });
+                // One root-and-path read owns namespace and value-member
+                // resolution, as where the `typeof` is lowered in place
+                // (`typeof_reference_key`): a member path that answers no
+                // value is a miss, never retried under a joined name that
+                // bypasses the module's export domain.
                 let read = Box::new(TypeofRead {
                     key: self.typeof_key_with_path(value_root, path, context),
-                    fallback,
                     type_args,
                     argument_context: context,
                 });
@@ -801,20 +782,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         node,
                         context,
                         read,
-                    }) => match self.advance_typeof_read(read, delivered) {
-                        // Its fallback is the run's next need.
-                        TypeofReadStep::Read(read) => {
-                            seam.need = Some(read.key.clone());
-                            frames.push(ProjectionFrame::AwaitTypeof {
-                                node,
-                                context,
-                                read,
-                            });
-                        }
-                        TypeofReadStep::Plan(plan) => {
-                            self.install_reference_plan(node, context, plan, memo, frames);
-                        }
-                    },
+                    }) => {
+                        let plan = self.advance_typeof_read(*read, delivered);
+                        self.install_reference_plan(node, context, plan, memo, frames);
+                    }
                     _ => unreachable!("a delivery resumes the node that awaited it"),
                 },
             }
@@ -1377,24 +1348,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         None
     }
 
-    /// Carry a `typeof` read on with what its query answered.
+    /// The projection plan a `typeof` read reaches with what its query
+    /// answered: a read that answered no value is a miss.
     fn advance_typeof_read(
         &self,
-        mut read: Box<TypeofRead>,
+        read: TypeofRead,
         answer: ProjectionDelivery,
-    ) -> TypeofReadStep {
+    ) -> ReferenceProjectionPlan {
         let Some(source_status) = answer.answered else {
-            return match read.fallback.take() {
-                Some(fallback) => {
-                    read.key = fallback;
-                    TypeofReadStep::Read(read)
-                }
-                None => TypeofReadStep::Plan(ReferenceProjectionPlan::Ready(
-                    self.opaque(QueryError::Miss),
-                )),
-            };
+            return ReferenceProjectionPlan::Ready(self.opaque(QueryError::Miss));
         };
-        TypeofReadStep::Plan(if read.type_args.is_empty() {
+        if read.type_args.is_empty() {
             ReferenceProjectionPlan::Ready(answer.node)
         } else {
             ReferenceProjectionPlan::NeedsArgs {
@@ -1405,29 +1369,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 args: read.type_args,
                 argument_context: read.argument_context,
             }
-        })
+        }
     }
 
-    /// Read a `typeof` in place, its fallback included.
-    fn read_typeof_in_place(&self, mut read: Box<TypeofRead>) -> ReferenceProjectionPlan {
-        loop {
-            let answer = match self.execute_type_node(read.key.clone()) {
-                QueryResult::Value(SemanticQueryOutput {
-                    value, provenance, ..
-                }) => ProjectionDelivery {
-                    node: value,
-                    answered: Some(provenance.fact_status),
-                },
-                _ => ProjectionDelivery {
-                    node: self.opaque(QueryError::Miss),
-                    answered: None,
-                },
-            };
-            match self.advance_typeof_read(read, answer) {
-                TypeofReadStep::Read(next) => read = next,
-                TypeofReadStep::Plan(plan) => return plan,
-            }
-        }
+    /// Read a `typeof` in place.
+    fn read_typeof_in_place(&self, read: Box<TypeofRead>) -> ReferenceProjectionPlan {
+        let answer = match self.execute_type_node(read.key.clone()) {
+            QueryResult::Value(SemanticQueryOutput {
+                value, provenance, ..
+            }) => ProjectionDelivery {
+                node: value,
+                answered: Some(provenance.fact_status),
+            },
+            _ => ProjectionDelivery {
+                node: self.opaque(QueryError::Miss),
+                answered: None,
+            },
+        };
+        self.advance_typeof_read(*read, answer)
     }
 
     /// Install a reference's projection plan reached after its `typeof` read

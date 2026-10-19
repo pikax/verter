@@ -726,6 +726,8 @@ fn printing_an_alias_chain_reads_each_alias_a_bounded_number_of_times() {
 /// is on Verter's own work.
 #[test]
 fn a_typeof_over_an_alias_chain_reads_each_link_a_bounded_number_of_times() {
+    use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::{checker_syntax, render_node};
+    use verter_type_engine::semantic_query::{ProjectionMode, ProjectionReductionContext};
     const LENGTH: usize = 200;
     let instantiations = on_this_thread(|| {
         let _trace = super::raise::enable_dispatch_trace_for_test();
@@ -735,15 +737,37 @@ fn a_typeof_over_an_alias_chain_reads_each_link_a_bounded_number_of_times() {
             Default::default(),
             &alias_chain(LENGTH),
             "typeof c",
-            |_, _| (),
-        );
-        super::raise::DISPATCH_TRACE.with(|trace| {
-            trace
-                .borrow()
-                .iter()
-                .filter(|kind| **kind == "Instantiate")
-                .count()
-        })
+            |dispatch, outcome| {
+                // The reads the `typeof` made, counted before its answer is
+                // evaluated for the check below.
+                let instantiations = super::raise::DISPATCH_TRACE.with(|trace| {
+                    trace
+                        .borrow()
+                        .iter()
+                        .filter(|kind| **kind == "Instantiate")
+                        .count()
+                });
+                let node = outcome
+                    .into_complete_node()
+                    .expect("`typeof c` answers completely");
+                let value = dispatch
+                    .normalize_node_for_structural_fact_demand(
+                        node,
+                        ProjectionReductionContext::published(ProjectionMode::Expanded),
+                    )
+                    .into_complete_node()
+                    .expect("`typeof c` evaluates completely");
+                let expected =
+                    checker_syntax::parse(ALIAS_CHAIN_ROWS[0].1).expect("the checker type parses");
+                assert!(
+                    checker_syntax::matches_node(dispatch, value, &expected, 0),
+                    "`typeof c` is {}, got {}",
+                    ALIAS_CHAIN_ROWS[0].1,
+                    render_node(dispatch, value, 0)
+                );
+                instantiations
+            },
+        )
     });
     assert!(
         instantiations <= 4 * LENGTH,
