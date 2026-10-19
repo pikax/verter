@@ -48,12 +48,19 @@ pub enum IndexedValueLiteralMode {
 }
 
 /// One step from a call argument into one of its authored nested
-/// positions: an object literal's member by its statically known key, or
-/// an array literal's element by its index.
+/// positions: an object literal's member by its statically known key, an
+/// array literal's element by its index, or the one element type the
+/// elements of an array literal holding a spread or an elision join into.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum IndexedLiteralStep {
     Member(crate::TypePropertyKey),
     Element(u32),
+    /// The element type of an array literal whose elements are no tuple's
+    /// (a spread or an elision makes their positions unknown). Each
+    /// element, and each element of an array literal a spread spreads, is
+    /// a separate arm of it: it widens its own fresh literals before the
+    /// elements join.
+    Elements,
 }
 
 /// A contributor to an authored position whose literals are REGULAR: the
@@ -119,11 +126,21 @@ pub struct IndexedLiteralProvenance {
 }
 
 /// One step from a declaration's inferred type into a nested position its
-/// initializer writes: an object literal's member by its statically known
-/// key, or an array literal's element type.
+/// initializer writes: an object literal's member, or an array literal's
+/// element type.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DeclaredReadStep {
-    Member(crate::TypePropertyKey),
+    /// The member with the statically known `key` that the authored
+    /// property declared at `at` writes. The declaration span tells the
+    /// position apart from a member of the same key another object writes:
+    /// another object arm of a conditional (`c ? { v: s } : { v: sl }`
+    /// writes two `v` positions, each widened by its own reads), or the
+    /// object literal an inline spread's operand is, whose members the
+    /// spreading object holds as its own.
+    Member {
+        key: crate::TypePropertyKey,
+        at: verter_span::Span,
+    },
     Element,
 }
 

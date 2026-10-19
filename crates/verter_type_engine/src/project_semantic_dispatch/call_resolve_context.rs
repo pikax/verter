@@ -413,6 +413,44 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                     .push((index, position.nested(step, value, contexts, through)));
                             }
                         }
+                        // An array literal holding a spread or an elision: its
+                        // elements join into one element type, typed by the
+                        // contextual type of any element.
+                        Some(SemanticNodeData::Array { element, .. }) => {
+                            let element = *element;
+                            drop(data);
+                            let shape = ArrayLiteralShape {
+                                length: None,
+                                first_spread: Some(0),
+                                last_spread: Some(0),
+                            };
+                            let mut crossed = FxHashSet::default();
+                            let contexts = combined_contexts(
+                                position
+                                    .contexts
+                                    .iter()
+                                    .flat_map(|&contextual| {
+                                        self.contextual_element_types(
+                                            contextual,
+                                            0,
+                                            shape,
+                                            declared,
+                                            &mut crossed,
+                                        )
+                                    })
+                                    .collect(),
+                            );
+                            let through = position.child_through(crossed);
+                            children.push((
+                                0,
+                                position.nested(
+                                    Some(ArgumentPathStep::Elements),
+                                    element,
+                                    contexts,
+                                    through,
+                                ),
+                            ));
+                        }
                         Some(SemanticNodeData::Union(members)) => {
                             let members: Vec<SemanticNodeId> = members.iter().copied().collect();
                             drop(data);
@@ -514,8 +552,22 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     .map(|&param| ContextKeptLiteral { literal, param }),
             );
         }
-        if fresh.is_empty() || contexts.is_empty() {
+        if fresh.is_empty() {
             return Vec::new();
+        }
+        // A position no constituent of the parameter types holds its fresh
+        // literals with no contextual type, which widens them
+        // (`getWidenedLiteralLikeTypeForContextualType` without one). A
+        // deposit widens them as well, unless a regular literal kept for
+        // every parameter the argument reaches is equal to one of them:
+        // the decision is then made here, at the position it is for (`{ v:
+        // "a" as "a", w: "a" }` deposited into a naked `T` keeps `v` alone).
+        if contexts.is_empty() {
+            return if reached.is_empty() {
+                Vec::new()
+            } else {
+                fresh
+            };
         }
         match self.literal_context_of(node, contexts, declared) {
             LiteralContext::Keep => {
@@ -586,6 +638,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         None => continue 'positions,
                     },
                     IndexedLiteralStep::Element(index) => ArgumentPathStep::Element(*index),
+                    IndexedLiteralStep::Elements => ArgumentPathStep::Elements,
                 });
             }
             let separate = position.arms.len() > 1;
@@ -691,6 +744,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             Some(SemanticNodeData::Union(members)) => {
                 PositionShape::Union(members.iter().copied().collect())
             }
+            Some(SemanticNodeData::Array { element, readonly }) => {
+                PositionShape::Array(*element, *readonly)
+            }
             _ => return node,
         };
         match shape {
@@ -738,6 +794,21 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         elements: crate::semantic_query::PayloadArray::from(
                             elements.into_boxed_slice(),
                         ),
+                        readonly,
+                    },
+                )
+            }
+            PositionShape::Array(element, readonly) => {
+                let typed = children
+                    .first()
+                    .map_or(element, |(_, child)| typed_child(child));
+                if typed == element {
+                    return node;
+                }
+                graph.intern_preserving_scope(
+                    node,
+                    SemanticNodeData::Array {
+                        element: typed,
                         readonly,
                     },
                 )
@@ -1727,5 +1798,6 @@ enum PositionShape {
     Literal,
     Object(crate::semantic_query::SurfaceView),
     Tuple(Vec<crate::semantic_query::TupleElement>, bool),
+    Array(SemanticNodeId, bool),
     Union(Vec<SemanticNodeId>),
 }
