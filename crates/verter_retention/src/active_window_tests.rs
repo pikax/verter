@@ -1,4 +1,4 @@
-use std::sync::{Arc, Barrier};
+use std::sync::Arc;
 
 use super::*;
 use crate::owned::{ChargeCtx, OwnedHandles, OwnedStr};
@@ -333,7 +333,7 @@ fn concurrent_transitions_at_window_boundaries_are_never_lost() {
                 let mut round = 0usize;
                 while !stop.load(Ordering::Relaxed) {
                     let charge = active_as(&account, &owner, 1 + (worker + round) % 13);
-                    if round % 3 == 0 {
+                    if round.is_multiple_of(3) {
                         drop(charge.commit_retained());
                     } else {
                         drop(charge);
