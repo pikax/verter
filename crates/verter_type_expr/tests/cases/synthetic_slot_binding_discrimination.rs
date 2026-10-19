@@ -9,7 +9,7 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use verter_type_expr::OwnedStr;
 
 use verter_type_expr::{
     type_expr_from_json, SyntheticCarrierKey, SyntheticCarrierSurfaceKind, TypeExpr,
@@ -23,10 +23,10 @@ fn make_key(
     value_node: u64,
 ) -> SyntheticCarrierKey {
     SyntheticCarrierKey {
-        scope_canonical_id: Arc::from(scope),
+        scope_canonical_id: From::from(scope),
         surface_kind,
-        slot_name: slot_name.map(Arc::from),
-        binding_name: Arc::from(binding_name),
+        slot_name: slot_name.map(OwnedStr::new),
+        binding_name: From::from(binding_name),
         value_node,
     }
 }

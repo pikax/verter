@@ -1416,7 +1416,7 @@ fn closed_leaf_object_source(
         });
     }
     Some(SemanticTypeSource::Synthesized(ResolvedLocalShape::Object(
-        Arc::from(synthesized.into_boxed_slice()),
+        From::from(synthesized.into_boxed_slice()),
     )))
 }
 
@@ -1499,7 +1499,7 @@ fn closed_member_path_route_source(
                                 },
                                 path: verter_type_expr::OwnedSlice::default(),
                             },
-                            index_path: Arc::from(index_path.into_boxed_slice()),
+                            index_path: From::from(index_path.into_boxed_slice()),
                         },
                     ),
                 ));
@@ -2415,15 +2415,15 @@ pub(crate) fn publish_merged_bindings(
                     (bounded, true)
                 } else {
                     let carrier = verter_type_expr::SyntheticCarrierKey {
-                        scope_canonical_id: Arc::from(gb.owner_macro.owner.canonical_id.as_ref()),
+                        scope_canonical_id: From::from(gb.owner_macro.owner.canonical_id.as_ref()),
                         surface_kind: verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding,
-                        slot_name: Some(Arc::clone(&slot_name)),
-                        binding_name: Arc::clone(&binding_name),
+                        slot_name: Some(verter_type_expr::OwnedStr::from(&slot_name)),
+                        binding_name: verter_type_expr::OwnedStr::from(&binding_name),
                         value_node: gb.value_node.0,
                     };
                     (
                         verter_type_expr::facts::SemanticTypeSource::SyntheticSlotBinding(
-                            Arc::new(carrier),
+                            From::from(carrier),
                         ),
                         true,
                     )

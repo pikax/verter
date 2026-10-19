@@ -635,9 +635,39 @@ fn observe_feature_closure_is_off_for_production_and_its_dev_unification() {
         // closure applies to default/dev, debug, release and no-debug-assertions.
         // Checking cfg(profile) with metadata would falsely claim build proof;
         // the repository's build lanes independently compile those profiles.
+        // The flight-rendezvous seam is test machinery its own crates' test
+        // edges carry, so only the normal/build closures must stay free of it.
+        let support_seeds: BTreeSet<(String, String)> = metadata
+            .packages
+            .iter()
+            .filter(|package| package.features.contains_key("soak-support"))
+            .map(|package| (package.name.clone(), "soak-support".into()))
+            .collect();
+        assert!(
+            support_seeds.contains(&("verter_type_engine".into(), "soak-support".into())),
+            "the engine declares the soak-support seam"
+        );
+        let shipped_union: BTreeSet<PackageFeature> = production
+            .iter()
+            .filter(|(_, include_dev, _, _)| !include_dev)
+            .flat_map(|(_, _, enabled, _)| enabled.iter().cloned())
+            .collect();
+        let support_forbidden = forbidden_closure(
+            root,
+            target,
+            &metadata,
+            &support_seeds,
+            &[],
+            &shipped_union,
+            &mut defaults,
+        );
         for (package, include_dev, enabled, _) in production {
-            let violations = violations(&metadata, &enabled, &forbidden);
-            assert!(violations.is_empty(), "{package} target={target} dev={include_dev}: optional observation features enabled: {violations:?}");
+            let observed = violations(&metadata, &enabled, &forbidden);
+            assert!(observed.is_empty(), "{package} target={target} dev={include_dev}: optional observation features enabled: {observed:?}");
+            if !include_dev {
+                let support = violations(&metadata, &enabled, &support_forbidden);
+                assert!(support.is_empty(), "{package} target={target}: soak-support enabled in a shipped closure: {support:?}");
+            }
         }
     }
     eprintln!("feature closure work: {} Cargo tree runs", TREE_RUNS.get());
