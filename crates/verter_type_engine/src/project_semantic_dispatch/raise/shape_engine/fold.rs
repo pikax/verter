@@ -660,10 +660,16 @@ fn fold_object_spread_program<
     );
     match projection {
         QueryResult::Value(formula) => {
-            if let Some(closed) = formula.closed() {
+            if formula.all_alternatives_closed() {
                 let mut alternatives = Vec::new();
-                for surface in closed.to_closed_surface_views() {
-                    let Some(surface) = surface else {
+                for alternative in dispatch.object_spread_cursor(&formula) {
+                    let Ok(alternative) = alternative else {
+                        return alg.opaque_sentinel(&QueryError::OpenSurface);
+                    };
+                    let Some(surface) = alternative
+                        .closed()
+                        .and_then(|closed| closed.to_closed_surface_view())
+                    else {
                         return alg.opaque_sentinel(&QueryError::UnrepresentableSurface);
                     };
                     let branch = if surface.closed().is_empty() {

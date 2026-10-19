@@ -3,9 +3,3 @@ error[E0451]: field `alternative` of struct `ClosedObjectProjectionAlternative` 
   |
 6 |     ClosedObjectProjectionAlternative { alternative }
   |                                         ^^^^^^^^^^^ private field
-
-error[E0451]: field `formula` of struct `ClosedObjectProjectionFormula` is private
-  --> tests/cases/compile-fail/object_projection_witness_not_forgeable.rs:10:37
-   |
-10 |     ClosedObjectProjectionFormula { formula }
-   |                                     ^^^^^^^ private field
