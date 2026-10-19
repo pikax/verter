@@ -39,7 +39,8 @@ fn upsert(host: &VerterHost, canonical_id: &str, source: &str) {
 /// One document per cycle, with names distinct per cycle, so no cycle can
 /// be served by what an earlier one left behind. `Out` resolves through a
 /// conditional `infer` over a call signature, so the demand interns
-/// signature records too.
+/// signature records too. `Spare` is never demanded: reading it later lowers
+/// a declaration through the retained parse.
 fn document(cycle: usize) -> (String, [String; 2], String) {
     let canonical = format!("/src/types/shapes{cycle}.ts");
     let symbols = [format!("Box{cycle}"), format!("Out{cycle}")];
@@ -48,7 +49,8 @@ fn document(cycle: usize) -> (String, [String; 2], String) {
          export type Run{cycle} = (input: Props{cycle}) => string;\n\
          export interface Box{cycle} {{ props: Props{cycle}; run: Run{cycle}; label: string }}\n\
          type Ret{cycle}<F> = F extends (...args: any[]) => infer R ? R : never;\n\
-         export type Out{cycle} = Ret{cycle}<Run{cycle}>;\n"
+         export type Out{cycle} = Ret{cycle}<Run{cycle}>;\n\
+         export interface Spare{cycle} {{ spare{cycle}: boolean }}\n"
     );
     (canonical, symbols, source)
 }
@@ -206,6 +208,60 @@ fn assert_workload_charged(during: &HostRetentionSnapshot, baseline: &HostRetent
     );
 }
 
+fn account(host: &VerterHost) -> (usize, usize, usize) {
+    let s = host.retention_snapshot();
+    (s.active_bytes, s.retained_bytes, s.pinned_bytes)
+}
+
+fn total(host: &VerterHost) -> usize {
+    let (active, retained, pinned) = account(host);
+    active + retained + pinned
+}
+
+/// The undemanded declaration lowered through a held artifact.
+fn spare_text(artifact: &verter_session::project_type_store::IndexedReady, cycle: usize) -> String {
+    format!(
+        "{:?}",
+        artifact
+            .shallow_state
+            .type_decl(&format!("Spare{cycle}"))
+            .expect("the undemanded declaration lowers through the retained parse")
+    )
+}
+
+/// The charge a set of readers keeps alive across a close: a control
+/// host runs the same workload, holds exactly the readers in `held` (bit 0
+/// result, bit 1 signature view, bit 2 parse artifact), closes, and reports
+/// the total it keeps above its baseline. Dropping them returns it to baseline.
+fn held_set_charge(held: u8) -> usize {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let baseline = retained(&host.retention_snapshot());
+    let base_total = baseline.active_bytes + baseline.retained_bytes + baseline.pinned_bytes;
+    let (answer, _) = demand(&host, 3);
+    let graph = host.project_type_store().semantic_graph();
+    let view = SemanticReadView::pin(graph.signature_store());
+    let artifact = host
+        .project_type_store()
+        .indexed()
+        .get_any(&document(3).0)
+        .expect("the demanded document has a live artifact");
+    let (answer, view, artifact) = (
+        (held & 1 != 0).then_some(answer),
+        (held & 2 != 0).then_some(view),
+        (held & 4 != 0).then_some(artifact),
+    );
+    host.close();
+    drain(&host);
+    if let Some(artifact) = &artifact {
+        let _ = spare_text(artifact, 3);
+    }
+    let charge = total(&host) - base_total;
+    drop((answer, view, artifact));
+    drain(&host);
+    assert_at_baseline(&host, &baseline, "a lone reader's control");
+    charge
+}
+
 #[test]
 fn one_cold_demand_then_close_returns_the_host_to_its_pre_workload_footprint() {
     let _serial = serial();
@@ -332,15 +388,6 @@ fn held_readers_survive_close_and_release_once_in_either_order() {
             .indexed()
             .get_any(&canonical)
             .expect("the demanded document has a live artifact");
-        let account = |host: &VerterHost| {
-            let s = host.retention_snapshot();
-            (s.active_bytes, s.retained_bytes, s.pinned_bytes)
-        };
-        let total = |host: &VerterHost| {
-            let (active, retained, pinned) = account(host);
-            active + retained + pinned
-        };
-
         let held = account(&host);
         let (clone, artifact_clone, view_again) = (
             answer.clone(),
@@ -355,14 +402,33 @@ fn held_readers_survive_close_and_release_once_in_either_order() {
         drop((clone, artifact_clone, view_again));
         assert_eq!(account(&host), held, "{order}: dropping it frees nothing");
 
+        let total_before_close = total(&host);
         if cache_first {
             host.close();
             drain(&host);
+            let base_total =
+                baseline.active_bytes + baseline.retained_bytes + baseline.pinned_bytes;
+            // The parse reader still serves an undemanded declaration after
+            // the close, identical to a clean host's.
+            let control = VerterHost::new_standalone(HostConfig::default());
+            let (control_answer, _) = demand(&control, 3);
+            let control_artifact = control
+                .project_type_store()
+                .indexed()
+                .get_any(&canonical)
+                .expect("the control has a live artifact");
+            assert_eq!(
+                spare_text(&artifact, 3),
+                spare_text(&control_artifact, 3),
+                "{order}: the held artifact lowers an undemanded declaration after the close"
+            );
+            drop((control_answer, control_artifact));
+            control.close();
+            drain(&control);
             let readers_only = total(&host);
             assert!(
-                readers_only
-                    > baseline.active_bytes + baseline.retained_bytes + baseline.pinned_bytes,
-                "{order}: the readers keep their allocations charged after the close"
+                readers_only <= total_before_close,
+                "{order}: the close creates no charge"
             );
             assert_eq!(
                 render(&host, &answer),
@@ -384,24 +450,26 @@ fn held_readers_survive_close_and_release_once_in_either_order() {
                 baseline.snapshot_leases + 1,
                 "{order}: the close revokes no lease a reader holds"
             );
-            // Each surviving reader owns its own charge: releasing it
-            // alone frees something, and the steps telescope to baseline.
-            let mut before = readers_only;
-            for (name, release) in [
-                ("result", Box::new(|| drop(answer)) as Box<dyn FnOnce()>),
-                ("signature view", Box::new(|| drop(view))),
-                ("parse artifact", Box::new(|| drop(artifact))),
+            // Each release leaves exactly the charge of the readers still held.
+            for (name, remaining, release) in [
+                (
+                    "result",
+                    0b110u8,
+                    Box::new(|| drop(answer)) as Box<dyn FnOnce()>,
+                ),
+                ("signature view", 0b100, Box::new(|| drop(view))),
+                ("parse artifact", 0b000, Box::new(|| drop(artifact))),
             ] {
                 release();
                 drain(&host);
-                let after = total(&host);
-                assert!(
-                    after < before,
-                    "{order}: dropping the held {name} releases its own charge ({before} -> {after})"
+                assert_eq!(
+                    total(&host) - base_total,
+                    held_set_charge(remaining),
+                    "{order}: after dropping the held {name} exactly the others stay charged"
                 );
-                before = after;
             }
         } else {
+            drain(&host);
             let owned = account(&host);
             drop(answer);
             assert_eq!(
@@ -417,15 +485,10 @@ fn held_readers_survive_close_and_release_once_in_either_order() {
             );
             drop(artifact);
             drain(&host);
-            let after_artifact = account(&host);
             assert_eq!(
-                (after_artifact.0, after_artifact.1),
-                (owned.0, owned.1),
-                "{order}: the artifact's drop releases no cache-owned charge"
-            );
-            assert!(
-                after_artifact.2 < owned.2 && after_artifact.2 > baseline.pinned_bytes,
-                "{order}: only the caller's own pin goes; the store keeps its pin"
+                account(&host),
+                owned,
+                "{order}: a non-last artifact handle's drop frees nothing"
             );
             assert_eq!(
                 retained(&host.retention_snapshot()).snapshot_leases,
