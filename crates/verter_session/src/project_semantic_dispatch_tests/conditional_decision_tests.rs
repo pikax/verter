@@ -349,6 +349,37 @@ fn instantiated_and_constrained_conditionals_decide_as_the_checker_decides_them(
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+#[test]
+fn distributive_conditionals_split_boolean_and_boolean_union_members() {
+    let source = r#"
+type __BenchInit = 0;
+type Exclude<T, U> = T extends U ? never : T;
+type Extract<T, U> = T extends U ? T : never;
+type F<T> = T extends true ? "t" : "f";
+type Box<T> = T extends unknown ? { value: T } : never;
+type Wrapped<T> = [T] extends [true] ? "t" : "f";
+type Bool = boolean;
+type BoolUnion = boolean | 0;
+type Nested<T> = T extends infer U ? U extends true ? U : never : never;
+"#;
+    let failures = Matrix::new(source).settings(&ALL).types(&[
+        ("F<boolean>", "\"f\" | \"t\""),
+        ("Exclude<boolean | 0, false>", "0 | true"),
+        ("Exclude<boolean | 0, true>", "0 | false"),
+        ("Extract<boolean | 0, true>", "true"),
+        ("F<Bool>", "\"f\" | \"t\""),
+        ("Exclude<BoolUnion, false>", "0 | true"),
+        ("Box<boolean>", "{ value: false; } | { value: true; }"),
+        ("Nested<boolean>", "true"),
+        ("Wrapped<boolean>", "\"f\""),
+        ("[boolean] extends [true] ? \"t\" : \"f\"", "\"f\""),
+        ("boolean extends true ? \"t\" : \"f\"", "\"f\""),
+        ("F<true>", "\"t\""),
+        ("F<false>", "\"f\""),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// Vue's ref unwrapping read through the real `vue` package, whose
 /// `UnwrapRef` and `Ref` reach the probe through the `vue` → runtime-dom →
 /// runtime-core → reactivity re-export chain. `Ref` declares its value as a
