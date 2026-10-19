@@ -8208,7 +8208,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         demand_canonical: &str,
         name: &str,
     ) -> Option<ResolvedRootIdentity> {
-        use verter_session_query::inputs::contributors::{ContributorOrigin, FileModuleKind};
         if let Some(lib) = self.lib_global_declaration(demand_canonical, name, GlobalSpace::Type) {
             return Some(lib);
         }
@@ -8217,23 +8216,74 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             name,
             verter_session_query::facts::SymbolSpace::Type,
         );
-        let first = population.entries.iter().find(|entry| {
-            !entry.is_automatic_lib
-                && match entry.origin {
-                    ContributorOrigin::DeclareGlobal => entry.module_kind == FileModuleKind::Module,
-                    ContributorOrigin::FileScopeInterface | ContributorOrigin::FileScopeType => {
-                        true
-                    }
-                    ContributorOrigin::FileScopeNamespace
-                    | ContributorOrigin::FileScopeValue
-                    | ContributorOrigin::ModuleAugmentation => false,
-                }
-        })?;
+        let first = population
+            .entries
+            .iter()
+            .find(|entry| declares_global_type(entry))?;
         Some(ResolvedRootIdentity::new_in_owner(
             Arc::clone(&first.artifact_key.canonical),
             first.owner,
             name,
         ))
+    }
+
+    /// Whether `(canonical, owner, name)` addresses ONE declaration of the
+    /// merged GLOBAL type `name` a reference in `demand_canonical` reads —
+    /// the project's library declaration, a module's `declare global`
+    /// contribution or a script's file-scope declaration — not only the
+    /// first of them ([`Self::first_global_declaration`]): every one of
+    /// them declares the same global symbol. A module's `declare global`
+    /// contribution is not addressed by the identity when the module also
+    /// declares a module-scope type of the name, which the identity names
+    /// instead.
+    fn is_global_type_declaration(
+        &self,
+        demand_canonical: &str,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+    ) -> bool {
+        use verter_session_query::inputs::contributors::ContributorOrigin;
+        if self
+            .lib_global_declaration(demand_canonical, name, GlobalSpace::Type)
+            .is_some_and(|lib| lib.canonical_id.as_ref() == canonical && lib.owner == owner)
+        {
+            return true;
+        }
+        let population = self.global_contributors_in(
+            demand_canonical,
+            name,
+            verter_session_query::facts::SymbolSpace::Type,
+        );
+        population.entries.iter().any(|entry| {
+            entry.artifact_key.canonical.as_ref() == canonical
+                && entry.owner == owner
+                && declares_global_type(entry)
+                && (entry.origin != ContributorOrigin::DeclareGlobal
+                    || self
+                        .ctx
+                        .ensure_indexed_ready_serve(canonical)
+                        .is_some_and(|serve| {
+                            !serve.indexed.shallow_state.has_type_symbol_in(owner, name)
+                        }))
+        })
+    }
+
+    /// Whether the declaration `(canonical, owner, name)` a reference in
+    /// `demand_canonical` resolves to is the contextual-this marker: a
+    /// declaration of the GLOBAL `ThisType`, whichever of its declarations
+    /// it is ([`Self::is_global_type_declaration`]). The checker identifies
+    /// the marker by the merged global symbol, so a module-scope
+    /// `ThisType` is an ordinary type.
+    pub(in crate::project_semantic_dispatch) fn names_contextual_this_marker(
+        &self,
+        demand_canonical: &str,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+    ) -> bool {
+        name == "ThisType"
+            && self.is_global_type_declaration(demand_canonical, canonical, owner, name)
     }
 
     /// The declaration the qualified type name `name` (`Ns.T`,
@@ -20365,6 +20415,24 @@ pub fn index_key_probes_for_tests() -> usize {
 struct ClauseBaseSubstitution<'n> {
     names: Vec<&'n str>,
     bases: Vec<SemanticNodeId>,
+}
+
+/// Whether the contributor `entry` declares the GLOBAL type of its name: a
+/// module's `declare global` interface or alias, or a script's file-scope
+/// one. A `declare global` block in a SCRIPT is an error that binds
+/// nothing; the automatic libraries are read through the project's library.
+fn declares_global_type(
+    entry: &verter_session_query::inputs::contributors::ContributorEntry,
+) -> bool {
+    use verter_session_query::inputs::contributors::{ContributorOrigin, FileModuleKind};
+    !entry.is_automatic_lib
+        && match entry.origin {
+            ContributorOrigin::DeclareGlobal => entry.module_kind == FileModuleKind::Module,
+            ContributorOrigin::FileScopeInterface | ContributorOrigin::FileScopeType => true,
+            ContributorOrigin::FileScopeNamespace
+            | ContributorOrigin::FileScopeValue
+            | ContributorOrigin::ModuleAugmentation => false,
+        }
 }
 
 /// A transaction read being recorded across the steps of its work

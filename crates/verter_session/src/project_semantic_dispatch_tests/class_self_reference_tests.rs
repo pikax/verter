@@ -163,6 +163,75 @@ const comp=defineComponent({data(){return {n:3 as const}},methods:{m(){return th
     );
 }
 
+/// The marker is the GLOBAL `ThisType`, merged from every declaration of
+/// it: a module that augments it beside an earlier declaration — another
+/// folder's module augmenting it the same way, as every module of a
+/// project may — still names the marker. TypeScript answers `{ m: 3; }`
+/// both alone and beside the sibling.
+#[test]
+fn contextual_this_marker_is_named_by_every_global_contributor() {
+    let module = "export {}; declare global { interface ThisType<T> {} }
+declare function defineComponent<D,M>(o:{data():D;methods:M & ThisType<D & M>}):{[K in keyof M]:M[K] extends ()=>infer R?R:never};
+const comp=defineComponent({data(){return {n:3 as const}},methods:{m(){return this.n}}});";
+    let rows = [("typeof comp", "{ m: 3; }")];
+    let alone = super::checker_probe_lane_tests::mismatches(module, &rows);
+    assert!(alone.is_empty(), "alone: {}", alone.join("\n"));
+    // The earlier declaration in a sibling module's `declare global`, in
+    // the project's library, and in a global script.
+    for (label, earlier) in [
+        (
+            "beside a sibling",
+            super::checker_probe_lane_tests::ProbeProject {
+                files: &[("a/scenario.ts", module)],
+                ..Default::default()
+            },
+        ),
+        (
+            "beside the library",
+            super::checker_probe_lane_tests::ProbeProject {
+                ambient_lib: Some("interface ThisType<T> {}"),
+                ..Default::default()
+            },
+        ),
+        (
+            "beside a global script",
+            super::checker_probe_lane_tests::ProbeProject {
+                files: &[("a/globals.d.ts", "interface ThisType<T> {}")],
+                ..Default::default()
+            },
+        ),
+    ] {
+        let beside = super::checker_probe_lane_tests::mismatches_in(earlier, module, &rows);
+        assert!(beside.is_empty(), "{label}: {}", beside.join("\n"));
+    }
+}
+
+/// A module's OWN `interface ThisType` — not in `declare global`, beside a
+/// global one in the library, or beside its own `declare global` one — is
+/// a different symbol from the global marker: the literal's receiver stays
+/// its contextual type, as TypeScript reads it.
+#[test]
+fn module_local_this_type_interface_is_not_the_contextual_this_marker() {
+    let local = "interface ThisType<T> { shadow: T }
+export function shadowed() { return { shadow: { n: 4 as const }, m() { return this.shadow.n; } } satisfies ThisType<{ n: 4 }> & { m(): 4 }; }";
+    let rows = [("ReturnType<ReturnType<typeof shadowed>['m']>", "4")];
+    let library = super::checker_probe_lane_tests::ProbeProject {
+        ambient_lib: Some("interface ThisType<T> {}"),
+        ..Default::default()
+    };
+    for (label, project, source) in [
+        ("beside the library", library, local.to_owned()),
+        (
+            "beside its own global one",
+            super::checker_probe_lane_tests::ProbeProject::default(),
+            format!("declare global {{ interface ThisType<T> {{}} }}\n{local}"),
+        ),
+    ] {
+        let failures = super::checker_probe_lane_tests::mismatches_in(project, &source, &rows);
+        assert!(failures.is_empty(), "{label}: {}", failures.join("\n"));
+    }
+}
+
 #[test]
 fn contextual_this_marker_is_inherited_by_nested_literals() {
     assert_contextual_receiver(
