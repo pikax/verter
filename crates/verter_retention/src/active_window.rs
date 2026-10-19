@@ -10,6 +10,25 @@
 //! charged when it opens and raises it only on ACTIVE transitions it
 //! observes until it closes.
 //!
+//! ## Owners and provenance
+//!
+//! A window measures ONE explicit [`ActiveOwner`]: a token minted by the
+//! account ([`SemanticRetentionAccount::mint_active_owner`]) that the
+//! measured workload reserves through
+//! ([`SemanticRetentionAccount::reserve_as`]). The owner travels with the
+//! charge — through sharing, `split_off`, `absorb`, holding adoption,
+//! release and class transfers — and the account keeps each owner's ACTIVE
+//! bytes exactly. A window's peak is its owner's own ACTIVE peak: bytes of
+//! any other owner never raise it, however they overlap the interval.
+//!
+//! A charge reserved without an owner ([`SemanticRetentionAccount::reserve`])
+//! has UNKNOWN provenance and is never implicitly attributed to a window; a
+//! charge that merged bytes of two different owners is UNKNOWN too. An ACTIVE
+//! transition of an UNKNOWN charge inside the interval rejects the witness
+//! ([`ActiveWitnessRejection::UnknownProvenance`]) because it could be the
+//! workload's own work or foreign work. Identified foreign owners are
+//! excluded and merely counted.
+//!
 //! ## What a window observes
 //!
 //! Every transition of the ACTIVE total — an admitted ACTIVE reservation,
@@ -22,27 +41,13 @@
 //! reader's, and overlapping windows report independently.
 //!
 //! The account numbers its ACTIVE transitions; a report carries the
-//! sequence numbers its interval spans and conserves its bytes:
+//! sequence numbers its interval spans and conserves its owner's bytes:
 //! `active_at_open + rise_bytes - fall_bytes == active_at_close`.
 //!
-//! ## Attribution
-//!
-//! A charge carries no owner identity, so the window attributes EVERY
-//! ACTIVE transition on the account inside its interval to the measured
-//! workload. That is sound only for a workload running alone on the
-//! process account — the precondition a tooling runner meets by running
-//! the workload in its own process. The window rejects the witness
-//! ([`ActiveWitnessRejection`]) whenever foreign work is detectable:
-//!
-//! - ACTIVE bytes already charged when it opened (pre-window work in
-//!   flight, whose bytes would inflate the peak);
-//! - a transition of a charge minted before it opened (pre-window work
-//!   that settled or grew inside the interval);
-//! - ACTIVE bytes still charged when it closed (work still in flight — an
-//!   unrelated owner, or the workload's own leak).
-//!
 //! Only [`ActiveWindowReport::attributed`] yields a peak a crossing check
-//! may read; a rejected report never satisfies one.
+//! may read; a rejected report never satisfies one. It also rejects the
+//! owner's own ACTIVE bytes charged at open (pre-window work) or still
+//! charged at close (work in flight, or the workload's own leak).
 //!
 //! ## Build availability
 //!
@@ -50,105 +55,130 @@
 //! `test`, `test-support` or the default-off `soak-support` feature, and
 //! [`crate::ACTIVE_OCCUPANCY_WINDOW_AVAILABLE`] reports which. An ordinary
 //! production build carries no window registry, no transition sequence
-//! and no per-charge mint epoch; the account's current occupancy
+//! and no per-charge provenance; the account's current occupancy
 //! ([`crate::SemanticRetentionAccount::snapshot`]) stays available there.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use crate::SemanticRetentionAccount;
+use crate::{ChargeClass, Provenance, RetentionAdmission, SemanticRetentionAccount};
 
 /// The account-side window registry. Every method that mutates it is
 /// called with the account's admission lock held.
 #[derive(Debug, Default)]
 pub(crate) struct ActiveWindows {
-    /// Windows opened so far; a window's epoch is its opening count. A
-    /// charge minted at epoch `e` predates every window whose epoch is
-    /// greater than `e`.
-    epoch: AtomicU64,
+    /// Owners and windows minted so far; ids are their minting order.
+    ids: AtomicU64,
     /// ACTIVE transitions the account has made.
     transitions: AtomicU64,
-    /// Open windows — the transition hooks' lock-free miss path.
+    /// Open windows — the transition hook's lock-free miss path.
     open: AtomicUsize,
-    states: parking_lot::Mutex<Vec<WindowState>>,
+    inner: parking_lot::Mutex<Registry>,
+}
+
+#[derive(Debug, Default)]
+struct Registry {
+    /// Each owner's ACTIVE bytes charged right now; absent means zero.
+    owner_active: HashMap<u64, usize>,
+    states: Vec<WindowState>,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct WindowState {
-    epoch: u64,
+    id: u64,
+    owner: u64,
     opened_at: u64,
     active_at_open: usize,
     peak_active_bytes: usize,
     rise_bytes: usize,
     fall_bytes: usize,
     transitions: u64,
-    pre_window_transitions: u64,
+    foreign_transitions: u64,
+    unknown_transitions: u64,
 }
 
 impl ActiveWindows {
-    /// The epoch a charge minted now carries.
-    pub(crate) fn current_epoch(&self) -> u64 {
-        self.epoch.load(Ordering::Relaxed)
+    fn next_id(&self) -> u64 {
+        self.ids.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    /// Note one ACTIVE transition of a charge minted at `minted_epoch`:
-    /// the ACTIVE total moved by `rise` or `fall` bytes to `active_after`.
-    /// Called with the admission lock held.
-    pub(crate) fn note_locked(
-        &self,
-        minted_epoch: u64,
-        rise: usize,
-        fall: usize,
-        active_after: usize,
-    ) {
+    /// Note one ACTIVE transition of a charge attributed to `owner` (or to
+    /// no one): the ACTIVE total moved by `rise` or `fall` bytes. Called
+    /// with the admission lock held.
+    pub(crate) fn note_locked(&self, owner: Option<u64>, rise: usize, fall: usize) {
         if rise == 0 && fall == 0 {
             return;
         }
         self.transitions.fetch_add(1, Ordering::Relaxed);
+        let mut registry = self.inner.lock();
+        let owner_active = owner.map(|owner| {
+            let active = registry.owner_active.entry(owner).or_default();
+            *active = (*active + rise).saturating_sub(fall);
+            let active = *active;
+            if active == 0 {
+                registry.owner_active.remove(&owner);
+            }
+            active
+        });
         if self.open.load(Ordering::Relaxed) == 0 {
             return;
         }
-        for state in self.states.lock().iter_mut() {
-            state.peak_active_bytes = state.peak_active_bytes.max(active_after);
-            state.rise_bytes += rise;
-            state.fall_bytes += fall;
-            state.transitions += 1;
-            if minted_epoch < state.epoch {
-                state.pre_window_transitions += 1;
+        for state in &mut registry.states {
+            match (owner, owner_active) {
+                (Some(owner), Some(active)) if owner == state.owner => {
+                    state.peak_active_bytes = state.peak_active_bytes.max(active);
+                    state.rise_bytes += rise;
+                    state.fall_bytes += fall;
+                    state.transitions += 1;
+                }
+                (Some(_), _) => state.foreign_transitions += 1,
+                (None, _) => state.unknown_transitions += 1,
             }
         }
     }
 
-    fn open_locked(&self, active: usize) -> u64 {
-        let epoch = self.epoch.fetch_add(1, Ordering::Relaxed) + 1;
-        self.states.lock().push(WindowState {
-            epoch,
+    fn open_locked(&self, owner: u64) -> u64 {
+        let id = self.next_id();
+        let mut registry = self.inner.lock();
+        let active = registry.owner_active.get(&owner).copied().unwrap_or(0);
+        registry.states.push(WindowState {
+            id,
+            owner,
             opened_at: self.transitions.load(Ordering::Relaxed),
             active_at_open: active,
             peak_active_bytes: active,
             rise_bytes: 0,
             fall_bytes: 0,
             transitions: 0,
-            pre_window_transitions: 0,
+            foreign_transitions: 0,
+            unknown_transitions: 0,
         });
         self.open.fetch_add(1, Ordering::Relaxed);
-        epoch
+        id
     }
 
-    fn report_locked(&self, epoch: u64, active: usize, close: bool) -> ActiveWindowReport {
-        let mut states = self.states.lock();
-        let index = states
+    fn report_locked(&self, id: u64, close: bool) -> ActiveWindowReport {
+        let mut registry = self.inner.lock();
+        let index = registry
+            .states
             .iter()
-            .position(|state| state.epoch == epoch)
+            .position(|state| state.id == id)
             .expect("an unfinished window stays registered");
         let state = if close {
             self.open.fetch_sub(1, Ordering::Relaxed);
-            states.swap_remove(index)
+            registry.states.swap_remove(index)
         } else {
-            states[index]
+            registry.states[index]
         };
+        let active = registry
+            .owner_active
+            .get(&state.owner)
+            .copied()
+            .unwrap_or(0);
         ActiveWindowReport {
-            window: ActiveWindowId(state.epoch),
+            window: ActiveWindowId(state.id),
+            owner: ActiveOwnerId(state.owner),
             opened_at: state.opened_at,
             closed_at: self.transitions.load(Ordering::Relaxed),
             active_at_open: state.active_at_open,
@@ -157,23 +187,88 @@ impl ActiveWindows {
             rise_bytes: state.rise_bytes,
             fall_bytes: state.fall_bytes,
             transitions: state.transitions,
-            pre_window_transitions: state.pre_window_transitions,
+            foreign_transitions: state.foreign_transitions,
+            unknown_transitions: state.unknown_transitions,
         }
     }
 }
 
+/// An explicit workload identity bound to ONE account. Reserving through it
+/// ([`SemanticRetentionAccount::reserve_as`]) attributes the charge — and
+/// everything that charge is shared, split, merged or transferred into — to
+/// this owner.
+#[derive(Debug, Clone)]
+pub struct ActiveOwner {
+    account: Arc<SemanticRetentionAccount>,
+    id: u64,
+}
+
+impl ActiveOwner {
+    /// This owner's identity on its account.
+    #[must_use]
+    pub fn id(&self) -> ActiveOwnerId {
+        ActiveOwnerId(self.id)
+    }
+
+    pub(crate) fn assert_bound_to(&self, account: &Arc<SemanticRetentionAccount>) {
+        assert!(
+            Arc::ptr_eq(&self.account, account),
+            "an ACTIVE owner is bound to the account that minted it"
+        );
+    }
+}
+
+/// An owner's identity: its minting order on its account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ActiveOwnerId(u64);
+
+impl ActiveOwnerId {
+    pub(crate) fn raw(self) -> u64 {
+        self.0
+    }
+}
+
 impl SemanticRetentionAccount {
-    /// Open an ACTIVE-occupancy window on this account. See the
-    /// [module docs](crate::active_window) for what it observes and when
-    /// its witness is attributable.
+    /// Mint a fresh workload identity bound to this account.
+    #[must_use]
+    pub fn mint_active_owner(self: &Arc<Self>) -> ActiveOwner {
+        ActiveOwner {
+            account: Arc::clone(self),
+            id: self.active_windows.next_id(),
+        }
+    }
+
+    /// Reserve exactly as [`Self::reserve`], attributing the charge to
+    /// `owner`. Admission, refusal and allocation classification are
+    /// unchanged.
+    ///
+    /// # Panics
+    ///
+    /// When `owner` was minted by a different account.
+    pub fn reserve_as(
+        self: &Arc<Self>,
+        owner: &ActiveOwner,
+        class: ChargeClass,
+        bytes: usize,
+    ) -> RetentionAdmission {
+        self.reserve_with(class, bytes, Provenance::of(owner, self))
+    }
+
+    /// Open an ACTIVE-occupancy window on this account measuring `owner`.
+    /// See the [module docs](crate::active_window) for what it observes and
+    /// when its witness is attributable.
+    ///
+    /// # Panics
+    ///
+    /// When `owner` was minted by a different account.
     #[must_use = "a window measures only until it is finished or dropped"]
-    pub fn open_active_window(self: &Arc<Self>) -> ActiveOccupancyWindow {
+    pub fn open_active_window(self: &Arc<Self>, owner: &ActiveOwner) -> ActiveOccupancyWindow {
+        owner.assert_bound_to(self);
         let _admission_lock = self.lock_aggregate_state();
-        let active = self.active_bytes.load(Ordering::Relaxed);
-        let epoch = self.active_windows.open_locked(active);
+        let id = self.active_windows.open_locked(owner.id);
         ActiveOccupancyWindow {
             account: Some(Arc::clone(self)),
-            epoch,
+            id,
         }
     }
 
@@ -195,14 +290,14 @@ pub struct ActiveWindowId(u64);
 pub struct ActiveOccupancyWindow {
     /// `None` only once finished.
     account: Option<Arc<SemanticRetentionAccount>>,
-    epoch: u64,
+    id: u64,
 }
 
 impl ActiveOccupancyWindow {
     /// This window's identity.
     #[must_use]
     pub fn id(&self) -> ActiveWindowId {
-        ActiveWindowId(self.epoch)
+        ActiveWindowId(self.id)
     }
 
     /// The window so far, without closing it: `closed_at` and
@@ -214,10 +309,7 @@ impl ActiveOccupancyWindow {
             .as_ref()
             .expect("an open window has its account");
         let _admission_lock = account.lock_aggregate_state();
-        let active = account.active_bytes.load(Ordering::Relaxed);
-        account
-            .active_windows
-            .report_locked(self.epoch, active, false)
+        account.active_windows.report_locked(self.id, false)
     }
 
     /// Close the window and report its interval. Transitions after this
@@ -226,10 +318,7 @@ impl ActiveOccupancyWindow {
     pub fn finish(mut self) -> ActiveWindowReport {
         let account = self.account.take().expect("an open window has its account");
         let _admission_lock = account.lock_aggregate_state();
-        let active = account.active_bytes.load(Ordering::Relaxed);
-        account
-            .active_windows
-            .report_locked(self.epoch, active, true)
+        account.active_windows.report_locked(self.id, true)
     }
 }
 
@@ -237,60 +326,63 @@ impl Drop for ActiveOccupancyWindow {
     fn drop(&mut self) {
         if let Some(account) = self.account.take() {
             let _admission_lock = account.lock_aggregate_state();
-            let active = account.active_bytes.load(Ordering::Relaxed);
-            let _ = account
-                .active_windows
-                .report_locked(self.epoch, active, true);
+            let _ = account.active_windows.report_locked(self.id, true);
         }
     }
 }
 
-/// What one window observed of the ACTIVE class.
+/// What one window observed of its owner's ACTIVE bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ActiveWindowReport {
     /// The window this reports.
     pub window: ActiveWindowId,
+    /// The owner it measured.
+    pub owner: ActiveOwnerId,
     /// The account's ACTIVE transition count when the window opened.
     pub opened_at: u64,
     /// The account's ACTIVE transition count when the window closed (or
     /// was observed); transitions numbered `opened_at + 1 ..= closed_at`
     /// fall inside the interval.
     pub closed_at: u64,
-    /// ACTIVE bytes charged when the window opened.
+    /// The owner's ACTIVE bytes charged when the window opened.
     pub active_at_open: usize,
-    /// ACTIVE bytes charged when the window closed (or was observed).
+    /// The owner's ACTIVE bytes charged when the window closed (or was
+    /// observed).
     pub active_at_close: usize,
-    /// The most ACTIVE bytes charged at once inside the interval, counting
-    /// the bytes charged at open.
+    /// The most ACTIVE bytes the owner held at once inside the interval,
+    /// counting the bytes charged at open.
     pub peak_active_bytes: usize,
-    /// ACTIVE bytes added inside the interval.
+    /// ACTIVE bytes the owner added inside the interval.
     pub rise_bytes: usize,
-    /// ACTIVE bytes removed inside the interval.
+    /// ACTIVE bytes the owner removed inside the interval.
     pub fall_bytes: usize,
-    /// ACTIVE transitions inside the interval.
+    /// The owner's ACTIVE transitions inside the interval.
     pub transitions: u64,
-    /// Of those, transitions of charges minted before the window opened.
-    pub pre_window_transitions: u64,
+    /// ACTIVE transitions of other identified owners inside the interval;
+    /// excluded from every figure above.
+    pub foreign_transitions: u64,
+    /// ACTIVE transitions of charges with unknown or mixed provenance inside
+    /// the interval.
+    pub unknown_transitions: u64,
 }
 
 impl ActiveWindowReport {
-    /// The interval's peak as the measured workload's own, or why it is
-    /// not attributable to it. See the [module docs](crate::active_window).
+    /// The interval's peak as the measured owner's own, or why it is not
+    /// attributable to it. See the [module docs](crate::active_window).
     ///
     /// # Errors
     ///
-    /// The first detectable foreign contribution: pre-window ACTIVE bytes,
-    /// a transition of a pre-window charge, or ACTIVE bytes still charged
-    /// at close.
+    /// Unknown-provenance transitions in the interval, or the owner's own
+    /// ACTIVE bytes charged at open or still charged at close.
     pub fn attributed(&self) -> Result<AttributedActivePeak, ActiveWitnessRejection> {
+        if self.unknown_transitions > 0 {
+            return Err(ActiveWitnessRejection::UnknownProvenance {
+                transitions: self.unknown_transitions,
+            });
+        }
         if self.active_at_open > 0 {
             return Err(ActiveWitnessRejection::ActiveAtOpen {
                 bytes: self.active_at_open,
-            });
-        }
-        if self.pre_window_transitions > 0 {
-            return Err(ActiveWitnessRejection::PreWindowCharge {
-                transitions: self.pre_window_transitions,
             });
         }
         if self.active_at_close > 0 {
@@ -304,36 +396,36 @@ impl ActiveWindowReport {
     }
 }
 
-/// An ACTIVE peak attributable to the measured workload.
+/// An ACTIVE peak attributable to the measured owner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AttributedActivePeak {
-    /// The most ACTIVE bytes the workload held at once.
+    /// The most ACTIVE bytes the owner held at once.
     pub peak_active_bytes: usize,
 }
 
 impl AttributedActivePeak {
-    /// Whether the workload's ACTIVE occupancy reached `threshold` bytes.
+    /// Whether the owner's ACTIVE occupancy reached `threshold` bytes.
     #[must_use]
     pub fn crossed(&self, threshold: usize) -> bool {
         self.peak_active_bytes >= threshold
     }
 }
 
-/// Why a window's peak is not attributable to the measured workload.
+/// Why a window's peak is not attributable to the measured owner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveWitnessRejection {
-    /// ACTIVE bytes were already charged when the window opened.
+    /// Charges of unknown or mixed provenance made ACTIVE transitions
+    /// inside the window.
+    UnknownProvenance {
+        /// How many such transitions.
+        transitions: u64,
+    },
+    /// The owner already held ACTIVE bytes when the window opened.
     ActiveAtOpen {
         /// Bytes charged at open.
         bytes: usize,
     },
-    /// Charges minted before the window opened made ACTIVE transitions
-    /// inside it.
-    PreWindowCharge {
-        /// How many such transitions.
-        transitions: u64,
-    },
-    /// ACTIVE bytes were still charged when the window closed.
+    /// The owner still held ACTIVE bytes when the window closed.
     ActiveAtClose {
         /// Bytes charged at close.
         bytes: usize,

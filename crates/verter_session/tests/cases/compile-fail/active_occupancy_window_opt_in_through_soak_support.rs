@@ -7,7 +7,8 @@
 use verter_session::VerterHost;
 
 fn measure(host: &VerterHost) -> Option<usize> {
-    let window = host.open_active_occupancy_window();
+    let owner = host.mint_active_occupancy_owner();
+    let window = host.open_active_occupancy_window(&owner);
     let report = window.finish();
     report.attributed().ok().map(|peak| peak.peak_active_bytes)
 }

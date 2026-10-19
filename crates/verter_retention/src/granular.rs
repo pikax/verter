@@ -115,6 +115,7 @@ impl RetentionCharge {
             "absorb merges charges of one class on one account"
         );
         self.bytes += other.bytes;
+        self.provenance = self.provenance.merged(other.provenance);
         // The absorbed charge's bytes are this charge's now: it must not
         // release them.
         other.account = None;
