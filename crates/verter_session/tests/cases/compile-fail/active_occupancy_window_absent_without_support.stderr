@@ -1,0 +1,5 @@
+error[E0599]: no method named `open_active_occupancy_window` found for reference `&VerterHost` in the current scope
+ --> tests/cases/compile-fail/active_occupancy_window_absent_without_support.rs:8:24
+  |
+8 |     let _window = host.open_active_occupancy_window();
+  |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&VerterHost`

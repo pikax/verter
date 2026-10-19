@@ -782,6 +782,8 @@ A document CLOSE is the moment its edited versions become unreachable, and the c
 
 `$/verter/getStatistics` reports the host's retained object set under `retention` (live and retired artifact versions, captured roots, parse-snapshot leases, carrier candidates and lanes, semantic nodes, memo entries, shape entries, flow-slice entries, mapper fingerprints, charged bytes and pressure refusals), read live from the owning structures. The endurance churn lane (`pnpm --filter @verter/dx-harness test:endurance`, `test/endurance.churn.test.ts`) reads it at every quiesced checkpoint and fails when any counter grows per cycle, alongside the per-window process-tree RSS slope over the criterion's 1000 cycles and the pressure-refusal count.
 
+**ACTIVE-occupancy witness.** `VerterHost::open_active_occupancy_window()` (only under `test`, `test-support` or the default-off `verter_session/soak-support`) opens a measurement window on the same aggregate account `retention_snapshot()` reads and the host's semantic stores charge; `finish().attributed()` gives the peak ACTIVE bytes of a workload that ran alone on the process account, or a typed rejection when pre-window or still-in-flight ACTIVE work is detectable. Build the soak/tooling runner with `--features verter_session/soak-support`; semantics: `/type-cache-architecture` → Aggregate retention account → ACTIVE-occupancy windows.
+
 ### Freeze Prevention (Fast Typing)
 
 Three layers prevent tokio runtime starvation during rapid typing:

@@ -167,6 +167,32 @@ component's co-resident members). A charge stored beside a cache entry
 outlives an eviction for as long as a reader snapshot holds the entry —
 which is correct, because the bytes are still resident.
 
+**ACTIVE-occupancy windows** (`verter_retention/src/active_window.rs`,
+optional test/tooling state compiled only under `test`, `test-support` or
+the default-off `soak-support` — forwarded by
+`verter_session_query/soak-support` and `verter_session/soak-support`;
+`ACTIVE_OCCUPANCY_WINDOW_AVAILABLE` reports the build). The snapshot's
+`peak_total_bytes` mixes every class over the account's lifetime, so it
+cannot say how much ACTIVE a given workload held. `open_active_window()`
+(host route: `VerterHost::open_active_occupancy_window`) registers a window
+under the admission lock; every ACTIVE transition — ACTIVE reserve and
+release, `commit_retained`, an ACTIVE `transfer_to_pinned`, a holds slice
+joining an ACTIVE charge through `holding` — is noted to each open window
+under that same lock, so opening or finishing races lose nothing, and each
+window keeps its own counters (overlapping windows never reset each other).
+`finish()` / `observe()` return an `ActiveWindowReport`: the interval on the
+account's ACTIVE transition sequence, ACTIVE at open and close, the peak
+(starting at the ACTIVE charged at open, never a lifetime maximum), rise and
+fall bytes (`open + rise − fall == close`) and the transitions of charges
+minted before the window opened (each charge carries its mint epoch).
+Attribution is to the whole account: `attributed()` yields a peak a crossing
+check may read only for a workload alone on the process account, and rejects
+the witness on detectable foreign work — ACTIVE in flight at open, a
+pre-window charge's transition, or ACTIVE still charged at close. A window
+changes no admission decision. Production builds carry no registry, sequence
+or epoch (`ChargeEpoch` is zero-sized there); current occupancy stays in the
+snapshot.
+
 **What a charge measures.** A charge covers the allocations its owner
 keeps reachable, by CAPACITY, under the declared conventions of
 `verter_retention/src/allocation.rs` (heap block = payload rounded to 16 B plus a
