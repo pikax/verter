@@ -19,7 +19,7 @@ impl<'a> AugmentationRequestDriver<'a> {
     pub(crate) fn ensure_populated<R>(
         &self,
         key: &AugmentationTargetKey,
-        resolve_relative_canonical: R,
+        resolve_module_file: R,
         overlay_discriminator: Option<Hash16>,
     ) -> Arc<AugmenterSet>
     where
@@ -42,7 +42,7 @@ impl<'a> AugmentationRequestDriver<'a> {
         // An overlay-scoped key carries session-divergent
         // augmentations and must not poison that base index.
         // Snapshot first, then match off the guard: the resolver invoked
-        // by `augmenter_matches_target` for a relative target re-enters
+        // by `augmenter_matches_target` for a resolved-file target re-enters
         // the store and inserts into `self.artifacts`, which cannot run
         // while a `self.artifacts.iter()` shard guard is held (see
         // `collect_augmenter_candidates`).
@@ -51,24 +51,21 @@ impl<'a> AugmentationRequestDriver<'a> {
         let mut seen_canonicals: rustc_hash::FxHashSet<Arc<str>> = rustc_hash::FxHashSet::default();
         for candidate in &candidates {
             for fact in candidate.augmentations.iter() {
-                let relative = if matches!(
+                let resolved = if matches!(
                     key.target,
                     AugmentationTargetKind::ResolvedRelativeCanonical(_)
                 )
                     && verter_session_query::source::augmentation::fact_augments_resolved_module(
                         fact,
                     ) {
-                    resolve_relative_canonical(
-                        candidate.canonical.as_ref(),
-                        fact.specifier.as_ref(),
-                    )
+                    resolve_module_file(candidate.canonical.as_ref(), fact.specifier.as_ref())
                 } else {
                     None
                 };
                 if verter_session_query::source::augmentation::augmenter_matches_target(
                     fact,
                     key,
-                    relative.as_deref(),
+                    resolved.as_deref(),
                 ) {
                     if seen_canonicals.insert(Arc::clone(&candidate.canonical)) {
                         // Capture the EXACT artifact key — the stitch

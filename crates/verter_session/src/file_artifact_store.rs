@@ -190,10 +190,11 @@ impl FileFacts {
 
 /// Kind of augmentation target.
 ///
-/// Distinguishes external specifiers (`declare module "vue" {}`),
-/// resolved relative paths (`declare module "./local" {}` resolved
-/// against the augmenter), wildcard ambients (`declare module "*.css" {}`),
-/// and the global block (`declare global {}`).
+/// Distinguishes external specifiers (`declare module "vue" {}`), the
+/// module file a relative or package specifier resolves to from the
+/// augmenter (`declare module "./local" {}`, or `declare module "pkg" {}`
+/// in a module), wildcard ambients (`declare module "*.css" {}`), and the
+/// global block (`declare global {}`).
 // Dependency-neutral augmentation key vocabulary shared with the semantic
 // observation boundary. `InternedSpecifier`/`InternedGlobPattern` are fact
 // registry values, and these key types contain no session/host behavior.
@@ -3434,11 +3435,11 @@ impl FileArtifactStore {
     /// nothing (matches TypeScript's own augmentation-visibility
     /// rule).
     ///
-    /// `resolve_relative_canonical` is a caller-supplied hook that
-    /// resolves a `(augmenter_canonical, relative_specifier)` pair to
-    /// a canonical when the queried target is `ResolvedRelativeCanonical`.
-    /// `None` means the augmenter's specifier did not resolve to the
-    /// queried canonical and the augmenter is skipped.
+    /// `resolve` is a caller-supplied hook that resolves an
+    /// `(augmenter_canonical, specifier)` pair — a relative specifier, or a
+    /// package specifier declared in a module — to the module file it names
+    /// when the queried target is `ResolvedRelativeCanonical`. `None` means
+    /// the specifier resolved to no file and the augmenter is skipped.
     #[cfg(any(test, feature = "test-support"))]
     pub fn ensure_augmentation_index_populated<R>(
         &self,

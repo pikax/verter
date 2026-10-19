@@ -67,10 +67,11 @@ impl ProjectIdentity {
 
 /// Kind of augmentation target.
 ///
-/// Distinguishes external specifiers (`declare module "vue" {}`),
-/// resolved relative paths (`declare module "./local" {}` resolved
-/// against the augmenter), wildcard ambients (`declare module "*.css" {}`),
-/// and the global block (`declare global {}`).
+/// Distinguishes external specifiers (`declare module "vue" {}`), the
+/// module file a relative or package specifier resolves to from the
+/// augmenter (`declare module "./local" {}`, or `declare module "pkg" {}`
+/// in a module), wildcard ambients (`declare module "*.css" {}`), and the
+/// global block (`declare global {}`).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AugmentationTargetKind {
     /// `declare module "vue" {}` — bare specifier resolved through the
@@ -80,7 +81,9 @@ pub enum AugmentationTargetKind {
     /// augmenter's own canonical: a relative path (`declare module
     /// "./local" {}`) or a package (`declare module "@vue/reactivity" {}`
     /// in a file of another package), each augmenting the file it resolves
-    /// to.
+    /// to. The variant keeps the audit wire tag's name
+    /// (`AugmentationTargetKindTag::ResolvedRelativeCanonical`); it is not
+    /// a relative-only target.
     ResolvedRelativeCanonical(Arc<str>),
     /// `declare module "*.css" {}` — wildcard ambient module pattern.
     WildcardAmbient(InternedGlobPattern),

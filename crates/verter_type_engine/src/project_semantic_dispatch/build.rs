@@ -6838,7 +6838,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.ctx.augmentation_index_with_resolutions(target.clone());
         // A specifier the index population resolved in this read is not
         // resolved again: the answer is the one the same fold just read.
-        let resolve_rel = |augmenter: &str, spec: &str| -> Option<Arc<str>> {
+        let resolve_module_file = |augmenter: &str, spec: &str| -> Option<Arc<str>> {
             if let Some(resolved) = index_resolutions.get(augmenter).and_then(|specs| {
                 specs
                     .iter()
@@ -7014,14 +7014,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     {
                         continue;
                     }
-                    let relative = if matches!(key.target, verter_session_query::resolution::AugmentationTargetKind::ResolvedRelativeCanonical(_))
+                    let resolved = if matches!(key.target, verter_session_query::resolution::AugmentationTargetKind::ResolvedRelativeCanonical(_))
                     && verter_session_query::source::augmentation::fact_augments_resolved_module(fact) {
-                    resolve_rel(augmenter_canonical, fact.specifier.as_ref())
+                    resolve_module_file(augmenter_canonical, fact.specifier.as_ref())
                 } else { None };
                     if !verter_session_query::source::augmentation::augmenter_matches_target(
                         fact,
                         &key,
-                        relative.as_deref(),
+                        resolved.as_deref(),
                     ) {
                         continue;
                     }

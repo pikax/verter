@@ -60,14 +60,14 @@ pub fn fact_augments_resolved_module(fact: &ModuleAugmentationFact) -> bool {
             || fact.declaring_file == FileModuleKind::Module)
 }
 
-/// Classify an owned augmentation fact against a target. The resolution of
-/// the fact's specifier from the augmenter is supplied by the request owner
-/// for a [`AugmentationTargetKind::ResolvedRelativeCanonical`] target; this
-/// predicate performs no source work.
+/// Classify an owned augmentation fact against a target. The module file the
+/// fact's specifier resolves to from the augmenter is supplied by the request
+/// owner for a [`AugmentationTargetKind::ResolvedRelativeCanonical`] target;
+/// this predicate performs no source work.
 pub fn augmenter_matches_target(
     fact: &ModuleAugmentationFact,
     target_key: &AugmentationTargetKey,
-    resolved_relative_canonical: Option<&str>,
+    resolved_module_file: Option<&str>,
 ) -> bool {
     use crate::resolution::is_relative_specifier;
     let specifier: &str = fact.specifier.as_ref();
@@ -83,7 +83,7 @@ pub fn augmenter_matches_target(
             if !fact_augments_resolved_module(fact) {
                 return false;
             }
-            match resolved_relative_canonical {
+            match resolved_module_file {
                 Some(resolved) => resolved == target_canon.as_ref(),
                 None => false,
             }
