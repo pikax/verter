@@ -257,6 +257,10 @@ pub struct FallthroughPropOverride {
 #[derive(Debug, Clone, Default)]
 pub struct FallthroughPropOverrideSet {
     pub entries: Vec<FallthroughPropOverride>,
+    /// Owns every entry's value node for as long as the set lives: the set
+    /// crosses into the child's fallthrough request after the engine that
+    /// evaluated the overrides is gone.
+    pub roots: verter_type_engine::semantic_query_memo::node_roots::NodeRootSet,
 }
 
 impl FallthroughPropOverrideSet {
@@ -1953,6 +1957,7 @@ mod tests {
                 name: "p".to_string(),
                 node: SemanticNodeId(1),
             }],
+            roots: Default::default(),
         };
         let override_key = fallthrough_cache_key("/App.vue", true, Some(&overrides));
         assert!(
@@ -1964,9 +1969,7 @@ mod tests {
             "the override-bearing key differs from the no-override key"
         );
 
-        let empty = FallthroughPropOverrideSet {
-            entries: Vec::new(),
-        };
+        let empty = FallthroughPropOverrideSet::default();
         assert_eq!(
             fallthrough_cache_key("/App.vue", true, Some(&empty)),
             none_key,
@@ -1984,9 +1987,7 @@ mod tests {
             FallthroughOverrideIdentity::NoOverrides,
             "None maps to NoOverrides"
         );
-        let empty = FallthroughPropOverrideSet {
-            entries: Vec::new(),
-        };
+        let empty = FallthroughPropOverrideSet::default();
         assert_eq!(
             FallthroughOverrideIdentity::for_overrides(Some(&empty)),
             FallthroughOverrideIdentity::NoOverrides,
@@ -1997,6 +1998,7 @@ mod tests {
                 name: "p".to_string(),
                 node: SemanticNodeId(7),
             }],
+            roots: Default::default(),
         };
         assert_eq!(
             FallthroughOverrideIdentity::for_overrides(Some(&non_empty)),

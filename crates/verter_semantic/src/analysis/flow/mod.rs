@@ -36,7 +36,7 @@ use verter_session_query::flow::skeleton::{
     SkeletonWriteCertainty, SkeletonWriteTarget,
 };
 
-use std::sync::Arc;
+use verter_session_query::retention::owned::{OwnedSlice, OwnedStr};
 
 use oxc_ast::ast::{
     ArrowFunctionExpression, AssignmentTarget, AssignmentTargetMaybeDefault,
@@ -364,8 +364,8 @@ struct SkeletonBuilder<'entry> {
     /// typed [`FrameSpan`].
     anchor: u32,
     kind: FunctionBodyKind,
-    names: Vec<Arc<str>>,
-    name_lookup: FxHashMap<Arc<str>, FlowNameId>,
+    names: Vec<OwnedStr>,
+    name_lookup: FxHashMap<OwnedStr, FlowNameId>,
     regions: Vec<SkeletonRegion>,
     region_stack: Vec<usize>,
     bindings: Vec<SkeletonBinding>,
@@ -470,9 +470,9 @@ impl<'entry> SkeletonBuilder<'entry> {
         if let Some(id) = self.name_lookup.get(text) {
             return *id;
         }
-        let interned: Arc<str> = Arc::from(text);
+        let interned = OwnedStr::from(text);
         let id = FlowNameId(u32::try_from(self.names.len()).unwrap_or(u32::MAX));
-        self.names.push(Arc::clone(&interned));
+        self.names.push(interned.clone());
         self.name_lookup.insert(interned, id);
         id
     }
@@ -661,7 +661,7 @@ impl<'entry> SkeletonBuilder<'entry> {
         let consequent = self.open_site(&conditional.consequent, Some(id));
         let alternate = self.open_site(&conditional.alternate, Some(id));
         self.sites[id.index()].shape = SkeletonExprShape::BranchJoin {
-            arms: Arc::from(vec![consequent, alternate].into_boxed_slice()),
+            arms: OwnedSlice::from(vec![consequent, alternate].into_boxed_slice()),
         };
         id
     }
@@ -689,7 +689,7 @@ impl<'entry> SkeletonBuilder<'entry> {
             elements.push(self.open_site(value, Some(id)));
         }
         self.sites[id.index()].shape = SkeletonExprShape::ArrayLiteral {
-            elements: Arc::from(elements.into_boxed_slice()),
+            elements: OwnedSlice::from(elements.into_boxed_slice()),
         };
         id
     }
@@ -743,7 +743,7 @@ impl<'entry> SkeletonBuilder<'entry> {
             }
         }
         self.sites[id.index()].shape = SkeletonExprShape::ObjectLiteral {
-            entries: Arc::from(entries.into_boxed_slice()),
+            entries: OwnedSlice::from(entries.into_boxed_slice()),
         };
         id
     }
@@ -756,19 +756,19 @@ impl<'entry> SkeletonBuilder<'entry> {
         self.sites[site.index()].closures.push(SkeletonClosure {
             span: closure_span,
             correlation: SkeletonClosureCorrelation::Uncorrelated,
-            captures: Arc::from([]),
-            read_captures: Arc::from([]),
+            captures: OwnedSlice::from([]),
+            read_captures: OwnedSlice::from([]),
         });
     }
 
     fn push_read(&mut self, name: FlowNameId, span: verter_span::Span) {
-        self.push_read_path(name, Arc::from(Vec::new().into_boxed_slice()), span);
+        self.push_read_path(name, OwnedSlice::from(Vec::new().into_boxed_slice()), span);
     }
 
     fn push_read_path(
         &mut self,
         name: FlowNameId,
-        path: Arc<[SkeletonPathSegment]>,
+        path: OwnedSlice<SkeletonPathSegment>,
         span: verter_span::Span,
     ) {
         let site = self.footprint_site(span);
@@ -854,12 +854,12 @@ impl<'entry> SkeletonBuilder<'entry> {
         self.sites[site.index()].closures.push(SkeletonClosure {
             span: closure_span,
             correlation,
-            captures: Arc::from(own.into_boxed_slice()),
-            read_captures: Arc::from(own_reads.into_boxed_slice()),
+            captures: OwnedSlice::from(own.into_boxed_slice()),
+            read_captures: OwnedSlice::from(own_reads.into_boxed_slice()),
         });
         for read in reads.iter() {
             let name = self.intern(&read.binding.name);
-            let path: Arc<[_]> = read
+            let path: OwnedSlice<_> = read
                 .path
                 .iter()
                 .map(|segment| SkeletonPathSegment::Static(self.intern(segment)))
@@ -903,7 +903,7 @@ impl<'entry> SkeletonBuilder<'entry> {
     fn push_write(
         &mut self,
         target: SkeletonWriteTarget,
-        path: Arc<[SkeletonPathSegment]>,
+        path: OwnedSlice<SkeletonPathSegment>,
         certainty: SkeletonWriteCertainty,
         value: Option<SkeletonExprSiteId>,
         span: verter_span::Span,
@@ -948,7 +948,7 @@ impl<'entry> SkeletonBuilder<'entry> {
             initializer,
             annotation_span: None,
             destructured,
-            pattern_sites: Arc::from([]),
+            pattern_sites: OwnedSlice::from([]),
             evolving_array: false,
             overload_signature: false,
         });
@@ -957,7 +957,10 @@ impl<'entry> SkeletonBuilder<'entry> {
     /// Open every expression one binding pattern evaluates while it binds
     /// as its own root site, so no footprint is dropped; the pattern's
     /// bindings then own the sites as evaluation effects.
-    fn open_pattern_sites(&mut self, evaluated: Vec<&Expression<'_>>) -> Arc<[SkeletonExprSiteId]> {
+    fn open_pattern_sites(
+        &mut self,
+        evaluated: Vec<&Expression<'_>>,
+    ) -> OwnedSlice<SkeletonExprSiteId> {
         evaluated
             .into_iter()
             .map(|expression| self.open_root_site(expression))
@@ -1011,7 +1014,7 @@ impl<'entry> SkeletonBuilder<'entry> {
                 initializer,
                 destructured,
             );
-            self.bindings.last_mut().unwrap().pattern_sites = Arc::clone(&pattern_sites);
+            self.bindings.last_mut().unwrap().pattern_sites = pattern_sites.clone();
         }
     }
 
@@ -1028,7 +1031,7 @@ impl<'entry> SkeletonBuilder<'entry> {
         let pattern_sites = self.open_pattern_sites(defaults);
         for (name, span, destructured) in identifiers {
             self.push_binding(&name, kind, span, initializer, destructured);
-            self.bindings.last_mut().unwrap().pattern_sites = Arc::clone(&pattern_sites);
+            self.bindings.last_mut().unwrap().pattern_sites = pattern_sites.clone();
             if !destructured {
                 self.bindings.last_mut().unwrap().annotation_span = annotation_span;
             }
@@ -1053,7 +1056,7 @@ impl<'entry> SkeletonBuilder<'entry> {
                 }
                 self.push_write(
                     SkeletonWriteTarget::Named(name),
-                    Arc::from(Vec::new().into_boxed_slice()),
+                    OwnedSlice::from(Vec::new().into_boxed_slice()),
                     certainty,
                     value,
                     verter_span::Span::new(identifier.span.start, identifier.span.end),
@@ -1115,7 +1118,7 @@ impl<'entry> SkeletonBuilder<'entry> {
                             }
                             self.push_write(
                                 SkeletonWriteTarget::Named(name),
-                                Arc::from(Vec::new().into_boxed_slice()),
+                                OwnedSlice::from(Vec::new().into_boxed_slice()),
                                 SkeletonWriteCertainty::Definite,
                                 value,
                                 verter_span::Span::new(identifier.span.start, identifier.span.end),
@@ -1221,7 +1224,7 @@ impl<'entry> SkeletonBuilder<'entry> {
             }
         };
         segments.reverse();
-        let path: Arc<[SkeletonPathSegment]> = Arc::from(segments.into_boxed_slice());
+        let path: OwnedSlice<SkeletonPathSegment> = OwnedSlice::from(segments.into_boxed_slice());
         match root {
             Some(identifier) => {
                 let name = self.intern(identifier.name.as_str());
@@ -1282,7 +1285,7 @@ impl<'entry> SkeletonBuilder<'entry> {
                 let name = self.intern(identifier.name.as_str());
                 self.push_write(
                     SkeletonWriteTarget::Named(name),
-                    Arc::from(Vec::new().into_boxed_slice()),
+                    OwnedSlice::from(Vec::new().into_boxed_slice()),
                     certainty,
                     value,
                     verter_span::Span::new(identifier.span.start, identifier.span.end),
@@ -1304,7 +1307,7 @@ impl<'entry> SkeletonBuilder<'entry> {
             other => {
                 self.push_write(
                     SkeletonWriteTarget::Opaque,
-                    Arc::from(Vec::new().into_boxed_slice()),
+                    OwnedSlice::from(Vec::new().into_boxed_slice()),
                     certainty,
                     value,
                     verter_span::Span::new(other.span().start, other.span().end),
@@ -1326,7 +1329,7 @@ impl<'entry> SkeletonBuilder<'entry> {
                 if collect_static_callee_path(member, &mut names) {
                     let interned: Vec<FlowNameId> =
                         names.iter().map(|name| self.intern(name)).collect();
-                    SkeletonCallee::Path(Arc::from(interned.into_boxed_slice()))
+                    SkeletonCallee::Path(OwnedSlice::from(interned.into_boxed_slice()))
                 } else {
                     SkeletonCallee::Opaque
                 }
@@ -1355,10 +1358,10 @@ impl<'entry> SkeletonBuilder<'entry> {
         );
         FunctionBodySkeleton {
             kind: self.kind,
-            names: Arc::from(self.names.into_boxed_slice()),
-            regions: Arc::from(self.regions.into_boxed_slice()),
-            bindings: Arc::from(self.bindings.into_boxed_slice()),
-            expr_sites: Arc::from(
+            names: OwnedSlice::from(self.names.into_boxed_slice()),
+            regions: OwnedSlice::from(self.regions.into_boxed_slice()),
+            bindings: OwnedSlice::from(self.bindings.into_boxed_slice()),
+            expr_sites: OwnedSlice::from(
                 self.sites
                     .into_iter()
                     .map(|draft| SkeletonExprSite {
@@ -1366,20 +1369,22 @@ impl<'entry> SkeletonBuilder<'entry> {
                         region: draft.region,
                         parent: draft.parent,
                         shape: draft.shape,
-                        reads: Arc::from(draft.reads.into_boxed_slice()),
+                        reads: OwnedSlice::from(draft.reads.into_boxed_slice()),
                         source_type_queries: draft.source_type_queries.into(),
-                        captures: Arc::from(draft.captures.into_boxed_slice()),
-                        capture_bindings: Arc::from(draft.capture_bindings.into_boxed_slice()),
-                        closures: Arc::from(draft.closures.into_boxed_slice()),
-                        calls: Arc::from(draft.calls.into_boxed_slice()),
+                        captures: OwnedSlice::from(draft.captures.into_boxed_slice()),
+                        capture_bindings: OwnedSlice::from(
+                            draft.capture_bindings.into_boxed_slice(),
+                        ),
+                        closures: OwnedSlice::from(draft.closures.into_boxed_slice()),
+                        calls: OwnedSlice::from(draft.calls.into_boxed_slice()),
                     })
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
             ),
-            return_sites: Arc::from(self.return_sites.into_boxed_slice()),
-            yield_sites: Arc::from(self.yield_sites.into_boxed_slice()),
-            writes: Arc::from(self.writes.into_boxed_slice()),
-            closure_assignments: Arc::from([]),
+            return_sites: OwnedSlice::from(self.return_sites.into_boxed_slice()),
+            yield_sites: OwnedSlice::from(self.yield_sites.into_boxed_slice()),
+            writes: OwnedSlice::from(self.writes.into_boxed_slice()),
+            closure_assignments: OwnedSlice::from([]),
             span_index: Default::default(),
             name_index,
         }
@@ -1881,7 +1886,7 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
             crate::analysis::function_program::access::static_member_reference(it)
         {
             let root = self.intern(&reference.name);
-            let path: Arc<[SkeletonPathSegment]> = Arc::from(
+            let path: OwnedSlice<SkeletonPathSegment> = OwnedSlice::from(
                 reference
                     .path
                     .iter()
@@ -1925,11 +1930,11 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
             self.push_read(name, verter_span::Span::new(root.span.start, root.span.end));
             let index = self.open_site(&member.expression, Some(containing));
             let value = self.open_site(&it.right, Some(containing));
-            let path: Arc<[SkeletonPathSegment]> =
-                Arc::from(vec![SkeletonPathSegment::Computed].into_boxed_slice());
+            let path: OwnedSlice<SkeletonPathSegment> =
+                OwnedSlice::from(vec![SkeletonPathSegment::Computed].into_boxed_slice());
             self.push_write(
                 SkeletonWriteTarget::Named(name),
-                Arc::clone(&path),
+                path.clone(),
                 SkeletonWriteCertainty::Definite,
                 Some(value),
                 verter_span::Span::new(member.span.start, member.span.end),
@@ -1975,7 +1980,7 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
                 );
                 self.push_write(
                     SkeletonWriteTarget::Named(name),
-                    Arc::from(Vec::new().into_boxed_slice()),
+                    OwnedSlice::from(Vec::new().into_boxed_slice()),
                     SkeletonWriteCertainty::Definite,
                     None,
                     verter_span::Span::new(it.span.start, it.span.end),
@@ -2077,7 +2082,7 @@ impl<'a> Visit<'a> for SkeletonBuilder<'_> {
                 let value = self.open_site(expression, Some(site));
                 self.push_write(
                     SkeletonWriteTarget::Named(name),
-                    Arc::from(vec![SkeletonPathSegment::Computed].into_boxed_slice()),
+                    OwnedSlice::from(vec![SkeletonPathSegment::Computed].into_boxed_slice()),
                     SkeletonWriteCertainty::Definite,
                     Some(value),
                     verter_span::Span::new(it.span.start, it.span.end),
@@ -2146,8 +2151,7 @@ impl SkeletonBuilder<'_> {
                     for (name, span, destructured) in identifiers {
                         let interned = self.intern(&name);
                         self.push_binding(&name, kind, span, None, destructured);
-                        self.bindings.last_mut().unwrap().pattern_sites =
-                            Arc::clone(&pattern_sites);
+                        self.bindings.last_mut().unwrap().pattern_sites = pattern_sites.clone();
                         if !destructured {
                             let annotation_span =
                                 declarator.type_annotation.as_ref().map(|annotation| {
@@ -2164,7 +2168,7 @@ impl SkeletonBuilder<'_> {
                             target: SkeletonWriteTarget::Named(interned),
                             target_span: Some(span),
                             binding: None,
-                            path: Arc::from(Vec::new().into_boxed_slice()),
+                            path: OwnedSlice::from(Vec::new().into_boxed_slice()),
                             certainty: SkeletonWriteCertainty::Optional,
                             value: Some(source),
                             site: source,

@@ -2,17 +2,15 @@
 //! `TypeExpr::SyntheticSlotBinding` variant traversing the graph
 //! builder + proto encoding pipeline.
 
-use std::sync::Arc;
-
 use verter_protocol::graph::{GraphBuilder, GraphNode};
 use verter_type_expr::{SyntheticCarrierKey, SyntheticCarrierSurfaceKind, TypeExpr};
 
 fn make_carrier() -> TypeExpr {
     TypeExpr::synthetic_slot_binding(SyntheticCarrierKey {
-        scope_canonical_id: Arc::from("/abs/Foo.vue"),
+        scope_canonical_id: From::from("/abs/Foo.vue"),
         surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
-        slot_name: Some(Arc::from("default")),
-        binding_name: Arc::from("controls"),
+        slot_name: Some(From::from("default")),
+        binding_name: From::from("controls"),
         value_node: 42,
     })
 }
@@ -98,10 +96,10 @@ fn graph_builder_synthetic_carrier_roundtrip() {
 #[test]
 fn graph_builder_synthetic_carrier_absent_slot_name_encodes_as_zero() {
     let carrier = TypeExpr::synthetic_slot_binding(SyntheticCarrierKey {
-        scope_canonical_id: Arc::from("/abs/Foo.vue"),
+        scope_canonical_id: From::from("/abs/Foo.vue"),
         surface_kind: SyntheticCarrierSurfaceKind::Binding,
         slot_name: None,
-        binding_name: Arc::from("controls"),
+        binding_name: From::from("controls"),
         value_node: 7,
     });
 

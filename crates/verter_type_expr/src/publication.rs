@@ -1,12 +1,24 @@
 //! Resolved type authority and pure publication selection.
 
-use std::sync::Arc;
-
 use verter_no_storedspan::NoStoredSpan;
 use verter_no_typeexpr::NoTypeExpr;
 
 use crate::facts::{SchemaAbsence, SemanticSourceFailure, SemanticTypeSource, SourcePosition};
 use crate::locators::{AuthoredBodyLocator, MacroPayloadLocator};
+use crate::{OwnedSlice, OwnedStr};
+
+/// A semantic type source a publication shares: a sealed, self-charged
+/// allocation, so a reader's clone keeps it charged after every cache and
+/// result that handed it out let go.
+///
+/// Its value reaches no raw `Arc`: every list and name a source keeps is an
+/// owned handle charged by its own cell, so a leaf a reader clones out of a
+/// borrowed source keeps its own charge.
+pub type SharedTypeSource = verter_retention::owned::Owned<SemanticTypeSource>;
+
+/// A publication's diagnostics: a sealed, self-charged list whose names are
+/// owned strings, each charged by its own cell.
+pub type ResolutionDiagnostics = OwnedSlice<ResolutionDiagnostic>;
 
 /// Semantic exactness of the resolved authority.
 #[derive(
@@ -121,8 +133,20 @@ pub enum ResolutionDiagnosticKind {
 #[serde(rename_all = "camelCase")]
 pub struct ResolutionDiagnostic {
     pub kind: ResolutionDiagnosticKind,
-    pub context: Arc<str>,
-    pub property_name: Option<Arc<str>>,
+    pub context: OwnedStr,
+    pub property_name: Option<OwnedStr>,
+}
+
+impl verter_retention::owned::Measured for ResolutionDiagnostic {
+    /// Both names are owned allocations, each charged by its own cell.
+    fn heap_bytes(&self, aliases: &mut verter_retention::allocation::AliasSet) -> usize {
+        let Self {
+            kind: _,
+            context,
+            property_name,
+        } = self;
+        context.offer(aliases) + property_name.as_ref().map_or(0, |name| name.offer(aliases))
+    }
 }
 
 /// The immutable result authority before representation selection.
@@ -141,7 +165,7 @@ pub struct ResolutionDiagnostic {
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum ResolvedTypeOutcome {
     Present {
-        source: Arc<SemanticTypeSource>,
+        source: SharedTypeSource,
         exactness: ResolutionExactness,
     },
     Absent {
@@ -169,7 +193,7 @@ pub enum ResolvedTypeOutcome {
 pub struct ResolvedTypeAuthority {
     outcome: ResolvedTypeOutcome,
     provenance: ResolutionProvenance,
-    diagnostics: Arc<[ResolutionDiagnostic]>,
+    diagnostics: ResolutionDiagnostics,
 }
 
 impl ResolvedTypeAuthority {
@@ -178,15 +202,15 @@ impl ResolvedTypeAuthority {
         source: SemanticTypeSource,
         exactness: ResolutionExactness,
         provenance: ResolutionProvenance,
-        diagnostics: Arc<[ResolutionDiagnostic]>,
+        diagnostics: impl Into<ResolutionDiagnostics>,
     ) -> Self {
         Self {
             outcome: ResolvedTypeOutcome::Present {
-                source: Arc::new(source),
+                source: SharedTypeSource::new(source),
                 exactness,
             },
             provenance,
-            diagnostics,
+            diagnostics: diagnostics.into(),
         }
     }
 
@@ -194,12 +218,12 @@ impl ResolvedTypeAuthority {
     pub fn absent(
         absence: SchemaAbsence,
         provenance: ResolutionProvenance,
-        diagnostics: Arc<[ResolutionDiagnostic]>,
+        diagnostics: impl Into<ResolutionDiagnostics>,
     ) -> Self {
         Self {
             outcome: ResolvedTypeOutcome::Absent { absence },
             provenance,
-            diagnostics,
+            diagnostics: diagnostics.into(),
         }
     }
 
@@ -207,12 +231,12 @@ impl ResolvedTypeAuthority {
     pub fn failed(
         failure: TypedResolutionFailure,
         provenance: ResolutionProvenance,
-        diagnostics: Arc<[ResolutionDiagnostic]>,
+        diagnostics: impl Into<ResolutionDiagnostics>,
     ) -> Self {
         Self {
             outcome: ResolvedTypeOutcome::Failed { failure },
             provenance,
-            diagnostics,
+            diagnostics: diagnostics.into(),
         }
     }
 
@@ -221,7 +245,7 @@ impl ResolvedTypeAuthority {
         position: &SourcePosition,
         exactness: ResolutionExactness,
         provenance: ResolutionProvenance,
-        diagnostics: Arc<[ResolutionDiagnostic]>,
+        diagnostics: impl Into<ResolutionDiagnostics>,
     ) -> Self {
         match position {
             SourcePosition::Present(source) => {
@@ -248,6 +272,13 @@ impl ResolvedTypeAuthority {
 
     #[must_use]
     pub fn diagnostics(&self) -> &[ResolutionDiagnostic] {
+        &self.diagnostics
+    }
+
+    /// The diagnostics as their owned list, for an owner measuring or
+    /// sharing the list's one charge.
+    #[must_use]
+    pub fn diagnostics_list(&self) -> &ResolutionDiagnostics {
         &self.diagnostics
     }
 
@@ -376,7 +407,7 @@ pub enum AuthoredProvenance {
 #[serde(rename_all = "camelCase")]
 pub struct AuthoredTypeEvidence {
     source: AuthoredTypeSource,
-    text: Arc<str>,
+    text: OwnedStr,
     provenance: AuthoredProvenance,
 }
 
@@ -385,11 +416,11 @@ impl AuthoredTypeEvidence {
     pub fn from_macro_payload(
         _mint: &AuthoredSourceMint,
         locator: &MacroPayloadLocator,
-        text: Arc<str>,
+        text: impl Into<OwnedStr>,
     ) -> Self {
         Self {
             source: AuthoredTypeSource::from_macro_payload(locator),
-            text,
+            text: text.into(),
             provenance: AuthoredProvenance::MacroPayload,
         }
     }
@@ -398,7 +429,7 @@ impl AuthoredTypeEvidence {
     pub fn from_authored_body(
         _mint: &AuthoredSourceMint,
         locator: &AuthoredBodyLocator,
-        text: Arc<str>,
+        text: impl Into<OwnedStr>,
     ) -> Self {
         let provenance = match locator {
             AuthoredBodyLocator::DeclBody(_) => AuthoredProvenance::DeclarationBody,
@@ -408,7 +439,7 @@ impl AuthoredTypeEvidence {
         };
         Self {
             source: AuthoredTypeSource::from_authored_body(locator),
-            text,
+            text: text.into(),
             provenance,
         }
     }
@@ -420,6 +451,13 @@ impl AuthoredTypeEvidence {
 
     #[must_use]
     pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// The text as its owned string, for an owner measuring or sharing its
+    /// one charge.
+    #[must_use]
+    pub fn owned_text(&self) -> &OwnedStr {
         &self.text
     }
 
@@ -436,7 +474,7 @@ impl AuthoredTypeEvidence {
         Self::from_authored_body(
             &mint,
             &self.source.locator().absolutized_against(canonical_id),
-            Arc::clone(&self.text),
+            self.text.clone(),
         )
     }
 }
@@ -720,7 +758,7 @@ pub enum PublicationResult {
         provenance: ResolutionProvenance,
     },
     Published {
-        selected_source: Arc<SemanticTypeSource>,
+        selected_source: SharedTypeSource,
         semantic_authority: SemanticAuthority,
         exactness: ResolutionExactness,
         reason: Box<PublicationReason>,
@@ -789,7 +827,9 @@ pub fn select_type_publication(
             {
                 if proof.matches(source, evidence.source()) {
                     return PublicationResult::Published {
-                        selected_source: Arc::new(evidence.source().to_semantic_source()),
+                        selected_source: SharedTypeSource::new(
+                            evidence.source().to_semantic_source(),
+                        ),
                         semantic_authority: SemanticAuthority::Resolved,
                         exactness: ResolutionExactness::ExactSymbolic,
                         reason: Box::new(PublicationReason::AuthoredSymbolicRepresentation {
@@ -814,7 +854,7 @@ pub fn select_type_publication(
         } => {
             if let (Some(evidence), Some(_)) = (evidence, policy.incomplete_reason) {
                 return PublicationResult::Published {
-                    selected_source: Arc::new(evidence.source().to_semantic_source()),
+                    selected_source: SharedTypeSource::new(evidence.source().to_semantic_source()),
                     semantic_authority: SemanticAuthority::AuthoredFallback,
                     exactness: ResolutionExactness::Incomplete,
                     reason: Box::new(PublicationReason::AuthoredForIncomplete {
@@ -836,13 +876,13 @@ pub fn select_type_publication(
 }
 
 fn resolved_publication(
-    source: &Arc<SemanticTypeSource>,
+    source: &SharedTypeSource,
     exactness: ResolutionExactness,
     reason: PublicationReason,
     provenance: ResolutionProvenance,
 ) -> PublicationResult {
     PublicationResult::Published {
-        selected_source: Arc::clone(source),
+        selected_source: source.clone(),
         semantic_authority: SemanticAuthority::Resolved,
         exactness,
         reason: Box::new(reason),
@@ -889,7 +929,7 @@ impl TypePublication {
         position: &SourcePosition,
         exactness: ResolutionExactness,
         provenance: ResolutionProvenance,
-        diagnostics: Arc<[ResolutionDiagnostic]>,
+        diagnostics: impl Into<ResolutionDiagnostics>,
         evidence: Option<AuthoredTypeEvidence>,
         policy: &PublicationPolicy,
     ) -> Self {
@@ -941,17 +981,17 @@ impl TypePublication {
                 source.absolutized_against(canonical_id),
                 *exactness,
                 self.authority.provenance,
-                Arc::clone(&self.authority.diagnostics),
+                self.authority.diagnostics.clone(),
             ),
             ResolvedTypeOutcome::Absent { absence } => ResolvedTypeAuthority::absent(
                 *absence,
                 self.authority.provenance,
-                Arc::clone(&self.authority.diagnostics),
+                self.authority.diagnostics.clone(),
             ),
             ResolvedTypeOutcome::Failed { failure } => ResolvedTypeAuthority::failed(
                 *failure,
                 self.authority.provenance,
-                Arc::clone(&self.authority.diagnostics),
+                self.authority.diagnostics.clone(),
             ),
         };
         let evidence = self

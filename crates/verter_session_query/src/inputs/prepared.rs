@@ -31,10 +31,10 @@ pub enum PreparationFailure {
 /// only if that exact debt remains unresolved at query exit.
 #[derive(Debug, Clone)]
 pub enum PreparedTypeDeclResolution {
-    Complete(Arc<PreparedTypeDecl>),
+    Complete(verter_retention::heap_size::OwnedValue<PreparedTypeDecl>),
     AuthoredPartial {
         root_identity: ResolvedRootIdentity,
-        declaration: Arc<PreparedTypeDecl>,
+        declaration: verter_retention::heap_size::OwnedValue<PreparedTypeDecl>,
         failure: PreparationFailure,
     },
     Missing,
@@ -67,7 +67,7 @@ pub enum PreparedDeclOutcome<T> {
 
 /// Import binding: maps a local import name to its resolved target.
 /// Used by the declaration-scope solver host to resolve cross-file references.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub struct ImportBinding {
     pub canonical_id: String,
     pub exported_name: String,
@@ -89,7 +89,7 @@ pub struct ImportBinding {
 /// `ordinal` carries the 0-based clause position into the lowered type
 /// parameter's index, disambiguating same-name parameters across multiple
 /// script-setup declarations within one file.
-#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct TypeParamBinding {
     pub name: Arc<str>,
     /// 0-based position in the `<script setup generic="T, U, V">` clause,
@@ -103,7 +103,7 @@ pub struct TypeParamBinding {
 /// The lexical owner is the key of the owner-scope map, so every map here
 /// can stay string-keyed without aliasing a same-name binding from another
 /// script region.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, verter_retention::heap_size::HeapSize)]
 pub struct PreparedOwnerScope {
     /// Resolved imports visible in this lexical owner.
     pub import_bindings: FxHashMap<String, ImportBinding>,
@@ -118,12 +118,22 @@ pub struct PreparedOwnerScope {
 /// Owned declaration-scope record of one prepared file, as the engine reads
 /// it: an observation identity, the owning file's content version, and the
 /// exact scope of every lexical owner.
-#[derive(Clone)]
+#[derive(Clone, verter_retention::heap_size::HeapSize)]
 pub struct PreparedInputRecord {
     pub observation_id: u64,
     pub owner_whole_hash: Hash16,
-    pub owner_scopes: Arc<FxHashMap<TopLevelOwnerId, PreparedOwnerScope>>,
+    pub owner_scopes: OwnerScopes,
 }
+
+/// The exact declaration scope of every lexical owner of one prepared file:
+/// one self-charged cell, shared by the file's bundle and every input record
+/// and reader viewing it.
+pub type OwnerScopes =
+    verter_retention::heap_size::OwnedValue<FxHashMap<TopLevelOwnerId, PreparedOwnerScope>>;
+
+/// A prepared file's input record as the engine holds it: one self-charged
+/// cell, so a record a request keeps past its bundle stays charged.
+pub type PreparedInputRef = verter_retention::heap_size::OwnedValue<PreparedInputRecord>;
 
 impl PreparedInputRecord {
     /// Exact declaration scope for `owner`. An absent owner has no scope; it

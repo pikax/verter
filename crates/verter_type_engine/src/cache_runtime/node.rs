@@ -179,18 +179,16 @@ pub trait ArtifactNode {
     }
 }
 
-/// Claim the evidence pages a cold winner's cacheable `signature` reaches
-/// before the entry is published: the entry retains them, so they join a
-/// refusable reservation on `account`. A refused claim answers the
-/// non-admission reason the winner returns its value under, uncached; the
-/// complete entry still passes the validity fence and projection, which
-/// bubbles its facts before delivering the value without publishing.
-fn claim_published_pages(
-    account: &Arc<SemanticRetentionAccount>,
+/// The reverse-index registrations a candidate with `signature` and
+/// `self_roots` takes: one per distinct canonical among its facts and its
+/// self-roots, the set its store indexes it under.
+fn reverse_index_registrations(
     signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
-) -> Result<(), NonAdmissionReason> {
-    verter_session_query::facts::receipt::claim_evidence_pages(account, &signature.facts)
-        .map_err(|refusal| refusal.non_admission_reason())
+    self_roots: &[Arc<str>],
+) -> usize {
+    let mut seen: rustc_hash::FxHashSet<Arc<str>> = signature.canonical_ids().into_iter().collect();
+    seen.extend(self_roots.iter().cloned());
+    seen.len()
 }
 
 /// The post-compute fence applies equally to retained and unretained entries.
@@ -398,6 +396,16 @@ pub trait QueryNode {
         validated_at_generation: u64,
     ) -> Self::Discriminant;
 
+    /// What a candidate keeping `value` under `key` pays for beyond their
+    /// inline bytes: the heap the key and the value keep that the candidate
+    /// alone owns, and the owned cells the value hands to its callers (see
+    /// [`Candidate::admit`]).
+    fn candidate_footprint(
+        &self,
+        key: &Self::Key,
+        value: &Self::Value,
+    ) -> verter_session_query::retention::Footprint;
+
     /// The cache's retention gate, when it carries a retention budget.
     /// The whole publish lifecycle (post-compute revalidation,
     /// [`Self::publish_core`], and [`Self::evict_deferred`]) runs under
@@ -523,8 +531,6 @@ pub mod query {
                         self_root_canonicals,
                         validated_at_generation,
                     } => {
-                        let retention =
-                            claim_published_pages(&node.retention_account(), &signature);
                         // Build the discriminant from the EXACT generation
                         // the candidate is stamped with, NOT from
                         // `cx.generation()` (the lookup-entry snapshot). A
@@ -536,28 +542,32 @@ pub mod query {
                         // replace-vs-coexist identity contract.
                         let discriminant =
                             node.discriminant(&key, &value, &signature, validated_at_generation);
-                        let entry = Candidate {
+                        let footprint = node.candidate_footprint(&key, &value);
+                        let registrations =
+                            reverse_index_registrations(&signature, &self_root_canonicals);
+                        match Candidate::admit::<N::Key>(
                             discriminant,
                             value,
                             signature,
                             self_root_canonicals,
-                            admission_seq: 0,
                             validated_at_generation,
-                        };
-                        match retention {
-                            Ok(()) => ComputeAdmission::Cacheable(entry),
-                            Err(reason) => {
+                            registrations,
+                            footprint,
+                            &node.retention_account(),
+                        ) {
+                            Ok(entry) => ComputeAdmission::Cacheable(entry),
+                            Err(refused) => {
                                 let _fence = node.publish_fence().map(parking_lot::RwLock::read);
                                 if !computed_signature_is_current(
-                                    &entry.signature,
-                                    &entry.self_root_canonicals,
-                                    entry.validated_at_generation,
+                                    &refused.signature,
+                                    &refused.self_root_canonicals,
+                                    refused.validated_at_generation,
                                     flags,
                                     resolver,
                                 ) {
-                                    return match node.lower_unadmitted(&entry.value) {
+                                    return match node.lower_unadmitted(&refused.value) {
                                         Some(value) => {
-                                            entry.signature.bubble(resolver);
+                                            refused.signature.bubble(resolver);
                                             ComputeAdmission::ReturnOnly {
                                                 value,
                                                 reason: NonAdmissionReason::PostComputeRevalidationFailed,
@@ -566,15 +576,21 @@ pub mod query {
                                         None => ComputeAdmission::Failed,
                                     };
                                 }
-                                entry.signature.bubble(resolver);
+                                refused.signature.bubble(resolver);
                                 ComputeAdmission::ReturnOnly {
-                                    value: entry.value,
-                                    reason,
+                                    value: refused.value,
+                                    reason: NonAdmissionReason::RetentionPressure,
                                 }
                             }
                         }
                     }
                     CacheAdmission::ReturnOnly { value, reason } => {
+                        // Returned uncached: its owned cells are its caller's.
+                        node.candidate_footprint(&key, &value).handles.pin(
+                            verter_session_query::retention::owned::ChargeCtx::new(
+                                &node.retention_account(),
+                            ),
+                        );
                         ComputeAdmission::ReturnOnly { value, reason }
                     }
                     CacheAdmission::Failed { .. } => ComputeAdmission::Failed,

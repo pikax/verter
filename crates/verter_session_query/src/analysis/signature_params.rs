@@ -1,7 +1,7 @@
 //! Name and ordinal facts of a signature-scoped type-parameter list.
 
-use std::sync::Arc;
 use verter_type_expr::facts::{NarrowTypeParam, TypeParamVariance};
+use verter_type_expr::OwnedSlice;
 use verter_type_expr::TypeParam;
 
 /// Narrow a SIGNATURE-scoped type-parameter list (a function declaration's /
@@ -11,7 +11,7 @@ use verter_type_expr::TypeParam;
 /// (a value / method signature's bound is recovered whole-signature when the
 /// signature position is demanded), so no independent bound slot exists to
 /// mint — deliberately NOT a fabricated locator.
-pub fn narrow_signature_type_params(params: &[TypeParam]) -> Arc<[NarrowTypeParam]> {
+pub fn narrow_signature_type_params(params: &[TypeParam]) -> OwnedSlice<NarrowTypeParam> {
     params
         .iter()
         .enumerate()

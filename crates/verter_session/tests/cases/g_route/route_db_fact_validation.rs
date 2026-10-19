@@ -178,7 +178,7 @@ fn lib_env_hash_change_does_not_invalidate_resolved_import_facts() {
 
     let admitted = db.insert_if_absent(
         key.clone(),
-        Arc::new(ResolvedImportFacts::new()),
+        verter_retention::heap_size::OwnedValue::new(ResolvedImportFacts::new()),
         witness.clone(),
     );
     assert!(admitted, "the first admission MUST retain the candidate");
@@ -219,11 +219,21 @@ fn lib_env_hash_change_does_not_invalidate_resolved_import_facts() {
 // ────────────────────────────────────────────────────────────────
 
 trait RouteDbTestExt {
-    fn snapshot_routes_for_test(&self) -> Vec<((String, String), Arc<RouteResult>)>;
+    fn snapshot_routes_for_test(
+        &self,
+    ) -> Vec<(
+        (String, String),
+        verter_retention::heap_size::OwnedValue<RouteResult>,
+    )>;
 }
 
 impl RouteDbTestExt for RouteDb {
-    fn snapshot_routes_for_test(&self) -> Vec<((String, String), Arc<RouteResult>)> {
+    fn snapshot_routes_for_test(
+        &self,
+    ) -> Vec<(
+        (String, String),
+        verter_retention::heap_size::OwnedValue<RouteResult>,
+    )> {
         // Iterate via get_route + AcceptAllView for any keys we
         // already populated in the test. There is no public
         // snapshot_all on RouteDb, so we look up by the known keys.

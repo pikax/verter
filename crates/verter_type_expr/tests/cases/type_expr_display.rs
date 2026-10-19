@@ -303,10 +303,10 @@ fn emits_only_the_parentheses_required_by_typescript_precedence() {
 #[test]
 fn rejects_internal_or_malformed_carriers_instead_of_rendering_unknown() {
     let synthetic = TypeExpr::SyntheticSlotBinding(Arc::new(SyntheticCarrierKey {
-        scope_canonical_id: Arc::from("/src/Component.svelte"),
+        scope_canonical_id: From::from("/src/Component.svelte"),
         surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
-        slot_name: Some(Arc::from("default")),
-        binding_name: Arc::from("item"),
+        slot_name: Some(From::from("default")),
+        binding_name: From::from("item"),
         value_node: 7,
     }));
     assert_eq!(

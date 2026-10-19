@@ -42,6 +42,13 @@ fn candidate_for(
         self_root_canonicals: self_roots,
         admission_seq: 0,
         validated_at_generation: generation,
+        // These store-mechanics fixtures charge nothing of their own.
+        retention: Arc::new(
+            verter_session_query::retention::SemanticRetentionAccount::new(
+                verter_session_query::retention::RetentionLimits::defaults(),
+            )
+            .pin(0),
+        ),
     }
 }
 

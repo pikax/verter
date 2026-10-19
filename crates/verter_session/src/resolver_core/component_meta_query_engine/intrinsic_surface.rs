@@ -17,8 +17,6 @@
 //! honest source degrades to the typed Unknown leaf — never a fabricated
 //! locator minted from a node.
 
-use std::sync::Arc;
-
 use verter_session_query::analysis::type_expand::{
     ExpandedCallSignature, ExpandedIndexSignature, ExpandedObjectShape, ExpandedParameter,
     ExpandedProperty,
@@ -122,6 +120,7 @@ impl ComponentMetaQueryEngine<'_> {
     ) -> Option<ExpandedObjectShape> {
         let dispatch = self.dispatch;
         let raised = dispatch
+            .owning()
             .raise_semantic_type_source_to_hot(
                 tag_source,
                 SourceRaiseContext {
@@ -133,6 +132,7 @@ impl ComponentMetaQueryEngine<'_> {
                     interior_failures: None,
                 },
             )
+            .into_value_in(self.builder())
             .at_optional_boundary()?;
         let view = dispatch.resolve_typeinfo_surface(
             raised.node(),
@@ -365,7 +365,7 @@ fn member_value_source(
     path.push(key());
     SemanticTypeSource::Projected(ProjectedTypeFact::MemberPath {
         base,
-        path: Arc::from(path.into_boxed_slice()),
+        path: From::from(path.into_boxed_slice()),
     })
 }
 
@@ -404,7 +404,7 @@ fn expanded_call_signature_from_node(
             })
             .collect(),
         return_type: leaf_or_degraded_source(dispatch, *return_type),
-        type_parameters: Arc::from(
+        type_parameters: From::from(
             type_parameters
                 .iter()
                 .enumerate()

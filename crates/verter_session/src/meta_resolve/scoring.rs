@@ -201,6 +201,7 @@ mod node_scoring_differential_tests {
         let host = build_host();
         let dispatch =
             &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
 
         let foo = || TypeExpr::named("Foo");
         let idx = || TypeExpr::IndexedAccess {
@@ -267,6 +268,7 @@ mod node_scoring_differential_tests {
         let host = build_host();
         let dispatch =
             &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
 
         // A symbolic current: a bare `Foo` Ref raises to one symbolic carrier
         // (`symbolic_carriers == 1`), so the pre-fix default-score path returns
@@ -297,6 +299,7 @@ mod node_scoring_differential_tests {
         let host = build_host();
         let dispatch =
             &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
 
         let foo = || TypeExpr::named("Foo");
         // selectors → true

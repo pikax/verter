@@ -605,6 +605,7 @@ where
     /// installs a candidate and registers its reverse index exactly as the
     /// cold publish-core path. Mirrors the prior `insert_for_test`.
     #[cfg(any(test, feature = "test-support"))]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn insert_for_test(
         &self,
         key: K,
@@ -612,19 +613,31 @@ where
         signature: ReadSetSignature,
         self_root_canonicals: Arc<[Arc<str>]>,
         validated_at_generation: u64,
+        footprint: verter_session_query::retention::Footprint,
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) {
         let _retention = self.retention_gate.read();
         let discriminant = FactCandidateDiscriminant {
             validated_at_generation,
             facts: Arc::clone(&signature.facts),
         };
-        let candidate = Candidate {
+        let registrations = {
+            let mut seen: rustc_hash::FxHashSet<Arc<str>> =
+                signature.canonical_ids().into_iter().collect();
+            seen.extend(self_root_canonicals.iter().cloned());
+            seen.len()
+        };
+        let Ok(candidate) = Candidate::admit::<K>(
             discriminant,
             value,
             signature,
             self_root_canonicals,
-            admission_seq: 0,
             validated_at_generation,
+            registrations,
+            footprint,
+            account,
+        ) else {
+            panic!("a test insertion is admitted by its account");
         };
         let outcome = self.publish_core(key, candidate);
         self.evict_deferred(outcome.deferred_victims);

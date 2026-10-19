@@ -1,0 +1,14 @@
+error[E0616]: field `delivery` of struct `SemanticQueryOutput` is private
+  --> tests/cases/compile-fail/public_dispatcher_delivery_cannot_detach.rs:10:12
+   |
+10 |     output.delivery
+   |            ^^^^^^^^ private field
+
+error[E0515]: cannot return value referencing function parameter `output`
+  --> tests/cases/compile-fail/public_dispatcher_delivery_cannot_detach.rs:14:5
+   |
+14 |     output.node(output.value).unwrap()
+   |     ------^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |     |
+   |     returns a value referencing data owned by the current function
+   |     `output` is borrowed here

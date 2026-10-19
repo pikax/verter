@@ -191,6 +191,7 @@ fn cache_discipline_builtin_pick_instantiate_repeated_keys_warm() {
     // One dispatcher builds the key's operands and runs every repeat: its
     // construction owner keeps them live.
     let dispatch = host.semantic_dispatch();
+    let _builder = dispatch.enter_construction_scope();
     let base = intern_empty_object(&host);
     let members: Vec<Arc<str>> = vec![Arc::from("a"), Arc::from("b")];
     let mode = ProjectionMode::Expanded;
@@ -258,6 +259,7 @@ fn cache_discipline_builtin_omit_instantiate_repeated_keys_warm() {
     // One dispatcher builds the key's operands and runs every repeat: its
     // construction owner keeps them live.
     let dispatch = host.semantic_dispatch();
+    let _builder = dispatch.enter_construction_scope();
     let base = intern_empty_object(&host);
     let members: Vec<Arc<str>> = vec![Arc::from("x"), Arc::from("y")];
     let mode = ProjectionMode::Expanded;

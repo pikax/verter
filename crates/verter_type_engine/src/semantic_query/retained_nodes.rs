@@ -73,23 +73,7 @@ impl SemanticQueryValue {
                     visit(binding.bound);
                 }
             }
-            Self::FlowReturn(value) => {
-                visit(value.return_type());
-                value
-                    .fresh_literal_arms()
-                    .iter()
-                    .copied()
-                    .for_each(&mut visit);
-                if let Some(wrap) = value.function_wrap() {
-                    wrap.yield_join.into_iter().for_each(&mut visit);
-                    wrap.generator_head.into_iter().for_each(&mut visit);
-                }
-                value
-                    .inferred_predicate()
-                    .and_then(|predicate| predicate.ty)
-                    .into_iter()
-                    .for_each(visit);
-            }
+            Self::FlowReturn(value) => value.for_each_retained_node(visit),
             Self::ResolveCall(value) => match value.as_ref() {
                 ResolvedCallResult::Selected {
                     selected: _,
@@ -167,5 +151,23 @@ impl crate::project_semantic_dispatch::walk::ShallowDiagnostic {
             }
             | Self::PendingFlowRoot { gap: _ } => {}
         }
+    }
+}
+
+impl FlowReturnResult {
+    pub(crate) fn for_each_retained_node(&self, mut visit: impl FnMut(SemanticNodeId)) {
+        visit(self.return_type());
+        self.fresh_literal_arms()
+            .iter()
+            .copied()
+            .for_each(&mut visit);
+        if let Some(wrap) = self.function_wrap() {
+            wrap.yield_join.into_iter().for_each(&mut visit);
+            wrap.generator_head.into_iter().for_each(&mut visit);
+        }
+        self.inferred_predicate()
+            .and_then(|predicate| predicate.ty)
+            .into_iter()
+            .for_each(visit);
     }
 }
