@@ -2424,6 +2424,12 @@ let d22 = { m: () => "a" };
 let d23 = { v: "a" } satisfies { v: string };
 let d24 = { v: ["a", 1] as const, w: [1] };
 let d25 = c ? "a" : ("a" as "a");
+declare const c2: boolean;
+let d26 = c ? (c2 ? "a" : "b") : ("a" as "a");
+let d27 = c ? (c2 ? "a" : "b") : "c";
+let d28 = { v: c ? (c2 ? "a" : sl) : "b" };
+let d29 = [s, "x" as "x"];
+let d30 = { v: s, w: { u: c ? s : sl } };
 "##;
 
 /// A declaration's initializer keeps each literal's freshness per authored
@@ -2432,7 +2438,8 @@ let d25 = c ? "a" : ("a" as "a");
 /// beside a fresh sibling that widens — as a member at any depth, as an
 /// array element, at the top level — and a union of a fresh literal and
 /// its regular counterpart is the regular one. A fresh literal widens
-/// wherever its position closes: a member, an element, an arrow's body.
+/// wherever its position closes: a member, an element, an arrow's body,
+/// and through a conditional nested in a conditional's branch.
 #[test]
 fn declared_literal_occurrences() {
     let failures = Matrix::new(DECLARED_LITERAL_OCCURRENCES).same(&[
@@ -2460,6 +2467,8 @@ fn declared_literal_occurrences() {
             r#"{ v: readonly ["a", 1]; w: number[]; }"#,
         ),
         (Read::Type("typeof d25"), r#""a""#),
+        (Read::Type("typeof d26"), r#"string"#),
+        (Read::Type("typeof d27"), r#"string"#),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
@@ -2468,9 +2477,9 @@ fn declared_literal_occurrences() {
 /// a `const` holding a widening literal reads as that fresh literal, so a
 /// member, an element or a mutable declaration of it widens, and a
 /// conditional of a fresh literal and a stored read of the same literal is
-/// the regular one.
+/// the regular one — through a nested conditional, beside an asserted
+/// element, and through a member read of the declaration.
 #[test]
-#[ignore = "typed gap in the lane: a declaration's inferred type reads a binding's literal as regular, whatever the binding's freshness"]
 fn declared_reads_follow_their_binding_freshness() {
     let failures = Matrix::new(DECLARED_LITERAL_OCCURRENCES).same(&[
         (Read::Type("typeof d7"), r#"{ v: "a"; }"#),
@@ -2480,7 +2489,79 @@ fn declared_reads_follow_their_binding_freshness() {
         (Read::Type("typeof d17"), r#"string | number"#),
         (Read::Type("typeof d18"), r#"string[]"#),
         (Read::Type("typeof d19"), r#"{ v: string; }"#),
+        (Read::Type("typeof d28"), r#"{ v: string; }"#),
+        (Read::Type("typeof d29"), r#"string[]"#),
+        (
+            Read::Type("typeof d30"),
+            r#"{ v: string; w: { u: "a"; }; }"#,
+        ),
+        (Read::Type("typeof d30.w"), r#"{ u: "a"; }"#),
+        (Read::Type("typeof d30.v"), r#"string"#),
     ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+const DECLARED_READ_USES: &str = r##"
+declare const c: boolean;
+declare function pu<T>(x: { v: T }): T;
+declare function id<T>(x: T): T;
+declare function fa<T>(x: T): T[];
+let sl: "a" = "a";
+const s = "a";
+let e1 = s;
+const e2 = { v: s };
+let e3 = c ? "a" : sl;
+let e4 = { v: c ? "a" : sl };
+const e5 = [s];
+let e6 = c ? s : 1;
+const e7 = { o: { v: s, w: sl } };
+let e8 = c ? ("b" as "b") : s;
+let e9 = { v: [s, sl] };
+let e10 = c ? { v: s } : null;
+let e11 = [c ? "a" : sl, "x" as "x"];
+export function m1() { return pu({ v: e1 }); }
+export function m2() { return id(e2); }
+export function m3() { return pu({ v: e3 }); }
+export function m4() { return id(e4); }
+export function m5() { return fa(e5); }
+export function m6() { return pu({ v: e6 }); }
+export function m7() { return id(e7.o); }
+export function m8() { return id(e8); }
+export function m9() { return pu(e4); }
+export function m10() { return id(e9); }
+export function m11() { return id(e10); }
+export function m12() { return id(e7.o.v); }
+export function m13() { return id(e11); }
+"##;
+
+/// A declaration's type, widened by the freshness of the bindings its
+/// initializer reads, is what a later read of it stores: as a call
+/// argument, whole or nested, and through a member read. Each element of an
+/// array literal widens its own reads before the elements join, so a fresh
+/// read beside an equal regular one in another element still widens.
+#[test]
+fn declared_reads_reach_their_stored_uses() {
+    let mut failures = Matrix::new(DECLARED_READ_USES).same(&[
+        (Read::Return(r#"m1"#), r#"string"#),
+        (Read::Return(r#"m2"#), r#"{ v: string; }"#),
+        (Read::Return(r#"m3"#), r#""a""#),
+        (Read::Return(r#"m4"#), r#"{ v: "a"; }"#),
+        (Read::Return(r#"m5"#), r#"string[][]"#),
+        (Read::Return(r#"m6"#), r#"string | number"#),
+        (Read::Return(r#"m7"#), r#"{ v: string; w: "a"; }"#),
+        (Read::Return(r#"m8"#), r#"string"#),
+        (Read::Return(r#"m9"#), r#""a""#),
+        (Read::Return(r#"m10"#), r#"{ v: string[]; }"#),
+        (Read::Return(r#"m12"#), r#"string"#),
+        (Read::Return(r#"m13"#), r#"("a" | "x")[]"#),
+    ]);
+    failures.extend(Matrix::new(DECLARED_READ_USES).four(&[(
+        Read::Return(r#"m11"#),
+        r#"{ v: string; } | null"#,
+        r#"{ v: string; }"#,
+        r#"{ v: string; } | null"#,
+        r#"{ v: string; }"#,
+    )]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

@@ -103,6 +103,45 @@ pub struct IndexedLiteralProvenance {
     pub positions: Arc<[IndexedLiteralPosition]>,
 }
 
+/// One step from a declaration's inferred type into a nested position its
+/// initializer writes: an object literal's member by its statically known
+/// key, or an array literal's element type.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DeclaredReadStep {
+    Member(crate::TypePropertyKey),
+    Element,
+}
+
+/// One position a declaration's initializer closes in a mutable location
+/// whose widening waits on the bindings it reads: a read is as fresh as its
+/// binding (`const s = "a"` is read as the fresh `"a"`, which a mutable
+/// location widens), which only the binding's resolution knows, and a
+/// fresh literal the position holds stays the regular literal a regular
+/// read beside it holds (`c ? "a" : sl` with `sl: "a"` is the regular
+/// `"a"`). The inferred type keeps the position's fresh literals as
+/// written.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeclaredReadPosition {
+    /// The steps from the declaration's inferred type to the position.
+    pub path: Arc<[DeclaredReadStep]>,
+    /// The fresh literals the position holds as written.
+    pub fresh: Arc<[crate::LiteralValue]>,
+    /// The regular literals the position holds as written: asserted or
+    /// const-context literals.
+    pub regular: Arc<[crate::LiteralValue]>,
+    /// The value bindings the position reads.
+    pub reads: Arc<[crate::ValueRef]>,
+}
+
+/// The positions of a declaration's inferred type whose widening waits on
+/// the bindings they read ([`DeclaredReadPosition`]). The elements of an
+/// array literal are each a position of their own at the array's element
+/// type: an element closes before the elements join.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeclaredReadProvenance {
+    pub positions: Arc<[DeclaredReadPosition]>,
+}
+
 /// One indexed call argument.
 #[derive(Debug, Clone, PartialEq, verter_retention::heap_size::HeapSize)]
 pub struct IndexedValueCallArg {
