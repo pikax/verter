@@ -15,8 +15,9 @@
 use std::sync::Arc;
 
 use crate::semantic_query::{
-    PartialReasonSet, PrimitiveKind, ProjectionReductionContext, SemanticNodeData, SemanticNodeId,
-    SurfaceKeyProjection, SurfaceMember,
+    ObjectConstructionEffect, ObjectSpreadProgram, PartialReasonSet, PrimitiveKind,
+    ProjectionReductionContext, SemanticNodeData, SemanticNodeId, SurfaceKeyProjection,
+    SurfaceMember,
 };
 use verter_type_expr::{DeclaredReadPosition, DeclaredReadStep};
 
@@ -144,6 +145,46 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     SemanticNodeData::Object(
                         surface.with_positive_members(Arc::from(members.into_boxed_slice())),
                     ),
+                )
+            }
+            // An object that spreads another addresses a member by the
+            // literal's own last write of its key: a later spread may
+            // override that write, but the write itself is the position.
+            (
+                Some(SemanticNodeData::ObjectSpreadProgram(program)),
+                DeclaredReadStep::Member(key),
+            ) => {
+                let Some(index) = program.effects.iter().rposition(|effect| {
+                    matches!(
+                        effect,
+                        ObjectConstructionEffect::DirectProperty(property)
+                            if property.key.cloned_known().as_ref() == Some(key)
+                    )
+                }) else {
+                    return node;
+                };
+                let ObjectConstructionEffect::DirectProperty(property) = &program.effects[index]
+                else {
+                    unreachable!("the found effect is a direct property write");
+                };
+                let mut property = property.copy();
+                let mut effects: Vec<ObjectConstructionEffect> = program
+                    .effects
+                    .iter()
+                    .map(ObjectConstructionEffect::copy)
+                    .collect();
+                drop(data);
+                let value = self.rewrite_declared_position(property.value, rest, rewrite);
+                if value == property.value {
+                    return node;
+                }
+                property.value = value;
+                effects[index] = ObjectConstructionEffect::DirectProperty(property);
+                graph.intern_preserving_scope(
+                    node,
+                    SemanticNodeData::ObjectSpreadProgram(ObjectSpreadProgram {
+                        effects: crate::semantic_query::PayloadArray::from(effects),
+                    }),
                 )
             }
             (Some(SemanticNodeData::Array { element, readonly }), DeclaredReadStep::Element) => {

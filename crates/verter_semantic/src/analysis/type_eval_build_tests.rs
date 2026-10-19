@@ -2893,7 +2893,7 @@ fn angle_bracket_const_assertion_pins_an_argument_literal_like_as_const() {
     assert_eq!(angle, as_const);
     let angle = angle.expect("the member records its regular contributor");
     assert!(matches!(
-        angle.positions[0].regular.as_ref(),
+        angle.positions[0].arms[0].regular.as_ref(),
         [verter_type_expr::IndexedRegularLiteralSource::Pinned(TypeExpr::Literal(
             verter_type_expr::LiteralValue::String(value)
         ))] if &**value == "a"

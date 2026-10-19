@@ -82,17 +82,32 @@ pub enum IndexedRegularLiteralSource {
 pub struct IndexedLiteralPosition {
     /// The steps from the argument to the position.
     pub path: Arc<[IndexedLiteralStep]>,
-    /// The position's regular contributors: the branches of the conditional
-    /// the position is, or the position's one expression.
+    /// The expressions writing the position, one per separate object or
+    /// array arm of a conditional on the way to it (`c ? { v: x } : { v: y
+    /// }` writes `v` in two arms), else the position's one expression.
+    pub arms: Arc<[IndexedLiteralArm]>,
+}
+
+/// The contributors one expression writes at an authored position of a
+/// call argument. Each separate arm is an expression of its own: the
+/// checker types it, and widens its fresh literals, before the arms join,
+/// so a literal one arm writes regular is fresh where another arm writes
+/// it fresh (`c ? { v: "a" as "a" } : { v: "a" }` widens `v`).
+#[derive(Debug, Clone, PartialEq, verter_retention::heap_size::HeapSize)]
+pub struct IndexedLiteralArm {
+    /// The arm's regular contributors: the branches of the conditional
+    /// the arm's expression is, or its one expression.
     pub regular: Arc<[IndexedRegularLiteralSource]>,
-    /// Whether another contributor writes the position too: a fresh
-    /// literal, an object or array literal, or an expression this
+    /// Whether another contributor writes the arm's expression too: a
+    /// fresh literal, an object or array literal, or an expression this
     /// classification does not read. Only the regular contributors' own
     /// literals are then regular (`c ? "a" : sl` with `sl: "a"` is the
     /// regular `"a"`, since a union of a fresh literal and its regular
     /// counterpart is the regular one); otherwise every literal at the
     /// position and nested in it is.
     pub mixed: bool,
+    /// The fresh scalar literals the arm's expression writes as written.
+    pub fresh: Arc<[crate::LiteralValue]>,
 }
 
 /// The literal provenance of a call argument's authored nested positions:
