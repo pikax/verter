@@ -94,7 +94,7 @@ fn object_member_surface(ty: &TypeExpr) -> Vec<(String, String)> {
 /// and carries a `declare module './types'` fact whose SPECIFIER resolves
 /// (relative to `/aug.ts`) to `/types.ts` — the specifier is the SOLE
 /// association key (`augmenter_matches_target` →
-/// `resolve_relative_canonical(augmenter_canonical, fact.specifier)`, the fact
+/// `resolve_module_file(augmenter_canonical, fact.specifier)`, the fact
 /// derived from the `declare module` header by `collect_augmentations`). The
 /// augmenter's OWN `import type { Foo } from './types'` is incidental, NOT the
 /// discovery key; the consumer's side-effect import is immaterial too. The

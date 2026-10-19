@@ -6284,11 +6284,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// Cross-file declaration-augmentation stitch (`declare module "./local"`
-    /// relative interface merging from sibling files).
+    /// or `declare module "<package>"` interface merging from other files).
     ///
     /// Given a base declaration `(decl_canonical, decl_name)` and its
     /// already-lowered base body `base_result`, this finds every augmenter file
-    /// whose `declare module "<rel>"` block resolves to `decl_canonical` and
+    /// whose `declare module "<specifier>"` block resolves to `decl_canonical` and
     /// augments `decl_name`, lowers each augmenter's RETAINED inner body in the
     /// augmenter's own file context, and folds all contributions into a single
     /// [`SemanticNodeData::MergedDecl`] peer-merge carrier — the ONE
@@ -6847,7 +6847,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.ctx.augmentation_index_with_resolutions(target.clone());
         // A specifier the index population resolved in this read is not
         // resolved again: the answer is the one the same fold just read.
-        let resolve_rel = |augmenter: &str, spec: &str| -> Option<Arc<str>> {
+        let resolve_module_file = |augmenter: &str, spec: &str| -> Option<Arc<str>> {
             if let Some(resolved) = index_resolutions.get(augmenter).and_then(|specs| {
                 specs
                     .iter()
@@ -7023,14 +7023,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     {
                         continue;
                     }
-                    let relative = if matches!(key.target, verter_session_query::resolution::AugmentationTargetKind::ResolvedRelativeCanonical(_))
-                    && verter_session_query::resolution::is_relative_specifier(fact.specifier.as_ref()) {
-                    resolve_rel(augmenter_canonical, fact.specifier.as_ref())
+                    let resolved = if matches!(key.target, verter_session_query::resolution::AugmentationTargetKind::ResolvedRelativeCanonical(_))
+                    && verter_session_query::source::augmentation::fact_augments_resolved_module(fact) {
+                    resolve_module_file(augmenter_canonical, fact.specifier.as_ref())
                 } else { None };
                     if !verter_session_query::source::augmentation::augmenter_matches_target(
                         fact,
                         &key,
-                        relative.as_deref(),
+                        resolved.as_deref(),
                     ) {
                         continue;
                     }
@@ -8208,7 +8208,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         demand_canonical: &str,
         name: &str,
     ) -> Option<ResolvedRootIdentity> {
-        use verter_session_query::inputs::contributors::{ContributorOrigin, FileModuleKind};
         if let Some(lib) = self.lib_global_declaration(demand_canonical, name, GlobalSpace::Type) {
             return Some(lib);
         }
@@ -8217,23 +8216,74 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             name,
             verter_session_query::facts::SymbolSpace::Type,
         );
-        let first = population.entries.iter().find(|entry| {
-            !entry.is_automatic_lib
-                && match entry.origin {
-                    ContributorOrigin::DeclareGlobal => entry.module_kind == FileModuleKind::Module,
-                    ContributorOrigin::FileScopeInterface | ContributorOrigin::FileScopeType => {
-                        true
-                    }
-                    ContributorOrigin::FileScopeNamespace
-                    | ContributorOrigin::FileScopeValue
-                    | ContributorOrigin::ModuleAugmentation => false,
-                }
-        })?;
+        let first = population
+            .entries
+            .iter()
+            .find(|entry| declares_global_type(entry))?;
         Some(ResolvedRootIdentity::new_in_owner(
             Arc::clone(&first.artifact_key.canonical),
             first.owner,
             name,
         ))
+    }
+
+    /// Whether `(canonical, owner, name)` addresses ONE declaration of the
+    /// merged GLOBAL type `name` a reference in `demand_canonical` reads —
+    /// the project's library declaration, a module's `declare global`
+    /// contribution or a script's file-scope declaration — not only the
+    /// first of them ([`Self::first_global_declaration`]): every one of
+    /// them declares the same global symbol. A module's `declare global`
+    /// contribution is not addressed by the identity when the module also
+    /// declares a module-scope type of the name, which the identity names
+    /// instead.
+    fn is_global_type_declaration(
+        &self,
+        demand_canonical: &str,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+    ) -> bool {
+        use verter_session_query::inputs::contributors::ContributorOrigin;
+        if self
+            .lib_global_declaration(demand_canonical, name, GlobalSpace::Type)
+            .is_some_and(|lib| lib.canonical_id.as_ref() == canonical && lib.owner == owner)
+        {
+            return true;
+        }
+        let population = self.global_contributors_in(
+            demand_canonical,
+            name,
+            verter_session_query::facts::SymbolSpace::Type,
+        );
+        population.entries.iter().any(|entry| {
+            entry.artifact_key.canonical.as_ref() == canonical
+                && entry.owner == owner
+                && declares_global_type(entry)
+                && (entry.origin != ContributorOrigin::DeclareGlobal
+                    || self
+                        .ctx
+                        .ensure_indexed_ready_serve(canonical)
+                        .is_some_and(|serve| {
+                            !serve.indexed.shallow_state.has_type_symbol_in(owner, name)
+                        }))
+        })
+    }
+
+    /// Whether the declaration `(canonical, owner, name)` a reference in
+    /// `demand_canonical` resolves to is the contextual-this marker: a
+    /// declaration of the GLOBAL `ThisType`, whichever of its declarations
+    /// it is ([`Self::is_global_type_declaration`]). The checker identifies
+    /// the marker by the merged global symbol, so a module-scope
+    /// `ThisType` is an ordinary type.
+    pub(in crate::project_semantic_dispatch) fn names_contextual_this_marker(
+        &self,
+        demand_canonical: &str,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+    ) -> bool {
+        name == "ThisType"
+            && self.is_global_type_declaration(demand_canonical, canonical, owner, name)
     }
 
     /// The declaration the qualified type name `name` (`Ns.T`,
@@ -8792,6 +8842,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             super::dispatch_txn::FlowMemberReuse,
         )>,
     ) {
+        let Some(recording) = self.begin_transaction_read() else {
+            return (read(), None);
+        };
+        let value = read();
+        let complete = complete(&value);
+        let recorded = recording.finish(self, complete);
+        (value, recorded)
+    }
+
+    /// Begin recording a transaction read whose work does not run inside one
+    /// closure (the explicit-stack form of [`Self::record_transaction_read`]):
+    /// every channel the reads in between reach is recorded until
+    /// [`TransactionReadRecording::finish`]. `None` when the read could not
+    /// be replayed — no live tracer, no live build-local frame, or a
+    /// cold-compute completeness already partial. Recordings nest, and each
+    /// finishes before the one begun before it.
+    pub(super) fn begin_transaction_read(&self) -> Option<TransactionReadRecording<'_>> {
         // A recording is only replayable when every channel an enclosing
         // build observes is observable here: a live tracer, a live
         // build-local frame and a cold-compute completeness that can show
@@ -8803,41 +8870,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             && !(completeness_scope_active
                 && crate::request_context::current_cold_compute_completeness().is_partial());
         if !recordable {
-            return (read(), None);
+            return None;
         }
         let private_completeness = (!completeness_scope_active)
             .then(crate::request_context::ColdComputeCompletenessScope::enter);
         let evidence_epoch = self.canonical_evidence_epoch.get();
         let frame = super::BuildLocalTaintGuard::push(&self.build_local_taint);
         let refusals = crate::fact_tracing::RefusalObservationScope::enter();
-        let (value, reads) = crate::resolver_core::resolver_context::record_fact_reads(read);
-        let refused = refusals.observed();
-        drop(refusals);
-        let observed = frame.finish();
-        let folded_partial =
-            crate::request_context::current_cold_compute_completeness().is_partial();
-        if let Some(scope) = private_completeness {
-            scope.discard();
-        }
-        self.fold_observed_frame_into_top(&observed);
-        let refusal = match refused {
-            Some(reason) => verter_session_query::facts::reuse::ObservedRefusal::Typed(reason),
-            None if reads.non_cacheable || observed.cache_suppress => {
-                verter_session_query::facts::reuse::ObservedRefusal::Unattributed
-            }
-            None => verter_session_query::facts::reuse::ObservedRefusal::None,
-        };
-        let complete = !observed.result_is_partial && !folded_partial && complete(&value);
-        let reuse = verter_session_query::facts::reuse::classify_reuse(refusal, complete);
-        if !reuse.is_request_reusable() {
-            return (value, None);
-        }
-        let replay = super::dispatch_txn::FlowMemberReuse {
+        let reads = crate::resolver_core::resolver_context::FactReadRecording::begin();
+        Some(TransactionReadRecording {
             reads,
-            observed_self_roots: observed.observed_self_roots,
-            canonical_evidence_deposited: self.canonical_evidence_epoch.get() != evidence_epoch,
-        };
-        (value, Some((reuse, replay)))
+            refusals,
+            frame,
+            private_completeness,
+            evidence_epoch,
+        })
     }
 
     /// Replay a read [`Self::record_transaction_read`] recorded into the
@@ -20368,4 +20415,86 @@ pub fn index_key_probes_for_tests() -> usize {
 struct ClauseBaseSubstitution<'n> {
     names: Vec<&'n str>,
     bases: Vec<SemanticNodeId>,
+}
+
+/// Whether the contributor `entry` declares the GLOBAL type of its name: a
+/// module's `declare global` interface or alias, or a script's file-scope
+/// one. A `declare global` block in a SCRIPT is an error that binds
+/// nothing; the automatic libraries are read through the project's library.
+fn declares_global_type(
+    entry: &verter_session_query::inputs::contributors::ContributorEntry,
+) -> bool {
+    use verter_session_query::inputs::contributors::{ContributorOrigin, FileModuleKind};
+    !entry.is_automatic_lib
+        && match entry.origin {
+            ContributorOrigin::DeclareGlobal => entry.module_kind == FileModuleKind::Module,
+            ContributorOrigin::FileScopeInterface | ContributorOrigin::FileScopeType => true,
+            ContributorOrigin::FileScopeNamespace
+            | ContributorOrigin::FileScopeValue
+            | ContributorOrigin::ModuleAugmentation => false,
+        }
+}
+
+/// A transaction read being recorded across the steps of its work
+/// ([`ProjectSemanticDispatch::begin_transaction_read`]). Dropped unfinished
+/// — an unwind — it uninstalls every scope it installed and records nothing.
+pub(super) struct TransactionReadRecording<'g> {
+    // Uninstalled innermost first: the recorder, then the refusal scope,
+    // the build-local frame and the private completeness scope.
+    reads: crate::resolver_core::resolver_context::FactReadRecording,
+    refusals: crate::fact_tracing::RefusalObservationScope,
+    frame: super::BuildLocalTaintGuard<'g>,
+    private_completeness: Option<crate::request_context::ColdComputeCompletenessScope>,
+    evidence_epoch: u64,
+}
+
+impl TransactionReadRecording<'_> {
+    /// End the recording: fold what it observed into the enclosing build,
+    /// and return what reusing the read must replay — `None` when it is not
+    /// reusable (it was partial, `complete` is false, or its refusal is not
+    /// one a later reader of this transaction may share).
+    pub(super) fn finish<C: crate::resolver_core::ResolverCapabilities>(
+        self,
+        dispatch: &ProjectSemanticDispatch<'_, C>,
+        complete: bool,
+    ) -> Option<(
+        verter_session_query::facts::reuse::ReuseClass,
+        super::dispatch_txn::FlowMemberReuse,
+    )> {
+        let Self {
+            reads,
+            refusals,
+            frame,
+            private_completeness,
+            evidence_epoch,
+        } = self;
+        let reads = reads.finish();
+        let refused = refusals.observed();
+        drop(refusals);
+        let observed = frame.finish();
+        let folded_partial =
+            crate::request_context::current_cold_compute_completeness().is_partial();
+        if let Some(scope) = private_completeness {
+            scope.discard();
+        }
+        dispatch.fold_observed_frame_into_top(&observed);
+        let refusal = match refused {
+            Some(reason) => verter_session_query::facts::reuse::ObservedRefusal::Typed(reason),
+            None if reads.non_cacheable || observed.cache_suppress => {
+                verter_session_query::facts::reuse::ObservedRefusal::Unattributed
+            }
+            None => verter_session_query::facts::reuse::ObservedRefusal::None,
+        };
+        let complete = !observed.result_is_partial && !folded_partial && complete;
+        let reuse = verter_session_query::facts::reuse::classify_reuse(refusal, complete);
+        if !reuse.is_request_reusable() {
+            return None;
+        }
+        let replay = super::dispatch_txn::FlowMemberReuse {
+            reads,
+            observed_self_roots: observed.observed_self_roots,
+            canonical_evidence_deposited: dispatch.canonical_evidence_epoch.get() != evidence_epoch,
+        };
+        Some((reuse, replay))
+    }
 }

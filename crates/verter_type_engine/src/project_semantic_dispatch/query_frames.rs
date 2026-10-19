@@ -466,7 +466,18 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> SemanticTask<'p,
         let _spend = self.accounting.spend.install();
         let _refusals = self.accounting.refusals.install();
         let _completeness = self.accounting.completeness.install();
-        self.execution.poll(program, self.root.take(), waker)
+        let poll = self.execution.poll(program, self.root.take(), waker);
+        // Each frame step keeps its partiality to its own frame, reaching a
+        // consumer through the delivery it reads. The lender consumes the
+        // root's: its partiality returns to the lender with the task.
+        if let std::task::Poll::Ready(Ok(delivery)) = &poll {
+            if delivery.read.result_is_partial() {
+                crate::request_context::mark_request_result_partial_from_read_with(
+                    delivery.read.partial_reason_classes(),
+                );
+            }
+        }
+        poll
     }
 
     /// Poll the task to completion on this thread.
@@ -1703,6 +1714,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         });
         let taint = super::StepTaint::install(&self.build_local_taint, &mut frame.taint);
         let installed = tracer.install();
+        // The step's partiality is its frame's own, as a synchronous build's
+        // is: it reaches the frame's output through its taint, and a
+        // consumer through the delivery it reads, never the native caller
+        // whose drive happens to be stepping the frame.
+        let completeness = crate::request_context::ColdComputeCompletenessScope::enter();
         let delivery = delivery.map(|outcome| match outcome {
             Ok(delivery) => delivery,
             Err(()) => unreachable!("a stopped drive delivers nothing"),
@@ -1843,6 +1859,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
         };
+        let step = crate::request_context::current_cold_compute_completeness();
+        if step.is_partial() {
+            self.fold_into_top_build_local_taint_with(true, false, step.reasons());
+        }
+        completeness.discard();
         drop(installed);
         drop(taint);
         match poll {
