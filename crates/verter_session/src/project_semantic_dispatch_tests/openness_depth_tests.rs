@@ -234,6 +234,28 @@ fn nested_pick(dispatch: &Dispatch<'_>, depth: usize, bottom: SemanticNodeId) ->
     node
 }
 
+/// `bottom` wrapped `depth` times in the key-producing builtins in turn —
+/// `Pick<…, 'a'>`, `Partial<…>`, `Omit<…, 'b'>`, `Readonly<…>`.
+fn nested_key_producers(
+    dispatch: &Dispatch<'_>,
+    depth: usize,
+    bottom: SemanticNodeId,
+) -> SemanticNodeId {
+    let a = string_literal(dispatch, "a");
+    let b = string_literal(dispatch, "b");
+    let mut node = bottom;
+    // bounded-loop: test fixture — fold a fixed nesting depth.
+    for level in 0..depth {
+        node = match level % 4 {
+            0 => builtin(dispatch, "Pick", &[node, a]),
+            1 => builtin(dispatch, "Partial", &[node]),
+            2 => builtin(dispatch, "Omit", &[node, b]),
+            _ => builtin(dispatch, "Readonly", &[node]),
+        };
+    }
+    node
+}
+
 /// The member names the empty-path Shallow projection of `node` publishes;
 /// empty for a carrier-stop.
 fn shallow_member_names(dispatch: &Dispatch<'_>, node: SemanticNodeId) -> Vec<String> {
@@ -368,12 +390,11 @@ fn mixed_declaration_hops_decide_on_a_small_stack() {
         );
     });
 
-    // An open or cyclic bottom leaves every `Pick` hop unprovable by the
-    // registry rule, so each one also reads the reduced instantiation —
-    // a query that asks the enumeration gate about the rest of the chain
-    // again. The deep chain must still decide as its control does, on the
-    // small stack, with work linear in its hops: no query rebuilt, no
-    // suffix re-derived by each nested evaluation.
+    // An open or cyclic bottom leaves every hop unprovable: each `Pick` and
+    // mapped hop then judges a source the rest of the chain left open. The
+    // deep chain must still decide as its control does, on the small
+    // stack, with work linear in its hops: no query rebuilt, no suffix
+    // re-derived by each nested evaluation.
     for (bottom, label) in [("() => string", "a function body"), ("A0", "its own head")] {
         let control = probe_chain_head(mixed_chain(6, bottom));
         assert_ne!(
@@ -475,6 +496,44 @@ fn nested_instantiation_arguments_decide_on_a_small_stack() {
             "control: four nested Picks of an outer generic still reach it"
         );
         assert!(
+            utility_enumeration_domain_is_open_or_unknown(
+                &dispatch,
+                &pick,
+                &[nested_key_producers(&dispatch, 4, open_bottom), key],
+            ),
+            "control: Pick over four nested key-producing builtins of an outer generic has an \
+             open key domain"
+        );
+        assert!(
+            !utility_enumeration_domain_is_open_or_unknown(
+                &dispatch,
+                &pick,
+                &[
+                    nested_key_producers(&dispatch, NEST_DEPTH, closed_bottom),
+                    key
+                ],
+            ),
+            "Pick over {NEST_DEPTH} nested key-producing builtins of a closed object enumerates"
+        );
+        // An open key-producing argument leaves every builtin of the chain
+        // to the reduction fallback, whose build asks the enumeration gate
+        // about the rest of the chain again. The deep chain still decides
+        // as its control does, on the small stack, and without a query: an
+        // open argument cannot be closed by reducing the builtin over it.
+        let deep = nested_key_producers(&dispatch, NEST_DEPTH, open_bottom);
+        let trace = enable_dispatch_trace_for_test();
+        assert!(
+            utility_enumeration_domain_is_open_or_unknown(&dispatch, &pick, &[deep, key]),
+            "Pick over {NEST_DEPTH} nested key-producing builtins of an outer generic has an \
+             open key domain"
+        );
+        assert_eq!(
+            DISPATCH_TRACE.with(|trace| trace.borrow().len()),
+            0,
+            "the open chain decides without reducing a builtin over an open argument"
+        );
+        drop(trace);
+        assert!(
             builtin_lowering_argument_is_open(
                 &dispatch,
                 nested_pick(&dispatch, NEST_DEPTH, open_bottom)
@@ -575,10 +634,16 @@ fn in_a_traced_build<R>(
     (value, rooted)
 }
 
+/// A mixed chain whose bottom is a value-producing builtin: its proof reads
+/// the reduced instantiation behind the registry rule.
+fn reduced_bottom_chain(depth: usize) -> String {
+    mixed_chain(depth, "ReturnType<() => { a: string; b: number }>")
+}
+
 #[test]
 fn a_reused_proof_charges_and_roots_what_running_it_did() {
     on_a_small_stack(|| {
-        let host = chain_host(mixed_chain(12, "() => string"));
+        let host = chain_host(reduced_bottom_chain(12));
         let dispatch = ProjectSemanticDispatch::new(host.as_ref());
         let _builder = dispatch.enter_construction_scope();
         let prove = || {
@@ -595,7 +660,7 @@ fn a_reused_proof_charges_and_roots_what_running_it_did() {
             (verdict, full_budget() - budget, dispatches)
         };
         let ((verdict, charged, dispatches), rooted) = in_a_traced_build(&host, &dispatch, prove);
-        assert_eq!(verdict, ClosednessVerdict::ProvenOpen);
+        assert_eq!(verdict, ClosednessVerdict::ProvenClosed);
         assert!(
             dispatches > 0,
             "control: the first proof issues its reductions"
@@ -616,6 +681,69 @@ fn a_reused_proof_charges_and_roots_what_running_it_did() {
         assert!(
             rerooted,
             "a reused proof roots the chain's file on the tracer live now, as running it would"
+        );
+    });
+}
+
+/// Prove `A0` of the chain on `dispatch`, inside a connected demand of its
+/// own run where a build records its proofs: the verdict, and the connected
+/// work the demand charged.
+fn prove_in_a_demand(host: &VerterHost, dispatch: &Dispatch<'_>) -> (ClosednessVerdict, usize) {
+    let (verdict, _) = in_a_traced_build(host, dispatch, || {
+        let (_demand, trip) = dispatch.enter_connected_demand(false);
+        assert_eq!(trip, None, "the demand enters untripped");
+        let mut budget = full_budget();
+        prepared_decl_body_is_closed(
+            dispatch,
+            FILE,
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "A0",
+            &mut budget,
+        )
+    });
+    (verdict, dispatch.connected_demand().work_used_for_tests())
+}
+
+#[test]
+fn a_reused_proof_pays_its_reads_on_the_live_demand() {
+    on_a_small_stack(|| {
+        let host = chain_host(reduced_bottom_chain(6));
+        let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+        let _builder = dispatch.enter_construction_scope();
+        let (verdict, cold_work) = prove_in_a_demand(&host, &dispatch);
+        assert_eq!(verdict, ClosednessVerdict::ProvenClosed);
+        assert!(
+            cold_work > 0,
+            "control: the proof's reductions charge the demand it runs in"
+        );
+
+        let (reused, reused_work) = prove_in_a_demand(&host, &dispatch);
+        assert_eq!(reused, verdict, "a reused proof answers as running it did");
+        assert_eq!(
+            reused_work, cold_work,
+            "a reused proof charges the next demand what running it charged"
+        );
+
+        // A demand that cannot pay for the proof's reads runs it, and meets
+        // the refusal a dispatcher that never ran it meets.
+        let starved = |dispatch: &Dispatch<'_>| {
+            dispatch
+                .connected_demand()
+                .set_limits_for_tests(0, super::connected_demand::MAX_CONNECTED_QUERY_DEPTH);
+            prove_in_a_demand(&host, dispatch).0
+        };
+        let fresh = ProjectSemanticDispatch::new(host.as_ref());
+        let _fresh_builder = fresh.enter_construction_scope();
+        let cold_refusal = starved(&fresh);
+        assert_ne!(
+            cold_refusal,
+            ClosednessVerdict::ProvenClosed,
+            "control: without the work its reductions need, the proof is not proven closed"
+        );
+        assert_eq!(
+            starved(&dispatch),
+            cold_refusal,
+            "a stored proof answers a demand that cannot pay for it as running it would"
         );
     });
 }

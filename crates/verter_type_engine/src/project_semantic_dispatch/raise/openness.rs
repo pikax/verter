@@ -13,9 +13,11 @@
 //!
 //! A few leaves read through a dispatcher query instead — a conditional's
 //! decision, a carrier head's resolution, an escape's lowering and the
-//! one-hop reduction behind a builtin the registry rule cannot prove
-//! closed — and that query may ask a gate here again, opening a nested
-//! evaluation inside the step. Such a nested evaluation re-derives nothing
+//! one-hop reduction behind a builtin the registry rule cannot decide —
+//! and that query may ask a gate here again, opening a nested evaluation
+//! inside the step. A key-producing builtin over an argument the walk
+//! judged open is decided open without that reduction, which could not
+//! close it, so a nest of such builtins never re-enters the gate. Such a nested evaluation re-derives nothing
 //! an evaluation of this transaction already proved: every declaration and
 //! instantiation proof that completes is kept on the dispatch transaction
 //! ([`ClosednessProofTable`]) and answers each later demand, and the query
@@ -42,7 +44,12 @@
 //!   names a proof below it is reused only while that proof is in flight
 //!   ([`ClosednessChain`]), and a reuse replays the fact reads the proof
 //!   rooted on the active fact tracer, so a warm entry built over it is
-//!   invalidated by the same edits.
+//!   invalidated by the same edits;
+//! - inside a connected demand a proof records the cost receipt of the
+//!   dispatcher reads it issued, and a reuse there first replays that
+//!   receipt into the demand: the demand pays what running the proof
+//!   would, and one that cannot pay — or a proof that ran in no demand —
+//!   runs the proof and meets the refusal running it meets.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -537,6 +544,33 @@ fn builtin_utility_key_domain_is_closed(decl_name: &str, args: &[KeyDomainBindin
     positions
         .iter()
         .all(|&idx| args.get(idx).is_some_and(|binding| !binding.is_open()))
+}
+
+/// Whether a KEY-PRODUCING builtin utility's produced key domain is open
+/// by an argument the walk judged OPEN at one of its key-producing
+/// positions — the filtered source or key selection of `Pick` / `Omit`,
+/// the source of `Partial` / `Required` / `Readonly`, the keys of
+/// `Record`.
+///
+/// Reducing such an instantiation cannot close what it produces: an object
+/// filter over an open source is the L1 carrier-stop
+/// ([`utility_enumeration_domain_is_open_or_unknown`] on the same
+/// argument) and reduces to itself, while every other key-producing
+/// position becomes the source or key space of the produced mapped type,
+/// whose key-domain walk reaches that same open argument. The one-hop
+/// reduction behind the registry rule would therefore only answer OPEN —
+/// after a demand whose build asks this gate about the argument again, one
+/// native evaluation per builtin of a nested chain. A value-producing
+/// utility has no key-producing position and is never decided here.
+fn builtin_utility_key_domain_is_open(decl_name: &str, args: &[KeyDomainBinding]) -> bool {
+    use verter_session_query::type_solver::builtin::BuiltinUtility;
+    BuiltinUtility::from_name(decl_name)
+        .and_then(BuiltinUtility::key_domain_argument_positions)
+        .is_some_and(|positions| {
+            positions
+                .iter()
+                .any(|&idx| args.get(idx).is_some_and(|binding| binding.is_open()))
+        })
 }
 
 /// Work budget of one openness evaluation
@@ -1325,6 +1359,11 @@ struct CompletedProof {
     /// same, so an evaluation refuses for budget exactly where running the
     /// proof again would.
     cost: u32,
+    /// What the proof's dispatcher reads cost the connected demand it ran
+    /// in — `None` when it ran in none. A reuse inside a demand replays it
+    /// first, so the demand pays what running the proof would and stops
+    /// where running it would: a demand that cannot pay runs the proof.
+    receipt: Option<Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>>,
     cycle_dependencies: CycleDependencies,
     /// A canonical names no content version: the proof answers only under
     /// the edit clocks it ran under.
@@ -1374,6 +1413,10 @@ impl ClosednessProofTable {
 struct ProofSpan<'a> {
     key: ClosednessProofKey,
     recording: Option<crate::project_semantic_dispatch::build::TransactionReadRecording<'a>>,
+    /// Whether the proof records its cost on the connected demand it runs
+    /// in: a recording opened for it there, sealed into its receipt when
+    /// the proof is kept and abandoned to its consumer otherwise.
+    costed: bool,
     budget: u32,
     context_refusals: u64,
     served_at: crate::project_semantic_dispatch::WorkspaceEdit,
@@ -1410,6 +1453,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> Drop for Openness<'_, C> {
         while let Some(frame) = self.frames.pop() {
             if let Frame::LeaveProof(span) = frame {
                 self.dispatch.closedness.borrow_mut().leave();
+                if span.costed {
+                    self.dispatch.connected_demand.abandon_cost_scope();
+                }
                 drop(span);
             }
         }
@@ -1538,10 +1584,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> Openness<'a, C> {
     ///
     /// A completed proof is reused only where running it again would answer
     /// the same: under the edit clocks it ran under, while every in-flight
-    /// proof its cycle refusals depended on still is, and with the budget to
-    /// pay what it charged. Reusing it replays its reads into the live
+    /// proof its cycle refusals depended on still is, with the budget to pay
+    /// what it charged, and — inside a connected demand — once the demand
+    /// has paid the receipt of the reads it issued, whose footprint must fit
+    /// the demand's allowances. Reusing it replays its reads into the live
     /// scopes and its cycle dependencies into the proof in flight, exactly
-    /// as running it would.
+    /// as running it would; a demand that cannot pay runs the proof, and
+    /// meets the refusal running it meets.
     fn enter_proof(&mut self, key: ClosednessProofKey) -> Option<Flow> {
         let identity = match &key {
             ClosednessProofKey::Decl(identity) | ClosednessProofKey::Instantiation(identity, _) => {
@@ -1566,7 +1615,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> Openness<'a, C> {
                         .borrow()
                         .holds(&proof.cycle_dependencies)
             });
-        if let Some(proof) = completed {
+        if let Some(proof) = completed.filter(|proof| self.admits_reuse(proof)) {
             self.dispatch.closedness.borrow_mut().leave();
             self.budget -= proof.cost;
             self.dispatch
@@ -1577,15 +1626,66 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> Openness<'a, C> {
                 .observe(&proof.cycle_dependencies);
             return Some(Flow::verdict(proof.verdict));
         }
+        let recording = self.dispatch.begin_transaction_read();
+        let costed = recording.is_some() && self.open_proof_cost_scope(&key);
         let span = ProofSpan {
             key,
-            recording: self.dispatch.begin_transaction_read(),
+            recording,
+            costed,
             budget: self.budget,
             context_refusals: self.dispatch.closedness.borrow().context_refusals,
             served_at,
         };
         self.frames.push(Frame::LeaveProof(Box::new(span)));
         None
+    }
+
+    /// Whether the active connected demand, if any, pays for reusing
+    /// `proof`: its receipt replays into the demand. A proof that ran in no
+    /// demand has no receipt to replay, so it serves only outside one.
+    fn admits_reuse(&self, proof: &CompletedProof) -> bool {
+        let ledger = &self.dispatch.connected_demand;
+        if !ledger.is_active() {
+            return true;
+        }
+        proof.receipt.as_ref().is_some_and(|receipt| {
+            matches!(
+                self.dispatch.admit_served(
+                    receipt,
+                    crate::project_semantic_dispatch::cost_receipt::Nesting::InPlace
+                ),
+                crate::project_semantic_dispatch::ServedAdmission::Admitted
+            )
+        })
+    }
+
+    /// Open the recording of the proof `key`'s cost on the active connected
+    /// demand: every read the proof issues is a prerequisite of its receipt.
+    /// `false` outside a demand, or when the proof's operands cannot be
+    /// rooted for its identity.
+    fn open_proof_cost_scope(&self, key: &ClosednessProofKey) -> bool {
+        let ledger = &self.dispatch.connected_demand;
+        if !ledger.is_active() {
+            return false;
+        }
+        let operands: Vec<SemanticNodeId> = match key {
+            ClosednessProofKey::Decl(_) => Vec::new(),
+            ClosednessProofKey::Instantiation(_, bindings) => bindings
+                .iter()
+                .filter_map(|binding| match binding {
+                    KeyDomainBinding::ClosedNode(node) => Some(*node),
+                    KeyDomainBinding::Open | KeyDomainBinding::ClosedAbstract => None,
+                })
+                .collect(),
+        };
+        let Ok(roots) = self.dispatch.graph().root_nodes(operands) else {
+            return false;
+        };
+        ledger.open_cost_scope(
+            crate::project_semantic_dispatch::cost_receipt::CostIdentity::of_key(key.clone())
+                .with_roots(roots),
+        );
+        true
     }
 
     /// Leave the proof `span` records, which answered `verdict`, and record
@@ -1597,10 +1697,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> Openness<'a, C> {
         let ProofSpan {
             key,
             recording,
+            costed,
             budget,
             context_refusals,
             served_at,
         } = span;
+        let ledger = &self.dispatch.connected_demand;
         let Some(recording) = recording else {
             return;
         };
@@ -1608,7 +1710,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> Openness<'a, C> {
             && !self.dispatch.cancellation.is_cancelled()
             && self.dispatch.workspace_edit() == served_at;
         let Some((reuse, replay)) = recording.finish(self.dispatch, undisturbed) else {
+            if costed {
+                ledger.abandon_cost_scope();
+            }
             return;
+        };
+        let receipt = if costed {
+            let request = crate::request_context::current_request_budget();
+            let Some(receipt) = ledger.seal_cost_scope(request.as_deref()) else {
+                return;
+            };
+            // What consumed the proof — an enclosing proof, or the build the
+            // evaluation runs in — owes it, as it owes a query it read.
+            ledger.record_prerequisite(
+                &receipt,
+                crate::project_semantic_dispatch::cost_receipt::Nesting::InPlace,
+            );
+            Some(receipt)
+        } else {
+            None
         };
         self.dispatch
             .dispatch_txn
@@ -1619,6 +1739,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> Openness<'a, C> {
                 CompletedProof {
                     verdict,
                     cost: budget - self.budget,
+                    receipt,
                     cycle_dependencies,
                     served_at,
                     reuse,
@@ -2439,7 +2560,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> Openness<'a, C> {
             if builtin_utility_key_domain_is_closed(base.decl_name.as_ref(), &bindings) {
                 return Flow::open(false);
             }
-            // The registry rule cannot prove the domain closed — for a
+            if builtin_utility_key_domain_is_open(base.decl_name.as_ref(), &bindings) {
+                return Flow::open(true);
+            }
+            // Neither rule decides the domain — for a
             // VALUE-PRODUCING utility (`ReturnType`, `InstanceType`,
             // `Awaited`, the string intrinsics, …) that is not a proof of
             // openness: the produced key set derives from argument VALUE
