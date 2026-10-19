@@ -4990,7 +4990,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let cache_read = if self.request_local_is_open(key) {
             // The key's own request-local completion is open: the same-path
             // re-entry a family-memo claim answers with its recursion carrier.
-            self.connected_demand.note_divergence_certificate();
             graph.recursion_read(
                 crate::semantic_query_memo::Recursion::SamePath,
                 (sentinel.take().expect("the completion runs once"))(),
@@ -5084,10 +5083,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         }
                     }
                     Acquired::Recursive(recursion) => {
+                        // A same-path carrier is a typed partial, never a
+                        // divergence certificate: a deferred position meets
+                        // itself on its path too.
                         if recursion == crate::semantic_query_memo::Recursion::WaitCycle {
                             self.connected_demand.note_schedule_cut();
-                        } else {
-                            self.connected_demand.note_divergence_certificate();
                         }
                         self.graph().recursion_read(
                             recursion,

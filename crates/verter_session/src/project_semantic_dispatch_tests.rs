@@ -68,6 +68,7 @@ mod differential_narrowing_tests;
 mod differential_relation_tests;
 mod differential_type_operator_tests;
 mod dispatch_txn_flow_demand_tests;
+mod divergence_certificate_tests;
 mod enum_literal_tests;
 mod equality_value_narrowing_tests;
 mod flow_narrowing_parity_tests;

@@ -580,6 +580,17 @@ pub(super) struct InferScan {
     pub(super) binder_scope: bool,
 }
 
+/// The dispatcher's witness that every step of the computation it is
+/// building was a complete function of its state: nothing it read was a
+/// partial (a refused child, a recursion carrier, a missing input) or a
+/// result its memo would not keep, and the request was not cancelled. Only
+/// [`ProjectSemanticDispatch::exact_steps`] mints one, and a divergence is
+/// certified only with it
+/// ([`CertifiedDivergence::exact_recurrence`](crate::semantic_query::checker_policy::CertifiedDivergence::exact_recurrence)).
+pub(crate) struct ExactSteps {
+    _proof: (),
+}
+
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     /// Collect the observed self-roots of a set of input `SemanticNodeId`s.
     ///
@@ -5845,6 +5856,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         InstantiateStart::Build(build)
     }
 
+    /// [`ExactSteps`] for the computation being built, when its steps so far
+    /// are exact: its build frame holds no partial and nothing its memo
+    /// would refuse to keep, and the request is live. `None` is no proof —
+    /// the caller evaluates on under its budget instead of certifying.
+    fn exact_steps(&self) -> Option<ExactSteps> {
+        if self.cancellation.is_cancelled() {
+            return None;
+        }
+        let frames = self.build_local_taint.borrow();
+        let frame = frames.last()?;
+        (!frame.result_is_partial && !frame.cache_suppress).then_some(ExactSteps { _proof: () })
+    }
+
     /// Carry an instantiation's build on as far as it can go. `delivery` is
     /// the node of the instantiation its body projection last stopped at,
     /// when it stopped at one. An inline build always finishes; a
@@ -5893,7 +5917,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // compatibility policy. The run fails with the checker's TS2589 at
             // Verter's tail budget, far past the checker's tail limit, or at
             // once, as a certified divergence, when the arguments come round
-            // again. Each step is charged to the
+            // again through exact steps. Each step is charged to the
             // connected-work ledger; a trip leaves the step's back-edge as a
             // typed partial.
             let next = build
@@ -5923,15 +5947,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 });
                 result = checker_policy::circular_type_alias_recovery(self.graph(), alias);
             } else if let Some(next) = next {
-                // A run that comes back to arguments it already took is in
-                // the state it was in then, and each step is a function of
-                // that state: it repeats forever, a certified divergence.
-                if build.tail_arguments.contains(&next) {
-                    self.connected_demand.note_divergence_certificate();
+                // A run that comes back to arguments it already took — the
+                // same declaration, context and phase, this build's — is in
+                // the state it was in then, and when each step was a complete
+                // function of that state it repeats forever: a certified
+                // divergence. Arguments that came round after a step read a
+                // partial prove nothing, and the run goes on under its budget.
+                let recurrence = build
+                    .tail_arguments
+                    .contains(&next)
+                    .then(|| self.exact_steps())
+                    .flatten();
+                if let Some(exact) = recurrence {
                     result = checker_policy::divergence_recovery(
                         self.graph(),
                         checker_policy::CertifiedDivergence::exact_recurrence(
                             CheckerDiagnosticOperation::ConditionalTail,
+                            exact,
                         ),
                         None,
                     );
@@ -17883,14 +17915,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// ([`Self::lib_awaited_node`]); this read is a root. When
     /// `Awaited<argument>` is a root whose evaluation is ALREADY in progress
     /// on this path, the conditional has come back to itself with the same
-    /// argument and can never reach a value — a certified divergence: the
-    /// checker reports TS2589 and continues with its error type, which
-    /// dominates each union and branch on the way. That recovery is the
-    /// answer, a complete one.
+    /// argument: through exact steps it can never reach a value — a
+    /// certified divergence: the checker reports TS2589 and continues with
+    /// its error type, which dominates each union and branch on the way.
+    /// That recovery is the answer, a complete one
+    /// ([`Self::lib_awaited_recurs`]).
     fn lib_awaited_read(&self, argument: SemanticNodeId) -> Option<Option<SemanticNodeId>> {
         let application = self.declaration_carrier_key(self.lib_awaited_carrier(argument))?;
         if self.graph().is_same_path_claim(&application) {
-            return Some(Some(self.lib_awaited_recurs()));
+            return match self.lib_awaited_recurs() {
+                LibAwaited::Reduced(recovery) => Some(Some(recovery)),
+                _ => None,
+            };
         }
         let body = match self.execute_read(application).value {
             QueryResult::Value(body) => body,
@@ -17952,19 +17988,27 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.lib_awaited_run(operand, &mut walk, 0)
     }
 
-    /// The TS2589 recovery of the lib conditional re-entering itself with
-    /// an argument it is still evaluating on this path: the same
-    /// application under the same context, so a certified divergence — a
-    /// complete answer, kept.
-    fn lib_awaited_recurs(&self) -> SemanticNodeId {
-        self.connected_demand.note_divergence_certificate();
-        crate::semantic_query::checker_policy::divergence_recovery(
+    /// The lib conditional re-entering itself with an argument it is still
+    /// evaluating on this path: the same application under the same
+    /// context. Through exact steps that is a certified divergence, its
+    /// TS2589 recovery a complete answer, kept. After a step that read a
+    /// partial it proves nothing: the application stops as a same-path
+    /// partial, never kept.
+    fn lib_awaited_recurs(&self) -> LibAwaited {
+        let Some(exact) = self.exact_steps() else {
+            self.fold_local_partial_completeness(
+                crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION,
+            );
+            return LibAwaited::Refused;
+        };
+        LibAwaited::Reduced(crate::semantic_query::checker_policy::divergence_recovery(
             self.graph(),
             crate::semantic_query::checker_policy::CertifiedDivergence::exact_recurrence(
                 crate::semantic_query::CheckerDiagnosticOperation::LibAwaited,
+                exact,
             ),
             None,
-        )
+        ))
     }
 
     /// The TS2589 recovery of the lib conditional after `refusal`.
@@ -18074,7 +18118,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return LibStep::Done(LibAwaited::Reduced(resolved));
         }
         if walk.on_path.contains(&resolved) {
-            return LibStep::Done(LibAwaited::Reduced(self.lib_awaited_recurs()));
+            return LibStep::Done(self.lib_awaited_recurs());
         }
         walk.path.push(resolved);
         walk.on_path.insert(resolved);

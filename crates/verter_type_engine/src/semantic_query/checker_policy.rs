@@ -103,11 +103,14 @@ pub(crate) fn instantiation_budget(within: bool) -> Result<(), OperationRefusal>
 
 /// A sound, budget-independent proof that one operation can never reach a
 /// value: a CERTIFIED divergence. It is minted only by the constructors
-/// below, each of which names the one proof class it stands for, so a
-/// divergence can never be claimed from growth, from repeated names with
-/// different arguments, or from a query that merely meets itself on its
-/// path (a deferred position legitimately does, and a circular declaration
-/// is the checker's TS2456 instead).
+/// below, each of which names the one proof class it stands for and takes
+/// that class's witness, so a divergence can never be claimed from growth,
+/// from repeated names with different arguments, from a step that read a
+/// partial, or from a query that merely meets itself on its path (a
+/// deferred position legitimately does, and a circular declaration is the
+/// checker's TS2456 instead). Its dependencies are the reads of the
+/// computation that holds it: an edit to any declaration the run went
+/// through retires the kept answer with that computation's read set.
 #[must_use = "a certified divergence decides its operation's answer"]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CertifiedDivergence {
@@ -118,11 +121,17 @@ impl CertifiedDivergence {
     /// The operation reached a state IDENTICAL to one it is still
     /// evaluating on its own path: the same declaration with the same
     /// arguments under the same evaluation context and phase, each step a
-    /// deterministic function of that state. The run from there repeats
-    /// forever. Only the operation that holds both states may claim it —
-    /// a conditional tail run meeting arguments it already took, or the lib
-    /// `Awaited<T>` conditional re-entering itself with the same argument.
-    pub(crate) const fn exact_recurrence(operation: CheckerDiagnosticOperation) -> Self {
+    /// deterministic, complete function of that state. The run from there
+    /// repeats forever. Only the operation that holds both states may claim
+    /// it — a conditional tail run meeting arguments it already took, or the
+    /// lib `Awaited<T>` conditional re-entering itself with the same
+    /// argument — and only with `exact`, the dispatcher's witness that no
+    /// step on the way read a partial.
+    pub(crate) fn exact_recurrence(
+        operation: CheckerDiagnosticOperation,
+        exact: crate::project_semantic_dispatch::build::ExactSteps,
+    ) -> Self {
+        let _ = exact;
         Self { operation }
     }
 

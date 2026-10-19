@@ -21,8 +21,7 @@ use verter_session_query::facts::fact_cache::ReadSetSignature;
 /// Finalized evidence of one traced component computation. Only the engine
 /// can mint it; admission consumes it under its publication fence.
 ///
-/// The refusal charges, the isolation flag and the divergence certificate
-/// are this compute's. A later compute does not replace them.
+/// The refusal charges and the isolation flag are this compute's. A later compute does not replace them.
 pub struct ComponentMetaEvidence {
     facts: Arc<[FactVersionRef]>,
     generation: u64,
@@ -32,23 +31,19 @@ pub struct ComponentMetaEvidence {
     /// operation counter moved only by what this thread recorded, or there
     /// was no request to interleave with.
     spent_alone: bool,
-    /// A producer proved an exact same-path recurrence during this compute.
-    /// A same-path reason bit is not this flag.
-    divergence_certificate: bool,
     /// A schedule cut was noted during this compute.
     schedule_cut: bool,
 }
 
 impl ComponentMetaEvidence {
-    /// Admission proof for this compute. The certificate, the schedule cut
-    /// and the isolation flag are the ones recorded on this evidence.
+    /// Admission proof for this compute. The schedule cut and the isolation
+    /// flag are the ones recorded on this evidence.
     #[must_use]
     pub fn admission_proof(
         &self,
         query: &crate::component_meta_result_db::ComponentMetaRefusalQuery,
     ) -> crate::component_meta_result_db::FinalComponentAdmissionProof {
         crate::component_meta_result_db::FinalComponentAdmissionProof {
-            divergence_certificate: self.divergence_certificate,
             schedule_cut: self.schedule_cut,
             entered_isolated: query.entered_isolated && self.spent_alone && !self.schedule_cut,
             request_spend_owned: self.spent_alone,
@@ -1491,8 +1486,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
 
     /// Admission proof for the compute `evidence` finalised.
     ///
-    /// A same-path recursion bit is not, by itself, a certificate. A
-    /// schedule cut and a spend that was not this compute's alone both
+    /// A schedule cut and a spend that was not this compute's alone both
     /// refuse isolated-root retention. The current demand root is not
     /// consulted: two outstanding computes keep their own proofs.
     #[must_use]
@@ -1633,7 +1627,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
             bytes: span.bytes,
             trip: span.trip,
         };
-        let divergence_certificate = span.certificates > 0;
         let schedule_cut = span.schedule_cuts > 0;
         let trace = match finalise {
             verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(facts)
@@ -1648,7 +1641,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
                         .expect("checked captured fingerprint"),
                     effects,
                     spent_alone,
-                    divergence_certificate,
                     schedule_cut,
                 })
             }
