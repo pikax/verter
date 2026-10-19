@@ -127,6 +127,7 @@ fn base_key() -> ResolveCallKey {
                 ty: SemanticNodeId(2),
                 spread: false,
                 literal_mode: ArgumentLiteralMode::Widened,
+                literal_provenance: None,
                 context_sensitive: false,
                 const_view: None,
             }]
@@ -267,6 +268,7 @@ fn resolve_call_key_covers_callee_kind_receiver_args_and_type_args() {
                     ty: SemanticNodeId(8),
                     spread: false,
                     literal_mode: ArgumentLiteralMode::Widened,
+                    literal_provenance: None,
                     context_sensitive: false,
                     const_view: None,
                 }]
@@ -286,6 +288,7 @@ fn resolve_call_key_covers_callee_kind_receiver_args_and_type_args() {
                     ty: SemanticNodeId(2),
                     spread: true,
                     literal_mode: ArgumentLiteralMode::Widened,
+                    literal_provenance: None,
                     context_sensitive: false,
                     const_view: None,
                 }]
@@ -305,6 +308,7 @@ fn resolve_call_key_covers_callee_kind_receiver_args_and_type_args() {
                     ty: SemanticNodeId(2),
                     spread: false,
                     literal_mode: ArgumentLiteralMode::Literal,
+                    literal_provenance: None,
                     context_sensitive: false,
                     const_view: None,
                 }]

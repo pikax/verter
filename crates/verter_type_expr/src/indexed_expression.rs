@@ -47,6 +47,62 @@ pub enum IndexedValueLiteralMode {
     Literal,
 }
 
+/// One step from a call argument into one of its authored nested
+/// positions: an object literal's member by its statically known key, or
+/// an array literal's element by its index.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+pub enum IndexedLiteralStep {
+    Member(crate::TypePropertyKey),
+    Element(u32),
+}
+
+/// A contributor to an authored position whose literals are REGULAR: the
+/// checker types it as the literal it already is, never as a fresh literal
+/// a mutable location widens (`getWidenedLiteralType` widens fresh
+/// literals only).
+#[derive(Debug, Clone, PartialEq, verter_retention::heap_size::HeapSize)]
+pub enum IndexedRegularLiteralSource {
+    /// A value whose authored form pins its type, typed as this: a type
+    /// assertion's type (`"a" as "a"`), or a literal inside a const
+    /// assertion (`["a"] as const`).
+    Pinned(TypeExpr),
+    /// An object or array literal in a const context (`["a"] as const`):
+    /// its whole type is pinned, and it holds no literal at its own top
+    /// level.
+    PinnedComposite,
+    /// A read of a value binding. Its literals are regular unless the
+    /// binding's declaration keeps a widening literal (`const s = "a"` is
+    /// read as the fresh `"a"`), which only the binding's resolution knows.
+    Read(crate::ValueRef),
+}
+
+/// One authored nested position of a call argument that a regular
+/// contributor writes.
+#[derive(Debug, Clone, PartialEq, verter_retention::heap_size::HeapSize)]
+pub struct IndexedLiteralPosition {
+    /// The steps from the argument to the position.
+    pub path: Arc<[IndexedLiteralStep]>,
+    /// The position's regular contributors: the branches of the conditional
+    /// the position is, or the position's one expression.
+    pub regular: Arc<[IndexedRegularLiteralSource]>,
+    /// Whether another contributor writes the position too: a fresh
+    /// literal, an object or array literal, or an expression this
+    /// classification does not read. Only the regular contributors' own
+    /// literals are then regular (`c ? "a" : sl` with `sl: "a"` is the
+    /// regular `"a"`, since a union of a fresh literal and its regular
+    /// counterpart is the regular one); otherwise every literal at the
+    /// position and nested in it is.
+    pub mixed: bool,
+}
+
+/// The literal provenance of a call argument's authored nested positions:
+/// each position a regular contributor writes. A position not listed holds
+/// only fresh literals — the bare literals a mutable location widens.
+#[derive(Debug, Clone, PartialEq, verter_retention::heap_size::HeapSize)]
+pub struct IndexedLiteralProvenance {
+    pub positions: Arc<[IndexedLiteralPosition]>,
+}
+
 /// One indexed call argument.
 #[derive(Debug, Clone, PartialEq, verter_retention::heap_size::HeapSize)]
 pub struct IndexedValueCallArg {
@@ -54,6 +110,9 @@ pub struct IndexedValueCallArg {
     pub point: u32,
     pub spread: bool,
     pub literal_mode: IndexedValueLiteralMode,
+    /// The regular literals the argument nests at its authored positions;
+    /// `None` when it nests none.
+    pub literal_provenance: Option<Arc<IndexedLiteralProvenance>>,
     /// Whether the argument is a function value at least one of whose
     /// parameters carries no authored type annotation. Such an argument is
     /// withheld from the call's first inference pass.

@@ -2420,6 +2420,12 @@ struct CallArgumentLiteralPolicy {
     /// contextual type names: a nested deposit into that parameter keeps
     /// the literal as written; every other literal widens.
     context_keeps: Vec<ContextKeptLiteral>,
+    /// Whether the argument is a context-sensitive literal as the call's
+    /// first inference pass reads it, its context-sensitive members
+    /// withheld: a non-inferrable type the checker never deposits whole
+    /// into a naked type parameter (`inferFromTypes` skips a
+    /// `NonInferrableType` source).
+    first_pass: bool,
 }
 
 /// A literal an authored position of a call argument keeps, with a type
@@ -3058,6 +3064,7 @@ impl CheckerDispatchTransaction {
         top_level_infer_targets: Vec<SemanticNodeId>,
         argument: Option<SemanticNodeId>,
         context_keeps: Vec<ContextKeptLiteral>,
+        first_pass: bool,
     ) {
         self.relation
             .call_argument_literal_modes
@@ -3066,6 +3073,7 @@ impl CheckerDispatchTransaction {
                 top_level_infer_targets,
                 argument,
                 context_keeps,
+                first_pass,
             });
     }
 
@@ -3106,6 +3114,27 @@ impl CheckerDispatchTransaction {
             .call_argument_literal_modes
             .last()
             .is_some_and(|policy| policy.argument == Some(bound))
+    }
+
+    /// Whether depositing `bound` into `param_node` would deposit the
+    /// CURRENT call argument's first-pass reading whole into a top-level
+    /// type parameter of its target (`T`, or the `T` arm of `T |
+    /// undefined`): the deposit the checker withholds. A deposit into a
+    /// nested position, or into another arm (`U` in `T | { extra: U }`),
+    /// is made.
+    pub(crate) fn call_argument_withholds(
+        &self,
+        param_node: SemanticNodeId,
+        bound: SemanticNodeId,
+    ) -> bool {
+        self.relation
+            .call_argument_literal_modes
+            .last()
+            .is_some_and(|policy| {
+                policy.first_pass
+                    && policy.argument == Some(bound)
+                    && policy.top_level_infer_targets.contains(&param_node)
+            })
     }
 
     /// The literals the CURRENT call argument nests at a position whose

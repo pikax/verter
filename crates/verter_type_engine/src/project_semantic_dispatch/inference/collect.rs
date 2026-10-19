@@ -38,6 +38,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         mut bound: SemanticNodeId,
         occurrence: InferenceOccurrence,
     ) -> bool {
+        // A context-sensitive literal's first-pass reading relates, but is
+        // no candidate for a naked type parameter: that parameter keeps its
+        // constraint for the second pass's contextual typing.
+        if self
+            .dispatch_txn
+            .borrow()
+            .call_argument_withholds(param_node, bound)
+        {
+            return true;
+        }
         let (call_policy, deposit_is_top_level, context_keeps) = {
             let txn = self.dispatch_txn.borrow();
             (

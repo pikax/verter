@@ -2027,6 +2027,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         argument.literal_mode,
                         argument_value.fresh,
                     ),
+                    literal_provenance: self.resolve_argument_literal_provenance(
+                        canonical,
+                        owner,
+                        argument.literal_provenance.as_deref(),
+                    ),
                 });
             }
             if let Some(argument) = call.args.get(args.len()) {
@@ -10573,6 +10578,12 @@ pub(super) trait FlowDemandDriver {
         owner: verter_type_expr::TopLevelOwnerId,
         path: &[String],
     ) -> bool;
+    fn resolve_argument_literal_provenance(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        authored: Option<&verter_type_expr::IndexedLiteralProvenance>,
+    ) -> Option<Arc<crate::semantic_query::ArgumentLiteralProvenance>>;
     fn arena(&self) -> super::arena_ops::ArenaOps<'_>;
     fn call_undecided_relations(&self) -> u64;
     fn discard_call_relation_observations(&self, count: u64);
@@ -11242,6 +11253,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         path: &[String],
     ) -> bool {
         ProjectSemanticDispatch::value_read_widens(self, canonical, owner, path)
+    }
+    fn resolve_argument_literal_provenance(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        authored: Option<&verter_type_expr::IndexedLiteralProvenance>,
+    ) -> Option<Arc<crate::semantic_query::ArgumentLiteralProvenance>> {
+        ProjectSemanticDispatch::resolve_argument_literal_provenance(
+            self, canonical, owner, authored,
+        )
     }
     fn arena(&self) -> super::arena_ops::ArenaOps<'_> {
         super::arena_ops::ArenaOps::new(self.graph())
@@ -11991,6 +12012,15 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         path: &[String],
     ) -> bool {
         self.driver.value_read_widens(canonical, owner, path)
+    }
+    fn resolve_argument_literal_provenance(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        authored: Option<&verter_type_expr::IndexedLiteralProvenance>,
+    ) -> Option<Arc<crate::semantic_query::ArgumentLiteralProvenance>> {
+        self.driver
+            .resolve_argument_literal_provenance(canonical, owner, authored)
     }
     fn arena(&self) -> super::arena_ops::ArenaOps<'_> {
         self.arena

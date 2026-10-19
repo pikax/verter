@@ -302,12 +302,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     // A member read off an argument is reported by no
                     // diagnostic of its own.
                     authored: u32::MAX,
+                    literal_provenance: None,
                 };
                 match self.collect_contextual_argument(
                     &argument,
                     member.value,
                     &mut budget,
                     &declared,
+                    false,
                 ) {
                     Ok(true) => {}
                     Ok(false) | Err(ContextualCandidateFailure::Mismatch) => {
@@ -691,7 +693,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 let typed = state
                     .delivery
                     .take()
-                    .or_else(|| arguments.get(position).copied())
+                    .or_else(|| arguments.get(position).cloned())
                     .filter(|arg| !arg.context_sensitive)
                     .ok_or(ContextualCandidateFailure::Degraded(
                         ResolveCallFailure::Undecidable,
@@ -704,7 +706,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 state
                     .candidate_typed_arguments
                     .entry((candidate.node, position))
-                    .or_insert(typed);
+                    .or_insert(typed.clone());
                 state.typed_arguments.entry(position).or_insert(typed);
             } else {
                 // Eager arguments infer before a context-sensitive callback is
@@ -777,7 +779,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         rest.as_ref(),
                         position,
                         original.len(),
-                        *argument,
+                        argument.clone(),
                         graph,
                         &mut evidence,
                     )
@@ -787,19 +789,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     self.deposit_canonical_evidence(evidence);
                     if argument.context_sensitive {
                         progress.deferred.push((position, target));
-                        if let Some(first_pass) = argument
-                            .first_pass
-                            .filter(|_| self.first_pass_infers_into(target, &declared))
-                        {
+                        if let Some(first_pass) = argument.first_pass {
                             let checkpoint = self.relation_session_checkpoint();
                             let view = CallArgument {
                                 node: first_pass,
                                 // The flow pass already applied mutable-slot
                                 // widening. Preserve pins in checked returns.
                                 literal_mode: ArgumentLiteralMode::Literal,
-                                ..*argument
+                                ..argument.clone()
                             };
-                            match self.collect_contextual_argument(&view, target, budget, &declared)
+                            match self
+                                .collect_contextual_argument(&view, target, budget, &declared, true)
                             {
                                 Ok(true) => {}
                                 Ok(false)
@@ -811,7 +811,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         }
                         continue;
                     }
-                    let mut argument = *argument;
+                    let mut argument = argument.clone();
                     if let Some(view) = argument.const_view {
                         argument.node = if const_params.contains(&target) {
                             view
@@ -828,7 +828,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         generic_arguments.push((argument, signature, target));
                         continue;
                     }
-                    if !self.collect_contextual_argument(&argument, target, budget, &declared)? {
+                    if !self
+                        .collect_contextual_argument(&argument, target, budget, &declared, false)?
+                    {
                         if !self.hold_eager_failure(
                             &mut state.diagnostic,
                             &mut progress,
@@ -855,9 +857,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             )
                             .map_err(ContextualCandidateFailure::Degraded)?
                             .unwrap_or(argument.node);
-                        if !self
-                            .collect_contextual_argument(&argument, target, budget, &declared)?
-                        {
+                        if !self.collect_contextual_argument(
+                            &argument, target, budget, &declared, false,
+                        )? {
                             if !self.hold_eager_failure(
                                 &mut state.diagnostic,
                                 &mut progress,
@@ -881,12 +883,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 // applicability (`assignContextualParameters`: a callback's
                 // parameter context is assigned once, by the first candidate
                 // that types it, and later candidates relate by that typing).
-                if let Some(&assigned) = state.typed_arguments.get(&position) {
+                if let Some(assigned) = state.typed_arguments.get(&position).cloned() {
                     if self.collect_contextual_argument(
                         &assigned,
                         inference_target,
                         budget,
                         &declared,
+                        false,
                     )? {
                         progress.arguments[position] = assigned;
                         progress.cursor += 1;
@@ -899,9 +902,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     // the recipe names it where it fails, and nothing where
                     // it relates (an unexplained rejection reports no
                     // position).
-                    if let Some(&own) = state
+                    if let Some(own) = state
                         .candidate_typed_arguments
                         .get(&(candidate.node, position))
+                        .cloned()
                     {
                         let reportable = own.node == assigned.node
                             || !self.collect_contextual_argument(
@@ -909,6 +913,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                 inference_target,
                                 budget,
                                 &declared,
+                                false,
                             )?;
                         if reportable {
                             state.diagnostic = Some(super::argument_not_assignable(
@@ -1006,12 +1011,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         true
     }
 
+    /// Relate one argument to `target` collecting its candidates;
+    /// `first_pass` when the argument is a context-sensitive literal's
+    /// first-pass reading.
     fn collect_contextual_argument(
         &self,
         argument: &CallArgument,
         target: SemanticNodeId,
         budget: &mut CallResolutionBudget<'_>,
         declared: &[TypeParamDecl],
+        first_pass: bool,
     ) -> Result<bool, ContextualCandidateFailure> {
         let before = self.accepted_inference_deposits();
         let step = self.call_argument_relation(
@@ -1020,7 +1029,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             argument.freshness_origin,
             budget,
             argument.literal_mode,
+            argument.literal_provenance.as_deref(),
             declared,
+            first_pass,
         );
         if !budget.charge_accepted_deposits(self.accepted_inference_deposits() - before) {
             return Err(ContextualCandidateFailure::Degraded(

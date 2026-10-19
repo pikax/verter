@@ -1025,12 +1025,26 @@ impl FamilyKey {
                         ty,
                         const_view,
                         first_pass,
+                        literal_provenance,
                         spread: _,
                         literal_mode: _,
                         context_sensitive: _,
                     } = arg
                     {
                         visit(*ty);
+                        for position in literal_provenance.iter().flat_map(|p| p.positions.iter()) {
+                            for step in position.path.iter() {
+                                if let crate::semantic_query::ArgumentPathStep::Member(key) = step {
+                                    visit(*key);
+                                }
+                            }
+                            position
+                                .literals
+                                .iter()
+                                .flat_map(|l| l.iter())
+                                .copied()
+                                .for_each(&mut visit);
+                        }
                         if let Some(const_view) = const_view {
                             visit(*const_view);
                         }

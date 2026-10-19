@@ -207,11 +207,13 @@ impl<'l> CallResolutionBudget<'l> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct CallArgument {
     node: SemanticNodeId,
     freshness_origin: SemanticNodeId,
     literal_mode: ArgumentLiteralMode,
+    /// The regular literals the argument nests ([`CallArgKey::Eager`]).
+    literal_provenance: Option<Arc<crate::semantic_query::ArgumentLiteralProvenance>>,
     indefinite_spread: bool,
     /// A function-valued argument with at least one un-annotated parameter.
     /// Its provisional type is withheld from the first inference pass.
@@ -2090,46 +2092,54 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             record_argument_work(1);
             let authored = u32::try_from(authored).map_err(|_| ResolveCallFailure::Undecidable)?;
             let context_sensitive = argument.is_context_sensitive();
-            let (node, spread, literal_mode, (const_view, first_pass)) = match argument {
-                CallArgKey::Eager {
-                    ty,
-                    spread,
-                    literal_mode,
-                    const_view,
-                    first_pass,
-                    ..
-                } => (*ty, *spread, *literal_mode, (*const_view, *first_pass)),
-                CallArgKey::ProgramExpression {
-                    point,
-                    spread,
-                    literal_mode,
-                    ..
-                } => {
-                    let (_serve, source_demand) = self
-                        .ctx
-                        .indexed_expression_source(point.canonical_id.as_ref())
-                        .ok_or(ResolveCallFailure::Undecidable)?;
-                    let indexed_point = verter_type_expr::facts::ProgramExpressionIdentity {
-                        canonical_id: std::sync::Arc::<str>::from(point.canonical_id.as_str()),
-                        offset: point.offset,
-                    };
-                    let program_index = source_demand.function_program_index();
-                    let record = program_index
-                        .expression(&indexed_point)
-                        .ok_or(ResolveCallFailure::Undecidable)?;
-                    let expression = source_demand
-                        .indexed_program_expression_ir(record)
-                        .ok_or(ResolveCallFailure::Undecidable)?;
-                    let node = self
-                        .evaluate_indexed_value_expression_node(
-                            point.canonical_id.as_ref(),
-                            record.locator.contributor.owner,
-                            expression.as_ref(),
-                        )
-                        .ok_or(ResolveCallFailure::Undecidable)?;
-                    (node, *spread, *literal_mode, (None, None))
-                }
-            };
+            let (node, spread, literal_mode, (const_view, first_pass), literal_provenance) =
+                match argument {
+                    CallArgKey::Eager {
+                        ty,
+                        spread,
+                        literal_mode,
+                        const_view,
+                        first_pass,
+                        literal_provenance,
+                        ..
+                    } => (
+                        *ty,
+                        *spread,
+                        *literal_mode,
+                        (*const_view, *first_pass),
+                        literal_provenance.clone(),
+                    ),
+                    CallArgKey::ProgramExpression {
+                        point,
+                        spread,
+                        literal_mode,
+                        ..
+                    } => {
+                        let (_serve, source_demand) = self
+                            .ctx
+                            .indexed_expression_source(point.canonical_id.as_ref())
+                            .ok_or(ResolveCallFailure::Undecidable)?;
+                        let indexed_point = verter_type_expr::facts::ProgramExpressionIdentity {
+                            canonical_id: std::sync::Arc::<str>::from(point.canonical_id.as_str()),
+                            offset: point.offset,
+                        };
+                        let program_index = source_demand.function_program_index();
+                        let record = program_index
+                            .expression(&indexed_point)
+                            .ok_or(ResolveCallFailure::Undecidable)?;
+                        let expression = source_demand
+                            .indexed_program_expression_ir(record)
+                            .ok_or(ResolveCallFailure::Undecidable)?;
+                        let node = self
+                            .evaluate_indexed_value_expression_node(
+                                point.canonical_id.as_ref(),
+                                record.locator.contributor.owner,
+                                expression.as_ref(),
+                            )
+                            .ok_or(ResolveCallFailure::Undecidable)?;
+                        (node, *spread, *literal_mode, (None, None), None)
+                    }
+                };
             let freshness_origin = node;
             let node = self.substitute_canonical(node, &key.context.substitution);
             if !spread {
@@ -2137,6 +2147,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     node,
                     freshness_origin,
                     literal_mode,
+                    literal_provenance,
                     indefinite_spread: false,
                     context_sensitive,
                     const_view: const_view
@@ -2172,6 +2183,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         },
                         freshness_origin,
                         literal_mode,
+                        literal_provenance: None,
                         indefinite_spread: false,
                         context_sensitive,
                         const_view: None,
@@ -2183,6 +2195,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     node,
                     freshness_origin,
                     literal_mode,
+                    literal_provenance: None,
                     indefinite_spread: true,
                     context_sensitive,
                     const_view: None,
@@ -2550,7 +2563,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 rest,
                 index,
                 arguments.len(),
-                *argument,
+                argument.clone(),
                 graph,
                 &mut canonical_evidence,
             );
@@ -2604,11 +2617,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // A context-sensitive literal still infers from its other
                 // members (`SkipContextSensitive` reads the sensitive ones
                 // as the non-inferring `anyFunctionType`); what it deposits
-                // is kept only when that reading relates.
-                if let Some(view) = argument
-                    .first_pass
-                    .filter(|_| self.first_pass_infers_into(target, &visible_type_params))
-                {
+                // is kept only when that reading relates, and never the
+                // reading whole at a naked type parameter.
+                if let Some(view) = argument.first_pass {
                     let checkpoint = self.relation_session_checkpoint();
                     let deposits_before = self.accepted_inference_deposits();
                     let step = self.call_argument_relation(
@@ -2617,7 +2628,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         argument.freshness_origin,
                         budget,
                         argument.literal_mode,
+                        argument.literal_provenance.as_deref(),
                         &visible_type_params,
+                        true,
                     );
                     if !budget.charge_accepted_deposits(
                         self.accepted_inference_deposits() - deposits_before,
@@ -2643,7 +2656,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 freshness_origin,
                 budget,
                 literal_mode,
+                argument.literal_provenance.as_deref(),
                 &visible_type_params,
+                false,
             );
             if !budget
                 .charge_accepted_deposits(self.accepted_inference_deposits() - deposits_before)
@@ -2736,7 +2751,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 argument.freshness_origin,
                 budget,
                 argument.literal_mode,
+                argument.literal_provenance.as_deref(),
                 &visible_type_params,
+                false,
             );
             if !budget
                 .charge_accepted_deposits(self.accepted_inference_deposits() - deposits_before)
@@ -3033,7 +3050,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 substituted_rest,
                 index,
                 arguments.len(),
-                *argument,
+                argument.clone(),
                 graph,
                 &mut canonical_evidence,
             );
@@ -3787,11 +3804,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         freshness_origin: SemanticNodeId,
         budget: &mut CallResolutionBudget<'_>,
         literal_mode: ArgumentLiteralMode,
+        literal_provenance: Option<&crate::semantic_query::ArgumentLiteralProvenance>,
         declared: &[crate::semantic_query::TypeParamDecl],
+        first_pass: bool,
     ) -> RelationStep {
         let top_level = self.top_level_type_param_targets(target);
         let (source, context_keeps) = if literal_mode == ArgumentLiteralMode::Widened {
-            self.checked_literal_argument(source, target, declared)
+            self.checked_literal_argument(source, target, declared, literal_provenance)
         } else {
             (source, Vec::new())
         };
@@ -3800,6 +3819,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             top_level,
             Some(source),
             context_keeps,
+            first_pass,
         );
         let step = self.call_relation(source, target, freshness_origin, budget, true, true);
         self.dispatch_txn.borrow_mut().end_call_argument();
@@ -3896,6 +3916,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Vec::new(),
             None,
             Vec::new(),
+            false,
         );
         let step = self.call_relation(source, target, source, budget, true, false);
         self.dispatch_txn.borrow_mut().end_call_argument();
@@ -3946,9 +3967,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         freshness_origin: SemanticNodeId,
         budget: &mut CallResolutionBudget<'_>,
     ) -> RelationStep {
-        self.dispatch_txn
-            .borrow_mut()
-            .begin_call_argument(None, Vec::new(), None, Vec::new());
+        self.dispatch_txn.borrow_mut().begin_call_argument(
+            None,
+            Vec::new(),
+            None,
+            Vec::new(),
+            false,
+        );
         let step = self.call_relation(source, target, freshness_origin, budget, true, false);
         self.dispatch_txn.borrow_mut().end_call_argument();
         step
@@ -4494,6 +4519,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> SemanticNodeId {
         if let Some(cached) = memo.get(&node) {
             return *cached;
+        }
+        // A kept node — a literal, or a composite the argument wrote as a
+        // regular value — is deposited as written.
+        if keeps.contains(&node) {
+            return node;
         }
         let graph = self.graph();
         memo.insert(node, node);
