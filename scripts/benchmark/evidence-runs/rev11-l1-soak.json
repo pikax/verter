@@ -1,0 +1,99 @@
+{
+  "name": "rev11-l1-soak",
+  "kind": "soak",
+  "description": "The long-churn soak: 100 tranches of 100 editor actions (10,000 actions, every lifecycle class) in normal and pressure modes through the public host routes, retention sampled every 25 actions with capture off, judged by the runner's inventories, answer rules, opening-window envelope and teardown drain; process memory and wall time beside it on the benchmark machine.",
+  "modes": ["normal", "pressure"],
+  "noise": [
+    "docs/contributing/semantic-benchmark.md#verdicts",
+    "docs/contributing/semantic-benchmark.md#schedule"
+  ],
+  "soak": {
+    "runner": "verter-soak",
+    "tranches": 100,
+    "actionsPerTranche": 100,
+    "minDistinctQueries": 3000,
+    "sampleEvery": 25,
+    "envelopeActions": 2000,
+    "workloads": {
+      "normal": {
+        "actions": 10000,
+        "distinctQueries": 6700,
+        "digest": "5c01035de94ef9e4309d6fdaf051b1bdc70d01380180e6a9bf42b0f8dfc4eedc"
+      },
+      "pressure": {
+        "actions": 10000,
+        "distinctQueries": 6500,
+        "digest": "b1b682ae08794a2a48ab7c1b79dfc883c2da321b7af8d01cd9b2aafd3cc96c5a"
+      }
+    },
+    "smoke": {
+      "normal": {
+        "tranches": 1,
+        "digest": "fe2ae1c8229bfbccf79cb23207d2964ad51f1b98c091ee212cd3bbdafef77f11"
+      },
+      "pressure": {
+        "tranches": 1,
+        "digest": "5d842fab80930054684fedffd1d4af6b2f47da802103527a1e870b0ca8681489"
+      }
+    },
+    "binding": {
+      "smoke": "targeted-domain",
+      "full": "bench-m3"
+    },
+    "controls": {
+      "runner": "verter-soak --controls",
+      "names": [
+        "retained-key-leak",
+        "omitted-workload-class",
+        "omitted-cancellation",
+        "fake-overlap",
+        "wrong-project-reversion",
+        "missing-summary",
+        "unexpected-skip"
+      ]
+    }
+  },
+  "requiredCells": [
+    {
+      "mode": "normal",
+      "metrics": [
+        "verdict",
+        "controls",
+        "failures",
+        "actions",
+        "samples",
+        "closedRetainedBytes",
+        "finalRetainedBytes",
+        "peakAccountBytes",
+        "refusalsPressure",
+        "refusalsOversized",
+        "refusalsActive"
+      ]
+    },
+    {
+      "mode": "pressure",
+      "metrics": [
+        "verdict",
+        "failures",
+        "actions",
+        "samples",
+        "closedRetainedBytes",
+        "finalRetainedBytes",
+        "peakAccountBytes",
+        "refusalsPressure",
+        "refusalsOversized",
+        "refusalsActive"
+      ]
+    },
+    {
+      "mode": "normal",
+      "benchM3Only": true,
+      "metrics": ["wallMs", "peakRssBytes", "processTreePeakBytes"]
+    },
+    {
+      "mode": "pressure",
+      "benchM3Only": true,
+      "metrics": ["wallMs", "peakRssBytes", "processTreePeakBytes"]
+    }
+  ]
+}

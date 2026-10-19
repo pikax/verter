@@ -49,6 +49,8 @@
 //! - [`payloads`] — per-`RequestKind` payload data structs.
 //! - [`scheduler`] — [`scheduler::SchedulerAudit`] +
 //!   [`scheduler::WorkerPool`] / [`scheduler::SchedulerDepths`].
+//! - [`soak`] — [`soak::SoakCounts`], the long-churn soak's retention
+//!   sample, and its drain and envelope comparisons.
 //! - [`batch`] — [`batch::BatchAuditAggregator`] folds an
 //!   [`batch::AuditRecordSource`] into a
 //!   [`payloads::BundlerBatchPayload`].
@@ -71,6 +73,7 @@ pub mod published_surface;
 mod published_surface_tests;
 pub mod record;
 pub mod scheduler;
+pub mod soak;
 pub mod store;
 pub mod structured_event;
 pub mod timing;
