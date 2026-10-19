@@ -554,7 +554,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if suspend {
                     return ReferenceProjectionPlan::Typeof(read);
                 }
-                self.read_typeof_in_place(read)
+                self.read_typeof_in_place(*read)
             }
             SemanticNodeData::DeclRef { identity } => {
                 if self.is_instantiate_active(
@@ -1373,7 +1373,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// Read a `typeof` in place.
-    fn read_typeof_in_place(&self, read: Box<TypeofRead>) -> ReferenceProjectionPlan {
+    fn read_typeof_in_place(&self, read: TypeofRead) -> ReferenceProjectionPlan {
         let answer = match self.execute_type_node(read.key.clone()) {
             QueryResult::Value(SemanticQueryOutput {
                 value, provenance, ..
@@ -1386,7 +1386,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 answered: None,
             },
         };
-        self.advance_typeof_read(*read, answer)
+        self.advance_typeof_read(read, answer)
     }
 
     /// Install a reference's projection plan reached after its `typeof` read
