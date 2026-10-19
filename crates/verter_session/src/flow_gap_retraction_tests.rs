@@ -362,6 +362,10 @@ const OPTIONAL_READ_NARROW: &str = "type Boxed = { k?: \"a\" };\n\
 #[test]
 fn predicate_narrow_over_an_undecided_relation_publishes_no_fact() {
     let host = make_audit_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let canonical = "/flow-gap-retraction/undecided_relation_narrow.ts";
     upsert(
         &host,
@@ -446,6 +450,10 @@ fn nominal_relation_gap_retracts_only_when_decided() {
 #[test]
 fn nominal_narrow_retracts_when_a_declaration_changes_on_one_host() {
     let host = make_audit_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let decl = "/flow-gap-retraction/edit-decl.ts";
     let consumer = "/flow-gap-retraction/edit-consumer.ts";
     upsert(

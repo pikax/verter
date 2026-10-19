@@ -2262,6 +2262,10 @@ fn each_return_site_is_connected_work_the_demand_pays_for() {
         );
 
         let host = host_with(&[(PATH, source.as_str())]);
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let step = with_dispatch(&host, |dispatch| {
             dispatch.set_connected_limits_for_tests(used - 1, MAX_CONNECTED_QUERY_DEPTH);
             let key = key_of(dispatch, PATH, "witness");

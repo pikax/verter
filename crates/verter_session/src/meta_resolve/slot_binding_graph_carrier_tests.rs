@@ -69,6 +69,10 @@ fn carrier_wrapping(
 fn accumulate_carrier_deps_descends_carrier_args() {
     for kind in 0u8..3 {
         let host = VerterHost::new_standalone(HostConfig::default());
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
             crate::resolver_core::HostCapabilities,
         > = &host;
@@ -131,6 +135,7 @@ fn accumulate_carrier_deps_descends_carrier_args() {
 fn node_contains_free_type_param_descends_carrier_args() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let free_param = graph.intern_node(SemanticNodeData::TypeParam {
@@ -192,6 +197,7 @@ fn under_nested_arrays<R: Send + 'static>(
         .spawn(move || {
             let host = VerterHost::new_standalone(HostConfig::default());
             let dispatch = ProjectSemanticDispatch::new(&host);
+            let _builder = dispatch.enter_construction_scope();
             let graph = Arc::clone(host.project_type_store().semantic_graph());
             let mut node = leaf(&graph);
             for _ in 0..DEPTH {
@@ -257,6 +263,7 @@ fn a_symbolic_slot_root_is_found_through_any_alias_chain() {
         .spawn(|| {
             let host = VerterHost::new_standalone(HostConfig::default());
             let dispatch = ProjectSemanticDispatch::new(&host);
+            let _builder = dispatch.enter_construction_scope();
             let graph = Arc::clone(host.project_type_store().semantic_graph());
             let mut node = free_param(&graph);
             for _ in 0..DEPTH {

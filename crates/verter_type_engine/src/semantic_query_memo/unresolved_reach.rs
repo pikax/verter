@@ -24,12 +24,122 @@
 //! cleared on every edit; this one must not be, and clearing it would only
 //! cost recomputation.
 //!
-//! The one exception is a document CLOSE: `release_canonical` drops the
-//! bits of the nodes it tombstones (their payloads are gone, so the bits
-//! are pure retention). A released id asked again reads the `Opaque(Miss)`
-//! placeholder and memoizes `true` — the conservative answer.
+//! The one exception is a node's destruction: its bits are pure retention
+//! once its payload is gone, so the store drops them with the arena's
+//! destroyed log (`release.rs`). A destroyed id asked again reads the
+//! `Opaque(Miss)` placeholder and answers `true` — the conservative answer
+//! — without memoizing it.
 
 use super::*;
+
+pub(super) const STRUCTURE_BITS_STORAGE_GRANULE: usize = 4 * 1024;
+
+/// The single per-node bit table and its pinned backing. Removal can reduce
+/// HashMap::capacity through tombstones without freeing its allocation, so
+/// backing_capacity changes only on growth or an explicit geometric shrink.
+pub(super) struct StructureBits {
+    entries: FxHashMap<SemanticNodeId, NodeStructureBits>,
+    backing_capacity: usize,
+    storage: verter_session_query::retention::granular::GranularPin,
+    #[cfg(test)]
+    retirement_work: usize,
+}
+
+impl StructureBits {
+    pub(super) fn new(
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) -> Self {
+        Self {
+            entries: FxHashMap::default(),
+            backing_capacity: 0,
+            storage: verter_session_query::retention::granular::GranularPin::new(
+                account,
+                STRUCTURE_BITS_STORAGE_GRANULE,
+            ),
+            #[cfg(test)]
+            retirement_work: 0,
+        }
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(super) fn get(&self, node: &SemanticNodeId) -> Option<&NodeStructureBits> {
+        self.entries.get(node)
+    }
+
+    fn set_unresolved(&mut self, node: SemanticNodeId, bit: bool) {
+        self.entries.entry(node).or_default().unresolved = Some(bit);
+        self.settle_growth();
+    }
+
+    fn set_inert(&mut self, node: SemanticNodeId, bit: bool) {
+        self.entries.entry(node).or_default().inert = Some(bit);
+        self.settle_growth();
+    }
+
+    fn settle_growth(&mut self) {
+        let capacity = self.entries.capacity();
+        if capacity > self.backing_capacity {
+            self.settle_capacity(capacity);
+        }
+    }
+
+    fn settle_capacity(&mut self, capacity: usize) {
+        let bytes = |capacity| {
+            verter_retention::heap_size::hash_table_bytes(
+                capacity,
+                std::mem::size_of::<(SemanticNodeId, NodeStructureBits)>(),
+            )
+        };
+        let (before, after) = (bytes(self.backing_capacity), bytes(capacity));
+        if after > before {
+            self.storage.add(after - before);
+        } else {
+            self.storage.sub(before - after);
+        }
+        self.backing_capacity = capacity;
+    }
+
+    pub(super) fn remove(&mut self, node: &SemanticNodeId) -> bool {
+        #[cfg(test)]
+        {
+            self.retirement_work += 1;
+        }
+        let removed = self.entries.remove(node).is_some();
+        if !removed {
+            return false;
+        }
+        if self.entries.is_empty() {
+            self.entries = FxHashMap::default();
+            self.settle_capacity(0);
+        } else if self.backing_capacity > self.entries.len().saturating_mul(4) {
+            #[cfg(test)]
+            {
+                self.retirement_work += self.entries.len();
+            }
+            self.entries.shrink_to(self.entries.len().saturating_mul(2));
+            self.settle_capacity(self.entries.capacity());
+        }
+        removed
+    }
+
+    #[cfg(test)]
+    pub(super) fn retirement_work(&self) -> usize {
+        self.retirement_work
+    }
+
+    #[cfg(test)]
+    pub(super) fn capacity(&self) -> usize {
+        self.backing_capacity
+    }
+
+    #[cfg(test)]
+    pub(super) fn storage_charge_bytes(&self) -> usize {
+        self.storage.charged()
+    }
+}
 
 /// The structural bits memoized for ONE node id — the value of the store's
 /// single per-node sidecar. Each bit is an inductive function of the node's
@@ -104,12 +214,9 @@ impl SemanticGraphStore {
                     stack.pop();
                     on_path.remove(&node);
                     local.insert(node, bit);
-                    if !cycle_seen && self.keeps_structure_bits(node) {
-                        self.unresolved_reach
-                            .lock()
-                            .entry(node)
-                            .or_default()
-                            .unresolved = Some(bit);
+                    if !cycle_seen {
+                        self.unresolved_reach.lock().set_unresolved(node, bit);
+                        self.track_structure_bits(node);
                     }
                     if let Some(parent) = stack.last_mut() {
                         parent.bit |= bit;
@@ -370,18 +477,18 @@ impl SemanticGraphStore {
     }
 
     fn set_inert_bit(&self, node: SemanticNodeId, bit: bool) {
-        if self.keeps_structure_bits(node) {
-            self.unresolved_reach.lock().entry(node).or_default().inert = Some(bit);
-        }
+        self.unresolved_reach.lock().set_inert(node, bit);
+        self.track_structure_bits(node);
     }
 
-    /// Whether `node`'s structure bits are memoized. A released id is
-    /// answered (it reads the placeholder) but never memoized: no later
-    /// release names it, so its entry would be a residue for the life of
-    /// the store. Until the first release every id is live and this is one
-    /// relaxed load.
-    fn keeps_structure_bits(&self, node: SemanticNodeId) -> bool {
-        !self.released_any.load(std::sync::atomic::Ordering::Relaxed) || self.arena.is_live(node)
+    /// Mark `node`'s just-written structure bits for cleanup when it is
+    /// destroyed. A destroyed id is answered (it reads the placeholder) but
+    /// never memoized: no later destruction names it, so its entry would be
+    /// a residue for the life of the store.
+    fn track_structure_bits(&self, node: SemanticNodeId) {
+        if !self.track_sidecar(node) {
+            self.unresolved_reach.lock().remove(&node);
+        }
     }
 
     /// The memoized structural bits of `node`, if any was decided.

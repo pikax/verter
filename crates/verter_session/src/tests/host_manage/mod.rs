@@ -877,10 +877,11 @@ impl crate::session_view::SessionView for DecliningOverlayView {
 /// shape entries, the per-family memo breakdown and the node slot count.
 type ChurnCycleCounters = (usize, usize, usize, Vec<(&'static str, usize)>, usize);
 
-/// Fixture for the activity-gate tests: a consumer whose props resolve
-/// through `/src/types/icon.ts`, resolved once so icon.ts has live nodes.
+/// Fixture for the document-close lifecycle tests: a consumer whose props
+/// resolve through `/src/types/icon.ts`, resolved once so icon.ts has live
+/// nodes.
 #[cfg(not(target_arch = "wasm32"))]
-fn activity_gate_fixture() -> (Arc<CountingWorkspace>, VerterHost) {
+fn close_lifecycle_fixture() -> (Arc<CountingWorkspace>, VerterHost) {
     const CONSUMER: &str = r#"<script setup lang="ts">
 import type { IconProps } from './types/icon'
 defineProps<IconProps>()

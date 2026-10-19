@@ -86,7 +86,7 @@ crate::output_sinks::define_output_capability! {
 
 /// The ordinal a projection reads, proven to be the live node `node` roots
 /// in this request's graph. A root minted by another graph is foreign and a
-/// node a legacy close released is stale: both project nothing.
+/// destroyed node is stale: both project nothing.
 fn owned_projection_subject(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: &verter_type_engine::semantic_query_memo::node_roots::NodeRoot,

@@ -44,6 +44,16 @@ fn hash16(byte: u8) -> [u8; 16] {
 fn count_for_b_after_publishing_a(a: &SemanticQueryKey, b: &SemanticQueryKey) -> usize {
     let host = host();
     let graph = host.project_type_store().semantic_graph();
+    // The keys name fixture ordinals: this graph holds a live node at
+    // each, so every ordinal a key names is one it owns.
+    let _scope = graph.enter_node_root_scope();
+    let _fixture_ordinals: Vec<_> = (0..128u32)
+        .map(|n| {
+            graph.intern_node(SemanticNodeData::Literal(
+                verter_type_engine::semantic_query::LiteralValue::Number(f64::from(n)),
+            ))
+        })
+        .collect();
     let node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     graph.publish_with_carrier_dispatch_and_generation_for_tests(
         a.clone(),
@@ -433,6 +443,16 @@ fn contextual_type_key_is_order_insensitive_set() {
 fn flow_narrowing_at_execute_is_non_producing_miss() {
     let host = host();
     let graph = host.project_type_store().semantic_graph();
+    // The keys name fixture ordinals: this graph holds a live node at
+    // each, so every ordinal a key names is one it owns.
+    let _scope = graph.enter_node_root_scope();
+    let _fixture_ordinals: Vec<_> = (0..128u32)
+        .map(|n| {
+            graph.intern_node(SemanticNodeData::Literal(
+                verter_type_engine::semantic_query::LiteralValue::Number(f64::from(n)),
+            ))
+        })
+        .collect();
     let key = flow_narrowing_key("a.ts", 0, 0, 0, 0, 0, 0);
 
     let result =
@@ -452,6 +472,16 @@ fn flow_narrowing_at_execute_is_non_producing_miss() {
 fn contextual_type_at_execute_is_non_producing_miss() {
     let host = host();
     let graph = host.project_type_store().semantic_graph();
+    // The keys name fixture ordinals: this graph holds a live node at
+    // each, so every ordinal a key names is one it owns.
+    let _scope = graph.enter_node_root_scope();
+    let _fixture_ordinals: Vec<_> = (0..128u32)
+        .map(|n| {
+            graph.intern_node(SemanticNodeData::Literal(
+                verter_type_engine::semantic_query::LiteralValue::Number(f64::from(n)),
+            ))
+        })
+        .collect();
     let key = contextual_type_key("a.ts", 0, 0, 0, 0, 0, 0);
 
     let result =

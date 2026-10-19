@@ -231,6 +231,10 @@ fn install_audit_ctx() -> (Arc<RequestContext>, RequestContextGuard) {
 #[test]
 fn recursive_substitution_repeated_triples_hit_memo() {
     let host = make_host(NESTED_K_FIXTURE);
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let mapped_carrier = lower_mapped(&host);
     let (value_expr, parameter_node) = extract_mapper_inputs(&host, mapped_carrier);
     let arg = intern_literal(&host, "a");
@@ -291,6 +295,10 @@ fn recursive_substitution_repeated_triples_hit_memo() {
 #[test]
 fn recursive_substitution_unique_triples_do_not_false_hit() {
     let host = make_host(SINGLE_K_FIXTURE);
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let mapped_carrier = lower_mapped(&host);
     let (value_expr, parameter_node) = extract_mapper_inputs(&host, mapped_carrier);
 
@@ -348,6 +356,10 @@ fn recursive_substitution_unique_triples_do_not_false_hit() {
 #[test]
 fn recursive_substitution_changed_bit_correct() {
     let host = make_host(SINGLE_K_FIXTURE);
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let mapped_carrier = lower_mapped(&host);
     let (value_expr, parameter_node) = extract_mapper_inputs(&host, mapped_carrier);
 

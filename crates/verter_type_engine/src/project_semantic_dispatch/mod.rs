@@ -825,7 +825,28 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             key: crate::semantic_query::FlowReturnKey,
         ) -> (crate::semantic_query::FlowReturnStep, bool) {
             let before = self.degraded_member_reads.get();
-            let step = self.execute_flow_return(key);
+            let step = match self.execute_flow_return(key) {
+                // The delivered result owns its nodes past this dispatch: a
+                // ReturnOnly result has no cache entry holding them. Its
+                // producer owns every node it names until this delivery roots
+                // it, so a destroyed one is an ownership defect: loud in
+                // checked builds, a typed no-value failure in shipped ones.
+                crate::semantic_query::FlowReturnStep::Complete(result) => {
+                    match result.delivered(self.graph()) {
+                        Ok(result) => crate::semantic_query::FlowReturnStep::Complete(result),
+                        Err(error) => {
+                            verter_debug_assert!(
+                                false,
+                                "flow-return delivery names a destroyed node: {error:?}"
+                            );
+                            crate::semantic_query::FlowReturnStep::NoValue(
+                                crate::semantic_query::FlowReturnFailure::Unresolved,
+                            )
+                        }
+                    }
+                }
+                step => step,
+            };
             (step, self.degraded_member_reads.get() != before)
         }
     }
@@ -891,14 +912,14 @@ impl<'g> Drop for RelationEnvironmentScope<'g> {
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
-    /// Bind the controlled counted fixture to real dispatch without an
-    /// enclosing construction scope. Unavailable in production builds.
+    /// Bind a fixture's private graph to real dispatch without an enclosing
+    /// construction scope. Test support only.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn with_ownership_harness(
+    pub fn with_graph_fixture(
         ctx: &'a dyn ResolverContext<C>,
-        harness: crate::semantic_query_memo::ownership_harness::CountedOwnershipHarness,
+        fixture: crate::semantic_query_memo::graph_fixture::GraphFixture,
     ) -> Self {
-        Self::bind(ctx, Some(Arc::new(harness.into_graph())))
+        Self::bind(ctx, Some(Arc::new(fixture.into_graph())))
     }
 
     /// Create a dispatcher bound to a sealed request context.
@@ -1721,13 +1742,33 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             (None, None) => None,
             _ => return,
         };
+        // The summary owns everything its replay delivers — value,
+        // diagnostics and dependency rail — under its own lease: the read's
+        // lease may predate diagnostics folded in after it was minted.
+        let mut stored = read.clone();
+        stored.lease = match self.graph().lease_delivery(
+            crate::semantic_query_memo::delivery_lease::DeliveredAllocations::read(
+                &stored.value,
+                &stored.walker_diagnostics,
+                &stored.dep_signature,
+            ),
+        ) {
+            Ok(lease) => lease,
+            // The read being sealed owns every node it names, so a destroyed
+            // one is an ownership defect: loud in checked builds; shipped
+            // builds seal nothing and the read is delivered unsealed.
+            Err(error) => {
+                verter_debug_assert!(false, "a sealed refusal names a destroyed node: {error:?}");
+                return;
+            }
+        };
         self.graph().seal_refusal(
             self.ctx,
             root.key,
             cost_receipt::BudgetProfile::intern(root.profile),
             root.entered,
             crate::semantic_query_memo::refusal_summary::RefusalSummary::new(
-                read.clone(),
+                stored,
                 traced.carrier,
                 traced.self_roots,
                 crate::semantic_query_memo::refusal_summary::RefusalPrefix {
@@ -1760,11 +1801,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         crate::project_semantic_dispatch::walk::WalkerDiagnostics::new(diagnostics)
     }
 
-    fn append_connected_limit_diagnostics<T>(
+    fn append_connected_limit_diagnostics(
         &self,
         key: &SemanticQueryKey,
         reasons: crate::semantic_query::PartialReasonSet,
-        read: &mut CacheRead<QueryResult<T>>,
+        read: &mut CacheRead<QueryResult<SemanticQueryValue>>,
     ) {
         let root = self.connected_limit_carrier(key, reasons);
         let additions = self.connected_limit_diagnostics(root, reasons);
@@ -1783,6 +1824,27 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         read.walker_diagnostics =
             crate::project_semantic_dispatch::walk::WalkerDiagnostics::new(diagnostics);
+        // The appended diagnostics name the limit's carrier, interned just
+        // now: the read's delivery owns it alongside everything else it
+        // hands out. The read and the carrier's construction scope own every
+        // node named, so a destroyed one is an ownership defect: loud in
+        // checked builds, a typed refusal in shipped ones.
+        match self.graph().lease_delivery(
+            crate::semantic_query_memo::delivery_lease::DeliveredAllocations::read(
+                &read.value,
+                &read.walker_diagnostics,
+                &read.dep_signature,
+            ),
+        ) {
+            Ok(lease) => read.lease = lease,
+            Err(error) => {
+                verter_debug_assert!(
+                    false,
+                    "connected-limit diagnostics name a destroyed node: {error:?}"
+                );
+                *read = crate::semantic_query_memo::refused_operand_cache_read(error);
+            }
+        }
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -3167,8 +3229,8 @@ fn widen_node_cache_read(
 #[test]
 fn counted_value_domain_conversion_preserves_delivery_ownership() {
     use crate::semantic_query::LiteralValue;
-    use crate::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
-    let harness = CountedOwnershipHarness::new();
+    use crate::semantic_query_memo::graph_fixture::GraphFixture;
+    let harness = GraphFixture::new();
     let read = harness.run(|graph| {
         let node = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
             "converted result".into(),
@@ -3974,18 +4036,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // delivered value.
         let mut read = self.execute_via_cold_build_helper_owned(key, publication, operand_evidence);
         let lease = std::mem::take(&mut read.lease);
-        read.lease = self
-            .graph()
-            .redeliver(
-                lease,
-                crate::semantic_query_memo::delivery_lease::DeliveredAllocations::read(
-                    &read.value,
-                    &read.walker_diagnostics,
-                    &read.dep_signature,
-                ),
-            )
-            .expect("dispatch delivery operands are live");
-        read
+        match self.graph().redeliver(
+            lease,
+            crate::semantic_query_memo::delivery_lease::DeliveredAllocations::read(
+                &read.value,
+                &read.walker_diagnostics,
+                &read.dep_signature,
+            ),
+        ) {
+            Ok(lease) => {
+                read.lease = lease;
+                read
+            }
+            // Every node a read names is owned by its producer until this
+            // delivery re-roots it, so a destroyed one is an ownership
+            // defect: loud in checked builds, a typed refusal in shipped ones.
+            Err(error) => {
+                verter_debug_assert!(false, "dispatch delivery names a destroyed node: {error:?}");
+                crate::semantic_query_memo::refused_operand_cache_read(error)
+            }
+        }
     }
 
     fn execute_via_cold_build_helper_owned(

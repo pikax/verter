@@ -96,6 +96,10 @@ fn build_diamond(
 fn diamond_dag_walkers_are_memo_bounded_and_charge_shared_budget() {
     let project = open_project();
     let host = project.host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
         crate::resolver_core::HostCapabilities,
@@ -174,6 +178,10 @@ fn diamond_dag_walkers_are_memo_bounded_and_charge_shared_budget() {
 fn diamond_dynamic_root_result_is_bounded_by_unique_leaves_not_exponential() {
     let project = open_project();
     let host = project.host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
         crate::resolver_core::HostCapabilities,
@@ -227,6 +235,7 @@ fn consumed_bindings_key_is_uncacheable_for_override_bearing() {
             name: "bag".to_string(),
             node: SemanticNodeId(3),
         }],
+        roots: Default::default(),
     };
     let override_key = consumed_bindings_key(
         "/App.vue",
@@ -357,6 +366,10 @@ defineProps<{ root: Tree }>()
 fn over_cap_walker_trip_folds_partial_into_cold_compute_scope() {
     let project = open_project();
     let host = project.host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
         crate::resolver_core::HostCapabilities,
@@ -429,6 +442,10 @@ fn over_cap_walker_trip_folds_partial_into_cold_compute_scope() {
 fn wide_unique_union_result_is_bounded_by_halt_not_grown_to_n() {
     let project = open_project();
     let host = project.host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
         crate::resolver_core::HostCapabilities,

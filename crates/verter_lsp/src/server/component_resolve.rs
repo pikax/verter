@@ -1232,7 +1232,7 @@ impl VerterLanguageServer {
                     .registered_file_structure_snapshot(&child_canonical_id)?;
                 let (inherited_attrs, fact_versions) =
                     super::server_utils::resolved_fallthrough_attrs(
-                        &self.documents.host(),
+                        self.documents.host(),
                         &child_canonical_id,
                     );
                 Some((analysis, structure, inherited_attrs, fact_versions))

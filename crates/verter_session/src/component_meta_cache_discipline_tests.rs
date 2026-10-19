@@ -102,6 +102,10 @@ fn tracked_macro_owner(
 #[test]
 fn cache_discipline_resolve_macro_payload_repeated_keys_warm() {
     let host = build_test_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let arg = intern_empty_object(&host);
     // The `ResolveMacroPayload` memo entry self-roots on the owner
     // SFC's `FileWholeHash`; the owner canonical must be a tracked
@@ -184,19 +188,21 @@ fn cache_discipline_resolve_macro_payload_repeated_keys_warm() {
 #[test]
 fn cache_discipline_builtin_pick_instantiate_repeated_keys_warm() {
     let host = build_test_host();
+    // One dispatcher builds the key's operands and runs every repeat: its
+    // construction owner keeps them live.
+    let dispatch = host.semantic_dispatch();
+    let _builder = dispatch.enter_construction_scope();
     let base = intern_empty_object(&host);
     let members: Vec<Arc<str>> = vec![Arc::from("a"), Arc::from("b")];
     let mode = ProjectionMode::Expanded;
 
     // The canonical builtin Pick key shape, constructed directly.
-    let key_set = host
-        .semantic_dispatch()
-        .intern_string_literal_union(&members);
+    let key_set = dispatch.intern_string_literal_union(&members);
     let probe_key =
         SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
-            host.semantic_dispatch().builtin_type_slot("Pick"),
+            dispatch.builtin_type_slot("Pick"),
             Arc::from(vec![base, key_set].into_boxed_slice()),
-            host.semantic_dispatch().instantiate_context_for(
+            dispatch.instantiate_context_for(
                 "__builtin__",
                 verter_type_engine::semantic_query::ProjectionReductionContext::published(mode),
             ),
@@ -207,7 +213,6 @@ fn cache_discipline_builtin_pick_instantiate_repeated_keys_warm() {
     let baseline_warm = counter.family_warm(&probe_key);
 
     const N: usize = 8;
-    let dispatch = host.semantic_dispatch();
     for _ in 0..N {
         let _ = dispatch.execute_type_node(probe_key.clone());
     }
@@ -227,14 +232,12 @@ fn cache_discipline_builtin_pick_instantiate_repeated_keys_warm() {
     // Negative assertion: a different members set produces a
     // distinct key that cold-fires once.
     let unrelated_members: Vec<Arc<str>> = vec![Arc::from("z")];
-    let unrelated_key_set = host
-        .semantic_dispatch()
-        .intern_string_literal_union(&unrelated_members);
+    let unrelated_key_set = dispatch.intern_string_literal_union(&unrelated_members);
     let unrelated_probe =
         SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
-            host.semantic_dispatch().builtin_type_slot("Pick"),
+            dispatch.builtin_type_slot("Pick"),
             Arc::from(vec![base, unrelated_key_set].into_boxed_slice()),
-            host.semantic_dispatch().instantiate_context_for(
+            dispatch.instantiate_context_for(
                 "__builtin__",
                 verter_type_engine::semantic_query::ProjectionReductionContext::published(mode),
             ),
@@ -253,18 +256,20 @@ fn cache_discipline_builtin_pick_instantiate_repeated_keys_warm() {
 #[test]
 fn cache_discipline_builtin_omit_instantiate_repeated_keys_warm() {
     let host = build_test_host();
+    // One dispatcher builds the key's operands and runs every repeat: its
+    // construction owner keeps them live.
+    let dispatch = host.semantic_dispatch();
+    let _builder = dispatch.enter_construction_scope();
     let base = intern_empty_object(&host);
     let members: Vec<Arc<str>> = vec![Arc::from("x"), Arc::from("y")];
     let mode = ProjectionMode::Expanded;
 
-    let key_set = host
-        .semantic_dispatch()
-        .intern_string_literal_union(&members);
+    let key_set = dispatch.intern_string_literal_union(&members);
     let probe_key =
         SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
-            host.semantic_dispatch().builtin_type_slot("Omit"),
+            dispatch.builtin_type_slot("Omit"),
             Arc::from(vec![base, key_set].into_boxed_slice()),
-            host.semantic_dispatch().instantiate_context_for(
+            dispatch.instantiate_context_for(
                 "__builtin__",
                 verter_type_engine::semantic_query::ProjectionReductionContext::published(mode),
             ),
@@ -275,7 +280,6 @@ fn cache_discipline_builtin_omit_instantiate_repeated_keys_warm() {
     let baseline_warm = counter.family_warm(&probe_key);
 
     const N: usize = 8;
-    let dispatch = host.semantic_dispatch();
     for _ in 0..N {
         let _ = dispatch.execute_type_node(probe_key.clone());
     }
@@ -294,14 +298,12 @@ fn cache_discipline_builtin_omit_instantiate_repeated_keys_warm() {
 
     // Negative assertion: distinct members set still cold-fires.
     let unrelated_members: Vec<Arc<str>> = vec![Arc::from("q")];
-    let unrelated_key_set = host
-        .semantic_dispatch()
-        .intern_string_literal_union(&unrelated_members);
+    let unrelated_key_set = dispatch.intern_string_literal_union(&unrelated_members);
     let unrelated_probe =
         SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
-            host.semantic_dispatch().builtin_type_slot("Omit"),
+            dispatch.builtin_type_slot("Omit"),
             Arc::from(vec![base, unrelated_key_set].into_boxed_slice()),
-            host.semantic_dispatch().instantiate_context_for(
+            dispatch.instantiate_context_for(
                 "__builtin__",
                 verter_type_engine::semantic_query::ProjectionReductionContext::published(mode),
             ),
@@ -322,6 +324,10 @@ fn cache_discipline_builtin_omit_instantiate_repeated_keys_warm() {
 #[test]
 fn cache_discipline_execute_read_repeated_keys_warm() {
     let host = build_test_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let base = intern_empty_object(&host);
     // Use a ProjectMember key — it routes through execute_read like every
     // other variant. The SemanticQueryKeyDigest canonicalises ProjectMember →

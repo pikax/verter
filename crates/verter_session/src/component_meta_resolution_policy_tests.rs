@@ -1105,6 +1105,10 @@ fn pass_does_not_touch_public_instance_when_no_rewrite() {
 #[test]
 fn symbolic_projection_rejects_canonical_and_scope_identity_collisions() {
     let host = empty_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
     let scope_a = verter_type_engine::semantic_query::NodeScopeId::File {
@@ -1187,6 +1191,10 @@ fn symbolic_projection_rejects_canonical_and_scope_identity_collisions() {
 #[test]
 fn symbolic_projection_rejects_swapped_repeated_canonical_references() {
     let host = empty_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     upsert_ts(
         &host,
         "/workspace/a.ts",
@@ -1246,6 +1254,10 @@ fn symbolic_projection_rejects_swapped_repeated_canonical_references() {
 #[test]
 fn symbolic_projection_rejects_swapped_repeated_lexical_scopes() {
     let host = empty_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     upsert_ts(
         &host,
         "/workspace/shared.ts",
@@ -1736,6 +1748,10 @@ fn same_spelled_distinct_indexed_roots_cannot_mint_symbolic_equivalence() {
 #[test]
 fn same_spelled_distinct_nominal_identities_cannot_mint_symbolic_equivalence() {
     let host = empty_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     upsert_ts(
         &host,
         "/workspace/a/token.ts",

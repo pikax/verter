@@ -1006,6 +1006,10 @@ fn one_level_surface_converts_every_entry_kind_and_generic_roots_stay_open() {
     const FILE: &str = "/src/one_level.ts";
 
     let host = make_host_with_footprint();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = { host.project_type_store().semantic_graph() };
     let scope = NodeScopeId::File {
         canonical_id: verter_type_expr::OwnedStr::from(FILE),

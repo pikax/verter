@@ -3515,7 +3515,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             key,
                             payload,
                             inline_flight,
-                        });
+                        }.held(self.graph()));
                     }
                 } else if !session_delta {
                     settles.push(!recursion_uses[position].context_dependent);
@@ -3523,7 +3523,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         key,
                         payload,
                         inline_flight,
-                    });
+                    }.held(self.graph()));
                 } else {
                     self.abort_inline_flight(inline_flight.as_ref());
                 }
@@ -3633,7 +3633,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             inline_flight: member.inline_flight,
                             self_roots: member.self_roots,
                             materialized: member.materialized,
-                        });
+                        }.held(self.graph()));
                     }
                     unproven => {
                         flow_batch_unproven = true;
@@ -3727,7 +3727,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             result,
                             inline_flight: state.inline_flight,
                             self_roots: state.self_roots,
-                        }),
+                        }.held(self.graph())),
                         _ => rootless_flights.push(state.inline_flight),
                     }
                 }
@@ -4224,11 +4224,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .borrow_mut()
             .relation
             .completed_members
-            .push(CompletedSccMember {
-                key: member_key,
-                payload,
-                inline_flight: Some(inline_flight),
-            });
+            .push(
+                CompletedSccMember {
+                    key: member_key,
+                    payload,
+                    inline_flight: Some(inline_flight),
+                }
+                .held(self.graph()),
+            );
         self.execute_relate_root(root_key)
     }
 

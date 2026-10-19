@@ -12,10 +12,10 @@ use crate::types::UpsertRequest;
 use crate::{HostConfig, VerterHost};
 use verter_language::FileLanguage;
 use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount, StoreAccount};
-use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
 
-fn zero_headroom_harness() -> CountedOwnershipHarness {
-    CountedOwnershipHarness::with_account(StoreAccount::new(SemanticRetentionAccount::new(
+fn zero_headroom_harness() -> GraphFixture {
+    GraphFixture::with_account(StoreAccount::new(SemanticRetentionAccount::new(
         RetentionLimits {
             aggregate_ceiling_bytes: 0,
             ..RetentionLimits::defaults()
@@ -56,7 +56,7 @@ fn counted_rows(src: &str) -> Vec<ClosedLiteralDomain> {
     let base = host.resolver_store_view_read().into_cold_seed_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let ctx = crate::resolver_core::HostResolverContext::from_cold_seed(&host, &base, overlay);
-    let dispatch = ProjectSemanticDispatch::with_ownership_harness(&ctx, zero_headroom_harness());
+    let dispatch = ProjectSemanticDispatch::with_graph_fixture(&ctx, zero_headroom_harness());
     let (_, rows, _) = classify_requested_subjects(
         &dispatch,
         &canonical,

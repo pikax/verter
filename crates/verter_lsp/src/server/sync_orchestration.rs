@@ -138,7 +138,7 @@ impl VerterLanguageServer {
             || snapshot.freshness != freshness
             || !snapshot
                 .publication_witness
-                .is_current(&self.documents.host())
+                .is_current(self.documents.host())
         {
             return None;
         }
@@ -148,7 +148,7 @@ impl VerterLanguageServer {
             && after_freshness == freshness
             && snapshot
                 .publication_witness
-                .is_current(&self.documents.host());
+                .is_current(self.documents.host());
         if current {
             crate::documents::ForegroundRequest::bracket_dependency(canonical_id, source_hash);
             crate::documents::ForegroundRequest::bracket_contract_publication(
@@ -214,7 +214,7 @@ impl VerterLanguageServer {
                 != Some(snapshot.terminal_source_hash)
             || !snapshot
                 .publication_witness
-                .is_current(&self.documents.host())
+                .is_current(self.documents.host())
         {
             return None;
         }
@@ -228,7 +228,7 @@ impl VerterLanguageServer {
                 == Some(snapshot.terminal_source_hash)
             && snapshot
                 .publication_witness
-                .is_current(&self.documents.host());
+                .is_current(self.documents.host());
         if current {
             crate::documents::ForegroundRequest::bracket_dependency(
                 &snapshot.terminal_canonical_id,
@@ -270,7 +270,7 @@ impl VerterLanguageServer {
         };
         if child.source_hash != terminal_source_hash
             || child.freshness != freshness
-            || !child.publication_witness.is_current(&self.documents.host())
+            || !child.publication_witness.is_current(self.documents.host())
         {
             return ImportSyncOutcome::Retry;
         }
@@ -434,7 +434,7 @@ impl VerterLanguageServer {
         let Some(publication_witness) = projection.publication_witness else {
             return ImportSyncOutcome::Retry;
         };
-        if !publication_witness.is_current(&self.documents.host()) {
+        if !publication_witness.is_current(self.documents.host()) {
             return ImportSyncOutcome::Retry;
         }
         #[cfg(test)]
@@ -461,7 +461,7 @@ impl VerterLanguageServer {
                 .is_none_or(|snapshot| {
                     !snapshot
                         .publication_witness
-                        .is_current(&self.documents.host())
+                        .is_current(self.documents.host())
                 })
         {
             self.child_public_contracts.remove(canonical_id);
@@ -600,7 +600,7 @@ impl VerterLanguageServer {
     /// publish path with no observability cost.
     pub(super) async fn publish_full_diagnostics_with_audit(&self, uri: &Uri) {
         let host = self.documents.host_arc();
-        if !host.host().config().audit_enabled {
+        if !host.as_ref().config().audit_enabled {
             self.publish_full_diagnostics(uri).await;
             return;
         }
@@ -1313,7 +1313,7 @@ impl VerterLanguageServer {
             // public-api path, and a carrier-less row (`.svelte`)
             // produces no provider sync state.
             let Some(file_language) = crate::provider_sync::provider_script_language(
-                &self.documents.host(),
+                self.documents.host(),
                 &canonical_id,
             ) else {
                 continue;
@@ -2088,7 +2088,7 @@ impl VerterLanguageServer {
                     // the source, or an owner-loss advanced the barrier) requeues and closes
                     // NOTHING — the prior IDE path may be that newer transaction's live buffer.
                     if self.carrier_transaction_coordinator.admit_owned_fenced(
-                        &self.documents.host(),
+                        self.documents.host(),
                         &self.provider_sync_states,
                         &canonical_id,
                         state,
@@ -2953,7 +2953,7 @@ impl VerterLanguageServer {
         let revision = host.last_content_transition_generation(canonical_id);
         let carrier_source = crate::provider_surface_store::resolve_carrier_source(
             Some(&self.documents),
-            &host,
+            host,
             canonical_id,
         );
         let (uri, identity) = self.documents.open_compile_pin(canonical_id);

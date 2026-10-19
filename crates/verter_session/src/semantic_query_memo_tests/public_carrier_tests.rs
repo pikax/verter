@@ -15,7 +15,7 @@ use verter_type_engine::semantic_query::{
     AuthoredPropertyKey, CacheRead, LiteralValue, ResolveDeclKey, ScopeId, SurfaceMember,
     SurfaceView,
 };
-use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
 use verter_type_expr::TopLevelOwnerId;
 
 const FILE: &str = "/public/carrier.ts";
@@ -95,17 +95,17 @@ fn member_text(read: &CacheRead<QueryResult<SemanticNodeId>>) -> String {
     }
 }
 
-fn harnesses() -> [(&'static str, CountedOwnershipHarness); 2] {
+fn harnesses() -> [(&'static str, GraphFixture); 2] {
     [
-        ("retained", CountedOwnershipHarness::new()),
+        ("retained", GraphFixture::new()),
         (
             "returned uncached at zero headroom",
-            CountedOwnershipHarness::with_account(StoreAccount::new(
-                SemanticRetentionAccount::new(RetentionLimits {
+            GraphFixture::with_account(StoreAccount::new(SemanticRetentionAccount::new(
+                RetentionLimits {
                     aggregate_ceiling_bytes: 0,
                     ..RetentionLimits::defaults()
-                }),
-            )),
+                },
+            ))),
         ),
     ]
 }
@@ -163,7 +163,7 @@ fn delivered_values_members_and_cloned_reads_outlive_every_producer_owner() {
 #[test]
 fn a_member_child_lease_outlives_its_parent_read() {
     let host = host();
-    let harness = CountedOwnershipHarness::new();
+    let harness = GraphFixture::new();
     let read = harness.run(|store| {
         store.execute_cooperative(
             &host,
@@ -208,7 +208,7 @@ fn a_member_child_lease_outlives_its_parent_read() {
 #[test]
 fn diagnostic_operands_stay_owned_by_the_delivering_read() {
     let host = host();
-    let harness = CountedOwnershipHarness::new();
+    let harness = GraphFixture::new();
     let read = harness.run(|store| {
         store.execute_cooperative(
             &host,
@@ -250,7 +250,7 @@ fn diagnostic_operands_stay_owned_by_the_delivering_read() {
 #[test]
 fn a_recursion_delivery_owns_its_carrier() {
     let host = host();
-    let harness = CountedOwnershipHarness::new();
+    let harness = GraphFixture::new();
     let inner = RefCell::new(None);
     let outer = harness.run(|store| {
         store.execute_cooperative(
@@ -295,8 +295,8 @@ fn a_recursion_delivery_owns_its_carrier() {
 #[test]
 fn foreign_and_unowned_capabilities_fail_safely() {
     let host = host();
-    let first = CountedOwnershipHarness::new();
-    let second = CountedOwnershipHarness::new();
+    let first = GraphFixture::new();
+    let second = GraphFixture::new();
     let read = first.run(|store| {
         store.execute_cooperative(
             &host,
@@ -335,11 +335,16 @@ fn foreign_and_unowned_capabilities_fail_safely() {
     ));
 }
 
-/// A root survives no legacy canonical close: the production lifecycle may
-/// still retire its slot, and a read through it then fails as stale instead
-/// of answering with the retired payload.
+/// A root survives its document's close: the close evicts only cache
+/// owners, so a read through the root still answers its payload, and the
+/// node is destroyed with the root's last clone. A destroyed ordinal can
+/// then never be rooted again.
+///
+/// Discriminating: a canonical sweep at close turns the read into
+/// `StaleSemanticOperand` while the root is held; a close that leaked the
+/// node keeps it live after the root drops.
 #[test]
-fn a_root_whose_slot_a_legacy_close_released_reads_as_stale() {
+fn a_root_survives_its_documents_close_and_drains_with_its_last_clone() {
     let graph = SemanticGraphStore::new();
     let root = {
         let scope = graph.enter_node_root_scope();
@@ -356,16 +361,27 @@ fn a_root_whose_slot_a_legacy_close_released_reads_as_stale() {
         drop(scope);
         root
     };
-    assert!(root.node_ref().unwrap().read().is_ok());
-    let _ = graph.release_canonical(FILE);
+    let clone = root.clone();
+    let _ = graph.close_canonical(FILE);
+    let payload = graph.read(root.node_ref().unwrap()).unwrap();
     assert!(matches!(
-        graph.read(root.node_ref().unwrap()),
+        &*payload,
+        SemanticNodeData::Literal(LiteralValue::String(text)) if text == "closed"
+    ));
+    drop(payload);
+    let id = root.id();
+    drop(root);
+    assert!(graph.node_is_live(id), "the clone still owns the node");
+    drop(clone);
+    assert!(!graph.node_is_live(id), "the last clone's drop destroys it");
+    assert!(matches!(
+        graph.root_nodes([id]),
         Err(QueryError::StaleSemanticOperand)
     ));
 }
 
 fn counted_host() -> VerterHost {
-    let host = VerterHost::new_standalone_with_counted_ownership_for_test(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some(FILE.to_string()),
         input_id: FILE.to_string(),
@@ -483,7 +499,7 @@ fn a_reduced_output_owns_its_node() {
 fn a_deferred_substitutions_pending_operands_stay_owned_by_the_delivering_read() {
     use verter_type_engine::semantic_query::ConditionalPendingSubstitution;
     let host = host();
-    let harness = CountedOwnershipHarness::new();
+    let harness = GraphFixture::new();
     let pending_argument = RefCell::new(None);
     let read = harness.run(|store| {
         store.execute_cooperative(
@@ -581,7 +597,10 @@ fn construction_labels_are_owned_by_the_callers_builder_never_by_a_dispatcher() 
 fn completed_receipts_release_when_the_callers_builder_closes() {
     let host = host();
     let harness = zero_headroom_harness();
-    let d = verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::with_ownership_harness(&host, harness);
+    let d =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::with_graph_fixture(
+            &host, harness,
+        );
     let graph = Arc::clone(d.graph());
     let baseline = graph.node_ownership_counts().permanent_nodes;
     let builder = d.enter_construction_scope();
@@ -610,8 +629,8 @@ fn completed_receipts_release_when_the_callers_builder_closes() {
     assert_eq!(graph.node_count(), baseline);
 }
 
-fn zero_headroom_harness() -> CountedOwnershipHarness {
-    CountedOwnershipHarness::with_account(StoreAccount::new(SemanticRetentionAccount::new(
+fn zero_headroom_harness() -> GraphFixture {
+    GraphFixture::with_account(StoreAccount::new(SemanticRetentionAccount::new(
         RetentionLimits {
             aggregate_ceiling_bytes: 0,
             ..RetentionLimits::defaults()
@@ -624,7 +643,11 @@ fn zero_headroom_harness() -> CountedOwnershipHarness {
 #[test]
 fn construction_carriers_own_new_and_reused_results_past_every_builder() {
     let host = host();
-    let d = verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::with_ownership_harness(&host, zero_headroom_harness());
+    let d =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::with_graph_fixture(
+            &host,
+            zero_headroom_harness(),
+        );
     let graph = Arc::clone(d.graph());
     let baseline = graph.node_ownership_counts().permanent_nodes;
     let context = verter_type_engine::semantic_query::ProjectionReductionContext::published(
@@ -690,7 +713,11 @@ fn construction_carriers_own_new_and_reused_results_past_every_builder() {
 #[test]
 fn a_construction_handed_to_a_builder_lives_until_the_builder_closes() {
     let host = host();
-    let d = verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::with_ownership_harness(&host, zero_headroom_harness());
+    let d =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::with_graph_fixture(
+            &host,
+            zero_headroom_harness(),
+        );
     let graph = Arc::clone(d.graph());
     let baseline = graph.node_ownership_counts().permanent_nodes;
     // Built with no owner open, so only the carrier holds it.
@@ -803,15 +830,16 @@ fn a_live_dispatchers_discarded_results_release_while_retained_ones_outlive_it()
             .static_resolution(),
         aliases: Vec::new(),
     });
-    let harness = CountedOwnershipHarness::with_account(StoreAccount::new(
-        SemanticRetentionAccount::new(RetentionLimits {
+    let harness = GraphFixture::with_account(StoreAccount::new(SemanticRetentionAccount::new(
+        RetentionLimits {
             aggregate_ceiling_bytes: 0,
             ..RetentionLimits::defaults()
-        }),
-    ));
-    let d = verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::with_ownership_harness(
-        &host, harness,
-    );
+        },
+    )));
+    let d =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::with_graph_fixture(
+            &host, harness,
+        );
     let graph = Arc::clone(d.graph());
     let baseline = graph.node_ownership_counts().permanent_nodes;
     for name in ["First", "Second"] {
@@ -911,7 +939,11 @@ fn a_live_dispatchers_discarded_results_release_while_retained_ones_outlive_it()
 #[test]
 fn public_hot_handle_adapters_deliver_owners_without_an_ambient_builder() {
     let host = host();
-    let d = verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::with_ownership_harness(&host, zero_headroom_harness());
+    let d =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::with_graph_fixture(
+            &host,
+            zero_headroom_harness(),
+        );
     let graph = Arc::clone(d.graph());
     let baseline = graph.node_ownership_counts().permanent_nodes;
     let context = verter_type_engine::semantic_query::ProjectionReductionContext::published(
@@ -1001,13 +1033,70 @@ fn a_resolved_node_that_cannot_be_rooted_is_a_typed_fault() {
     );
 }
 
+/// A delivered flow-return result owns its return node for as long as the
+/// caller holds it: after its request ends, every cache is invalidated and
+/// the declaring document is closed, the node is still live; the result's
+/// last drop destroys it.
+///
+/// Discriminating: a result carrying only the raw return ordinal leaves the
+/// node owned by caches alone, so the invalidation destroys it under the
+/// caller.
+#[test]
+fn a_delivered_flow_return_result_owns_its_node_past_its_request_and_close() {
+    const FLOW: &str = "/public/flow.ts";
+    let host = VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        ..HostConfig::default()
+    });
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        FLOW,
+        "export function pf() { return { owned: [1, 'two'] as const }; }\n",
+        crate::FileLanguage::script_ts(),
+    );
+    let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
+        anchor: verter_type_expr::locators::AuthoredAnchor {
+            canonical_id: verter_type_expr::OwnedStr::from(FLOW),
+            owner: TopLevelOwnerId::ordinary_file(),
+            symbol: verter_type_expr::OwnedStr::from("pf"),
+            space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+        },
+        function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+        overload_ordinal: 0,
+    };
+    let result = host
+        .get_flow_return_type_with_audit(
+            &identity,
+            verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        )
+        .into_result()
+        .expect("the flow return answers");
+    let node = result.return_type();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    graph.invalidate_all();
+    host.evict(FLOW);
+    assert!(
+        graph.node_is_live(node),
+        "the delivered result owns its node after every cache let go"
+    );
+    drop(result);
+    assert!(
+        !graph.node_is_live(node),
+        "the result's last drop destroys its node"
+    );
+}
+
 /// A signature adapter and its parameter demands own their roots even when
 /// no builder encloses the callable view.
 #[test]
 fn public_callable_adapters_own_their_parameters_past_dispatcher_teardown() {
     use verter_type_engine::project_semantic_dispatch::callable_view::CallableNodeView;
     let host = host();
-    let d = verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::with_ownership_harness(&host, zero_headroom_harness());
+    let d =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::with_graph_fixture(
+            &host,
+            zero_headroom_harness(),
+        );
     let graph = Arc::clone(d.graph());
     let baseline = graph.node_ownership_counts().permanent_nodes;
     let context = verter_type_engine::semantic_query::ProjectionReductionContext::published(

@@ -446,7 +446,7 @@ struct OpenFrame {
 /// class of an absent child), a class memoizes at most 256 fold offsets
 /// and only when it stands for at least [`FOLD_MEMO_MIN_BYTES`] key bytes
 /// of its own, and the memoized orders are the comparisons of the
-/// classified nodes' sets. When the store releases nodes (a document close), their
+/// classified nodes' sets. When the store's nodes are destroyed, their
 /// entries are forgotten ([`Self::release_nodes`]) and the table is
 /// emptied once released entries outnumber live ones, so it stays
 /// proportional to the live nodes it classified.
@@ -464,6 +464,9 @@ pub(crate) struct KeyClasses {
     folds: FxHashMap<(ClassId, u8), u64>,
     /// Classified nodes released since the table was last emptied.
     released: usize,
+    /// Nodes classified since the owning store last marked them as
+    /// described by this sidecar.
+    pub(crate) fresh: Vec<SemanticNodeId>,
 }
 
 impl KeyClasses {
@@ -618,6 +621,7 @@ impl<'t> ClassTable<'t> {
         let frame = self.frames.pop()?;
         let class = self.build(&frame.recipe, frame.filled);
         self.table.classified.insert(frame.node, class);
+        self.table.fresh.push(frame.node);
         if self.frames.is_empty() {
             return Some(class);
         }

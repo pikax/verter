@@ -1750,18 +1750,25 @@ where
     None
 }
 
-/// Release selected shape storage after the lifecycle root releases graph nodes.
-pub fn release_shape_canonical(
+/// Close `canonical_id` in `graph` ([`SemanticGraphStore::close_canonical`](crate::semantic_query_memo::SemanticGraphStore::close_canonical))
+/// and evict the shape-cache entries rooted in it, depending on it, or
+/// keyed by its closed content, against the same closed-content verdicts.
+pub fn close_canonical_with_shapes(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
     db: &ShapeCacheDb,
     canonical_id: &str,
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
-) -> usize {
-    release_shape_entries(db, canonical_id, &|node| graph.node_is_live(node))
+) -> crate::semantic_query_memo::SemanticCloseReport {
+    let mut released = 0usize;
+    let mut report = graph.close_canonical_with(canonical_id, |closed| {
+        released = release_shape_entries(db, canonical_id, &mut |node| closed.names(node));
+    });
+    report.shape_entries_released = released;
+    report
 }
 fn release_shape_entries(
     db: &ShapeCacheDb,
     canonical_id: &str,
-    node_is_live: &dyn Fn(crate::semantic_query::SemanticNodeId) -> bool,
+    names_closed: &mut dyn FnMut(crate::semantic_query::SemanticNodeId) -> bool,
 ) -> usize {
     let storage = db.attach_output();
     let keys: Vec<ShapeCacheKey> = storage
@@ -1770,8 +1777,8 @@ fn release_shape_entries(
         .filter_map(|entry| {
             let key = entry.key();
             let rooted_here = key.scope_canonical() == canonical_id;
-            let subject_released = match key.member_value_subject_node() {
-                Some(node) => !node_is_live(node),
+            let subject_closed = match key.member_value_subject_node() {
+                Some(node) => names_closed(node),
                 None => false,
             };
             let depends_here = || {
@@ -1782,7 +1789,7 @@ fn release_shape_entries(
                     .iter()
                     .any(|canonical| canonical.as_ref() == canonical_id)
             };
-            (rooted_here || subject_released || depends_here()).then(|| key.clone())
+            (rooted_here || subject_closed || depends_here()).then(|| key.clone())
         })
         .collect();
     let mut removed = 0usize;

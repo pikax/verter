@@ -29,22 +29,6 @@ impl SemanticGraphStore {
         node_roots::NodeRootSet::acquire(Arc::clone(&self.arena.core), ids.into_iter().collect())
     }
 
-    pub(crate) fn root_existing_nodes(
-        &self,
-        ids: node_roots::RootIds,
-    ) -> Result<node_roots::NodeRootSet, QueryError> {
-        // A legacy raw carrier may already name a tombstone (or a synthetic
-        // test ordinal). Such an id owns no storage. Counted delivery, where
-        // all carriers participate in ownership, rejects it instead.
-        if !self.arena.counted() {
-            return Ok(node_roots::NodeRootSet::acquire_live(
-                Arc::clone(&self.arena.core),
-                ids,
-            ));
-        }
-        self.root_nodes(ids)
-    }
-
     /// Open a construction scope even when no observation capture is active.
     ///
     /// Holding the graph grants no construction lane: a producer outside the
@@ -108,8 +92,8 @@ impl SemanticGraphStore {
     }
 
     /// Read a node through an arena-qualified capability. A capability
-    /// minted by another graph is foreign; a slot a legacy close already
-    /// released is stale. Neither reads as a live payload.
+    /// minted by another graph is foreign. Neither reads as a live payload
+    /// of this graph.
     pub fn read(
         &self,
         node: node_roots::NodeRef<'_>,
@@ -124,12 +108,9 @@ impl SemanticGraphStore {
     /// scope of this graph — the producer lane a semantic builder runs in.
     /// The scope is the capability: outside one the ordinal authorizes
     /// nothing and the read is `None`. A live node is returned under its own
-    /// root, so the lease outlives the scope. A slot a legacy close already
-    /// released reads as the unresolved placeholder with no root, exactly as
-    /// the production close lifecycle reports it, and none of its children
-    /// can be borrowed through it. Under counted ownership a released slot is
-    /// a label kept past its owner, never a plausible payload: it reads
-    /// nothing.
+    /// root, so the lease outlives the scope. A slot whose last owner already
+    /// dropped is a label kept past its owner, never a plausible payload: it
+    /// reads nothing.
     pub fn read_in_scope(&self, id: SemanticNodeId) -> Option<node_data_lease::NodeDataLease> {
         if !node_roots::NodeRootScope::holds(&self.arena.core) {
             return None;
@@ -142,18 +123,13 @@ impl SemanticGraphStore {
                 data: self.arena.get(id)?,
                 root: node_roots::NodeRoot::from_roots(id, roots),
             }),
-            Err(QueryError::StaleSemanticOperand) if self.arena.core.counted() => None,
-            Err(QueryError::StaleSemanticOperand) => Some(node_data_lease::NodeDataLease {
-                data: self.arena.get(id)?,
-                root: node_roots::NodeRoot::from_roots(id, Default::default()),
-            }),
             Err(_) => None,
         }
     }
 
     /// Root a live construction ordinal for delivery beyond the construction
     /// scope this thread holds of this graph. Without such a scope the
-    /// ordinal is foreign; a slot a legacy close already released is stale.
+    /// ordinal is foreign; a slot whose last owner already dropped is stale.
     /// Neither is ever delivered as an absent node.
     pub fn root_in_scope(&self, id: SemanticNodeId) -> Result<node_roots::NodeRoot, QueryError> {
         if !node_roots::NodeRootScope::holds(&self.arena.core) {
@@ -291,9 +267,8 @@ impl SemanticGraphStore {
     }
 
     /// Read the resolved payload for a construction ordinal. Returns `None`
-    /// if the id has not been interned. An id whose payload a document close
-    /// released ([`Self::release_canonical`]) is still a known id: it reads
-    /// as the shared `Opaque(Miss)` placeholder (see
+    /// if the id has not been interned. A destroyed id is still a known id:
+    /// it reads as the shared `Opaque(Miss)` placeholder (see
     /// [`Self::node_is_live`]), so a stale holder sees an unresolved value
     /// rather than an invalid-id fault.
     ///

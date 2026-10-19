@@ -297,6 +297,18 @@ pub struct InlineMemberFlight {
     /// active while the flight is open, whether it is the installed task of
     /// the enclosing execution or one registered for this flight alone.
     _task: super::tasks::ExecutionTask,
+    /// The member's decided value, owned from the moment its component
+    /// closes until the batched publish stages it: the construction scope
+    /// that computed it may close first.
+    /// The root set's own block is pinned against the store's retention
+    /// account for as long as it is held.
+    held: Option<(
+        super::node_roots::NodeRootSet,
+        verter_session_query::retention::shared::CallerHold,
+    )>,
+    /// The decided value named a node that was no longer live when the
+    /// component closed: the batched publish refuses the whole component.
+    hold_refused: bool,
 }
 
 impl std::fmt::Debug for InlineMemberFlight {
@@ -308,6 +320,51 @@ impl std::fmt::Debug for InlineMemberFlight {
 }
 
 impl InlineMemberFlight {
+    /// Own the graph nodes of `value` — the member's decided value — until
+    /// this flight is published or aborted. A value whose operands are not
+    /// live cannot be held; the flight records it, and the batched publish
+    /// then refuses the whole component ([`Self::hold_refused`]).
+    pub(crate) fn hold_value(
+        &mut self,
+        graph: &super::SemanticGraphStore,
+        value: &crate::semantic_query::QueryResult<crate::semantic_query::SemanticQueryValue>,
+    ) {
+        let mut nodes = Vec::new();
+        value.for_each_retained_node(|node| {
+            if node.0 < super::UNALLOCATABLE_ID_FLOOR {
+                nodes.push(node);
+            }
+        });
+        if nodes.is_empty() {
+            return;
+        }
+        match graph.root_nodes(nodes) {
+            Ok(roots) => {
+                let charge = verter_session_query::retention::shared::CallerHold::pin(
+                    graph.retention_account(),
+                    roots.heap_bytes(),
+                );
+                self.held = Some((roots, charge));
+            }
+            Err(_) => self.hold_refused = true,
+        }
+    }
+
+    /// Whether the member's decided value could not be held.
+    pub(super) fn hold_refused(&self) -> bool {
+        self.hold_refused
+    }
+
+    /// Test seam over [`Self::hold_value`] for a hand-staged member.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn hold_value_for_tests(
+        &mut self,
+        graph: &super::SemanticGraphStore,
+        value: &crate::semantic_query::QueryResult<crate::semantic_query::SemanticQueryValue>,
+    ) {
+        self.hold_value(graph, value);
+    }
+
     pub(super) fn state(&self) -> &Mutex<InflightState> {
         &self.inflight.state
     }
@@ -355,19 +412,24 @@ impl super::SemanticGraphStore {
             prepared,
             inflight,
             _task: task,
+            held: None,
+            hold_refused: false,
         })
     }
 
     /// Release an inline flight that cannot publish a decided member.
     /// Waiting top-level callers wake on the abort sentinel and retry
-    /// admission.
+    /// admission. The sentinel is the payload-free superseded abort a joiner
+    /// of an aborted flight already reads: a relation that stops part-way can
+    /// abandon thousands of members, and a per-member message would hold an
+    /// allocation for each until the relation returns.
     pub fn abort_inline_member_flight(&self, flight: &InlineMemberFlight) {
         {
             let mut state = flight.inflight.state.lock();
             state.aborted = true;
             if state.completed.is_none() {
-                state.completed = Some(QueryResult::Error(QueryError::Other(
-                    verter_type_expr::OwnedStr::from("inline member flight abandoned"),
+                state.completed = Some(QueryResult::Error(QueryError::ExecutionAborted(
+                    crate::semantic_query::ExecutionAbort::Superseded,
                 )));
                 state.dep_signature = Some(empty_signature());
             }

@@ -124,17 +124,7 @@ impl SemanticGraphStore {
         provenance: Arc<crate::engine_provenance::EngineProvenance>,
         retention_account: StoreAccount,
     ) -> Self {
-        Self::with_provenance_and_ownership(provenance, retention_account, Default::default())
-    }
-
-    /// [`Self::with_provenance`] in `ownership`'s reclamation regime.
-    #[must_use]
-    pub(crate) fn with_provenance_and_ownership(
-        provenance: Arc<crate::engine_provenance::EngineProvenance>,
-        retention_account: StoreAccount,
-        ownership: super::GraphOwnership,
-    ) -> Self {
-        let mut store = Self::with_account_and_ownership(retention_account, ownership);
+        let mut store = Self::with_account(retention_account);
         store.arena.provenance = Some(Arc::clone(&provenance));
         store.provenance = Some(provenance);
         store
@@ -147,16 +137,7 @@ impl SemanticGraphStore {
     /// without consuming aggregate headroom.
     #[must_use]
     pub fn with_account(retention_account: StoreAccount) -> Self {
-        Self::with_account_and_ownership(retention_account, Default::default())
-    }
-
-    /// [`Self::with_account`] in `ownership`'s reclamation regime.
-    #[must_use]
-    pub(crate) fn with_account_and_ownership(
-        retention_account: StoreAccount,
-        ownership: super::GraphOwnership,
-    ) -> Self {
-        Self::with_ownership_and_account(ownership, retention_account)
+        Self::with_arena(Default::default(), retention_account)
     }
 
     /// Bind this store's producers to `task_registry`: the one cycle
@@ -416,13 +397,15 @@ impl SemanticGraphStore {
 
     /// Bytes the store's memo bookkeeping is pinned for: its reverse
     /// index's shards and the publishes waiting to enter it, its
-    /// shared-charge registry's table and its dependency-rail interner. A
+    /// shared-charge registry's table, its dependency-rail interner and the
+    /// rail blocks that interner's entries keep. A
     /// required current count.
     pub fn bookkeeping_storage_charge_bytes(&self) -> usize {
         self.canonical_to_entries.storage_charge_bytes()
             + self.reverse_index_pending.lock().storage_charge_bytes()
             + self.alias_charges.table_charged_bytes()
             + self.dep_signature_interner.storage_charge_bytes()
+            + self.dep_signature_interner.entry_block_charge_bytes()
             + self.derivation.lock().storage_charge_bytes()
     }
 

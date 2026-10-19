@@ -5732,7 +5732,8 @@ pub use crate::project_semantic_dispatch::cost_receipt::ReadReceipt;
 #[derive(Debug, Clone)]
 pub struct CacheRead<T> {
     /// Internal graph and signature-version ownership, independent of cache
-    /// admission. Production canonical close can still revoke graph slots.
+    /// admission. A canonical close evicts cache owners only; it never
+    /// revokes what this lease owns.
     pub(crate) lease: crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease,
     pub(crate) value: T,
     pub(crate) dep_signature: DepSignature,

@@ -55,6 +55,10 @@ fn template(host: &VerterHost, quasis: &[&str], expressions: &[SemanticNodeId]) 
 #[test]
 fn truthiness_rules_match_the_pinned_checker() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
 
     let string = prim(&host, PrimitiveKind::String);
@@ -246,6 +250,7 @@ fn decided_domain_warms_and_undecided_domain_never_does() {
     let host = VerterHost::new_standalone(Default::default());
     let graph = host.project_type_store().semantic_graph();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let decided_key = SemanticQueryKey::ClassifyTruthinessDomain { subject: string };

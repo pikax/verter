@@ -25,10 +25,23 @@ mod node_root_gate_tests {
         DeclIdentity, ProjectionMode, SemanticNodeData, SemanticNodeId,
     };
 
+    /// Lower `expr`, keeping the node in the caller's construction scope
+    /// once the lowering dispatcher is gone.
     fn lower(host: &VerterHost, scope: &str, expr: &TypeExpr) -> SemanticNodeId {
-        ProjectSemanticDispatch::new(host)
+        let dispatch = ProjectSemanticDispatch::new(host);
+        let builder = dispatch.enter_construction_scope();
+        let node = dispatch
             .lower_type_expr_in_scope_with_mode(scope, expr, ProjectionMode::Navigate)
-            .expect("expr must lower")
+            .expect("expr must lower");
+        let roots = host
+            .project_type_store()
+            .semantic_graph()
+            .root_nodes([node])
+            .expect("the lowered node is live");
+        drop(builder);
+        drop(dispatch);
+        roots.retain_for_construction();
+        node
     }
 
     #[test]
@@ -56,6 +69,10 @@ mod node_root_gate_tests {
             },
             ws,
         );
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         assert!(host.ensure_loaded("/src/App.vue"));
         host.set_import_dependencies(
             "/src/App.vue",
@@ -138,6 +155,10 @@ mod node_root_gate_tests {
             },
             ws,
         );
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         assert!(host.ensure_loaded("/src/m.ts"));
         let scope = "/src/m.ts";
 
@@ -190,6 +211,10 @@ mod node_root_gate_tests {
             },
             ws,
         );
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         assert!(host.ensure_loaded("/src/m.ts"));
         let scope = "/src/m.ts";
 
@@ -278,6 +303,10 @@ mod node_root_gate_tests {
             },
             ws,
         );
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         assert!(host.ensure_loaded("/src/App.vue"));
         host.set_import_dependencies(
             "/src/App.vue",
@@ -395,6 +424,7 @@ mod node_root_gate_tests {
                 TypeExpr::string_literal("a"),
             ],
         );
+        let _builder = host.project_type_store().construction_grant().enter_scope();
         let node = lower(&host, scope, &imported_pick);
 
         let fixture_dispatch_4 =
@@ -449,6 +479,10 @@ mod node_root_gate_tests {
             },
             ws,
         );
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         assert!(host.ensure_loaded("/src/node_modules/pkgx/index.d.ts"));
         assert!(host.ensure_loaded("/src/App.vue"));
         let scope = "/src/App.vue";

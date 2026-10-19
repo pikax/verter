@@ -1452,6 +1452,9 @@ pub fn demand_semantic_source_type_expr_with_ctx<C: crate::resolver_core::Resolv
     source: &SemanticTypeSource,
 ) -> Option<verter_type_expr::TypeExpr> {
     let dispatch = ProjectSemanticDispatch::new(ctx);
+    // The probe composes construction ordinals across operations (raise,
+    // then reduce), so it holds an explicit builder owner for them.
+    let _builder = dispatch.enter_construction_scope();
     let context =
         ProjectionReductionContext::published(crate::semantic_query::ProjectionMode::Expanded);
     // A CLOSED fact is DATA — its raise composes carriers verbatim, and the
@@ -1526,6 +1529,9 @@ fn shallow_semantic_source_carrier<C: crate::resolver_core::ResolverCapabilities
     source: &SemanticTypeSource,
 ) -> Option<super::output_materialization::MaterializedOutputTypeExpr> {
     let dispatch = ProjectSemanticDispatch::new(ctx);
+    // The probe composes construction ordinals across operations (raise,
+    // then reduce), so it holds an explicit builder owner for them.
+    let _builder = dispatch.enter_construction_scope();
     let context = ProjectionReductionContext::structural_transit_with_mode(
         crate::semantic_query::ProjectionMode::Navigate,
     );
@@ -1594,6 +1600,9 @@ fn demand_semantic_source_carrier<C: crate::resolver_core::ResolverCapabilities>
     source: &SemanticTypeSource,
 ) -> Option<super::output_materialization::MaterializedOutputTypeExpr> {
     let dispatch = ProjectSemanticDispatch::new(ctx);
+    // The probe composes construction ordinals across operations (raise,
+    // then reduce), so it holds an explicit builder owner for them.
+    let _builder = dispatch.enter_construction_scope();
     let context =
         ProjectionReductionContext::published(crate::semantic_query::ProjectionMode::Expanded);
     let raise_context = match source {

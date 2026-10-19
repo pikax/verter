@@ -889,6 +889,10 @@ fn a_warm_repeat_answers_as_its_cold_request() {
 #[test]
 fn a_sealed_refusal_answers_its_repeat_without_evaluating() {
     let host = bench_host(1, &reversed_unions(4));
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let refused = probe_answer(&host).expect("the refusal is a typed partial value");
     assert!(
         host.project_type_store()

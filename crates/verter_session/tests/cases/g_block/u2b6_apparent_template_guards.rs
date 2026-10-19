@@ -46,6 +46,16 @@ fn dummy_node() -> SemanticNodeId {
 fn count_for_b_after_publishing_a(a: &SemanticQueryKey, b: &SemanticQueryKey) -> usize {
     let host = host();
     let graph = host.project_type_store().semantic_graph();
+    // The keys name fixture ordinals: this graph holds a live node at
+    // each, so every ordinal a key names is one it owns.
+    let _scope = graph.enter_node_root_scope();
+    let _fixture_ordinals: Vec<_> = (0..128u32)
+        .map(|n| {
+            graph.intern_node(SemanticNodeData::Literal(
+                verter_type_engine::semantic_query::LiteralValue::Number(f64::from(n)),
+            ))
+        })
+        .collect();
     let node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     graph.publish_with_carrier_dispatch_and_generation_for_tests(
         a.clone(),
@@ -262,6 +272,16 @@ fn callable_base(host: &VerterHost) -> SemanticNodeId {
         .flatten()
         .expect("`Callable` MUST resolve to a node");
     let graph = host.project_type_store().semantic_graph();
+    // The keys name fixture ordinals: this graph holds a live node at
+    // each, so every ordinal a key names is one it owns.
+    let _scope = graph.enter_node_root_scope();
+    let _fixture_ordinals: Vec<_> = (0..128u32)
+        .map(|n| {
+            graph.intern_node(SemanticNodeData::Literal(
+                verter_type_engine::semantic_query::LiteralValue::Number(f64::from(n)),
+            ))
+        })
+        .collect();
     // `typeof greet` resolves to the function's own surface; its single call
     // signature is the authored callable a member lookup starts from.
     let data = graph
@@ -290,6 +310,16 @@ fn callable_base(host: &VerterHost) -> SemanticNodeId {
 /// canonical each was declared in.
 fn call_member_origins(host: &VerterHost, node: SemanticNodeId) -> Vec<Option<Arc<str>>> {
     let graph = host.project_type_store().semantic_graph();
+    // The keys name fixture ordinals: this graph holds a live node at
+    // each, so every ordinal a key names is one it owns.
+    let _scope = graph.enter_node_root_scope();
+    let _fixture_ordinals: Vec<_> = (0..128u32)
+        .map(|n| {
+            graph.intern_node(SemanticNodeData::Literal(
+                verter_type_engine::semantic_query::LiteralValue::Number(f64::from(n)),
+            ))
+        })
+        .collect();
     let data = graph.node_data(node).expect("apparent surface must exist");
     let Some(SemanticNodeData::Object(surface)) = data.as_ref().into() else {
         panic!("the apparent surface of a callable MUST be an object surface, got {data:?}");
@@ -366,6 +396,16 @@ fn apparent_type_misses_without_a_registered_ambient_callable_surface() {
         "an unregistered ambient corpus MUST produce Error(Miss), got {result:?}"
     );
     let graph = host.project_type_store().semantic_graph();
+    // The keys name fixture ordinals: this graph holds a live node at
+    // each, so every ordinal a key names is one it owns.
+    let _scope = graph.enter_node_root_scope();
+    let _fixture_ordinals: Vec<_> = (0..128u32)
+        .map(|n| {
+            graph.intern_node(SemanticNodeData::Literal(
+                verter_type_engine::semantic_query::LiteralValue::Number(f64::from(n)),
+            ))
+        })
+        .collect();
     assert_eq!(
         graph.slot_candidate_count_for_tests(&key),
         0,
@@ -380,6 +420,16 @@ fn apparent_type_misses_for_a_non_callable_base() {
     // registered, a primitive base is an honest, non-admitting Miss.
     let host = callable_host(true);
     let graph = host.project_type_store().semantic_graph();
+    // The keys name fixture ordinals: this graph holds a live node at
+    // each, so every ordinal a key names is one it owns.
+    let _scope = graph.enter_node_root_scope();
+    let _fixture_ordinals: Vec<_> = (0..128u32)
+        .map(|n| {
+            graph.intern_node(SemanticNodeData::Literal(
+                verter_type_engine::semantic_query::LiteralValue::Number(f64::from(n)),
+            ))
+        })
+        .collect();
     let base = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let key = apparent_type_key(base, 0, 0, 0);
 
@@ -475,7 +525,21 @@ fn template_literal_reduce_do_not_warm_hit() {
 #[test]
 fn template_literal_reduce_reduces_concrete_concatenation() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
+    // The keys name fixture ordinals: this graph holds a live node at
+    // each, so every ordinal a key names is one it owns.
+    let _scope = graph.enter_node_root_scope();
+    let _fixture_ordinals: Vec<_> = (0..128u32)
+        .map(|n| {
+            graph.intern_node(SemanticNodeData::Literal(
+                verter_type_engine::semantic_query::LiteralValue::Number(f64::from(n)),
+            ))
+        })
+        .collect();
 
     // `${"a"}-${"b"}` ⇒ pattern ["", "-", ""], args [Literal("a"), Literal("b")].
     let lit_a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(

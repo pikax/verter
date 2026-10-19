@@ -32,11 +32,10 @@ fn counted_emit_merge_owns_surface_without_an_enclosing_scope() {
     use verter_type_engine::semantic_query::{
         DeclIdentity, LiteralValue, SemanticNodeData, SurfaceMember, SurfaceView,
     };
-    use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+    use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
 
     let host = VerterHost::new_standalone(HostConfig::default());
-    let dispatch =
-        ProjectSemanticDispatch::with_ownership_harness(&host, CountedOwnershipHarness::new());
+    let dispatch = ProjectSemanticDispatch::with_graph_fixture(&host, GraphFixture::new());
     let graph = dispatch.graph();
     let (payload, input_roots) = {
         let _scope = graph.enter_node_root_scope();

@@ -16,7 +16,7 @@ use verter_type_engine::project_semantic_dispatch::walk::{QueryBuildOutput, Shal
 use verter_type_engine::semantic_query::{
     CacheRead, LiteralValue, PrimitiveKind, ResolveDeclKey, ScopeId,
 };
-use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
 use verter_type_expr::TopLevelOwnerId;
 
 const FILE: &str = "/allocation/owned.ts";
@@ -104,19 +104,13 @@ fn delivered_name<T>(read: &CacheRead<T>) -> OwnedStr {
     }
 }
 
-fn read(
-    harness: &CountedOwnershipHarness,
-    host: &VerterHost,
-) -> CacheRead<QueryResult<SemanticNodeId>> {
+fn read(harness: &GraphFixture, host: &VerterHost) -> CacheRead<QueryResult<SemanticNodeId>> {
     harness.run(|store| {
         store.execute_cooperative(host, key(), || panic!("no recursion"), || build(store))
     })
 }
 
-fn warm_read(
-    harness: &CountedOwnershipHarness,
-    host: &VerterHost,
-) -> CacheRead<QueryResult<SemanticNodeId>> {
+fn warm_read(harness: &GraphFixture, host: &VerterHost) -> CacheRead<QueryResult<SemanticNodeId>> {
     harness.run(|store| {
         store.execute_cooperative(
             host,
@@ -127,13 +121,13 @@ fn warm_read(
     })
 }
 
-fn registrations(harness: &CountedOwnershipHarness) -> usize {
+fn registrations(harness: &GraphFixture) -> usize {
     harness.run(|store| store.shared_allocation_registrations_for_tests())
 }
 
 /// Pinned bytes beyond the store's own storage pins: what callers hold —
 /// the allocations live deliveries hold and their metadata.
-fn caller_pinned(harness: &CountedOwnershipHarness, account: &SemanticRetentionAccount) -> usize {
+fn caller_pinned(harness: &GraphFixture, account: &SemanticRetentionAccount) -> usize {
     account.snapshot().pinned_bytes - harness.run(|store| store.store_storage_pins_for_tests())
 }
 
@@ -151,7 +145,7 @@ fn metadata<T>(read: &CacheRead<T>) -> usize {
 fn a_read_outliving_its_candidate_keeps_exactly_the_delivered_rail_charged() {
     let host = host();
     let account = unbounded();
-    let harness = CountedOwnershipHarness::with_account(StoreAccount::new(Arc::clone(&account)));
+    let harness = GraphFixture::with_account(StoreAccount::new(Arc::clone(&account)));
     let cold = read(&harness, &host);
     assert_eq!(harness.run(|store| store.memo_entry_count()), 1);
     let warm = warm_read(&harness, &host);
@@ -210,7 +204,7 @@ fn a_read_outliving_its_candidate_keeps_exactly_the_delivered_rail_charged() {
 fn reads_dropped_first_leave_one_retained_charge_until_the_candidate_drains() {
     let host = host();
     let account = unbounded();
-    let harness = CountedOwnershipHarness::with_account(StoreAccount::new(Arc::clone(&account)));
+    let harness = GraphFixture::with_account(StoreAccount::new(Arc::clone(&account)));
     let cold = read(&harness, &host);
     let warm = warm_read(&harness, &host);
     let warm_again = warm.clone();
@@ -250,7 +244,7 @@ fn a_refused_admission_returns_the_complete_value_charged_to_its_caller() {
         aggregate_ceiling_bytes: 0,
         ..RetentionLimits::defaults()
     });
-    let harness = CountedOwnershipHarness::with_account(StoreAccount::new(Arc::clone(&account)));
+    let harness = GraphFixture::with_account(StoreAccount::new(Arc::clone(&account)));
     let delivered = read(&harness, &host);
     assert!(matches!(delivered.value(), QueryResult::Value(_)));
     assert!(!delivered.result_is_partial());
@@ -296,8 +290,7 @@ fn a_cloned_delivered_name_alone_keeps_its_charge_until_its_own_drop() {
             max_entry_bytes: ceiling,
             pin_threshold_bytes: ceiling,
         });
-        let harness =
-            CountedOwnershipHarness::with_account(StoreAccount::new(Arc::clone(&account)));
+        let harness = GraphFixture::with_account(StoreAccount::new(Arc::clone(&account)));
         let read = read(&harness, &host);
         let cached = harness.run(|store| store.memo_entry_count()) == 1;
         assert_eq!(
@@ -433,8 +426,7 @@ fn a_cloned_identity_from_a_delivered_value_keeps_its_charge_until_its_own_drop(
                 max_entry_bytes: ceiling,
                 pin_threshold_bytes: ceiling,
             });
-            let harness =
-                CountedOwnershipHarness::with_account(StoreAccount::new(Arc::clone(&account)));
+            let harness = GraphFixture::with_account(StoreAccount::new(Arc::clone(&account)));
             let read = harness.run(|store| {
                 store.execute_cooperative(
                     &host,
@@ -497,8 +489,7 @@ fn a_nested_copy_of_a_delivered_member_keeps_its_names_charged_until_its_own_dro
             max_entry_bytes: ceiling,
             pin_threshold_bytes: ceiling,
         });
-        let harness =
-            CountedOwnershipHarness::with_account(StoreAccount::new(Arc::clone(&account)));
+        let harness = GraphFixture::with_account(StoreAccount::new(Arc::clone(&account)));
         let read = harness.run(|store| {
             store.execute_cooperative(
                 &host,
@@ -574,7 +565,7 @@ fn a_cloned_dependency_rail_and_entry_keep_their_charges_through_their_last_hold
     const CANONICAL_LEN: usize = 12_000;
     let host = host();
     let account = unbounded();
-    let harness = CountedOwnershipHarness::with_account(StoreAccount::new(Arc::clone(&account)));
+    let harness = GraphFixture::with_account(StoreAccount::new(Arc::clone(&account)));
     let long = format!("/{}.ts", "d".repeat(CANONICAL_LEN));
     let read = harness.run(|store| {
         store.execute_cooperative(
@@ -639,8 +630,7 @@ fn an_interned_rail_from_a_warm_read_keeps_its_block_charged_through_store_teard
     for rail_survives_store in [true, false] {
         let host = host();
         let account = unbounded();
-        let harness =
-            CountedOwnershipHarness::with_account(StoreAccount::new(Arc::clone(&account)));
+        let harness = GraphFixture::with_account(StoreAccount::new(Arc::clone(&account)));
         let long = format!("/{}.ts", "i".repeat(CANONICAL_LEN));
         let cold = harness.run(|store| {
             store.execute_cooperative(
@@ -702,7 +692,7 @@ fn an_interned_rail_from_a_warm_read_keeps_its_block_charged_through_store_teard
 #[test]
 fn a_substitution_answer_is_charged_while_its_memo_keeps_it() {
     let account = unbounded();
-    let harness = CountedOwnershipHarness::with_account(StoreAccount::new(Arc::clone(&account)));
+    let harness = GraphFixture::with_account(StoreAccount::new(Arc::clone(&account)));
     harness.run(|store| {
         let [a, b, c] = [
             PrimitiveKind::String,
@@ -730,7 +720,7 @@ fn a_sealed_refusal_hands_its_delivered_rail_to_a_surviving_read() {
     };
     let host = host();
     let account = unbounded();
-    let harness = CountedOwnershipHarness::with_account(StoreAccount::new(Arc::clone(&account)));
+    let harness = GraphFixture::with_account(StoreAccount::new(Arc::clone(&account)));
     let read = harness.run(|store| {
         store.execute_cooperative(
             &host,
@@ -795,7 +785,7 @@ fn a_sealed_refusal_hands_its_delivered_rail_to_a_surviving_read() {
 #[test]
 fn an_aborted_flight_releases_its_storage_pin() {
     let account = unbounded();
-    let harness = CountedOwnershipHarness::with_account(StoreAccount::new(Arc::clone(&account)));
+    let harness = GraphFixture::with_account(StoreAccount::new(Arc::clone(&account)));
     let before = caller_pinned(&harness, &account);
     harness.run(|store| {
         let flight = store

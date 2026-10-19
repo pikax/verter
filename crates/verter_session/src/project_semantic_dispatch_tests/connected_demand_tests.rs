@@ -105,6 +105,7 @@ fn stopped_demands_never_offer_unevaluated_subjects_as_positional_values() {
     };
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let number = dispatch
         .graph()
         .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -179,6 +180,10 @@ fn finite_mapped_batch_stops_at_its_first_refusal_and_warms_when_complete() {
         ProjectionMode, ReadonlyMod, SemanticNodeData, SemanticQueryKey,
     };
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = host.project_type_store().semantic_graph();
     let keys = (0..64)

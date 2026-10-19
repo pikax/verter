@@ -707,6 +707,7 @@ mod raise_miss_normalization_tests {
             })
             .unwrap();
         let dispatch = ProjectSemanticDispatch::new(&*host);
+        let _builder = dispatch.enter_construction_scope();
         let graph = host.project_type_store().semantic_graph();
         let shallow = dispatch
             .ctx

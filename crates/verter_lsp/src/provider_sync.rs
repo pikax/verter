@@ -884,7 +884,7 @@ pub(crate) fn api_leg_is_current(
 ) -> bool {
     let source = crate::provider_surface_store::resolve_carrier_source(
         Some(documents),
-        &documents.host(),
+        documents.host(),
         canonical_id,
     );
     let snapshot = documents.provider_surfaces().current_snapshot(dts_path);

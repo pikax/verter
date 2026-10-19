@@ -53,6 +53,7 @@ fn render(store: &SemanticGraphStore, node: SemanticNodeId) -> String {
 #[test]
 fn pending_display_applies_only_the_replacements_suffix_to_arguments() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let check = parameter(&store, "Q", 0);
     let t = parameter(&store, "T", 1);
     let u = parameter(&store, "U", 2);
@@ -79,6 +80,7 @@ fn pending_display_applies_only_the_replacements_suffix_to_arguments() {
 #[test]
 fn pending_display_uses_replacement_shape_for_parentheses() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let check = parameter(&store, "Q", 0);
     let t = parameter(&store, "T", 1);
     let number = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -100,6 +102,7 @@ fn pending_display_uses_replacement_shape_for_parentheses() {
 #[test]
 fn pending_display_composes_inner_frames_before_outer_frames() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let check = parameter(&store, "Q", 0);
     let t = parameter(&store, "T", 1);
     let u = parameter(&store, "U", 2);
@@ -116,6 +119,7 @@ fn pending_display_composes_inner_frames_before_outer_frames() {
 #[test]
 fn pending_display_preserves_exact_infer_scope_in_nested_conditionals() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let check = parameter(&store, "Q", 0);
     let number = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -157,6 +161,7 @@ fn pending_display_preserves_infer_scope_declared_inside_a_carrier_argument() {
     // must not reach either the declaration or the true branch. Before the
     // carrier arguments were walked, both collapsed to the outer argument.
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let check = parameter(&store, "Q", 0);
     let number = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -201,6 +206,7 @@ fn pending_display_preserves_infer_scope_declared_inside_a_carrier_argument() {
 #[test]
 fn pending_display_preserves_a_mapped_binder_and_its_value_scope() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let check = parameter(&store, "Q", 0);
     let key = parameter(&store, "K", 1);
     let number = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));

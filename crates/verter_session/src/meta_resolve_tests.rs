@@ -6554,6 +6554,7 @@ defineProps<Props<T>>()
     let _ = session.evaluate_types("/Generic.vue").unwrap().unwrap();
 
     let dispatch = ProjectSemanticDispatch::new(host);
+    let _builder = dispatch.enter_construction_scope();
 
     // Construct the macro's parent shell `Props<T>` as a TypeExpr —
     // this is the *macro field's parent*, not the field itself. Step
@@ -6668,6 +6669,7 @@ defineProps<Wrapper<Inner>>()
     let _ = session.evaluate_types("/Owner.vue").unwrap().unwrap();
     let host = project.host();
     let dispatch = ProjectSemanticDispatch::new(host);
+    let _builder = dispatch.enter_construction_scope();
 
     let wrapper_inner = TypeExpr::Ref {
         name: StdArc::from("Wrapper"),
@@ -6952,6 +6954,7 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
 
     let host = project.host();
     let dispatch = ProjectSemanticDispatch::new(host);
+    let _builder = dispatch.enter_construction_scope();
 
     // The macro shell: `PricingPlansSlots<{ id: string; tier: 'pro' }>`.
     let plan_arg = TypeExpr::Object(StdArc::new(verter_type_expr::ObjectExpr {
@@ -7164,6 +7167,7 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
 
     let host = project.host();
     let dispatch = ProjectSemanticDispatch::new(host);
+    let _builder = dispatch.enter_construction_scope();
 
     let plan_arg = TypeExpr::Object(StdArc::new(verter_type_expr::ObjectExpr {
         properties: vec![
@@ -8290,6 +8294,7 @@ fn emit_branch_merge_with_open_program_branch_keeps_the_conditional_carrier() {
 
     let host = VerterHost::new_standalone(crate::HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(
         verter_type_engine::semantic_query::PrimitiveKind::String,
@@ -8620,6 +8625,7 @@ fn dispatch_mutual_alias_cycle_emits_terminates_by_identity() {
 
     let scope = "/src/cyclic.ts";
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let builder = dispatch.enter_construction_scope();
 
     // Navigate-lower the cyclic alias head to its DeclRef carrier — the
     // shape the macro projector hands the carrier walk. Navigate produces
@@ -8650,7 +8656,6 @@ fn dispatch_mutual_alias_cycle_emits_terminates_by_identity() {
     // Drive the carrier walk DIRECTLY so the termination mechanism is
     // observable. A mutual alias cycle has no Conditional root → `None`.
     let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
-    let builder = dispatch.enter_construction_scope();
     let result = resolve_emit_payload_to_conditional_root(
         &dispatch,
         &builder,
@@ -8721,17 +8726,17 @@ export type C = { back: A }
             "Pick",
             vec![TypeExpr::named("A"), TypeExpr::string_literal("next")],
         );
-        let node =
-            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host)
-                .lower_type_expr_in_scope_with_mode(
-                    "/cycle.ts",
-                    &pick_over_cycle,
-                    verter_type_engine::semantic_query::ProjectionMode::Navigate,
-                )
-                .expect("Pick<A,'next'> must lower");
-
+        // One dispatcher lowers and detects: it owns the lowered node.
         let fixture_dispatch_16 =
             verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+        let _builder = fixture_dispatch_16.enter_construction_scope();
+        let node = fixture_dispatch_16
+            .lower_type_expr_in_scope_with_mode(
+                "/cycle.ts",
+                &pick_over_cycle,
+                verter_type_engine::semantic_query::ProjectionMode::Navigate,
+            )
+            .expect("Pick<A,'next'> must lower");
         let detected = crate::meta_resolve::node_root_reaches_transitive_cycle_with_fence(
             &fixture_dispatch_16,
             "/cycle.ts",

@@ -146,6 +146,33 @@ pub struct FlowReturnResult {
     /// its errors. Every rebuild carries them.
     checker_diagnostics:
         verter_session_query::retention::owned::OwnedSlice<super::CheckerDiagnostic>,
+    /// The graph ownership of a result handed out of the engine: its
+    /// return node and every node it carries, held for as long as the
+    /// delivered result lives. Transport only — never identity.
+    owner: FlowReturnOwner,
+}
+
+/// A delivered flow-return result's graph ownership. Equality, hashing and
+/// display ignore it.
+#[derive(Clone, Default)]
+pub(super) struct FlowReturnOwner(
+    #[allow(
+        dead_code,
+        reason = "held for its drop: the lease owns the result's nodes"
+    )]
+    crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease,
+);
+
+impl PartialEq for FlowReturnOwner {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+impl Eq for FlowReturnOwner {}
+impl std::fmt::Debug for FlowReturnOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FlowReturnOwner")
+    }
 }
 
 /// What a function's authored kind adds to its body join — see
@@ -244,7 +271,24 @@ impl FlowReturnResult {
             fresh_literal_arms: retained_fresh_literal_arms(graph, return_type, fresh_literal_arms),
             facet: FunctionKindFacet::None,
             checker_diagnostics: Vec::new().into(),
+            owner: FlowReturnOwner::default(),
         }
+    }
+
+    /// This result owning every graph node it carries, for delivery out of
+    /// the engine. `Err` when a node it names is no longer live: the result
+    /// cannot be delivered.
+    pub(crate) fn delivered(
+        mut self,
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+    ) -> Result<Self, super::QueryError> {
+        let value = super::QueryResult::Value(super::SemanticQueryValue::FlowReturn(
+            verter_session_query::retention::owned::Owned::new(self.clone()),
+        ));
+        self.owner = FlowReturnOwner(graph.lease_delivery(
+            crate::semantic_query_memo::delivery_lease::DeliveredAllocations::value(&value),
+        )?);
+        Ok(self)
     }
 
     /// Explicit producer availability. An approximation retains the evaluated

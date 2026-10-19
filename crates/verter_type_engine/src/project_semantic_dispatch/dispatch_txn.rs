@@ -2251,6 +2251,22 @@ pub struct CompletedSccMember {
     pub(crate) inline_flight: Option<InlineMemberFlight>,
 }
 
+impl CompletedSccMember {
+    /// Own the member's decided payload in its inline flight until the
+    /// batched publish stages it.
+    pub(crate) fn held(mut self, graph: &crate::semantic_query_memo::SemanticGraphStore) -> Self {
+        if let Some(flight) = self.inline_flight.as_mut() {
+            flight.hold_value(
+                graph,
+                &crate::semantic_query::QueryResult::Value(
+                    crate::semantic_query::SemanticQueryValue::Relation(self.payload.clone()),
+                ),
+            );
+        }
+        self
+    }
+}
+
 impl RelationDomainRuntime {
     /// The session `id`. Sessions are appended in the order their ids are
     /// allocated and never reordered, so the stack is sorted by id and a
@@ -2431,6 +2447,26 @@ pub struct CompletedFlowReturnMember {
     pub(crate) materialized: crate::semantic_query::demand::MaterializedSet,
 }
 
+impl CompletedFlowReturnMember {
+    /// Own the member's proven value in its inline flight until the
+    /// batched publish stages it.
+    pub(crate) fn held(mut self, graph: &crate::semantic_query_memo::SemanticGraphStore) -> Self {
+        if let Some(flight) = self.inline_flight.as_mut() {
+            flight.hold_value(
+                graph,
+                &crate::semantic_query::QueryResult::Value(
+                    crate::semantic_query::SemanticQueryValue::FlowReturn(
+                        verter_session_query::retention::owned::Owned::new(
+                            self.result.value().clone(),
+                        ),
+                    ),
+                ),
+            );
+        }
+        self
+    }
+}
+
 /// What reusing a completed flow result replays at the demanding site: the
 /// reads its evaluation made on every channel an enclosing build observes,
 /// so a scope that was not live when the result was computed still sees
@@ -2523,6 +2559,26 @@ pub struct CompletedResolveCallMember {
     pub result: crate::semantic_query::AdmissibleCallResult,
     pub(crate) inline_flight: Option<crate::semantic_query_memo::InlineMemberFlight>,
     pub(crate) self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+}
+
+impl CompletedResolveCallMember {
+    /// Own the member's admitted result in its inline flight until the
+    /// batched publish stages it.
+    pub(crate) fn held(mut self, graph: &crate::semantic_query_memo::SemanticGraphStore) -> Self {
+        if let Some(flight) = self.inline_flight.as_mut() {
+            flight.hold_value(
+                graph,
+                &crate::semantic_query::QueryResult::Value(
+                    crate::semantic_query::SemanticQueryValue::ResolveCall(
+                        verter_session_query::retention::owned::Owned::new(
+                            self.result.get().clone(),
+                        ),
+                    ),
+                ),
+            );
+        }
+        self
+    }
 }
 
 /// The flow-return domain runtime: the completed flow members queued

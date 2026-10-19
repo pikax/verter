@@ -349,6 +349,7 @@ fn prefix_backfill_skips_record_origin_edge_when_target_already_warm() {
     use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
     let graph = SemanticGraphStore::new();
+    let _scope = graph.enter_node_root_scope();
     // Build two distinct interned nodes: a source and a target. The
     // edge will record `target` as derived from `[source]`.
     let source = mint_distinct_node(&graph);
@@ -420,6 +421,7 @@ fn prefix_backfill_emits_record_origin_edge_when_target_cold() {
     use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
     let graph = SemanticGraphStore::new();
+    let _scope = graph.enter_node_root_scope();
     let source = mint_distinct_node(&graph);
     let target_a = mint_distinct_node(&graph);
     let target_b = mint_distinct_node(&graph);
@@ -508,6 +510,7 @@ fn audit_mining_traces_dropped_prefix_edges() {
     // Discriminating: a fix that gated `acc.push_derivation_edge` by
     // the dedup check would drop the second push and the test fails.
     let graph = SemanticGraphStore::new();
+    let _scope = graph.enter_node_root_scope();
     let source = mint_distinct_node(&graph);
     let target = mint_distinct_node(&graph);
     let fence: verter_type_engine::semantic_query::DepSignature =
@@ -587,6 +590,7 @@ fn repo_first_pass_diagnosis_dup_edge_ratio_under_5_percent() {
     use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
     let graph = SemanticGraphStore::new();
+    let _scope = graph.enter_node_root_scope();
     let source = mint_distinct_node(&graph);
     let target = mint_distinct_node(&graph);
     let fence: verter_type_engine::semantic_query::DepSignature =

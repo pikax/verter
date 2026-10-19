@@ -257,7 +257,7 @@ async fn measure_wrapper_layer_sizes() {
         ..HostConfig::default()
     };
     let host = Arc::new(VerterHost::new_standalone(config_on));
-    let shared_audit_on = crate::documents::SharedHost::new(std::sync::Arc::clone(&host));
+    let shared_audit_on = std::sync::Arc::clone(&host);
     let audit_on = crate::audit_harness::run_with_audit(
         &shared_audit_on,
         verter_audit::payloads::tags::LspMethodTag::GotoDefinition,
@@ -277,7 +277,7 @@ async fn measure_wrapper_layer_sizes() {
         ..HostConfig::default()
     };
     let host_off = Arc::new(VerterHost::new_standalone(config_off));
-    let shared_off = crate::documents::SharedHost::new(std::sync::Arc::clone(&host_off));
+    let shared_off = std::sync::Arc::clone(&host_off);
     let audit_off = crate::audit_harness::run_with_audit(
         &shared_off,
         verter_audit::payloads::tags::LspMethodTag::GotoDefinition,

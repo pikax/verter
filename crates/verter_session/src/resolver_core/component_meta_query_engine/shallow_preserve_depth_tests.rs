@@ -27,6 +27,7 @@ fn under_nested_arrays<R: Send + 'static>(
         .spawn(move || {
             let host = VerterHost::new_standalone(HostConfig::default());
             let graph = Arc::clone(host.project_type_store().semantic_graph());
+            let _scope = graph.enter_node_root_scope();
             let mut node = leaf(&graph);
             for _ in 0..DEPTH {
                 node = graph.intern_node(SemanticNodeData::Array {

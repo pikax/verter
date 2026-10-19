@@ -1558,11 +1558,11 @@ pub fn note_component_meta_schedule_cut_for_test() {
 mod ownership_tests {
     use super::*;
     use crate::semantic_query::{LiteralValue, SemanticNodeData, SemanticQueryKey};
-    use crate::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+    use crate::semantic_query_memo::graph_fixture::GraphFixture;
 
     #[test]
     fn counted_failed_prefix_receipt_retains_its_materialized_operand() {
-        let harness = CountedOwnershipHarness::new();
+        let harness = GraphFixture::new();
         let receipt = harness.run(|graph| {
             let flags = crate::resolver_core::resolver_context::RequestFlags::new(
                 crate::resolver_core::resolver_context::ProjectGenerationClock::new(Arc::new(

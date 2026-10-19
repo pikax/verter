@@ -5416,15 +5416,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // (the usable value still flows to the caller).
                     match &verdict {
                         Some(FlowSolveOutcome::Complete(proof)) => {
-                            self.dispatch_txn.borrow_mut().flow.completed_members.push(
-                                CompletedFlowReturnMember {
-                                    key: root_key,
-                                    result: proof.clone(),
-                                    inline_flight,
-                                    self_roots,
-                                    materialized,
-                                },
-                            );
+                            let member = CompletedFlowReturnMember {
+                                key: root_key,
+                                result: proof.clone(),
+                                inline_flight,
+                                self_roots,
+                                materialized,
+                            }
+                            .held(self.graph());
+                            self.dispatch_txn
+                                .borrow_mut()
+                                .flow
+                                .completed_members
+                                .push(member);
                         }
                         _ => {
                             self.abort_inline_flight(inline_flight.as_ref());

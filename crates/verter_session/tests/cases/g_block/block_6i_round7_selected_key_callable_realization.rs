@@ -78,6 +78,10 @@ export type LiteralKeyedSlots<TPlan extends PricingPlan = PricingPlan> = {
 #[test]
 fn selected_key_mapped_materialization_closes_conditional_to_function() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some("/pricing_slots.ts".to_string()),
         input_id: "/pricing_slots.ts".to_string(),

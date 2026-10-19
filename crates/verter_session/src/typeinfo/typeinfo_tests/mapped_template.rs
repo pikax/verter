@@ -347,6 +347,10 @@ fn recursive_mapped_index_budget_refusal_does_not_warm() {
     };
 
     let host = recursive_paths_host(3, 3, 100);
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let view = crate::typeinfo::current_store_view_for_query(&host).unwrap();
     let host_context = crate::resolver_core::HostResolverContext::from_current(
         &host,
@@ -1009,6 +1013,10 @@ pub(crate) fn keyspace_budget_exceeded_admits_nothing() {
     use verter_type_engine::semantic_query::{QueryResult, SemanticNodeData};
 
     let host = make_host_with_footprint();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
 
     // Two fully-CLOSED finite unions whose 1,600 concatenations exceed a
     // 256-unit work limit. Each union is a wide set of distinct string

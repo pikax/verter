@@ -1,5 +1,5 @@
-//! Counted graph roots. Production canonical sweeps may retire these roots;
-//! dropping an old handle then observes the tombstone and does nothing.
+//! Counted graph roots: every holder of a node owns one count on it, and
+//! the last release destroys the node (see `arena.rs`, **Lifetime**).
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -190,21 +190,6 @@ impl NodeRootSet {
         )))
     }
 
-    /// Retain the live operands of `ids` from `arena`, dropping any id that
-    /// names no live node.
-    pub(crate) fn acquire_live(arena: Arc<NodeArenaCore>, mut ids: RootIds) -> Self {
-        if ids.is_empty() {
-            return Self::default();
-        }
-        arena.retain_live(&mut ids);
-        if ids.is_empty() {
-            return Self::default();
-        }
-        Self(Some(verter_session_query::retention::owned::Owned::new(
-            RootOwner { arena, ids },
-        )))
-    }
-
     pub fn operands(&self) -> &[SemanticNodeId] {
         self.0.as_ref().map_or(&[], |owner| owner.ids.as_slice())
     }
@@ -262,8 +247,8 @@ impl<'a> NodeRef<'a> {
         self.arena
     }
 
-    /// Read the payload under a new owning root. A slot a legacy close
-    /// already released is stale; it never reads as a live payload.
+    /// Read the payload under a new owning root. The borrow's owner keeps
+    /// the node live, so the read cannot find it destroyed.
     pub fn read(self) -> Result<super::node_data_lease::NodeDataLease, QueryError> {
         let roots = NodeRootSet::acquire(Arc::clone(self.arena), smallvec::smallvec![self.id])?;
         let data = self
@@ -817,17 +802,27 @@ impl NodeRootScope {
 }
 
 /// Root a record's operands against the arena of the graph that issued it.
+/// An operand the arena does not hold live — a synthetic ordinal no graph
+/// allocated, or a stale one — owns nothing and is not rooted: the record
+/// keeps naming it, and every read through it fails as stale or foreign.
 pub(crate) fn root_in_arena(
     arena: Arc<NodeArenaCore>,
     ids: impl IntoIterator<Item = SemanticNodeId>,
 ) -> NodeRootSet {
-    let ids = ids
+    let mut ids: RootIds = ids
         .into_iter()
-        .filter(|node| {
-            node.0 < super::UNALLOCATABLE_ID_FLOOR && (arena.counted() || arena.is_live(*node))
-        })
+        .filter(|node| node.0 < super::UNALLOCATABLE_ID_FLOOR)
         .collect();
-    NodeRootSet::acquire(arena, ids).expect("scoped record operands are live")
+    if ids.is_empty() {
+        return NodeRootSet::default();
+    }
+    arena.retain_live(&mut ids);
+    if ids.is_empty() {
+        return NodeRootSet::default();
+    }
+    NodeRootSet(Some(verter_session_query::retention::owned::Owned::new(
+        RootOwner { arena, ids },
+    )))
 }
 
 impl Drop for NodeRootScope {

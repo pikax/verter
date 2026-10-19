@@ -55,6 +55,10 @@ export type MapDeclRefSource = {
 #[test]
 fn shallow_walker_enumerates_declref_source_via_source_surface_helper() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some("/source.ts".to_string()),
         input_id: "/source.ts".to_string(),

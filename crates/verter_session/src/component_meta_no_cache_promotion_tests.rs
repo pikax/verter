@@ -166,6 +166,10 @@ fn request_projection_budget_caps_distinct_dispatch_cold_builds() {
         projection_op_budget: 1,
         ..HostConfig::default()
     }));
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let first_base = intern_single_member_object(&host, "first");
     let second_base = intern_single_member_object(&host, "second");
     let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
@@ -242,6 +246,10 @@ fn post_trip_projection_op_queries_bypass_cooperative_admission() {
         projection_op_budget: 1,
         ..HostConfig::default()
     }));
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let bases: Vec<SemanticNodeId> = (0..6)
         .map(|i| {
             let name: &'static str = match i {
@@ -370,6 +378,10 @@ fn post_trip_typeof_early_exit_attributes_to_typeof_cold_counter() {
         projection_op_budget: 1,
         ..HostConfig::default()
     }));
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let bases: Vec<SemanticNodeId> = (0..2)
         .map(|i| intern_single_member_object(&host, if i == 0 { "t0" } else { "t1" }))
         .collect();
@@ -489,6 +501,10 @@ fn post_trip_non_projection_queries_still_dispatch_normally() {
         projection_op_budget: 1,
         ..HostConfig::default()
     }));
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let base_a = intern_single_member_object(&host, "a");
     let base_b = intern_single_member_object(&host, "b");
     let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
@@ -574,6 +590,10 @@ fn post_trip_non_projection_queries_still_dispatch_normally() {
 #[test]
 fn no_cache_promotion_for_budget_exceeded_resolve_macro_payload() {
     let host = build_constrained_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let base = intern_three_member_object(&host);
     let key = SemanticQueryKey::ProjectPath {
         base,
@@ -630,6 +650,10 @@ fn no_cache_promotion_for_budget_exceeded_resolve_macro_payload() {
 #[test]
 fn no_cache_promotion_for_budget_exceeded_route_target_pick_omit() {
     let host = build_constrained_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let base = intern_three_member_object(&host);
     // Use a different path than B7's so the two tests don't share
     // the constrained host's warm cache (each test owns its own
@@ -686,6 +710,10 @@ fn no_cache_promotion_for_budget_exceeded_route_target_pick_omit() {
 #[test]
 fn no_cache_promotion_for_budget_exceeded_fallthrough_inheritance() {
     let host = build_constrained_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let base = intern_three_member_object(&host);
     let key = SemanticQueryKey::ProjectPath {
         base,
@@ -748,6 +776,10 @@ fn no_cache_promotion_for_budget_exceeded_fallthrough_inheritance() {
 #[test]
 fn no_cache_promotion_for_budget_exceeded_userland_shadowing_pick() {
     let host = build_constrained_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let base = intern_three_member_object(&host);
     let key = SemanticQueryKey::ProjectPath {
         base,
@@ -814,6 +846,10 @@ fn no_cache_promotion_for_budget_exceeded_userland_shadowing_pick() {
 #[test]
 fn no_cache_promotion_for_budget_exceeded_exclude_extract_reduction() {
     let host = build_constrained_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let base = intern_three_member_object(&host);
     let key = SemanticQueryKey::ProjectPath {
         base,
@@ -880,6 +916,10 @@ fn no_cache_promotion_for_budget_exceeded_exclude_extract_reduction() {
 #[test]
 fn no_cache_promotion_for_budget_exceeded_slot_binding_lowering() {
     let host = build_constrained_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let base = intern_three_member_object(&host);
     let key = SemanticQueryKey::ProjectPath {
         base,
@@ -946,6 +986,10 @@ fn no_cache_promotion_for_budget_exceeded_slot_binding_lowering() {
 #[test]
 fn no_cache_promotion_for_budget_exceeded_typeof_substitution() {
     let host = build_constrained_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let base = intern_three_member_object(&host);
     let key = SemanticQueryKey::ProjectPath {
         base,
@@ -1017,6 +1061,10 @@ fn no_cache_promotion_for_budget_exceeded_typeof_substitution() {
 #[test]
 fn no_cache_promotion_for_budget_exceeded_engine_state_promotion() {
     let host = build_constrained_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let base = intern_three_member_object(&host);
     let key = SemanticQueryKey::ProjectPath {
         base,
@@ -1098,6 +1146,10 @@ fn budget_trip_conditional_suppresses_and_does_not_warm() {
         projection_op_budget: 1,
         ..HostConfig::default()
     }));
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     let true_branch = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let false_branch = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -1606,6 +1658,10 @@ fn projectpath_over_instantiationref_budget_trip_withholds_value_and_does_not_wa
         projection_op_budget: 2,
         ..HostConfig::default()
     }));
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let dispatch = host.semantic_dispatch();
     let graph = host.project_type_store().semantic_graph();
 
@@ -1732,6 +1788,10 @@ fn lower_indexed_access_chain_budget_trip_folds_partial_through_chokepoint_and_r
         projection_op_budget: 2,
         ..HostConfig::default()
     }));
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     // The conditional consumes three indexed hops rather than returning
     // their deferred shell; the constrained request refuses a nested read.
     let _ = host

@@ -175,6 +175,10 @@ fn instantiation_ref_args_contain_typeparam_named(
 #[test]
 fn shallow_walker_substitutes_mapper_binder_per_enumerated_key() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some("/slots.ts".to_string()),
         input_id: "/slots.ts".to_string(),

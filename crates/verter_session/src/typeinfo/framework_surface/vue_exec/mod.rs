@@ -944,6 +944,10 @@ pub(crate) fn vue_macro_dtos_with_ctx<C: crate::session_attachment::SessionCapab
     let (dtos, finalise) = verter_type_engine::fact_signature_helpers::install_fact_tracer(
         &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
         || {
+            // The cold compute resolves the surface and then normalizes its
+            // member labels in later operations, so it holds an explicit
+            // builder owner for them; the DTO bundle it yields is graph-free.
+            let _builder = dispatch.enter_construction_scope();
             let fact = resolve_vue_macro_surface_fact_with_ctx(ctx, dispatch, &validated_request);
             let (surface, domain_guarantee) = adopt_macro_surface_fact(fact);
             match surface {
@@ -1326,6 +1330,7 @@ mod partial_admission_tests {
         let str_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let absent = SemanticNodeId(u64::MAX);
         let dispatch = ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
         let cap = TypeinfoVueSurfaceOutputCap::new(&dispatch);
 
         // Degraded output: an object whose member value is unraisable

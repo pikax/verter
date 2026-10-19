@@ -215,6 +215,7 @@ fn closed_leaf_sources_lower_in_scope() {
     let host = host();
     upsert_ts(&host, OWNER_ID, OWNER);
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     // A primitive leaf lowers to the primitive node.
     let primitive = dispatch
@@ -318,6 +319,7 @@ fn closed_ref_leaf_uses_exact_instance_owner_when_module_import_has_same_name() 
     const OWNER: &str = "/w/semantic-source/OwnerIsolation.vue";
     let host = owner_isolation_fixture();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     let raised = dispatch
         .raise_semantic_type_source_to_hot(
@@ -337,6 +339,7 @@ fn synthesized_symbol_ref_uses_exact_anchor_owner_when_module_import_has_same_na
     const OWNER: &str = "/w/semantic-source/OwnerIsolation.vue";
     let host = owner_isolation_fixture();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let source = SemanticTypeSource::Synthesized(ResolvedLocalShape::Ref(SymbolBodyLocator {
         anchor: AuthoredAnchor {
             canonical_id: verter_type_expr::OwnedStr::from(OWNER),
@@ -365,6 +368,7 @@ fn closed_tuple_leaf_union_element_raises_to_the_ordered_union_node() {
     let host = host();
     upsert_ts(&host, OWNER_ID, OWNER);
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     // The realized emit-payload shape: `[payload: string | number]` as a
     // closed tuple whose single element carries the nested leaf-union fact.
@@ -469,6 +473,7 @@ fn synthesized_object_source_composes_a_surface_with_lowered_member_values() {
     let host = host();
     upsert_ts(&host, OWNER_ID, OWNER);
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     let shape = ResolvedLocalShape::Object(From::from(
         vec![
@@ -737,6 +742,10 @@ fn fenced_serve_synthetic_binding_deepen_is_not_admitted() {
 
     // Control — an UNFENCED deepen admits its reduced shape.
     let control = fixture();
+    let _control_scope = control
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let control_carrier = carrier_for(intern_seed(&control));
     assert!(
         drive(&control, &control_carrier),
@@ -752,6 +761,10 @@ fn fenced_serve_synthetic_binding_deepen_is_not_admitted() {
     // fenced at a STABLE generation (no bump, so a GenerationSuperseded gate cannot
     // mask the refusal).
     let fenced = fixture();
+    let _fenced_scope = fenced
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let fenced_carrier = carrier_for(intern_seed(&fenced));
     {
         let rctx = RequestContext::new(1, Arc::from(SCOPE), false, None);
@@ -972,6 +985,7 @@ fn closed_leaf_union_with_duplicate_leaves_raises_to_the_singleton_literal() {
     let host = host();
     upsert_ts(&host, OWNER_ID, OWNER);
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     let source = SemanticTypeSource::Closed(ClosedTypeFact::LeafUnion(From::from(
         vec![
@@ -1015,6 +1029,7 @@ fn nested_leaf_union_with_duplicate_leaves_composes_the_singleton_literal() {
     let host = host();
     upsert_ts(&host, OWNER_ID, OWNER);
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     let source = SemanticTypeSource::Closed(ClosedTypeFact::Tuple(TuplePayloadFact {
         readonly: false,
@@ -1078,6 +1093,7 @@ fn closed_leaf_union_multi_arm_re_anchors_to_the_owning_fact_scope() {
     let host = host();
     upsert_ts(&host, OWNER_ID, OWNER);
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     let source = SemanticTypeSource::Closed(ClosedTypeFact::LeafUnion(From::from(
         vec![
@@ -1129,6 +1145,7 @@ fn nested_leaf_union_multi_arm_re_anchors_to_the_owning_fact_scope() {
     let host = host();
     upsert_ts(&host, OWNER_ID, OWNER);
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     let source = SemanticTypeSource::Closed(ClosedTypeFact::Tuple(TuplePayloadFact {
         readonly: false,

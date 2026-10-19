@@ -301,7 +301,10 @@ impl ComponentMetaQueryEngine<'_> {
             scope_owner,
             lowered,
         ) {
-            return Some(admitted.node());
+            // The admitted carrier is dropped here; the engine's builder keeps
+            // its node for the rest of the evaluation.
+            let node = admitted.node();
+            return self.builder().node_ref(node).ok().map(|_| node);
         }
         // (4) Key-domain fallback. The class-A terminal admits only a FULLY
         // materialized expanded surface, but the fallthrough readers consume

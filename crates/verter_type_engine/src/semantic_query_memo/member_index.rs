@@ -15,8 +15,8 @@
 //! arena is append-only (ids are never reused) and payloads are immutable,
 //! so entries never go stale and no EDIT-time invalidation hook is required
 //! (unlike the hash-cons memos, whose values depend on cross-file walks).
-//! A document CLOSE (`release_canonical`) does drop the entries of the
-//! nodes it tombstones — pure retention once the payload is gone.
+//! A destroyed node's entry is dropped with the arena's destroyed log
+//! (`release.rs`) — pure retention once the payload is gone.
 //!
 //! **Collision-safe hashing.** Member names are authored strings, so the
 //! inner map uses the std `HashMap` default hasher (SipHash `RandomState`),
@@ -112,6 +112,11 @@ impl SemanticGraphStore {
                 Entry::Occupied(existing) => Arc::clone(existing.get()),
                 Entry::Vacant(slot) => {
                     slot.insert(Arc::clone(&built));
+                    if !self.track_sidecar(id) {
+                        // A destroyed id is answered, never memoized.
+                        self.member_ordinal_index_memo.remove(&id);
+                        return built;
+                    }
                     let mut fifo = self.member_ordinal_index_fifo.lock();
                     fifo.push_back(id);
                     while fifo.len() > MEMBER_ORDINAL_INDEX_RETENTION_CAP {
@@ -231,6 +236,7 @@ mod tests {
     #[test]
     fn member_ordinal_index_is_built_once_and_shared() {
         let store = SemanticGraphStore::new();
+        let _scope = store.enter_node_root_scope();
         let value = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let view = object_view(vec![member("alpha", value)]);
         let id = store.intern_node(SemanticNodeData::Object(view.clone()));

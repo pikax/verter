@@ -154,13 +154,12 @@ mod tests {
         raise::node_raised_shape_facts_with_dispatch, ProjectSemanticDispatch,
     };
     use verter_type_engine::semantic_query::{LiteralValue, SemanticNodeData};
-    use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+    use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
 
     #[test]
     fn counted_route_admission_owns_node_after_orchestration_scope_closes() {
         let host = crate::VerterHost::new_standalone(Default::default());
-        let dispatch =
-            ProjectSemanticDispatch::with_ownership_harness(&host, CountedOwnershipHarness::new());
+        let dispatch = ProjectSemanticDispatch::with_graph_fixture(&host, GraphFixture::new());
         let graph = dispatch.graph();
         let admitted = {
             let _scope = graph.enter_node_root_scope();

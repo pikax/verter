@@ -208,7 +208,7 @@ fn counted_component_candidates_and_subscribers_own_flow_operands() {
     use super::producer::{Claim, Joined, ReadCapture};
     use verter_type_engine::resolver_core::fact_validation_port::FactValidation;
     use verter_type_engine::semantic_query::LiteralValue;
-    use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+    use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
     for subscribe in [false, true] {
         let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
         let canonical = "/ws/scc-flow.ts";
@@ -231,7 +231,7 @@ fn counted_component_candidates_and_subscribers_own_flow_operands() {
             },
         ]));
         let self_roots = Arc::from([Arc::<str>::from(canonical)]);
-        let harness = CountedOwnershipHarness::new();
+        let harness = GraphFixture::new();
         let task = harness.run(|store| store.task_registry_for_tests().register_task());
         let (key_node, return_node, subscriber) = harness.run(|store| {
             let root_key = distinct_keys(store, 1).remove(0);
@@ -335,6 +335,73 @@ fn counted_component_candidates_and_subscribers_own_flow_operands() {
     }
 }
 
+/// A member whose decided value named a node already destroyed when its
+/// component closed cannot be held; the batched publish refuses the WHOLE
+/// component and releases every member flight, rather than publishing a
+/// candidate whose value no lease can root.
+///
+/// Discriminating against a hold failure that is ignored: the component
+/// would publish both members, the unheld one included.
+#[test]
+fn scc_batch_refuses_whole_when_a_member_value_could_not_be_held() {
+    for unheld in [false, true] {
+        let store = SemanticGraphStore::new_with_memo_budget_for_test(8);
+        let _scope = store.enter_node_root_scope();
+        let keys = distinct_keys(&store, 3);
+        let witness = seed_root(&store, &keys[0]);
+        let dead = {
+            let _inner = store.enter_node_root_scope();
+            store.intern_node(SemanticNodeData::Literal(
+                verter_type_engine::semantic_query::LiteralValue::String(
+                    "destroyed member value".into(),
+                ),
+            ))
+        };
+        assert!(!store.node_is_live(dead), "premise: only the scope held it");
+        let mut pending = Vec::new();
+        for key in &keys[1..] {
+            let mut flight = store
+                .begin_inline_relation_flight(key)
+                .expect("each member claims its vacant family flight");
+            if unheld && pending.is_empty() {
+                flight.hold_value_for_tests(
+                    &store,
+                    &QueryResult::Value(SemanticQueryValue::TypeNode(dead)),
+                );
+            }
+            pending.push(PendingRelationMember {
+                key: key.clone(),
+                payload: store.relation_payload_for_tests(RelationOutcome::Assignable),
+                flight,
+            });
+        }
+        let published = store.publish_scc_members_fenced_for_tests(
+            None::<
+                &dyn verter_type_engine::resolver_core::ResolverContext<
+                    crate::resolver_core::HostCapabilities,
+                >,
+            >,
+            &witness,
+            &verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+            &Arc::from(Vec::<Arc<str>>::new()),
+            0,
+            pending,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(published, !unheld, "unheld={unheld}");
+        let members = keys[1..]
+            .iter()
+            .filter(|key| store.slot_candidate_count_for_tests(&key.to_query_key()) > 0)
+            .count();
+        assert_eq!(members, if unheld { 0 } else { 2 }, "unheld={unheld}");
+        assert!(
+            store.retained_claimed_flight_keys_for_tests().is_empty(),
+            "every member flight is released either way"
+        );
+    }
+}
+
 /// Run one batch of `members` (in the given order) plus `flow_members`
 /// flow-return members against a store whose global family budget is
 /// `cap`, and report `(published, resident)`.
@@ -345,6 +412,7 @@ fn counted_component_candidates_and_subscribers_own_flow_operands() {
 /// there is invisible.
 fn run_batch(cap: usize, member_order: &[usize], flow_members: usize) -> (bool, Vec<String>) {
     let store = SemanticGraphStore::new_with_memo_budget_for_test(cap);
+    let _scope = store.enter_node_root_scope();
     let keys = distinct_keys(&store, member_order.len() + 1);
     let flow_keys = distinct_flow_keys(flow_members);
     let root_key = keys[0].clone();
@@ -614,6 +682,7 @@ fn scc_batch_refuses_whole_on_a_proof_key_mismatch() {
     // The second flow member's proof names the FIRST member's key.
     let (published_spliced, resident_spliced) = {
         let store = SemanticGraphStore::new_with_memo_budget_for_test(8);
+        let _scope = store.enter_node_root_scope();
         let keys = distinct_keys(&store, 3);
         let flow_keys = distinct_flow_keys(2);
         let root_key = keys[0].clone();
@@ -733,6 +802,7 @@ fn run_exact_fit_pressure_batch(
 ) {
     let cap = 1 + relation_members + flow_members;
     let store = SemanticGraphStore::new_with_memo_budget_for_test(cap);
+    let _scope = store.enter_node_root_scope();
     // keys[0] = root, keys[1..=relation_members] = relation members,
     // the trailing two = the unrelated fillers.
     let keys = distinct_keys(&store, relation_members + 3);
@@ -966,6 +1036,10 @@ fn scc_batch_plans_member_eviction_invalid_first_against_the_callers_view() {
     use verter_session_query::facts::fact_cache::ReadSetSignature;
 
     let host = crate::VerterHost::new_standalone(HostConfig::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let dep = "/ws/scc-eviction-dep.ts";
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some(dep.to_string()),
@@ -978,6 +1052,7 @@ fn scc_batch_plans_member_eviction_invalid_first_against_the_callers_view() {
     });
 
     let store = SemanticGraphStore::new_with_memo_budget_for_test(8);
+    let _scope = store.enter_node_root_scope();
     let keys = distinct_keys(&store, 2);
     let root_key = keys[0].clone();
     let member_key = keys[1].clone();
@@ -1073,6 +1148,7 @@ fn flow_scc_publish_accepts_proof_tokens_only() {
     // (a) The mint mirrors the seal: a degraded value mints NO proof, so
     // no degraded member is constructible at the publish boundary.
     let store = SemanticGraphStore::new_with_memo_budget_for_test(8);
+    let _scope = store.enter_node_root_scope();
     let keys = distinct_flow_keys(1);
     let degraded_node = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
     let degraded = FlowReturnResult::new(

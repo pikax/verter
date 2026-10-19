@@ -225,6 +225,8 @@ fn run_deep_conditional_projection_child() {
 fn run_deep_structural_validation_child() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let graph = host.project_type_store().semantic_graph();
+    // This thread owns the chain while the worker validates it.
+    let _scope = graph.enter_node_root_scope();
     let leaf = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let mut root = leaf;
     // bounded-loop: fixed finite structural-validation fixture depth.
@@ -357,6 +359,7 @@ fn missing_projection_nodes_remain_unavailable_on_repeated_visits() {
     use verter_type_engine::semantic_query::{SemanticNodeId, SurfaceMember, SurfaceView};
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let missing = SemanticNodeId(u64::MAX);
     assert!(dispatch.graph().node_data(missing).is_none());
     let number = dispatch
@@ -436,6 +439,7 @@ fn missing_projection_nodes_remain_unavailable_on_repeated_visits() {
 fn expanded_locator_projection_does_not_request_hidden_spread_writes() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let array = graph.intern_node(SemanticNodeData::Array {
@@ -504,6 +508,7 @@ fn expanded_locator_projection_does_not_request_hidden_spread_writes() {
 fn projection_work_limit_allows_last_step_and_refuses_the_next_without_memoizing_root() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     // A leaf that is not an inert structure, so the projection walks every
     // array level above it (an array of primitives is its own projection
@@ -567,6 +572,7 @@ fn projection_work_limit_allows_last_step_and_refuses_the_next_without_memoizing
 fn active_identity_cycle_keeps_recursive_sentinel_at_exhausted_work_boundary() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     dispatch.set_connected_limits_for_tests(0, 24);
     let graph = host.project_type_store().semantic_graph();
     let recursive = graph.intern_node(SemanticNodeData::DeclRef {
@@ -689,6 +695,10 @@ fn connected_query_depth_limit_allows_boundary_and_trips_at_plus_one() {
 #[test]
 fn runaway_generic_returns_work_partial_one_root_diagnostic_and_seals_its_refusal() {
     let host = VerterHost::new_standalone(HostConfig::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let _update = host
         .upsert(UpsertRequest {
             canonical_id: Some("/runaway.ts".to_string()),
@@ -808,6 +818,10 @@ fn runaway_generic_returns_work_partial_one_root_diagnostic_and_seals_its_refusa
 #[test]
 fn connected_query_depth_limit_is_distinct_diagnostic_and_seals_its_refusal() {
     let host = build_host("export type Deep = keyof { x: string };\n".to_string());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
     dispatch.set_connected_limits_for_tests(128, 1);
     let graph = host.project_type_store().semantic_graph();

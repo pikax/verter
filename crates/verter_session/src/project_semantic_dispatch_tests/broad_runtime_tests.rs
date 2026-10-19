@@ -59,6 +59,7 @@ fn runtime_fact_preserves_operation_refusal_and_certified_recovery() {
     };
     crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
         let dispatch = ProjectSemanticDispatch::new(ctx);
+        let _builder = dispatch.enter_construction_scope();
         let refused = graph.intern_node(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
             diagnostic,
             basis: RecoveryBasis::Budget,
@@ -142,6 +143,10 @@ fn file_scope(
 #[test]
 fn broad_runtime_preserves_union_order_and_first_occurrence_dedup() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(42.0)));
@@ -176,6 +181,10 @@ fn broad_runtime_preserves_union_order_and_first_occurrence_dedup() {
 #[test]
 fn broad_runtime_classifies_container_callable_and_object_without_member_descent() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     let leaf = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let array = graph.intern_node(SemanticNodeData::Array {
@@ -264,6 +273,10 @@ fn broad_runtime_classifies_container_callable_and_object_without_member_descent
 #[test]
 fn broad_runtime_keeps_null_and_unsupported_undefined_distinct() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     let null = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Null));
     let undefined = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
@@ -282,6 +295,7 @@ fn broad_runtime_keeps_null_and_unsupported_undefined_distinct() {
 #[test]
 fn broad_runtime_recognizes_only_shadow_safe_builtin_nominal_identities() {
     let host = VerterHost::new_standalone(Default::default());
+    let _builder = host.project_type_store().construction_grant().enter_scope();
     let graph = host.project_type_store().semantic_graph();
     let builtin = |name: &'static str| {
         graph.intern_node(SemanticNodeData::DeclRef {
@@ -365,6 +379,7 @@ fn rootless_classifier_subject_stays_return_only_with_a_rooted_descendant() {
     let host = VerterHost::new_standalone(Default::default());
     upsert_ts(&host, "/rooted-child.ts", "export type Seed = string");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let rooted = graph.intern_node_with_scope(
         SemanticNodeData::Primitive(PrimitiveKind::String),
@@ -627,6 +642,7 @@ fn missing_semantic_node_data_is_partial_unknown_and_return_only() {
     let host = VerterHost::new_standalone(Default::default());
     upsert_ts(&host, "/missing-node.ts", "export type Seed = string");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let subject = graph.intern_node_with_scope(
         SemanticNodeData::Alias(SemanticNodeId(u64::MAX)),
@@ -665,6 +681,7 @@ fn classifier_work_exhaustion_is_partial_unknown_and_never_warms() {
     let host = VerterHost::new_standalone(Default::default());
     upsert_ts(&host, "/work-limit.ts", "export type Seed = string");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let arms: Vec<_> = (0..64)
         .map(|value| {
@@ -710,6 +727,7 @@ fn opaque_query_fault_is_partial_but_honest_miss_is_complete_unknown() {
     let host = VerterHost::new_standalone(Default::default());
     upsert_ts(&host, "/query-fault.ts", "export type Seed = string");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let scope = file_scope(&dispatch, "/query-fault.ts");
     let fault_subject = graph.intern_node_with_scope(
@@ -784,6 +802,7 @@ fn the_positional_marker_classifies_with_the_flow_class_through_the_classifier()
     let host = VerterHost::new_standalone(Default::default());
     upsert_ts(&host, "/positional-marker.ts", "export type Seed = string");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let subject = graph.intern_node_with_scope(
         SemanticNodeData::Opaque(QueryError::UnmodeledPosition),
@@ -834,6 +853,7 @@ fn recursive_runtime_carrier_is_typed_partial_and_return_only() {
     let host = VerterHost::new_standalone(Default::default());
     upsert_ts(&host, "/recursive-runtime.ts", "export type Seed = string");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let subject = graph.intern_node_with_scope(
         SemanticNodeData::Opaque(QueryError::RecursiveRef {
@@ -867,6 +887,10 @@ fn recursive_runtime_carrier_is_typed_partial_and_return_only() {
 #[test]
 fn finite_deep_alias_chain_is_iterative_and_complete() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     let mut subject = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     // Builds the finite alias chain the classifier must resolve iteratively.

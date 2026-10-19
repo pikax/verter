@@ -1534,6 +1534,10 @@ fn key_of_same_canonical_edit_rejects_warm_entry() {
 #[test]
 fn key_of_over_cross_file_merged_decl_rejects_warm_entry_on_augmenter_edit() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let base_c = "/sg_self_root/merged_base.ts";
     let aug_c = "/sg_self_root/merged_augmenter.ts";
     upsert(&host, base_c, "export type Foo = { a: number };\n");
@@ -1838,6 +1842,7 @@ fn builtin_utility_instantiation_roots_on_argument_file() {
     // `c`'s file — a genuine file-derived argument for the utility.
     let source = file_derived_object_node(&host, c);
     let dispatch = host.semantic_dispatch();
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     // `Pick<Foo, 'a'>` — args are [source_object_node, key_set]. The

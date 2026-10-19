@@ -25,7 +25,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 
-use verter_session_query::retention::owned::{ChargeCtx, Owned, WeakOwned};
+use verter_session_query::retention::owned::{BlockShare, ChargeCtx, Owned, WeakOwned};
 
 use crate::semantic_query::{DepEntry, DepRail, DepSignature, DepVersion};
 
@@ -278,6 +278,18 @@ impl DepSignatureInterner {
                     .sum::<usize>()
             })
             .sum()
+    }
+
+    /// Bytes the block shares its entries keep are charged: every interned
+    /// rail block an entry still keeps allocated, alive or not — one share
+    /// per entry, each on its own rail's block.
+    #[must_use]
+    pub fn entry_block_charge_bytes(&self) -> usize {
+        self.shards
+            .iter()
+            .map(|shard| shard.lock().values().map(Vec::len).sum::<usize>())
+            .sum::<usize>()
+            * BlockShare::bytes_for::<DepRail>()
     }
 
     /// Bytes the interner's own storage is charged.

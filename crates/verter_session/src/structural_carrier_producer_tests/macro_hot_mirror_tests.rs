@@ -191,6 +191,7 @@ fn bare_ref_macro_arg_mirrors_to_bare_ref_carrier_and_reentry_matches_eager() {
         "<script setup lang=\"ts\">\nimport type { Props } from './types'\ndefineProps<Props>()\n</script>\n<template><div /></template>\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let macro_index = first_macro_index(&host, "/C.vue");
 
     let handle = macro_type_arg_hot_ref(&host, "/C.vue", macro_index)
@@ -959,18 +960,18 @@ fn concurrent_first_macro_arg_demands_singleflight_one_cold_build() {
 
 // ── Close / reopen ──────────────────────────────────────────────────────────
 
-/// Closing an SFC releases the carrier nodes its macro mirror lowered, while
-/// the content-addressed `IndexedReady` artifact, and with it the mirror,
-/// stays for the disk reload. Reloading the SAME bytes serves that same
-/// artifact, so the mirror must not hand back the handle the close released:
-/// the reopened owner's demand re-lowers a live carrier of the same shape,
-/// and a later demand is warm on it.
+/// Closing an SFC keeps its content-addressed `IndexedReady` artifact, and
+/// with it the macro mirror, for the disk reload: the mirror owns the carrier
+/// it lowered, so the close (which evicts only semantic-graph caches) leaves
+/// that carrier live and readable. Reloading the SAME bytes serves the same
+/// artifact, and the reopened owner's demand is answered from the mirror's
+/// still-owned handle without re-lowering.
 ///
-/// Discriminating: the mirror's write-once cell served the tombstoned handle,
-/// which reads as the released placeholder (`Opaque(Miss)`) instead of the
-/// props object.
+/// Discriminating: a close that swept the closed document's nodes regardless
+/// of their owner turns the mirror's handle into the released placeholder
+/// (`Opaque(Miss)`) while the mirror still serves it.
 #[test]
-fn a_reopened_unchanged_owner_relowers_the_macro_mirror_its_close_released() {
+fn a_reopened_unchanged_owner_serves_the_carrier_its_mirror_owns() {
     use verter_workspace::{MemoryOptions, MemoryWorkspace};
     const PATH: &str = "/Reopen.vue";
     const SFC: &str = "<script setup lang=\"ts\">\ndefineProps<{ a: string }>()\n</script>\n<template><div /></template>\n";
@@ -978,7 +979,6 @@ fn a_reopened_unchanged_owner_relowers_the_macro_mirror_its_close_released() {
     ws.inject_file(PATH.to_string(), Arc::from(SFC));
     let host = VerterHost::new(HostConfig::default(), ws);
     assert!(host.ensure_loaded(PATH));
-    let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = host.project_type_store().semantic_graph();
     let macro_index = first_macro_index(&host, PATH);
     let indexed_before = host.ensure_indexed_ready(PATH).expect("indexed");
@@ -988,8 +988,8 @@ fn a_reopened_unchanged_owner_relowers_the_macro_mirror_its_close_released() {
 
     host.evict(PATH);
     assert!(
-        !graph.node_is_live(before.node()),
-        "fixture: the close releases the mirrored carrier"
+        graph.node_is_live(before.node()),
+        "the mirror still owns its carrier after the close"
     );
 
     assert!(host.ensure_loaded(PATH), "the closed SFC reloads from disk");
@@ -1000,21 +1000,17 @@ fn a_reopened_unchanged_owner_relowers_the_macro_mirror_its_close_released() {
     );
     let after = macro_type_arg_hot_ref(&host, PATH, macro_index)
         .expect("the reopened owner's macro arg mirrors to a hot ref");
-    assert!(
-        graph.node_is_live(after.node()),
-        "the mirror must not serve the handle the close released"
+    assert_eq!(
+        after.node(),
+        before.node(),
+        "the reopened owner is served the mirror's owned handle"
     );
+    let dispatch = ProjectSemanticDispatch::new(&host);
     assert!(
         matches!(
             node_data(&dispatch, after.node()),
             Some(SemanticNodeData::Object(_))
         ),
-        "the re-lowered carrier is the props object again"
-    );
-    let again = macro_type_arg_hot_ref(&host, PATH, macro_index).expect("warm demand");
-    assert_eq!(
-        again.node(),
-        after.node(),
-        "the re-lowered handle is served warm"
+        "the served carrier is the props object"
     );
 }

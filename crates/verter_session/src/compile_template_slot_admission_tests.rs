@@ -302,6 +302,52 @@ fn page_retention_refusal_evicts_compile_companions_and_serves_uncached() {
     }
 }
 
+/// An IDE artifact the retention account declines to keep is still served by
+/// the compile that produced it: only the cache slot is missing, so a
+/// consumer that takes the served artifact never loses the IDE surface of a
+/// component whose output exceeds the per-entry ceiling.
+#[test]
+fn refused_ide_admission_still_serves_the_compiled_artifact() {
+    use verter_session_query::facts::fact_cache::ReadSetSignature;
+    use verter_session_query::retention::{
+        RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+    let profile = CompileProfile::default();
+    let mut admitted_code = None;
+    for refused in [false, true] {
+        let host = make_host();
+        upsert(&host, INLINE_SOURCE);
+        let account = SemanticRetentionAccount::new(RetentionLimits {
+            max_entry_bytes: if refused { 1 } else { usize::MAX },
+            ..RetentionLimits::defaults()
+        });
+        let ide = crate::compile_output_node::with_session_publish_evidence_for_test(
+            ReadSetSignature::new(
+                verter_session_query::facts::fact_read_set::seal_canonical_signature(Vec::new()),
+            ),
+            StoreAccount::new(Arc::clone(&account)),
+            || host.compile_ide(OWNER, &profile),
+        )
+        .expect("the carrier compiles")
+        .expect("a .vue carrier projects an IDE surface");
+        assert!(
+            ide.code.contains("msg"),
+            "the served artifact is the compiled IDE surface"
+        );
+        assert_eq!(
+            session_slot_present(&host, &ide_profile(&profile)),
+            !refused,
+            "only an admitted artifact is cached"
+        );
+        match &admitted_code {
+            None => admitted_code = Some(ide.code),
+            Some(code) => assert_eq!(&*ide.code, &**code, "retention never changes the artifact"),
+        }
+        drop(host);
+        assert_eq!(account.snapshot().retained_bytes, 0);
+    }
+}
+
 /// An IDE output the account refuses to retain is still delivered: its
 /// compile hands it to the document as the surface the pure IDE read serves
 /// — complete, byte-equal to the retained output — charged to its readers,

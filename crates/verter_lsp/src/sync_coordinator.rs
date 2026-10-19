@@ -1922,7 +1922,7 @@ async fn sync_file(
     // closed one. The receipt gates every commit. Ownership resolves from the SAME
     // published `vfs` for both engines.
     match crate::external_ts::reconcile_carrier_source(crate::external_ts::CarrierSyncRequest {
-        host: &deps.documents.host(),
+        host: deps.documents.host(),
         vfs: vfs.as_deref(),
         ownership_ready: snapshot.ownership_ready,
         resolver: &snapshot.resolver,
@@ -1946,7 +1946,7 @@ async fn sync_file(
         } => {
             // The plugin serves both store-resident companions: no buffer I/O.
             if deps.carrier_transaction_coordinator.admit_owned_fenced(
-                &deps.documents.host(),
+                deps.documents.host(),
                 &deps.provider_sync_states,
                 canonical_id,
                 committed_state,
@@ -2080,7 +2080,7 @@ async fn sync_file(
                                     crate::provider_surface_store::record_carrier_ide_surface_fenced(
                                     deps.documents.provider_surfaces(),
                                     Some(&deps.documents),
-                                    &deps.documents.host(),
+                                    deps.documents.host(),
                                     canonical_id,
                                     &ide_path,
                                     delivered,
@@ -2133,7 +2133,7 @@ async fn sync_file(
                 // the provider-surface store so a closed `{carrier}.ts` is never later
                 // vouched as current by a rename).
                 if deps.carrier_transaction_coordinator.admit_owned_fenced(
-                    &deps.documents.host(),
+                    deps.documents.host(),
                     &deps.provider_sync_states,
                     canonical_id,
                     committed_state,
@@ -2334,7 +2334,7 @@ async fn preserve_open_unresolved_carrier(
                     if !crate::provider_surface_store::record_carrier_ide_surface_fenced(
                         deps.documents.provider_surfaces(),
                         Some(&deps.documents),
-                        &deps.documents.host(),
+                        deps.documents.host(),
                         canonical_id,
                         &ide_path,
                         prepared,

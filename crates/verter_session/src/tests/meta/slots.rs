@@ -561,6 +561,7 @@ defineSlots<OpenMappedSlots<T>>()
     // Object and not an Opaque miss.
     let dispatch =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(project.host());
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(project.host().project_type_store().semantic_graph());
     let t_param = graph.intern_node(
         verter_type_engine::semantic_query::SemanticNodeData::TypeParam {

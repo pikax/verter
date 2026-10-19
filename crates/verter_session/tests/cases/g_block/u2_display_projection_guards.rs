@@ -66,6 +66,7 @@ fn expanded_demand_with_display(dn: DisplayNeeds) -> Demand {
 #[test]
 fn canonical_display_is_projection_not_stored_string() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
 
     // A readonly `string[]`. Its rendering DIFFERS under `IncludeReadonlyModifier`:
     //   facet off → `string[]`   facet on → `readonly string[]`.
@@ -173,6 +174,7 @@ fn display_needs_is_display_only_never_drives_resolution() {
     // (b) With ONE interned value, the two display-only-differing needs render
     //     strings that differ ONLY by the display facet.
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let string_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let array_id = store.intern_node(SemanticNodeData::Array {
         element: string_id,
@@ -349,6 +351,7 @@ fn object(
 #[test]
 fn precedence_is_structural_not_string_sniffing() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let a = declref(&store, "A");
     let b = declref(&store, "B");
     let c = declref(&store, "C");
@@ -453,6 +456,7 @@ fn precedence_is_structural_not_string_sniffing() {
 #[test]
 fn conditional_operands_apply_precedence() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let a = declref(&store, "A");
     let b = declref(&store, "B");
     let c = declref(&store, "C");
@@ -521,6 +525,7 @@ fn conditional_operands_apply_precedence() {
 #[test]
 fn method_member_with_non_function_value_renders_property_style() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let a = declref(&store, "A");
     let b = declref(&store, "B");
     let inter = store.intern_node(SemanticNodeData::Intersection(
@@ -546,6 +551,7 @@ fn method_member_with_non_function_value_renders_property_style() {
 #[test]
 fn object_signatures_use_colon_not_arrow_and_method_shorthand() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let string_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
@@ -593,6 +599,7 @@ fn object_signatures_use_colon_not_arrow_and_method_shorthand() {
 #[test]
 fn mapped_type_renders_modifiers_and_name_remap() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let t = declref(&store, "T");
     let v = declref(&store, "V");
     let f = declref(&store, "F");
@@ -647,6 +654,7 @@ fn mapped_type_renders_modifiers_and_name_remap() {
 #[test]
 fn function_type_parameters_render_constraint_and_default() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let string_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let void_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void));
@@ -707,6 +715,7 @@ fn function_type_parameters_render_constraint_and_default() {
 #[test]
 fn string_and_template_literals_are_escaped() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
 
     // STRING literals are COOKED (the unescaped content); the renderer must
     // re-escape them. A literal containing a quote and a backslash.
@@ -752,6 +761,7 @@ fn string_and_template_literals_are_escaped() {
 #[test]
 fn alias_to_function_member_and_call_signature_render_colon_form() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let string_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
@@ -795,6 +805,7 @@ fn alias_to_function_member_and_call_signature_render_colon_form() {
 #[test]
 fn bigint_literal_renders_with_n_suffix() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let lit = store.intern_node(SemanticNodeData::Literal(LiteralValue::BigInt(
         "123".to_string(),
     )));
@@ -811,6 +822,7 @@ fn bigint_literal_renders_with_n_suffix() {
 #[test]
 fn non_identifier_member_keys_are_quoted() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let t = declref(&store, "T");
 
     // DISCRIMINATING: a string-literal key with a hyphen must be quoted.
@@ -835,6 +847,7 @@ fn non_identifier_member_keys_are_quoted() {
 #[test]
 fn readonly_array_element_is_parenthesised_under_readonly_facet() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let string_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let inner = store.intern_node(SemanticNodeData::Array {
         element: string_id,
@@ -872,6 +885,7 @@ fn readonly_array_element_is_parenthesised_under_readonly_facet() {
 #[test]
 fn indexed_access_object_readonly_is_parenthesised_under_readonly_facet() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let string_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let arr = store.intern_node(SemanticNodeData::Array {
         element: string_id,
@@ -909,6 +923,7 @@ fn indexed_access_object_readonly_is_parenthesised_under_readonly_facet() {
 #[test]
 fn declaration_analysis_contributors_apply_intersection_precedence() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let a = declref(&store, "A");
     let b = declref(&store, "B");
     let c = declref(&store, "C");
@@ -939,6 +954,7 @@ fn declaration_analysis_contributors_apply_intersection_precedence() {
 #[test]
 fn merged_decl_display_matches_graph_reduction_and_is_non_mutating() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let number_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let boolean_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
@@ -1056,6 +1072,7 @@ fn merged_decl_display_matches_graph_reduction_and_is_non_mutating() {
 #[test]
 fn merged_decl_display_preserves_heritage_arms_like_graph_reduction() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let number_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let base_ref = declref(&store, "Base");
     let own = object(&store, vec![member("x", number_id, false)], vec![], vec![]);
@@ -1099,6 +1116,7 @@ fn merged_decl_display_preserves_heritage_arms_like_graph_reduction() {
 #[test]
 fn merged_decl_reduction_preserves_authored_multi_heritage_arm_order() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let number_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     // Interned in REVERSE of authored order so `B`'s id < `A`'s id.
     let b_ref = declref(&store, "B");
@@ -1152,6 +1170,7 @@ fn display_source_does_not_call_graph_interning_or_dispatch() {
 #[test]
 fn bare_ref_carrier_renders_type_args() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let number_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
     let bare = store.intern_node(SemanticNodeData::new_bare_ref(
@@ -1180,6 +1199,7 @@ fn bare_ref_carrier_renders_type_args() {
 #[test]
 fn typeof_carrier_renders_type_args() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let string_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let value_root = ValueRootKey {
         scope: ScopeId {

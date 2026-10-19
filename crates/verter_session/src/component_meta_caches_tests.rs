@@ -1646,20 +1646,19 @@ fn view_bound_cold_compute_seeds_from_executor_snapshot_not_a_second_read() {
 // Document-close release of the shape cache + the host `evict` hook
 // ──────────────────────────────────────────────────────────────────
 
-/// `ShapeCacheDb::release_canonical` (reached through
-/// `ProjectTypeStore::release_canonical`) drops the entries a closed
-/// document retained in the shape cache: the ones ROOTED in it, the ones
-/// whose member-value subject node the semantic graph released, and the
-/// ones whose fact signature DEPENDS on it — while an entry rooted in the
-/// neighbour, keyed by a live node, depending only on the neighbour, stays
-/// peekable.
+/// A document close (`ProjectTypeStore::close_canonical`) evicts the entries
+/// a closed document retained in the shape cache: the ones ROOTED in it, the
+/// ones whose member-value subject node is its closed content, and the ones
+/// whose fact signature DEPENDS on it — while an entry rooted in the
+/// neighbour, keyed by the neighbour's node, depending only on the
+/// neighbour, stays peekable. The closed node the evicted entries owned is
+/// destroyed with them.
 ///
-/// On the old code the close path never reached the shape cache at all
-/// (`live_count` stayed 4); and even `ShapeCacheDb::invalidate_canonical`
-/// matched only the rooted entry, leaving the released-node and dependent
-/// entries (`live_count` 3, both peeks `Some`).
+/// Discriminating: `ShapeCacheDb::invalidate_canonical` matches only the
+/// rooted entry, leaving the closed-subject and dependent entries
+/// (`live_count` 3, both peeks `Some`) and the closed node live.
 #[test]
-fn shape_cache_release_canonical_drops_rooted_released_node_and_dependent_entries() {
+fn shape_cache_close_drops_rooted_closed_subject_and_dependent_entries() {
     use verter_type_engine::component_meta_caches::ShapeCacheKey;
     use verter_type_engine::semantic_query::ProjectionMode;
     use verter_type_engine::semantic_query::{NodeScopeId, PrimitiveKind, SemanticNodeData};
@@ -1678,6 +1677,7 @@ fn shape_cache_release_canonical_drops_rooted_released_node_and_dependent_entrie
     let store = host.project_type_store();
     let db = store.shape_cache_db();
     let graph = store.semantic_graph();
+    let build = graph.enter_node_root_scope();
 
     let file_scope = |canonical: &str, hash: u8| NodeScopeId::File {
         canonical_id: verter_type_expr::OwnedStr::from(canonical),
@@ -1711,7 +1711,7 @@ fn shape_cache_release_canonical_drops_rooted_released_node_and_dependent_entrie
         node_shared,
         ProjectionMode::Expanded,
     );
-    let key_b_by_released_node = ShapeCacheKey::member_value_node_whole_for_test(
+    let key_b_by_closed_node = ShapeCacheKey::member_value_node_whole_for_test(
         Arc::from("/rel_b.ts"),
         node_a,
         ProjectionMode::Expanded,
@@ -1730,7 +1730,7 @@ fn shape_cache_release_canonical_drops_rooted_released_node_and_dependent_entrie
         .fixture(ctx)
         .admit_computed_traced_for_test(&key_rooted_a, value_a, sig_a);
     let _ = db.fixture(ctx).admit_computed_traced_for_test(
-        &key_b_by_released_node,
+        &key_b_by_closed_node,
         value_b.clone(),
         Arc::clone(&sig_b),
     );
@@ -1745,7 +1745,7 @@ fn shape_cache_release_canonical_drops_rooted_released_node_and_dependent_entrie
     assert_eq!(db.live_count(), 4, "fixture: all four entries admitted");
     for key in [
         &key_rooted_a,
-        &key_b_by_released_node,
+        &key_b_by_closed_node,
         &key_b_depends_on_a,
         &key_b,
     ] {
@@ -1755,16 +1755,12 @@ fn shape_cache_release_canonical_drops_rooted_released_node_and_dependent_entrie
         );
     }
 
-    let report = store.release_canonical("/rel_a.ts");
+    drop(build);
+    let report = store.close_canonical("/rel_a.ts");
 
-    assert!(
-        !graph.node_is_live(node_a),
-        "the graph released /rel_a.ts's node"
-    );
-    assert!(graph.node_is_live(node_b));
     assert_eq!(
         report.shape_entries_released, 3,
-        "rooted + released-node + dependent entries: {report:?}"
+        "rooted + closed-subject + dependent entries: {report:?}"
     );
     assert_eq!(db.live_count(), 1);
     assert!(
@@ -1772,8 +1768,8 @@ fn shape_cache_release_canonical_drops_rooted_released_node_and_dependent_entrie
         "rooted in the closed document"
     );
     assert!(
-        db.fixture(ctx).peek(&key_b_by_released_node).is_none(),
-        "keyed by a released node"
+        db.fixture(ctx).peek(&key_b_by_closed_node).is_none(),
+        "keyed by a closed node"
     );
     assert!(
         db.fixture(ctx).peek(&key_b_depends_on_a).is_none(),
@@ -1782,6 +1778,22 @@ fn shape_cache_release_canonical_drops_rooted_released_node_and_dependent_entrie
     assert!(
         db.fixture(ctx).peek(&key_b).is_some(),
         "the neighbour's own entry stays warm"
+    );
+    // The test's own keys root their subjects; once they go, nothing but
+    // the surviving neighbour entry holds a node.
+    drop((
+        key_rooted_a,
+        key_b_by_closed_node,
+        key_b_depends_on_a,
+        key_b,
+    ));
+    assert!(
+        !graph.node_is_live(node_a),
+        "/rel_a.ts's node is destroyed with the entries that owned it"
+    );
+    assert!(
+        graph.node_is_live(node_b),
+        "the neighbour's entry owns its node"
     );
 }
 

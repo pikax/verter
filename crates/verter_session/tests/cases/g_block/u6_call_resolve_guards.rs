@@ -50,6 +50,16 @@ fn hash16(byte: u8) -> [u8; 16] {
 fn count_for_b_after_publishing_a(a: &SemanticQueryKey, b: &SemanticQueryKey) -> usize {
     let host = host();
     let graph = host.project_type_store().semantic_graph();
+    // The keys name fixture ordinals: this graph holds a live node at
+    // each, so every ordinal a key names is one it owns.
+    let _scope = graph.enter_node_root_scope();
+    let _fixture_ordinals: Vec<_> = (0..128u32)
+        .map(|n| {
+            graph.intern_node(SemanticNodeData::Literal(
+                verter_type_engine::semantic_query::LiteralValue::Number(f64::from(n)),
+            ))
+        })
+        .collect();
     let node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     graph.publish_with_carrier_dispatch_and_generation_for_tests(
         a.clone(),
@@ -416,7 +426,21 @@ fn resolve_call_key_distinct_from_flow_narrowing_at_same_point() {
 #[test]
 fn resolve_call_non_callable_is_miss_and_never_admits() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
+    // The keys name fixture ordinals: this graph holds a live node at
+    // each, so every ordinal a key names is one it owns.
+    let _scope = graph.enter_node_root_scope();
+    let _fixture_ordinals: Vec<_> = (0..128u32)
+        .map(|n| {
+            graph.intern_node(SemanticNodeData::Literal(
+                verter_type_engine::semantic_query::LiteralValue::Number(f64::from(n)),
+            ))
+        })
+        .collect();
     let key = wrap(base_key());
 
     let result =

@@ -1845,6 +1845,7 @@
               "crates/verter_session/src/structural_carrier_producer_tests/structural_lower_tests.rs",
               "crates/verter_session/src/tests/dispatch_bridges.rs",
               "crates/verter_session/src/tests/host_manage/general.rs",
+              "crates/verter_session/src/tests/host_manage/lifecycle.rs",
               "crates/verter_session/src/tests/host_manage/workspace.rs",
               "crates/verter_session/src/tests/meta/expose.rs",
               "crates/verter_session/src/tests/meta/props.rs",

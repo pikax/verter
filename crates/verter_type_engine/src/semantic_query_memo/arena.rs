@@ -61,20 +61,31 @@
 //! [`SessionSolverHost`](crate::resolver_core::solver_host::SessionSolverHost)
 //! without threading scope through every call.
 //!
-//! **Release (document close).** The id space is append-only — a
-//! `SemanticNodeId` is a raw `u64` index with no generation tag, and ids are
-//! retained outside this arena (shape-cache keys, the member-ordinal sidecar,
-//! relation proofs, materialised provenance), so an id is NEVER reused. What
-//! a close reclaims is the PAYLOAD: [`NodeArena::release_canonical`]
-//! tombstones every node whose origin scope is the closed canonical, plus
-//! every node whose payload embeds a released id (children are interned
-//! before their parents, so a parent of a released node is dead too — no
-//! live node ever embeds a released id; the sealed `DeferredCallable`
-//! carrier's parts are walked through its topology-only visitor). A
-//! tombstoned slot drops its `Arc` payload and its scope, leaves the dedup
-//! index, and resolves through [`NodeArena::get`] to one shared
-//! `Opaque(Miss)` placeholder so a stale holder degrades to an unresolved
-//! value instead of an invalid-id fault.
+//! **Lifetime is counted.** Every live slot carries an owner count: one
+//! per counted child edge from a live parent payload plus one per root
+//! (a [`super::node_roots::NodeRootSet`] operand, a construction owner's
+//! intern count). The last release destroys the slot iteratively — its
+//! children lose the edge it held and are destroyed in turn when that was
+//! their last owner — so a node lives exactly as long as something that
+//! can still read it. The twelve `Global` primitive vocabulary nodes are the
+//! only permanent slots; provenance and the per-node sidecars own nothing.
+//! There is no canonical sweep: a document close evicts the CACHE owners
+//! bound to the closed content (`release.rs`), and a node a caller still
+//! holds stays readable until that caller drops it.
+//!
+//! The id space is append-only — a `SemanticNodeId` is a raw `u64` index
+//! with no generation tag, so an id is NEVER reused: a stale ordinal
+//! resolves through [`NodeArena::get`] to one shared `Opaque(Miss)`
+//! placeholder (an unresolved value, never an invalid-id fault) and
+//! refuses every root acquisition as `StaleSemanticOperand`.
+//!
+//! **Sidecar cleanup is bounded by what it cleans.** A per-node sidecar
+//! (structure bits, the member-ordinal index, origin edges, stable-key
+//! classes) marks the slot it describes ([`NodeArenaCore::track_sidecar`]).
+//! Destroying a marked slot appends its id to one pending log the store
+//! drains into its sidecars ([`NodeArenaCore::drain_destroyed`]); an
+//! unmarked slot is destroyed without a log entry, so the pending log never
+//! holds more ids than the stale sidecar entries it removes.
 //!
 //! **Storage is chunked, so released slots actually disappear.** Slots live
 //! in fixed-size chunks of [`CHUNK_LEN`] consecutive ids, keyed by
@@ -366,6 +377,7 @@ fn chunk_storage_bytes() -> usize {
         + heap_block_bytes(CHUNK_LEN * std::mem::size_of::<Option<NodeScopeId>>())
         + heap_block_bytes(CHUNK_LEN * std::mem::size_of::<usize>())
         + heap_block_bytes(CHUNK_LEN * std::mem::size_of::<bool>())
+        + heap_block_bytes(CHUNK_LEN * std::mem::size_of::<std::sync::atomic::AtomicBool>())
         + std::mem::size_of::<Option<Box<Chunk>>>()
 }
 
@@ -497,6 +509,60 @@ impl ShardIndex {
     }
 }
 
+/// Destroyed ids a per-node sidecar still describes, and the charge for
+/// the log's backing. Only marked slots are logged, so the log never holds
+/// more ids than the stale sidecar entries draining it removes.
+#[derive(Default)]
+pub(super) struct DestroyedLog {
+    ids: Vec<SemanticNodeId>,
+    storage: Option<verter_session_query::retention::granular::GranularPin>,
+    /// The backing bytes [`Self::storage`] currently counts.
+    charged: usize,
+}
+
+impl DestroyedLog {
+    fn extend(
+        &mut self,
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+        ids: &[SemanticNodeId],
+    ) {
+        self.ids.extend_from_slice(ids);
+        self.settle(account);
+    }
+
+    /// Hand the log and its charge to cleanup. The batch owns its backing
+    /// until cleanup drops it; taking it never leaves an uncharged buffer.
+    fn drain(&mut self) -> Self {
+        std::mem::take(self)
+    }
+
+    fn settle(&mut self, account: &Arc<verter_session_query::retention::SemanticRetentionAccount>) {
+        let bytes = verter_session_query::retention::allocation::heap_block_bytes(
+            self.ids.capacity() * std::mem::size_of::<SemanticNodeId>(),
+        );
+        let storage = self.storage.get_or_insert_with(|| {
+            verter_session_query::retention::granular::GranularPin::new(
+                account,
+                SHARD_STORAGE_GRANULE,
+            )
+        });
+        if bytes > self.charged {
+            storage.add(bytes - self.charged);
+        } else {
+            storage.sub(self.charged - bytes);
+        }
+        self.charged = bytes;
+    }
+}
+
+impl std::ops::Deref for DestroyedLog {
+    type Target = [SemanticNodeId];
+
+    fn deref(&self) -> &Self::Target {
+        &self.ids
+    }
+}
+
 /// Ids per storage chunk (see the module docs, **Storage**). Small enough
 /// that one long-lived node pins little: a chunk is ~24 KiB of slot storage.
 pub(super) const CHUNK_BITS: u32 = 8;
@@ -511,6 +577,10 @@ struct Chunk {
     scopes: Box<[Option<NodeScopeId>]>,
     owners: Box<[usize]>,
     permanent: Box<[bool]>,
+    /// Slots a per-node sidecar describes: destroying one logs its id for
+    /// sidecar cleanup. Atomic so a sidecar writer marks a slot under the
+    /// arena's read lock.
+    tracked: Box<[std::sync::atomic::AtomicBool]>,
     /// Slots of this chunk still holding a payload; the chunk is dropped
     /// when it reaches zero.
     live: usize,
@@ -523,6 +593,9 @@ impl Chunk {
             scopes: (0..CHUNK_LEN).map(|_| None).collect(),
             owners: vec![0; CHUNK_LEN].into_boxed_slice(),
             permanent: vec![false; CHUNK_LEN].into_boxed_slice(),
+            tracked: (0..CHUNK_LEN)
+                .map(|_| std::sync::atomic::AtomicBool::new(false))
+                .collect(),
             live: 0,
         }
     }
@@ -935,22 +1008,20 @@ impl ArenaInner {
         id
     }
 
-    /// Release `id`'s slot; `true` when it held a payload. Drops the chunk
-    /// when that was its last live slot.
-    fn release(&mut self, id: SemanticNodeId) -> bool {
+    /// Release `id`'s slot; `Some(tracked)` when it held a payload, with
+    /// whether a sidecar describes it. Drops the chunk when that was its
+    /// last live slot.
+    fn release(&mut self, id: SemanticNodeId) -> Option<bool> {
         let key = id.0 >> CHUNK_BITS;
-        let Some(chunk) = self.chunks.get_mut(&key) else {
-            return false;
-        };
+        let chunk = self.chunks.get_mut(&key)?;
         let index = (id.0 & CHUNK_MASK) as usize;
-        let Some(payload) = chunk.nodes[index].take() else {
-            return false;
-        };
+        let payload = chunk.nodes[index].take()?;
         let scope = chunk.scopes[index]
             .take()
             .expect("a live slot has its scope");
         chunk.owners[index] = 0;
         chunk.permanent[index] = false;
+        let tracked = chunk.tracked[index].swap(false, std::sync::atomic::Ordering::Relaxed);
         chunk.live -= 1;
         self.live -= 1;
         if chunk.live == 0 {
@@ -969,7 +1040,7 @@ impl ArenaInner {
                 }));
             }
         }
-        true
+        Some(tracked)
     }
 
     /// Every live `(id, payload, scope)` in ascending id order.
@@ -1075,10 +1146,10 @@ fn scope_digest(scope: &NodeScopeId) -> u64 {
 /// A consumer re-lowering an import from the closed document interns
 /// such a node under the CONSUMER's scope, with the closed content's whole
 /// hash inside the identity; it embeds no node id, so neither the scope
-/// root rule nor the child cascade reaches it, yet it can never be reached
-/// again (the reload mints a new hash → a new identity → a new node). One
-/// such node per closed content version is exactly the per-cycle growth
-/// a close-heavy session shows. The match carries no wildcard: a new
+/// rule nor the child walk reaches it, yet no lookup reaches it again (the
+/// reload mints a new hash → a new identity → a new node). A close
+/// therefore evicts the caches holding such a node, or each closed content
+/// version would leave one behind. The match carries no wildcard: a new
 /// variant must be dispositioned here.
 fn payload_binds_canonical(data: &SemanticNodeData, canonical_id: &str) -> bool {
     use crate::semantic_query::{ObjectConstructionEffect, QueryError, SignatureReturnCarrier};
@@ -1216,13 +1287,13 @@ pub(crate) struct NodeArenaCore {
     /// Sharded dedup indexes. Each shard owns the fingerprint-range whose
     /// low bits land on it.
     shards: [parking_lot::Mutex<ShardIndex>; NUM_SHARDS],
-    /// Optional contention instrumentation. When present,
-    /// `push_impl` records per-call counters and `inner.write()`
-    /// wait time so downstream passes have evidence-grade contention
-    /// data. `None` for test-default arenas constructed via
-    /// `Default::default()`.
-    #[cfg(any(test, feature = "test-support"))]
-    counted: bool,
+    /// Destroyed ids a per-node sidecar still describes, waiting for the
+    /// owning store to drop their sidecar entries (see the module docs,
+    /// **Sidecar cleanup**), with the log's backing charge.
+    destroyed: parking_lot::Mutex<DestroyedLog>,
+    /// The owning store's sidecars, drained by the release that grows
+    /// [`Self::destroyed`] past its threshold.
+    destroyed_sink: OnceLock<super::release::SidecarSink>,
     #[cfg(test)]
     race_hook: parking_lot::Mutex<Option<ArenaRaceHook>>,
     /// The ONE payload every released slot resolves to through [`Self::get`]
@@ -1238,17 +1309,22 @@ pub(crate) struct NodeArenaCore {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ArenaRaceEvent {
+pub(super) enum ArenaRaceEvent {
     BeforeDedupLookup,
     BeforeInnerWrite,
     BeforeDedupRetain,
-    BeforeRootRelease { blocked: bool },
+    BeforeRootRelease {
+        blocked: bool,
+    },
     AfterRootRelease,
     BeforeShardStorageSnapshot,
+    /// A destroyed-log drain found a sidecar lock held, while it still
+    /// holds the sidecar locks it did acquire.
+    SidecarDrainBlocked,
 }
 
 #[cfg(test)]
-type ArenaRaceHook = Arc<dyn Fn(ArenaRaceEvent) + Send + Sync>;
+pub(super) type ArenaRaceHook = Arc<dyn Fn(ArenaRaceEvent) + Send + Sync>;
 
 impl Default for NodeArena {
     fn default() -> Self {
@@ -1256,8 +1332,8 @@ impl Default for NodeArena {
             core: Arc::new(NodeArenaCore {
                 inner: parking_lot::RwLock::new(ArenaInner::default()),
                 shards: std::array::from_fn(|_| parking_lot::Mutex::new(ShardIndex::default())),
-                #[cfg(any(test, feature = "test-support"))]
-                counted: false,
+                destroyed: Default::default(),
+                destroyed_sink: OnceLock::new(),
                 #[cfg(test)]
                 race_hook: Default::default(),
                 released_placeholder: NodeData::new(SemanticNodeData::Opaque(
@@ -1325,7 +1401,12 @@ impl NodeArenaCore {
     }
 
     #[cfg(test)]
-    fn race_event(&self, event: ArenaRaceEvent) {
+    pub(super) fn set_race_hook(&self, hook: Option<ArenaRaceHook>) {
+        *self.race_hook.lock() = hook;
+    }
+
+    #[cfg(test)]
+    pub(super) fn race_event(&self, event: ArenaRaceEvent) {
         let hook = self.race_hook.lock().clone();
         if let Some(hook) = hook {
             hook(event);
@@ -1357,9 +1438,6 @@ impl NodeArenaCore {
             .expect("every live edge is counted");
         counts
     }
-    pub(crate) fn is_live(&self, id: SemanticNodeId) -> bool {
-        matches!(self.inner.read().slot(id), Slot::Live(..))
-    }
     /// The payload of a live slot only; a released slot has none.
     pub(super) fn live_payload(&self, id: SemanticNodeId) -> Option<NodeData> {
         match self.inner.read().slot(id) {
@@ -1367,15 +1445,107 @@ impl NodeArenaCore {
             _ => None,
         }
     }
-    pub(crate) fn counted(&self) -> bool {
-        #[cfg(any(test, feature = "test-support"))]
-        {
-            self.counted
+    /// Mark `id` as described by a per-node sidecar entry the caller has
+    /// just written, so its destruction is logged for cleanup. `false` when
+    /// the slot is no longer live: the caller removes the entry it wrote,
+    /// since no destruction will ever report it. An id from
+    /// [`UNALLOCATABLE_ID_FLOOR`] up names no slot and is never destroyed.
+    pub(super) fn track_sidecar(&self, id: SemanticNodeId) -> bool {
+        if id.0 >= UNALLOCATABLE_ID_FLOOR {
+            return true;
         }
-        #[cfg(not(any(test, feature = "test-support")))]
-        {
-            false
+        let inner = self.inner.read();
+        if !matches!(inner.slot(id), Slot::Live(..)) {
+            return false;
         }
+        inner
+            .chunks
+            .get(&(id.0 >> CHUNK_BITS))
+            .expect("a live slot has its chunk")
+            .tracked[(id.0 & CHUNK_MASK) as usize]
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        true
+    }
+
+    /// Whether `root` is content of the closed `canonical_id`: a node
+    /// interned in its file scope, one binding its content identity
+    /// ([`payload_binds_canonical`]), or one reaching such a node through its
+    /// retained children. A close evicts the cache owners of exactly these
+    /// nodes; nothing here releases a slot. `memo` carries the verdicts of
+    /// one close across calls, so each live node is classified once; a
+    /// destroyed or never-allocated id is not closed content. The walk is
+    /// iterative, so a deep DAG costs heap, not stack.
+    pub(super) fn reaches_canonical_content(
+        &self,
+        canonical_id: &str,
+        root: SemanticNodeId,
+        memo: &mut rustc_hash::FxHashMap<u64, bool>,
+    ) -> bool {
+        if root.0 >= UNALLOCATABLE_ID_FLOOR {
+            return false;
+        }
+        if let Some(known) = memo.get(&root.0) {
+            return *known;
+        }
+        let inner = self.inner.read();
+        let mut stack = vec![(root, false)];
+        while let Some((id, expanded)) = stack.pop() {
+            if memo.contains_key(&id.0) {
+                continue;
+            }
+            let Slot::Live(payload, scope) = inner.slot(id) else {
+                memo.insert(id.0, false);
+                continue;
+            };
+            if expanded {
+                let mut reaches = false;
+                payload.for_each_retained_child(|child| {
+                    reaches |= memo.get(&child.0).copied().unwrap_or(false);
+                });
+                memo.insert(id.0, reaches);
+                continue;
+            }
+            let direct = match scope {
+                NodeScopeId::File {
+                    canonical_id: c, ..
+                } if c.as_ref() == canonical_id => true,
+                _ => payload_binds_canonical(payload, canonical_id),
+            };
+            if direct {
+                memo.insert(id.0, true);
+                continue;
+            }
+            stack.push((id, true));
+            payload.for_each_retained_child(|child| {
+                if child.0 < UNALLOCATABLE_ID_FLOOR && !memo.contains_key(&child.0) {
+                    stack.push((child, false));
+                }
+            });
+        }
+        memo.get(&root.0).copied().unwrap_or(false)
+    }
+
+    /// Take the destroyed ids whose sidecar entries the store must drop.
+    pub(super) fn drain_destroyed(&self) -> DestroyedLog {
+        self.destroyed.lock().drain()
+    }
+
+    /// Settle the destroyed-log drain a release left to the holder of a
+    /// sidecar lock (see [`super::release::SidecarMutex`]).
+    pub(super) fn settle_destroyed_log(&self) {
+        if let Some(sink) = self.destroyed_sink.get() {
+            sink.settle_owed(self);
+        }
+    }
+
+    /// Bind the owning store's sidecars; the first store bound keeps them.
+    pub(super) fn bind_destroyed_sink(&self, sink: super::release::SidecarSink) {
+        let _ = self.destroyed_sink.set(sink);
+    }
+
+    /// Destroyed ids waiting for sidecar cleanup.
+    pub(super) fn pending_destroyed(&self) -> usize {
+        self.destroyed.lock().ids.len()
     }
 
     pub(super) fn retain(
@@ -1414,32 +1584,8 @@ impl NodeArenaCore {
     }
 
     pub(super) fn release_roots(&self, ids: &[SemanticNodeId]) {
-        if !self.counted() {
-            // Without counted release a node outlives its last owner, so a
-            // release only returns each id's count.
-            #[cfg(test)]
-            self.race_event(ArenaRaceEvent::BeforeRootRelease {
-                blocked: self.inner.try_write().is_none(),
-            });
-            let mut inner = self.inner.write();
-            for id in ids {
-                let Some(chunk) = inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)) else {
-                    continue;
-                };
-                let index = (id.0 & CHUNK_MASK) as usize;
-                if chunk.nodes[index].is_none() {
-                    continue;
-                }
-                assert!(chunk.owners[index] > 0, "live root released twice");
-                chunk.owners[index] -= 1;
-            }
-            drop(inner);
-            #[cfg(test)]
-            self.race_event(ArenaRaceEvent::AfterRootRelease);
-            return;
-        }
         let mut pending = SmallVec::<[SemanticNodeId; 16]>::from_slice(ids);
-        let mut retired = SmallVec::<[(SemanticNodeId, u64); 4]>::new();
+        let mut retired = SmallVec::<[(SemanticNodeId, u64, bool); 4]>::new();
         #[cfg(test)]
         self.race_event(ArenaRaceEvent::BeforeRootRelease {
             blocked: self.inner.try_write().is_none(),
@@ -1455,7 +1601,7 @@ impl NodeArenaCore {
             }
             assert!(chunk.owners[index] > 0, "live root released twice");
             chunk.owners[index] -= 1;
-            if chunk.owners[index] != 0 || chunk.permanent[index] || !self.counted() {
+            if chunk.owners[index] != 0 || chunk.permanent[index] {
                 continue;
             }
             let data = chunk.nodes[index].as_ref().unwrap();
@@ -1465,18 +1611,36 @@ impl NodeArenaCore {
                 }
             });
             let fingerprint = structural_fingerprint(data, chunk.scopes[index].as_ref().unwrap());
-            inner.release(id);
-            retired.push((id, fingerprint));
+            let tracked = inner
+                .release(id)
+                .expect("the slot was live under the held lock");
+            retired.push((id, fingerprint, tracked));
         }
         drop(inner);
         #[cfg(test)]
         self.race_event(ArenaRaceEvent::AfterRootRelease);
         // Intern always confirms slot liveness under `inner` after a weak
         // upgrade. Removing the index after the tombstone cannot resurrect it.
-        for (id, fingerprint) in retired {
+        let mut logged = Vec::new();
+        for (id, fingerprint, tracked) in retired {
             self.shards[(fingerprint & SHARD_MASK) as usize]
                 .lock()
                 .remove_candidate(self.retention_account(), fingerprint, id);
+            if tracked {
+                logged.push(id);
+            }
+        }
+        if !logged.is_empty() {
+            let over_threshold = {
+                let mut log = self.destroyed.lock();
+                log.extend(self.retention_account(), &logged);
+                log.ids.len() > super::release::DESTROYED_DRAIN_THRESHOLD
+            };
+            if over_threshold {
+                if let Some(sink) = self.destroyed_sink.get() {
+                    sink.settle(self);
+                }
+            }
         }
     }
 }
@@ -1725,13 +1889,6 @@ impl NodeArena {
         super::node_roots::NodeRoot::adopt(Arc::clone(&self.core), id)
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub(super) fn counted_for_tests() -> Self {
-        let mut arena = Self::default();
-        Arc::get_mut(&mut arena.core).unwrap().counted = true;
-        arena
-    }
-
     #[cfg(test)]
     pub(super) fn owner_count(&self, id: SemanticNodeId) -> usize {
         self.inner
@@ -1742,8 +1899,8 @@ impl NodeArena {
     }
 
     /// Read the payload for `id`. `None` for an id this arena never handed
-    /// out; the shared `Opaque(Miss)` placeholder for a RELEASED id (see
-    /// [`Self::release_canonical`]); the interned payload otherwise.
+    /// out; the shared `Opaque(Miss)` placeholder for a DESTROYED id; the
+    /// interned payload otherwise.
     pub(super) fn get(&self, id: SemanticNodeId) -> Option<NodeData> {
         let inner = self.inner.read();
         match inner.slot(id) {
@@ -1789,152 +1946,6 @@ impl NodeArena {
         self.inner.read().live
     }
 
-    /// Release every node the closed `canonical_id` retained: the nodes
-    /// whose origin scope is `File { canonical_id, .. }`, the sealed
-    /// `DeferredCallable` carriers whose served position is declared in
-    /// it, and — transitively — every node whose payload embeds a released
-    /// id, sealed and pending parts included
-    /// ([`SemanticNodeData::for_each_retained_child`])
-    /// (a parent of a dead node can never be reached again: its dedup
-    /// key names an id that is never re-minted, and the memo entries that
-    /// held it are drained by the caller). Global-scope nodes are released
-    /// ONLY through that cascade; a scope-less node that embeds no released
-    /// id (a primitive, a shared literal) stays.
-    ///
-    /// Each released slot drops its payload `Arc` and scope, leaves the
-    /// dedup index (so a re-intern of the same `(payload, scope)` mints a
-    /// fresh id), and keeps its id — see the module docs for why ids are
-    /// never reused. Returns the released ids in ascending order.
-    ///
-    /// **Lock order.** The dead set is computed under `inner.read()`, the
-    /// dedup entries are dropped shard by shard with NO `inner` lock held
-    /// (the intern-miss path holds a shard mutex and THEN takes
-    /// `inner.write()`, so this method never nests the two the other way),
-    /// and only then are the payloads dropped under `inner.write()`. That
-    /// order also means no dedup hit can ever hand out an id whose payload
-    /// is already gone.
-    ///
-    /// **Cost.** One pass over the live slots (plus a confirming pass) when
-    /// the canonical owns at least one node; an early return otherwise. A
-    /// close is a user-driven, rare event, so the O(nodes) scan is paid
-    /// there rather than as a per-intern reverse index.
-    pub(super) fn release_canonical(&self, canonical_id: &str, below: u64) -> Vec<SemanticNodeId> {
-        assert!(
-            !self.counted(),
-            "counted destruction cannot coexist with legacy sweeps"
-        );
-        let mut released: Vec<(SemanticNodeId, u64)> = Vec::new();
-        {
-            let inner = self.inner.read();
-            let mut dead: rustc_hash::FxHashSet<u64> = rustc_hash::FxHashSet::default();
-            // Only nodes interned before the close are the closed content's;
-            // a node at or past `below` belongs to what the reload interned.
-            for (id, payload, scope) in inner.live_slots() {
-                if id >= below {
-                    continue;
-                }
-                let is_root = match scope {
-                    NodeScopeId::File {
-                        canonical_id: c, ..
-                    } if c.as_ref() == canonical_id => true,
-                    _ => payload_binds_canonical(payload, canonical_id),
-                };
-                if is_root {
-                    dead.insert(id);
-                }
-            }
-            if dead.is_empty() {
-                return Vec::new();
-            }
-            // Cascade to every live node embedding a dead id. Children are
-            // interned before their parents, so one ascending pass settles
-            // the common case; the loop re-runs until a pass changes
-            // nothing, which also covers any parent interned out of order.
-            loop {
-                let mut changed = false;
-                for (id, payload, _) in inner.live_slots() {
-                    if dead.contains(&id) {
-                        continue;
-                    }
-                    let mut embeds_dead = false;
-                    // Every id the payload retains, not only its semantic
-                    // children: a sealed callable's parts, a recursive
-                    // reference's arguments, a class expression's prototype
-                    // and a pending conditional's binders are each interned
-                    // unscoped, one per distinct payload, so an id of the
-                    // closed document would otherwise keep one such node per
-                    // content version.
-                    payload.for_each_retained_child(|child| {
-                        embeds_dead |= dead.contains(&child.0);
-                    });
-                    if embeds_dead {
-                        dead.insert(id);
-                        changed = true;
-                    }
-                }
-                if !changed {
-                    break;
-                }
-            }
-            for (id, payload, scope) in inner.live_slots() {
-                if dead.contains(&id) {
-                    released.push((SemanticNodeId(id), structural_fingerprint(payload, scope)));
-                }
-            }
-        }
-        if released.is_empty() {
-            return Vec::new();
-        }
-        // Drop the dedup entries FIRST, shard by shard, so no intern can
-        // hit a released node once its payload is gone.
-        let timing_on = verter_execution::request_context::current_timing_enabled();
-        let mut per_shard: Vec<Vec<(u64, SemanticNodeId)>> = vec![Vec::new(); NUM_SHARDS];
-        for (id, fingerprint) in &released {
-            per_shard[(fingerprint & SHARD_MASK) as usize].push((*fingerprint, *id));
-        }
-        for (shard_index, victims) in per_shard.into_iter().enumerate() {
-            if victims.is_empty() {
-                continue;
-            }
-            let lock_start = if timing_on {
-                Some(Instant::now())
-            } else {
-                None
-            };
-            let mut shard = self.shards[shard_index].lock();
-            let lock_wait = lock_start
-                .map(|t| t.elapsed())
-                .unwrap_or(std::time::Duration::ZERO);
-            crate::request_observers::record_node_arena_lock_acquisition(lock_wait);
-            for (fingerprint, id) in victims {
-                shard.remove_candidate(self.retention_account(), fingerprint, id);
-            }
-        }
-        // Now drop the payloads (and any chunk that empties). A slot already
-        // released by a concurrent call is skipped so `live` stays exact.
-        let mut inner = self.inner.write();
-        let mut ids: Vec<SemanticNodeId> = Vec::with_capacity(released.len());
-        for (id, _) in released {
-            let mut children = SmallVec::<[SemanticNodeId; 16]>::new();
-            if let Slot::Live(data, _) = inner.slot(id) {
-                data.for_each_retained_child(|child| children.push(child));
-            }
-            if inner.release(id) {
-                ids.push(id);
-                for child in children {
-                    if let Some(chunk) = inner.chunks.get_mut(&(child.0 >> CHUNK_BITS)) {
-                        let index = (child.0 & CHUNK_MASK) as usize;
-                        if chunk.nodes[index].is_some() {
-                            assert!(chunk.owners[index] > 0, "retained edge released twice");
-                            chunk.owners[index] -= 1;
-                        }
-                    }
-                }
-            }
-        }
-        ids
-    }
-
     /// Drop shard-dedup entries for the given canonical id.
     /// Invariant: invalidation does NOT drop `NodeScopeId::Global`
     /// — only `File { canonical_id: c, .. }` matches. Entries keyed at
@@ -1946,9 +1957,8 @@ impl NodeArena {
     /// "next intern of this `(payload, scope)` pair returns the existing
     /// id". After invalidation, a re-intern of the same `(payload, File{c})`
     /// pair allocates a fresh id, guaranteeing freshness against the changed
-    /// canonical's content generation. Payloads are dropped only by
-    /// [`Self::release_canonical`], whose chunked storage is what keeps the
-    /// arena's memory bounded (see the module docs, **Storage**).
+    /// canonical's content generation. Payloads are dropped only when their
+    /// last owner releases them (see the module docs, **Lifetime**).
     ///
     /// Touches every shard mutex once. Each shard's retain walk is
     /// O(shard size). When `node_arena_lock_acquisitions` is wired
@@ -2028,110 +2038,126 @@ mod arena_intern_tests {
 
     /// The acyclicity rule refuses a payload naming a child at or above the
     /// id the payload would take. With chunked storage that id is the
-    /// monotonic counter, not a slot count: after a close dropped whole
-    /// chunks the storage is smaller than the ids handed out, a payload over
-    /// a node interned before it is still interned as itself, and one naming
-    /// an id the arena has not handed out is refused. Discriminating: read
-    /// against the storage size, the rule would refuse every payload over a
-    /// live node whose id exceeds the slots currently stored.
+    /// monotonic counter, not a slot count: after destroyed nodes dropped
+    /// whole chunks the storage is smaller than the ids handed out, a
+    /// payload over a node interned before it is still interned as itself,
+    /// and one naming an id the arena has not handed out is refused.
+    /// Discriminating: read against the storage size, the rule would refuse
+    /// every payload over a live node whose id exceeds the slots stored.
     #[test]
     fn the_acyclicity_rule_reads_the_next_id_not_the_storage_size() {
         use crate::semantic_query::{LiteralValue, QueryError};
         let arena = NodeArena::default();
-        for n in 0..(CHUNK_LEN * 3 + 8) {
-            let _ = arena.push_with_scope(
-                SemanticNodeData::Literal(LiteralValue::Number(n as f64)),
-                file_scope("/closed.ts"),
-            );
-        }
-        let kept = arena.push_with_scope(
+        let churned: Vec<_> = (0..(CHUNK_LEN * 3 + 8))
+            .map(|n| {
+                arena.intern_owned(
+                    SemanticNodeData::Literal(LiteralValue::Number(n as f64)),
+                    file_scope("/closed.ts"),
+                )
+            })
+            .collect();
+        let kept = arena.intern_owned(
             SemanticNodeData::Literal(LiteralValue::Number(-1.0)),
             file_scope("/kept.ts"),
         );
-        let _ = arena.release_canonical("/closed.ts", u64::MAX);
+        drop(churned);
         assert!(
-            (kept.0 as usize) >= arena.storage_slots(),
+            (kept.id().0 as usize) >= arena.storage_slots(),
             "fixture: the kept node's id is past the slots still stored ({} vs {})",
-            kept.0,
+            kept.id().0,
             arena.storage_slots()
         );
-        let over_kept = arena.push(SemanticNodeData::Array {
-            element: kept,
-            readonly: false,
-        });
+        let over_kept = arena.intern_owned(
+            SemanticNodeData::Array {
+                element: kept.id(),
+                readonly: false,
+            },
+            NodeScopeId::Global,
+        );
         assert!(
             matches!(
-                arena.get(over_kept).as_deref(),
+                arena.get(over_kept.id()).as_deref(),
                 Some(SemanticNodeData::Array { .. })
             ),
             "a payload over a node interned before it is interned as itself"
         );
         let not_handed_out = SemanticNodeId(arena.len() as u64 + 5);
-        let refused = arena.push(SemanticNodeData::Array {
-            element: not_handed_out,
-            readonly: false,
-        });
+        let refused = arena.intern_owned(
+            SemanticNodeData::Array {
+                element: not_handed_out,
+                readonly: false,
+            },
+            NodeScopeId::Global,
+        );
         assert!(
             matches!(
-                arena.get(refused).as_deref(),
+                arena.get(refused.id()).as_deref(),
                 Some(SemanticNodeData::Opaque(QueryError::ForeignSemanticOperand))
             ),
             "a payload naming an id not handed out yet is a forward reference"
         );
     }
 
+    /// Whether `id` is content of the closed `canonical` as a close sees it.
+    fn closed(arena: &NodeArena, canonical: &str, id: SemanticNodeId) -> bool {
+        arena.reaches_canonical_content(canonical, id, &mut Default::default())
+    }
+
     /// A recursive reference is interned unscoped and carries its type
-    /// arguments inside an `Opaque` payload the child walk skips. Closing
-    /// the document an argument belongs to releases the reference with it;
-    /// a reference over arguments of another document stays.
-    /// Discriminating: without the cascade's explicit arm the reference
-    /// survives the close, one per content version of the closed document.
+    /// arguments inside an `Opaque` payload the semantic child walk skips.
+    /// A close classifies the reference over a closed document's argument as
+    /// closed content, so the caches holding it are evicted with the
+    /// document; a reference over another document's argument is not.
+    /// Discriminating: without the retained-child arm for the arguments the
+    /// reference stays cached, one per content version of the closed
+    /// document.
     #[test]
-    fn a_close_releases_the_recursive_references_over_its_nodes() {
+    fn a_close_classifies_the_recursive_references_over_its_nodes() {
         use crate::semantic_query::{LiteralValue, QueryError};
         let arena = NodeArena::default();
-        let closed = arena.push_with_scope(
+        let closed_node = arena.intern_owned(
             SemanticNodeData::Literal(LiteralValue::Number(1.0)),
             file_scope("/closed.ts"),
         );
-        let kept = arena.push_with_scope(
+        let kept = arena.intern_owned(
             SemanticNodeData::Literal(LiteralValue::Number(2.0)),
             file_scope("/kept.ts"),
         );
         let recursive_over = |arg: SemanticNodeId| {
-            arena.push(SemanticNodeData::Opaque(QueryError::RecursiveRef {
-                name: verter_type_expr::OwnedStr::from("Tree"),
-                args: [arg].into(),
-            }))
+            arena.intern_owned(
+                SemanticNodeData::Opaque(QueryError::RecursiveRef {
+                    name: verter_type_expr::OwnedStr::from("Tree"),
+                    args: [arg].into(),
+                }),
+                NodeScopeId::Global,
+            )
         };
-        let over_closed = recursive_over(closed);
-        let over_kept = recursive_over(kept);
-        let released = arena.release_canonical("/closed.ts", u64::MAX);
-        assert!(released.contains(&closed));
+        let over_closed = recursive_over(closed_node.id());
+        let over_kept = recursive_over(kept.id());
+        assert!(closed(&arena, "/closed.ts", closed_node.id()));
         assert!(
-            released.contains(&over_closed),
-            "the reference over the closed document's node goes with it"
+            closed(&arena, "/closed.ts", over_closed.id()),
+            "the reference over the closed document's node is its content"
         );
-        assert!(arena.is_live(kept));
+        assert!(!closed(&arena, "/closed.ts", kept.id()));
         assert!(
-            arena.is_live(over_kept),
-            "a reference over a live node stays"
+            !closed(&arena, "/closed.ts", over_kept.id()),
+            "a reference over another document's node is not"
         );
     }
 
     /// A generic callable declared in one document and instantiated with a
     /// parameter type from another is interned unscoped as a sealed
     /// `DeferredCallable` whose served position stays in its declaring
-    /// document. Closing the document the substituted type belongs to
-    /// releases the callable over it (through a parameter or through a
-    /// binder bound), and a parent naming the callable goes with it; a
-    /// callable over a live type stays.
-    /// Discriminating: the cascade read only `for_each_child`, which answers
-    /// `Sealed` for this variant without visiting its children, and the root
-    /// check reads only the declaring canonical, so both callables and the
-    /// parent survived the close still naming a released id.
+    /// document. A close of the document the substituted type belongs to
+    /// classifies the callable over it (through a parameter or a binder
+    /// bound) and a parent naming the callable as closed content; a
+    /// callable over another document's type is not.
+    /// Discriminating: `for_each_child` answers `Sealed` for this variant
+    /// without visiting its children, and the declaring canonical names
+    /// neither closed type, so only the retained-child walk reaches them.
     #[test]
-    fn a_close_releases_the_sealed_callables_over_its_nodes() {
+    fn a_close_classifies_the_sealed_callables_over_its_nodes() {
         use crate::semantic_query::{
             DeferredCallable, FunctionParam, LiteralValue, SignatureKind, SignatureNodeOccurrence,
             SignatureReturnCarrier, TypeParamDecl,
@@ -2142,15 +2168,15 @@ mod arena_intern_tests {
         use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace};
 
         let arena = NodeArena::default();
-        let closed = arena.push_with_scope(
+        let closed_node = arena.intern_owned(
             SemanticNodeData::Literal(LiteralValue::Number(1.0)),
             file_scope("/closed.ts"),
         );
-        let kept = arena.push_with_scope(
+        let kept = arena.intern_owned(
             SemanticNodeData::Literal(LiteralValue::Number(2.0)),
             file_scope("/kept.ts"),
         );
-        let binder = arena.push_with_scope(
+        let binder = arena.intern_owned(
             SemanticNodeData::Literal(LiteralValue::Number(3.0)),
             file_scope("/declaring.ts"),
         );
@@ -2168,8 +2194,8 @@ mod arena_intern_tests {
             signature_ordinal: 0,
         };
         let callable = |param: SemanticNodeId, constraint: Option<SemanticNodeId>| {
-            arena.push(SemanticNodeData::DeferredCallable(
-                DeferredCallable::from_parts_for_tests(
+            arena.intern_owned(
+                SemanticNodeData::DeferredCallable(DeferredCallable::from_parts_for_tests(
                     SignatureKind::Call,
                     Arc::from([FunctionParam::synthetic(
                         Some(Arc::from("x")),
@@ -2179,138 +2205,141 @@ mod arena_intern_tests {
                     )]),
                     Arc::from([TypeParamDecl {
                         name: verter_type_expr::OwnedStr::from("T"),
-                        param: binder,
+                        param: binder.id(),
                         constraint,
                         default: None,
                         is_const: false,
                     }]),
                     occurrence.clone(),
                     SignatureReturnCarrier::Function(FunctionReturnSource::Absent),
-                ),
-            ))
+                )),
+                NodeScopeId::Global,
+            )
         };
-        let over_closed_param = callable(closed, None);
-        let over_closed_bound = callable(kept, Some(closed));
-        let over_kept = callable(kept, None);
-        let parent = arena.push(SemanticNodeData::Array {
-            element: over_closed_param,
-            readonly: false,
-        });
+        let over_closed_param = callable(closed_node.id(), None);
+        let over_closed_bound = callable(kept.id(), Some(closed_node.id()));
+        let over_kept = callable(kept.id(), None);
+        let parent = arena.intern_owned(
+            SemanticNodeData::Array {
+                element: over_closed_param.id(),
+                readonly: false,
+            },
+            NodeScopeId::Global,
+        );
 
-        let released = arena.release_canonical("/closed.ts", u64::MAX);
-
-        assert!(released.contains(&closed));
         assert!(
-            released.contains(&over_closed_param),
-            "a callable whose parameter type was released goes with it"
+            closed(&arena, "/closed.ts", over_closed_param.id()),
+            "a callable over the closed parameter type is closed content"
         );
         assert!(
-            released.contains(&over_closed_bound),
-            "a callable whose binder bound was released goes with it"
+            closed(&arena, "/closed.ts", over_closed_bound.id()),
+            "a callable whose binder bound is closed is closed content"
         );
         assert!(
-            released.contains(&parent),
-            "a parent of a released callable goes with it"
+            closed(&arena, "/closed.ts", parent.id()),
+            "a parent of a closed callable is closed content"
         );
-        assert!(arena.is_live(over_kept), "a callable over live types stays");
-        assert!(arena.is_live(binder));
+        assert!(!closed(&arena, "/closed.ts", over_kept.id()));
+        assert!(!closed(&arena, "/closed.ts", binder.id()));
     }
 
     /// Substituting a binder through a deferred conditional appends the
     /// `(param, arg)` pair to its pending frame whether or not a branch
-    /// mentions the binder, so the frame can name a released binder while
-    /// the check, extends and branches are all live. Closing the binder's
-    /// document releases that conditional; one whose frame names only live
-    /// nodes stays.
-    /// Discriminating: the child walk visits a pending frame's arguments but
-    /// never its parameters, so the conditional survived the close naming a
-    /// released binder, one per content version of the closed document.
+    /// mentions the binder, so the frame can name a closed binder while the
+    /// check, extends and branches are all another document's. A close of
+    /// the binder's document classifies that conditional as its content;
+    /// one whose frame names only other nodes is not.
+    /// Discriminating: the semantic child walk visits a pending frame's
+    /// arguments but never its parameters.
     #[test]
-    fn a_close_releases_the_conditionals_whose_pending_frame_binds_its_nodes() {
+    fn a_close_classifies_the_conditionals_whose_pending_frame_binds_its_nodes() {
         use crate::semantic_query::{ConditionalPendingSubstitution, LiteralValue};
 
         let arena = NodeArena::default();
-        let closed = arena.push_with_scope(
+        let closed_node = arena.intern_owned(
             SemanticNodeData::Literal(LiteralValue::Number(1.0)),
             file_scope("/closed.ts"),
         );
-        let kept = arena.push_with_scope(
+        let kept = arena.intern_owned(
             SemanticNodeData::Literal(LiteralValue::Number(2.0)),
             file_scope("/kept.ts"),
         );
-        let bound = arena.push_with_scope(
+        let bound = arena.intern_owned(
             SemanticNodeData::Literal(LiteralValue::Number(3.0)),
             file_scope("/kept.ts"),
         );
         let conditional = |param: SemanticNodeId| {
-            arena.push(SemanticNodeData::Conditional {
-                check: kept,
-                extends: kept,
-                true_branch_ref: kept,
-                false_branch_ref: kept,
-                distributive: false,
-                pending: Some(verter_session_query::retention::owned::Owned::new(
-                    ConditionalPendingSubstitution::empty().append_both(param, bound),
-                )),
-            })
+            arena.intern_owned(
+                SemanticNodeData::Conditional {
+                    check: kept.id(),
+                    extends: kept.id(),
+                    true_branch_ref: kept.id(),
+                    false_branch_ref: kept.id(),
+                    distributive: false,
+                    pending: Some(verter_session_query::retention::owned::Owned::new(
+                        ConditionalPendingSubstitution::empty().append_both(param, bound.id()),
+                    )),
+                },
+                NodeScopeId::Global,
+            )
         };
-        let binds_closed = conditional(closed);
-        let binds_kept = conditional(kept);
-
-        let released = arena.release_canonical("/closed.ts", u64::MAX);
+        let binds_closed = conditional(closed_node.id());
+        let binds_kept = conditional(kept.id());
 
         assert!(
-            released.contains(&binds_closed),
-            "a conditional whose pending frame binds a released node goes with it"
+            closed(&arena, "/closed.ts", binds_closed.id()),
+            "a conditional whose pending frame binds a closed node is closed content"
         );
-        assert!(arena.is_live(binds_kept));
+        assert!(!closed(&arena, "/closed.ts", binds_kept.id()));
     }
 
     /// A class expression instance declared in a kept document whose
-    /// recorded prototype is a closed document's node is released with it,
-    /// and one whose prototype is kept stays. Discriminating: the child walk
-    /// treats the prototype as a derived record beside the instance, not a
-    /// part of it, so only the retention walk reaches it.
+    /// recorded prototype is a closed document's node is closed content,
+    /// and one whose prototype is kept is not. Discriminating: the semantic
+    /// child walk treats the prototype as a derived record beside the
+    /// instance, not a part of it, so only the retained-child walk reaches
+    /// it.
     #[test]
-    fn a_close_releases_the_class_expressions_whose_prototype_is_its_node() {
+    fn a_close_classifies_the_class_expressions_whose_prototype_is_its_node() {
         use crate::semantic_query::{ClassExpressionIdentity, LiteralValue};
 
         let arena = NodeArena::default();
-        let closed = arena.push_with_scope(
+        let closed_node = arena.intern_owned(
             SemanticNodeData::Literal(LiteralValue::Number(1.0)),
             file_scope("/closed.ts"),
         );
-        let kept = arena.push_with_scope(
+        let kept = arena.intern_owned(
             SemanticNodeData::Literal(LiteralValue::Number(2.0)),
             file_scope("/kept.ts"),
         );
         let instance = |prototype: SemanticNodeId| {
-            arena.push(SemanticNodeData::ClassExpressionInstance {
-                identity: Arc::new(ClassExpressionIdentity {
-                    canonical_id: verter_type_expr::OwnedStr::from("/kept.ts"),
-                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    offset: 0,
-                    name: verter_type_expr::OwnedStr::from("C"),
-                    outer_clauses: verter_type_expr::OwnedSlice::from([]),
-                    own_arity: 0,
-                    constructor_visibility: None,
-                    prototype: Some(prototype),
-                    object_literal: false,
-                }),
-                type_arguments: crate::semantic_query::PayloadArray::from([]),
-                surface: kept,
-            })
+            arena.intern_owned(
+                SemanticNodeData::ClassExpressionInstance {
+                    identity: Arc::new(ClassExpressionIdentity {
+                        canonical_id: verter_type_expr::OwnedStr::from("/kept.ts"),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        offset: 0,
+                        name: verter_type_expr::OwnedStr::from("C"),
+                        outer_clauses: verter_type_expr::OwnedSlice::from([]),
+                        own_arity: 0,
+                        constructor_visibility: None,
+                        prototype: Some(prototype),
+                        object_literal: false,
+                    }),
+                    type_arguments: crate::semantic_query::PayloadArray::from([]),
+                    surface: kept.id(),
+                },
+                NodeScopeId::Global,
+            )
         };
-        let over_closed = instance(closed);
-        let over_kept = instance(kept);
-
-        let released = arena.release_canonical("/closed.ts", u64::MAX);
+        let over_closed = instance(closed_node.id());
+        let over_kept = instance(kept.id());
 
         assert!(
-            released.contains(&over_closed),
-            "an instance whose prototype is a released node goes with it"
+            closed(&arena, "/closed.ts", over_closed.id()),
+            "an instance whose prototype is a closed node is closed content"
         );
-        assert!(arena.is_live(over_kept));
+        assert!(!closed(&arena, "/closed.ts", over_kept.id()));
     }
 
     fn file_scope(canonical: &str) -> NodeScopeId {
@@ -2421,12 +2450,12 @@ mod arena_intern_tests {
         assert_eq!(arena.len(), 2, "dedup does not allocate a new slot");
     }
 
-    /// Releasing every node of a chunk drops the chunk, so the storage the
+    /// Destroying every node of a chunk drops the chunk, so the storage the
     /// arena holds follows the live set, not the ids ever handed out. Ids
-    /// keep counting up and a released id reads as released either way.
+    /// keep counting up and a destroyed id reads as released either way.
     ///
-    /// Discriminating: with the previous dense `Vec` storage, `storage_slots`
-    /// grew with every cycle exactly like `len` does here.
+    /// Discriminating: with dense `Vec` storage, `storage_slots` would grow
+    /// with every cycle exactly like `len` does here.
     #[test]
     fn released_chunks_are_dropped_while_ids_keep_counting() {
         let arena = NodeArena::default();
@@ -2435,19 +2464,20 @@ mod arena_intern_tests {
         let mut last: Option<SemanticNodeId> = None;
         for cycle in 0..40u64 {
             let canonical = "/w/churn.ts";
-            let mut minted = Vec::with_capacity(per_cycle);
-            for n in 0..per_cycle {
-                let node = SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Number(
-                    (cycle * per_cycle as u64 + n as u64) as f64,
-                ));
-                minted.push(arena.push_with_scope(node, file_scope(canonical)));
-            }
-            let released = arena.release_canonical(canonical, u64::MAX);
-            assert_eq!(
-                released.len(),
-                per_cycle,
-                "cycle {cycle}: every minted node is released"
-            );
+            let minted: Vec<_> = (0..per_cycle)
+                .map(|n| {
+                    arena.intern_owned(
+                        SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Number(
+                            (cycle * per_cycle as u64 + n as u64) as f64,
+                        )),
+                        file_scope(canonical),
+                    )
+                })
+                .collect();
+            let first = minted[0].id();
+            let newest = minted.last().map(super::super::node_roots::NodeRoot::id);
+            assert_eq!(arena.live_len(), 1 + per_cycle);
+            drop(minted);
             assert!(
                 arena.storage_slots() <= 2 * CHUNK_LEN,
                 "cycle {cycle}: at most the pinned chunk and the chunk still receiving ids stay ({} slots)",
@@ -2464,18 +2494,15 @@ mod arena_intern_tests {
                 "cycle {cycle}: ids are never reused"
             );
             if let Some(previous) = last {
-                assert!(
-                    minted[0].0 > previous.0,
-                    "cycle {cycle}: ids keep counting up"
-                );
+                assert!(first.0 > previous.0, "cycle {cycle}: ids keep counting up");
             }
-            last = minted.last().copied();
+            last = newest;
             assert!(
-                NodeData::ptr_eq(&arena.get(minted[0]).unwrap(), &arena.released_placeholder),
-                "cycle {cycle}: a released id reads as the placeholder even after its chunk is gone"
+                NodeData::ptr_eq(&arena.get(first).unwrap(), &arena.released_placeholder),
+                "cycle {cycle}: a destroyed id reads as the placeholder even after its chunk is gone"
             );
-            assert!(!arena.is_live(minted[0]));
-            assert!(arena.scope(minted[0]).is_none());
+            assert!(!arena.is_live(first));
+            assert!(arena.scope(first).is_none());
         }
         assert!(
             arena.is_live(pinned),

@@ -16,9 +16,9 @@ fn arena_wait_counter_includes_hit_and_both_miss_acquisitions() {
         let provenance = Arc::new(crate::engine_provenance::EngineProvenance::default());
         arena.provenance = Some(Arc::clone(&provenance));
         let data = SemanticNodeData::Literal(LiteralValue::String("contended".into()));
-        if hit {
-            let _ = arena.push(data.clone());
-        }
+        // The hit case's seed stays owned across the worker's intern, so
+        // the worker finds it live rather than interning a fresh node.
+        let seeded = hit.then(|| arena.intern_owned(data.clone(), NodeScopeId::Global));
         let before = provenance
             .node_arena_inner_write_wait_ns
             .load(Ordering::Relaxed);
@@ -43,7 +43,10 @@ fn arena_wait_counter_includes_hit_and_both_miss_acquisitions() {
             resume.send(()).unwrap();
             std::thread::sleep(HOLD);
             drop(held);
-            worker.join().unwrap();
+            let interned = worker.join().unwrap();
+            if let Some(seeded) = &seeded {
+                assert_eq!(interned, seeded.id(), "the worker hit the live seed");
+            }
         });
         *arena.race_hook.lock() = None;
         let waited = provenance
@@ -77,7 +80,7 @@ fn multiset_guard_distinguishes_planted_omission_and_duplicate() {
 #[test]
 fn counted_only_global_primitive_vocabulary_is_permanent() {
     use crate::semantic_query::PrimitiveKind::*;
-    let arena = NodeArena::counted_for_tests();
+    let arena = NodeArena::default();
     for kind in [
         String, Number, Boolean, Symbol, BigInt, Any, Unknown, Void, Never, Null, Undefined, Object,
     ] {
@@ -94,7 +97,7 @@ fn counted_only_global_primitive_vocabulary_is_permanent() {
 
 #[test]
 fn counted_stale_child_is_refused_before_allocating_parent() {
-    let arena = NodeArena::counted_for_tests();
+    let arena = NodeArena::default();
     let root = arena.intern_owned(
         SemanticNodeData::Literal(LiteralValue::String("stale".into())),
         NodeScopeId::Global,
@@ -110,7 +113,7 @@ fn counted_stale_child_is_refused_before_allocating_parent() {
 
 #[test]
 fn counted_last_root_releases_repeated_internal_edges() {
-    let arena = NodeArena::counted_for_tests();
+    let arena = NodeArena::default();
     let child = arena.intern_owned(
         SemanticNodeData::Literal(LiteralValue::String("child".into())),
         NodeScopeId::Global,
@@ -140,7 +143,7 @@ fn counted_deep_dag_teardown_uses_a_worklist() {
     std::thread::Builder::new()
         .stack_size(1024 * 1024)
         .spawn(|| {
-            let arena = NodeArena::counted_for_tests();
+            let arena = NodeArena::default();
             let mut root = arena.intern_owned(
                 SemanticNodeData::Literal(LiteralValue::String("leaf".into())),
                 NodeScopeId::Global,
@@ -169,7 +172,7 @@ fn counted_dedup_races_with_last_release_without_resurrection() {
 
     const WAIT: Duration = Duration::from_secs(30);
     for upgrade_wins in [true, false] {
-        let arena = NodeArena::counted_for_tests();
+        let arena = NodeArena::default();
         let data = SemanticNodeData::Literal(LiteralValue::String("rendezvous".into()));
         let original = arena.intern_owned(data.clone(), NodeScopeId::Global);
         let original_id = original.id();
@@ -248,7 +251,7 @@ fn counted_dedup_races_with_last_release_without_resurrection() {
 
 #[test]
 fn counted_concurrent_intern_and_drop_drains_all_slots() {
-    let arena = Arc::new(NodeArena::counted_for_tests());
+    let arena = Arc::new(NodeArena::default());
     std::thread::scope(|scope| {
         for _ in 0..4 {
             scope.spawn(|| {
@@ -274,31 +277,96 @@ fn counted_concurrent_intern_and_drop_drains_all_slots() {
         .all(|shard| shard.lock().index.is_empty()));
 }
 
+/// The production constructor is the counted regime: the last release of a
+/// root destroys the node and the children it alone kept, and nothing else
+/// can. Discriminating against an inactive production mode (a last release
+/// that leaves the slot live for a later sweep) and against a destroyed slot
+/// that still reads its payload.
 #[test]
-fn production_constructor_keeps_sweeps_authoritative_and_old_drops_safe() {
+fn production_constructor_destroys_a_node_on_its_last_release() {
     let arena = NodeArena::default();
-    assert!(!arena.counted());
-    let root = arena.intern_owned(
-        SemanticNodeData::Literal(LiteralValue::String("closed".into())),
-        NodeScopeId::File {
-            canonical_id: verter_type_expr::OwnedStr::from("/closed.ts"),
-            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            whole_hash: [7; 16],
-            local_scope: None,
+    let child = arena.intern_owned(
+        SemanticNodeData::Literal(LiteralValue::String("child".into())),
+        NodeScopeId::Global,
+    );
+    let parent = arena.intern_owned(
+        SemanticNodeData::Array {
+            element: child.id(),
+            readonly: false,
         },
+        NodeScopeId::Global,
     );
-    assert_eq!(
-        arena.release_canonical("/closed.ts", u64::MAX),
-        vec![root.id()]
+    let (child_id, parent_id) = (child.id(), parent.id());
+    drop(child);
+    assert!(
+        arena.is_live(child_id),
+        "the parent's counted edge keeps the child"
     );
-    drop(root);
+    drop(parent);
+    assert!(!arena.is_live(parent_id));
+    assert!(
+        !arena.is_live(child_id),
+        "the parent's destruction releases its edge"
+    );
     assert_eq!(arena.live_len(), 0);
+    assert!(NodeData::ptr_eq(
+        &arena.get(child_id).unwrap(),
+        &arena.released_placeholder
+    ));
+    assert_eq!(
+        super::super::node_roots::NodeRootSet::acquire(
+            Arc::clone(&arena.core),
+            smallvec::smallvec![child_id]
+        )
+        .err(),
+        Some(crate::semantic_query::QueryError::StaleSemanticOperand),
+        "a destroyed ordinal can never be rooted again"
+    );
 }
 
+/// Only slots a sidecar describes are logged when destroyed, so the pending
+/// log never outgrows the stale sidecar entries draining it removes; a slot
+/// marked after its destruction is refused, so its writer removes the entry
+/// itself. Discriminating against logging every destruction (the log would
+/// hold both ids) and against accepting a mark on a destroyed slot.
 #[test]
-#[should_panic(expected = "counted destruction cannot coexist with legacy sweeps")]
-fn planted_counted_activation_with_legacy_sweep_is_rejected() {
-    NodeArena::counted_for_tests().release_canonical("/closed.ts", u64::MAX);
+fn only_sidecar_described_slots_enter_the_destroyed_log() {
+    let arena = NodeArena::default();
+    let account = verter_session_query::retention::SemanticRetentionAccount::new(
+        verter_session_query::retention::RetentionLimits::defaults(),
+    );
+    arena.core.bind_retention_account(&account);
+    let described = arena.intern_owned(
+        SemanticNodeData::Literal(LiteralValue::String("described".into())),
+        NodeScopeId::Global,
+    );
+    let plain = arena.intern_owned(
+        SemanticNodeData::Literal(LiteralValue::String("plain".into())),
+        NodeScopeId::Global,
+    );
+    let (described_id, plain_id) = (described.id(), plain.id());
+    assert!(arena.track_sidecar(described_id));
+    drop(described);
+    drop(plain);
+    assert_eq!(arena.pending_destroyed(), 1);
+    let charged = account.snapshot().pinned_bytes;
+    let destroyed = arena.drain_destroyed();
+    assert_eq!(&*destroyed, &[described_id]);
+    assert_eq!(
+        account.snapshot().pinned_bytes,
+        charged,
+        "a drained batch keeps its backing charged through cleanup"
+    );
+    drop(destroyed);
+    assert!(
+        account.snapshot().pinned_bytes < charged,
+        "dropping the batch frees its backing charge"
+    );
+    assert_eq!(arena.pending_destroyed(), 0);
+    assert!(
+        !arena.track_sidecar(plain_id),
+        "a destroyed slot cannot be marked"
+    );
 }
 
 /// Ids are never reused, so a long session allocates ever higher chunk
@@ -307,7 +375,7 @@ fn planted_counted_activation_with_legacy_sweep_is_rejected() {
 /// ever allocated and released.
 #[test]
 fn chunk_table_storage_follows_live_chunks_not_allocation_history() {
-    let arena = NodeArena::counted_for_tests();
+    let arena = NodeArena::default();
     let pinned = arena.intern_owned(
         SemanticNodeData::Literal(LiteralValue::String("pinned".into())),
         NodeScopeId::Global,
@@ -351,7 +419,7 @@ fn storage_snapshot_completes_beside_an_interner_holding_a_shard() {
     use std::time::Duration;
 
     const WAIT: Duration = Duration::from_secs(30);
-    let arena = Arc::new(NodeArena::counted_for_tests());
+    let arena = Arc::new(NodeArena::default());
     let (parked_tx, parked_rx) = mpsc::channel();
     let (resume_tx, resume_rx) = mpsc::channel::<()>();
     let resume_rx = parking_lot::Mutex::new(resume_rx);

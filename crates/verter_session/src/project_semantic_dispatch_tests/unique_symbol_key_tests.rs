@@ -57,13 +57,6 @@ fn a_unique_symbol_key_type_is_retained_by_its_key_union_and_released_on_close()
     let graph = std::sync::Arc::clone(host.project_type_store().semantic_graph());
     assert!(graph.node_is_live(keys) && graph.node_is_live(key_type));
     host.evict(PROBE_FILE);
-    let store = host.project_type_store();
-    store.try_apply_deferred_releases();
-    assert_eq!(
-        store.deferred_release_count(),
-        0,
-        "the close release applied"
-    );
     assert!(
         !graph.node_is_live(key_type) && !graph.node_is_live(keys),
         "closing {PROBE_FILE} releases the symbol's key type and the union holding it"

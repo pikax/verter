@@ -62,6 +62,7 @@ impl SemanticReadView {
         use std::sync::atomic::Ordering::Relaxed;
         inner.live_readers.fetch_add(1, Relaxed);
         inner.store_live_readers.fetch_add(1, Relaxed);
+        inner.hold();
         Self { inner }
     }
 
@@ -74,7 +75,9 @@ impl SemanticReadView {
     }
     #[must_use]
     pub fn pin(store: &SignatureStore) -> Self {
-        Self { inner: store.pin() }
+        let inner = store.pin();
+        inner.hold();
+        Self { inner }
     }
 
     #[must_use]
@@ -273,5 +276,6 @@ impl SemanticReadView {
 impl Drop for SemanticReadView {
     fn drop(&mut self) {
         SignatureStore::unpin(&self.inner);
+        self.inner.release_hold();
     }
 }

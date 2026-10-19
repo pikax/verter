@@ -126,17 +126,30 @@ impl PreparedKeyHandle {
 }
 
 impl super::SemanticGraphStore {
+    /// Prepare `key` with its operands rooted, for a key built from live
+    /// construction operands.
     pub(crate) fn prepare_rooted_key(&self, key: SemanticQueryKey) -> PreparedKeyHandle {
+        self.try_prepare_rooted_key(key)
+            .expect("a prepared key has live counted operands")
+    }
+
+    /// Prepare `key` with its operands rooted. A key naming a destroyed
+    /// (`StaleSemanticOperand`) or never-allocated (`ForeignSemanticOperand`)
+    /// operand is refused: it can neither be answered nor cached.
+    pub(crate) fn try_prepare_rooted_key(
+        &self,
+        key: SemanticQueryKey,
+    ) -> Result<PreparedKeyHandle, crate::semantic_query::QueryError> {
         let mut prepared = self.prepare_probe_key(key);
-        self.root_prepared_key(&mut prepared);
-        prepared
+        self.try_root_prepared_key(&mut prepared)?;
+        Ok(prepared)
     }
 
     /// The prepared identity of `key` for a warm probe: its family, slot,
     /// requested point and hash, with its operands still owned by the
     /// caller that holds `key`'s nodes. A probe that hits returns the
     /// stored result's own lease and drops this identity; one that goes on
-    /// to claim roots it first ([`Self::root_prepared_key`]), because a
+    /// to claim roots it first ([`Self::try_root_prepared_key`]), because a
     /// claim keeps it past the caller's hold.
     pub(super) fn prepare_probe_key(&self, key: SemanticQueryKey) -> PreparedKeyHandle {
         let signature = match &key {
@@ -154,20 +167,23 @@ impl super::SemanticGraphStore {
     }
 
     /// Root a probe identity's family operands in this arena, so the
-    /// identity outlives the caller's hold on them.
-    pub(super) fn root_prepared_key(&self, prepared: &mut PreparedKeyHandle) {
+    /// identity outlives the caller's hold on them. A destroyed or
+    /// never-allocated operand is refused.
+    pub(super) fn try_root_prepared_key(
+        &self,
+        prepared: &mut PreparedKeyHandle,
+    ) -> Result<(), crate::semantic_query::QueryError> {
         let mut nodes = super::node_roots::RootIds::new();
         prepared.family().for_each_node_id(|node| {
             if node.0 < super::UNALLOCATABLE_ID_FLOOR {
                 nodes.push(node);
             }
         });
-        let roots = self
-            .root_existing_nodes(nodes)
-            .expect("a prepared key has live counted operands");
+        let roots = self.root_nodes(nodes)?;
         Arc::get_mut(&mut prepared.0)
             .expect("a probe identity is unshared until its claim")
             ._roots = roots;
+        Ok(())
     }
 }
 
