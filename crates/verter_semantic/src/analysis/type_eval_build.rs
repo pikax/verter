@@ -98,6 +98,7 @@ pub fn offset_indexed_value_expression(expression: &mut IndexedValueExpression, 
             IndexedValueExpression::Call(call) => {
                 call.point = call.point.saturating_add(base);
                 call.report_point = call.report_point.saturating_add(base);
+                call.report_end = call.report_end.saturating_add(base);
                 let IndexedValueCall {
                     callee,
                     receiver,
@@ -354,6 +355,9 @@ pub struct LoweredValueDeclParts {
     /// Whether the declared type is a widening literal type (a `const`
     /// initialized with a literal, see [`DeclaredLiteralFreshness`]).
     pub literal_freshness: DeclaredLiteralFreshness,
+    /// The positions of the initializer-inferred annotation whose widening
+    /// waits on the bindings they read; `None` when it has none.
+    pub read_provenance: Option<Arc<verter_type_expr::DeclaredReadProvenance>>,
 }
 
 /// The TRANSIENT lowered parts one top-level statement contributes, routed to
@@ -1505,6 +1509,7 @@ fn mint_value_decl(
         parts.inference_unavailable,
     );
     type_annotation.literal_freshness = parts.literal_freshness.clone();
+    type_annotation.defers_read_widening = parts.read_provenance.is_some();
     let signatures = parts
         .signatures
         .iter()
@@ -3116,6 +3121,7 @@ fn collect_named_class_selecting(
                             enum_members: None,
                             enum_member_names: None,
                             literal_freshness: DeclaredLiteralFreshness::Regular,
+                            read_provenance: None,
                         });
                         TypeExpr::TypeOf(ValueRef {
                             path: vec![field_name],
@@ -3450,6 +3456,7 @@ fn collect_named_class_selecting(
             enum_members: None,
             enum_member_names: None,
             literal_freshness: DeclaredLiteralFreshness::Regular,
+            read_provenance: None,
         });
     }
     let base_name = match decl.heritage.as_ref().map(|heritage| &heritage.expression) {
@@ -3578,6 +3585,7 @@ fn collect_named_class_selecting(
                 instance: Arc::from(instance_widening_members.into_boxed_slice()),
             }
         },
+        read_provenance: None,
     });
 }
 
@@ -3724,6 +3732,7 @@ fn collect_enum(
         enum_members: Some(members),
         enum_member_names: Some(enum_member_names),
         literal_freshness: DeclaredLiteralFreshness::Regular,
+        read_provenance: None,
     });
 
     // Type-space: the enum used AS A TYPE is the union of its members'
@@ -3883,6 +3892,7 @@ fn lower_function_parts_in(
         enum_members: None,
         enum_member_names: None,
         literal_freshness: DeclaredLiteralFreshness::Regular,
+        read_provenance: None,
     })
 }
 
@@ -4485,6 +4495,7 @@ fn lower_destructured_variable_parts(
             enum_members: None,
             enum_member_names: None,
             literal_freshness: DeclaredLiteralFreshness::Regular,
+            read_provenance: None,
         })
         .collect()
 }
@@ -4707,6 +4718,7 @@ fn lower_identifier_variable_parts(
     let mut object_shape = None;
     let mut inference_unavailable = None;
     let mut expression_source_offset = None;
+    let mut read_provenance = None;
 
     if let Some(ref init) = decl.init {
         function_signature = extract_initializer_function_signature(init, source);
@@ -4740,13 +4752,16 @@ fn lower_identifier_variable_parts(
             expression_source_offset = Some(init.span().start);
             inference_unavailable = None;
         } else if type_annotation.is_none() {
-            let inferred = if matches!(var_kind, ValueDeclKind::Let | ValueDeclKind::Var) {
-                infer_mutable_declaration_expression_type(init, source)
-            } else {
-                infer_declaration_expression_type(init, source, TopLevelLiteralPolicy::Preserve)
-            };
+            let inferred = infer_declarator_initializer_type(
+                init,
+                source,
+                matches!(var_kind, ValueDeclKind::Let | ValueDeclKind::Var),
+            );
             let mut inferred = match inferred {
-                Ok(inferred) => inferred,
+                Ok((inferred, provenance)) => {
+                    read_provenance = provenance;
+                    inferred
+                }
                 Err(reason) => {
                     inference_unavailable = Some(reason);
                     TypeExpr::Primitive(PrimitiveName::Any)
@@ -4795,6 +4810,9 @@ fn lower_identifier_variable_parts(
 
     // A `const` without an annotation declares the fresh literal type of
     // its initializer; every other declaration declares a regular type.
+    // The positions are the inferred annotation's.
+    let read_provenance =
+        read_provenance.filter(|_| !annotation_is_authored && type_annotation.is_some());
     let literal_freshness = match (&decl.init, var_kind, annotation_is_authored) {
         (Some(init), _, false) if expr_is_widening_nullish(init) => {
             DeclaredLiteralFreshness::WideningNullish
@@ -4833,6 +4851,7 @@ fn lower_identifier_variable_parts(
         enum_members: None,
         enum_member_names: None,
         literal_freshness,
+        read_provenance,
     })
 }
 
@@ -5033,6 +5052,7 @@ fn lower_default_expression_parts(expr: &Expression<'_>, source: &str) -> Lowere
         enum_members: None,
         enum_member_names: None,
         literal_freshness: DeclaredLiteralFreshness::Regular,
+        read_provenance: None,
     }
 }
 
@@ -5264,6 +5284,11 @@ struct InferenceState {
     /// location that widens the fresh literals it holds: the initializer
     /// of a `let` / `var` declaration.
     widen_fresh_positions: bool,
+    /// Whether a position this inference closes in a mutable location
+    /// leaves the widening of what it reads to the bindings' resolution:
+    /// the type of a variable declaration's initializer, whose
+    /// [`verter_type_expr::DeclaredReadProvenance`] its `typeof` reads.
+    defer_read_widening: bool,
 }
 
 impl Default for InferenceState {
@@ -5272,6 +5297,7 @@ impl Default for InferenceState {
             used_unmodeled_fallback: false,
             nested_nullish: NestedNullishLiterals::Keep,
             widen_fresh_positions: false,
+            defer_read_widening: false,
         }
     }
 }
@@ -5450,25 +5476,48 @@ pub fn infer_declaration_expression_type(
     infer_declaration_expression_type_with_budget(expr, source, policy, &mut budget)
 }
 
-/// The type of a `let` / `var` initializer: every fresh literal it writes
-/// widens where its position closes — the top level, an object member, an
-/// array element, an arrow's expression body — while an asserted or
-/// const-context literal keeps its type (`let x = { v: "a" as "a", w: "b" }`
-/// is `{ v: "a"; w: string }`).
-fn infer_mutable_declaration_expression_type(
+/// The type of a variable declaration's initializer, and the positions it
+/// closes in a mutable location whose widening waits on the bindings they
+/// read. A `let` / `var` initializer (`mutable`) widens every fresh
+/// literal it writes where its position closes — the top level, an object
+/// member, an array element, an arrow's expression body — while an
+/// asserted or const-context literal keeps its type (`let x = { v: "a" as
+/// "a", w: "b" }` is `{ v: "a"; w: string }`); a `const` initializer
+/// keeps its top level as written.
+fn infer_declarator_initializer_type(
     expr: &Expression<'_>,
     source: &str,
-) -> InferenceResult<TypeExpr> {
+    mutable: bool,
+) -> InferenceResult<(
+    TypeExpr,
+    Option<Arc<verter_type_expr::DeclaredReadProvenance>>,
+)> {
     let mut budget = InferenceState {
-        widen_fresh_positions: true,
+        widen_fresh_positions: mutable,
+        defer_read_widening: true,
         ..InferenceState::default()
     };
-    infer_declaration_expression_type_with_budget(
-        expr,
+    let policy = if mutable {
+        TopLevelLiteralPolicy::Widen
+    } else {
+        TopLevelLiteralPolicy::Preserve
+    };
+    let (ty, positions) = shallow::run(
+        shallow::Task::Declaration(expr, policy),
         source,
-        TopLevelLiteralPolicy::Widen,
         &mut budget,
-    )
+        None,
+    )?
+    .into_typed()
+    .into_declared();
+    Ok((
+        ty,
+        (!positions.is_empty()).then(|| {
+            Arc::new(verter_type_expr::DeclaredReadProvenance {
+                positions: Arc::from(positions.into_boxed_slice()),
+            })
+        }),
+    ))
 }
 
 #[repr(u8)]
@@ -6921,7 +6970,8 @@ fn build_indexed_call(
     match node {
         IndexedCallNode::Call(call) => IndexedValueCall {
             point: call.span.start,
-            report_point: indexed_call_report_point(&call.callee),
+            report_point: indexed_call_report_span(&call.callee).0,
+            report_end: indexed_call_report_span(&call.callee).1,
             kind: IndexedValueCallKind::Call,
             callee: Box::new(callee),
             receiver,
@@ -6934,6 +6984,7 @@ fn build_indexed_call(
         IndexedCallNode::New(call) => IndexedValueCall {
             point: call.span.start,
             report_point: call.span.start,
+            report_end: call.span.end,
             kind: IndexedValueCallKind::Construct,
             callee: Box::new(callee),
             receiver: None,
@@ -6957,6 +7008,7 @@ fn build_indexed_call(
                 function_return_source: None,
                 report: IndexedReportSite {
                     point: tagged.quasi.span.start,
+                    end: tagged.quasi.span.end,
                     form: None,
                 },
             });
@@ -6968,6 +7020,7 @@ fn build_indexed_call(
             IndexedValueCall {
                 point: tagged.span.start,
                 report_point: tagged.span.start,
+                report_end: tagged.span.end,
                 kind: IndexedValueCallKind::Call,
                 callee: Box::new(callee),
                 receiver,
@@ -7569,7 +7622,8 @@ fn lower_indexed_call_expression_observed(
     let (callee, receiver) = indexed_callee_and_receiver(&call.callee, source, &mut observe);
     IndexedValueCall {
         point: call.span.start,
-        report_point: indexed_call_report_point(&call.callee),
+        report_point: indexed_call_report_span(&call.callee).0,
+        report_end: indexed_call_report_span(&call.callee).1,
         kind: IndexedValueCallKind::Call,
         callee: Box::new(callee),
         receiver,
@@ -7602,6 +7656,7 @@ fn lower_indexed_new_expression_observed(
     IndexedValueCall {
         point: call.span.start,
         report_point: call.span.start,
+        report_end: call.span.end,
         kind: IndexedValueCallKind::Construct,
         callee: Box::new(lower_indexed_value_expression(&call.callee, source)),
         receiver: None,
@@ -7652,6 +7707,7 @@ fn lower_indexed_tagged_template_expression_observed(
         function_return_source: None,
         report: IndexedReportSite {
             point: tagged.quasi.span.start,
+            end: tagged.quasi.span.end,
             form: None,
         },
     });
@@ -7669,6 +7725,7 @@ fn lower_indexed_tagged_template_expression_observed(
     IndexedValueCall {
         point: tagged.span.start,
         report_point: tagged.span.start,
+        report_end: tagged.span.end,
         kind: IndexedValueCallKind::Call,
         callee: Box::new(callee),
         receiver,
@@ -7765,12 +7822,13 @@ fn lower_indexed_call_argument(
 /// Where the checker reports a diagnostic about a whole call whose callee
 /// is `callee` (`getDiagnosticSpanForCallNode`): a property access's name,
 /// otherwise the callee expression.
-fn indexed_call_report_point(callee: &Expression<'_>) -> u32 {
-    match callee {
-        Expression::StaticMemberExpression(member) => member.property.span.start,
-        Expression::PrivateFieldExpression(member) => member.field.span.start,
-        callee => callee.span().start,
-    }
+fn indexed_call_report_span(callee: &Expression<'_>) -> (u32, u32) {
+    let span = match callee {
+        Expression::StaticMemberExpression(member) => member.property.span,
+        Expression::PrivateFieldExpression(member) => member.field.span,
+        callee => callee.span(),
+    };
+    (span.start, span.end)
 }
 
 /// Where the checker reports a relation failure of one call argument: the
@@ -7780,6 +7838,7 @@ fn indexed_argument_report_site(argument: &oxc_ast::ast::Argument<'_>) -> Indexe
     match argument {
         oxc_ast::ast::Argument::SpreadElement(spread) => IndexedReportSite {
             point: spread.span.start,
+            end: spread.span.end,
             form: None,
         },
         argument => indexed_report_site(argument.to_expression()),
@@ -7800,27 +7859,27 @@ fn indexed_report_site(expression: &Expression<'_>) -> IndexedReportSite {
         Whole,
         Unmodelled,
         Arrow(usize),
-        Object(Vec<(Arc<str>, u32, Option<usize>)>),
+        Object(Vec<(Arc<str>, u32, u32, Option<usize>)>),
         Array(Vec<usize>),
     }
     fn child<'a, 'b>(
         expression: &'a Expression<'b>,
-        nodes: &mut Vec<(u32, Shape)>,
+        nodes: &mut Vec<(u32, u32, Shape)>,
         pending: &mut Vec<(usize, &'a Expression<'b>)>,
     ) -> usize {
-        nodes.push((expression.span().start, Shape::Whole));
+        nodes.push((expression.span().start, expression.span().end, Shape::Whole));
         pending.push((nodes.len() - 1, expression));
         nodes.len() - 1
     }
 
-    let mut nodes: Vec<(u32, Shape)> = Vec::new();
+    let mut nodes: Vec<(u32, u32, Shape)> = Vec::new();
     let mut pending = Vec::new();
     child(expression, &mut nodes, &mut pending);
     while let Some((index, mut expression)) = pending.pop() {
         while let Expression::ParenthesizedExpression(parenthesized) = expression {
             expression = &parenthesized.expression;
         }
-        nodes[index].1 = match expression {
+        nodes[index].2 = match expression {
             Expression::ArrowFunctionExpression(arrow) => {
                 let annotated = arrow
                     .params
@@ -7862,7 +7921,12 @@ fn indexed_report_site(expression: &Expression<'_>) -> IndexedReportSite {
                         && !property.method
                         && !property.shorthand)
                         .then(|| child(&property.value, &mut nodes, &mut pending));
-                    properties.push((name, property.key.span().start, value));
+                    properties.push((
+                        name,
+                        property.key.span().start,
+                        property.key.span().end,
+                        value,
+                    ));
                 }
                 if modelled {
                     Shape::Object(properties)
@@ -7913,7 +7977,7 @@ fn indexed_report_site(expression: &Expression<'_>) -> IndexedReportSite {
             .take()
             .expect("a child site is built before its parent")
     };
-    for (index, (point, shape)) in nodes.into_iter().enumerate().rev() {
+    for (index, (point, end, shape)) in nodes.into_iter().enumerate().rev() {
         let form = match shape {
             Shape::Whole => None,
             Shape::Unmodelled => Some(IndexedElaborationForm::Unmodelled),
@@ -7923,9 +7987,10 @@ fn indexed_report_site(expression: &Expression<'_>) -> IndexedReportSite {
             Shape::Object(properties) => Some(IndexedElaborationForm::Object(Arc::from(
                 properties
                     .into_iter()
-                    .map(|(name, point, value)| IndexedElaboratedProperty {
+                    .map(|(name, point, end, value)| IndexedElaboratedProperty {
                         name,
                         point,
+                        end,
                         value: value.map(|value| take(&mut sites, value)),
                     })
                     .collect::<Vec<_>>(),
@@ -7937,7 +8002,7 @@ fn indexed_report_site(expression: &Expression<'_>) -> IndexedReportSite {
                     .collect::<Vec<_>>(),
             ))),
         };
-        sites[index] = Some(IndexedReportSite { point, form });
+        sites[index] = Some(IndexedReportSite { point, end, form });
     }
     sites[0].take().expect("the root site is built")
 }

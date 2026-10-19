@@ -9,54 +9,203 @@
 //! visited expression, member and parameter charges.
 
 use super::*;
+use verter_type_expr::DeclaredReadStep;
 
 /// What a step of the inference produces: a type, or the object, signature
 /// or parameter list an extraction builds.
 pub(super) enum Value {
     Type(TypeExpr),
-    /// A type whose listed top-level literals (the type itself, or members
-    /// of the union it is) are FRESH: written as bare literals, so a
-    /// mutable location widens them (`getWidenedLiteralType`). Every other
-    /// literal a type holds is regular — an asserted or const-context
-    /// literal keeps its type wherever it is written.
-    Fresh(TypeExpr, Vec<LiteralValue>),
+    /// A type with the freshness the positions it closes decide
+    /// ([`Typed`]).
+    Typed(Typed),
     Object(ObjectExpr),
     Signature(LoweredSignatureParts),
     Params(Vec<FunctionParam>),
 }
 
+/// A type with its freshness. Its listed top-level literals (the type
+/// itself, or members of the union it is) are FRESH: written as bare
+/// literals, so a mutable location widens them (`getWidenedLiteralType`).
+/// Every other literal a type holds is regular — an asserted or
+/// const-context literal keeps its type wherever it is written. With
+/// [`InferenceState::defer_read_widening`] its top-level value reads are
+/// listed too, and each position it nests whose widening waits on the
+/// bindings it reads ([`Deferred`]).
+pub(super) struct Typed {
+    ty: TypeExpr,
+    fresh: Vec<LiteralValue>,
+    reads: Vec<ValueRef>,
+    nested: Vec<Deferred>,
+}
+
+/// A position a mutable location closes whose widening waits on the
+/// bindings it reads: its path from the type that nests it, its fresh and
+/// regular top-level literals as written, and its reads
+/// ([`verter_type_expr::DeclaredReadPosition`]).
+#[derive(Clone)]
+pub(super) struct Deferred {
+    path: Vec<DeclaredReadStep>,
+    fresh: Vec<LiteralValue>,
+    regular: Vec<LiteralValue>,
+    reads: Vec<ValueRef>,
+}
+
+impl Typed {
+    fn plain(ty: TypeExpr) -> Self {
+        Self {
+            ty,
+            fresh: Vec::new(),
+            reads: Vec::new(),
+            nested: Vec::new(),
+        }
+    }
+
+    /// The type a mutable location closing it holds: its fresh top-level
+    /// literals widened — or, when it reads a binding, kept as written and
+    /// recorded as a position whose widening the bindings' freshness
+    /// decides. The closed type's top level is regular.
+    fn close(mut self) -> Self {
+        if self.reads.is_empty() {
+            self.ty = widen_fresh_literals(self.ty, &self.fresh);
+            self.fresh.clear();
+            return self;
+        }
+        let regular = top_level_literals(&self.ty)
+            .filter(|literal| !self.fresh.contains(literal))
+            .cloned()
+            .collect();
+        self.nested.push(Deferred {
+            path: Vec::new(),
+            fresh: std::mem::take(&mut self.fresh),
+            regular,
+            reads: std::mem::take(&mut self.reads),
+        });
+        self
+    }
+
+    /// The type a position closed in this inference holds: closed when the
+    /// inference widens every mutable location
+    /// ([`InferenceState::widen_fresh_positions`]), else its top level as
+    /// written and regular.
+    fn into_position(mut self, budget: &InferenceState) -> Self {
+        if budget.widen_fresh_positions {
+            return self.close();
+        }
+        self.fresh.clear();
+        self.reads.clear();
+        self
+    }
+
+    /// The type with every position it nests widened now, its reads read
+    /// as regular: the form a container whose positions no later reader
+    /// addresses holds.
+    fn into_resolved(self) -> TypeExpr {
+        resolve_deferred(self.ty, &self.nested)
+    }
+
+    /// The type and the positions it nests whose widening waits on the
+    /// bindings they read, its own top level as written.
+    pub(super) fn into_declared(self) -> (TypeExpr, Vec<verter_type_expr::DeclaredReadPosition>) {
+        let positions = self
+            .nested
+            .into_iter()
+            .map(|deferred| verter_type_expr::DeclaredReadPosition {
+                path: Arc::from(deferred.path.into_boxed_slice()),
+                fresh: Arc::from(deferred.fresh.into_boxed_slice()),
+                regular: Arc::from(deferred.regular.into_boxed_slice()),
+                reads: Arc::from(deferred.reads.into_boxed_slice()),
+            })
+            .collect();
+        (self.ty, positions)
+    }
+
+    /// The positions it nests, each one `step` further from the container
+    /// it is a part of.
+    fn nested_under(&mut self, step: &DeclaredReadStep) -> Vec<Deferred> {
+        std::mem::take(&mut self.nested)
+            .into_iter()
+            .map(|mut deferred| {
+                deferred.path.insert(0, step.clone());
+                deferred
+            })
+            .collect()
+    }
+}
+
+/// `ty` with each of `positions`' fresh literals widened at its path, the
+/// reads there read as regular.
+fn resolve_deferred(mut ty: TypeExpr, positions: &[Deferred]) -> TypeExpr {
+    for deferred in positions {
+        ty = rewrite_at(ty, &deferred.path, &|position| {
+            widen_fresh_literals(position, &deferred.fresh)
+        });
+    }
+    ty
+}
+
+/// `ty` with the position `path` addresses rewritten by `rewrite`: an
+/// object member by its known key, an array's element type, through each
+/// member of a union.
+fn rewrite_at(
+    ty: TypeExpr,
+    path: &[DeclaredReadStep],
+    rewrite: &dyn Fn(TypeExpr) -> TypeExpr,
+) -> TypeExpr {
+    let Some((step, rest)) = path.split_first() else {
+        return rewrite(ty);
+    };
+    match (&ty, step) {
+        (TypeExpr::Union(members), _) => TypeExpr::union(
+            members
+                .iter()
+                .map(|member| rewrite_at(member.clone(), path, rewrite))
+                .collect(),
+        ),
+        (TypeExpr::Object(object), DeclaredReadStep::Member(key)) => {
+            let mut object = Arc::clone(object);
+            for member in &mut Arc::make_mut(&mut object).properties {
+                if let ObjectMember::Property(property) = member {
+                    if property.key.cloned_known().as_ref() == Some(key) {
+                        let value = std::mem::replace(
+                            &mut property.ty,
+                            TypeExpr::Primitive(PrimitiveName::Any),
+                        );
+                        property.ty = rewrite_at(value, rest, rewrite);
+                    }
+                }
+            }
+            TypeExpr::Object(object)
+        }
+        (TypeExpr::Array { element, readonly }, DeclaredReadStep::Element) => TypeExpr::Array {
+            element: Arc::new(rewrite_at(TypeExpr::clone(element), rest, rewrite)),
+            readonly: *readonly,
+        },
+        _ => ty,
+    }
+}
+
 impl Value {
     pub(super) fn into_type(self) -> TypeExpr {
         match self {
-            Value::Type(ty) | Value::Fresh(ty, _) => ty,
+            Value::Type(ty) => ty,
+            Value::Typed(typed) => typed.into_resolved(),
             _ => unreachable!("a type position receives a type"),
         }
     }
 
-    /// The type and its fresh top-level literals.
-    fn into_typed(self) -> (TypeExpr, Vec<LiteralValue>) {
+    /// The type and its freshness.
+    pub(super) fn into_typed(self) -> Typed {
         match self {
-            Value::Type(ty) => (ty, Vec::new()),
-            Value::Fresh(ty, fresh) => (ty, fresh),
+            Value::Type(ty) => Typed::plain(ty),
+            Value::Typed(typed) => typed,
             _ => unreachable!("a type position receives a type"),
         }
     }
 
-    /// The type with its fresh top-level literals widened.
-    fn into_widened_type(self) -> TypeExpr {
-        let (ty, fresh) = self.into_typed();
-        widen_fresh_literals(ty, &fresh)
-    }
-
-    /// The type a position closed in this inference holds: its fresh
-    /// literals widened when the inference widens every mutable location
-    /// ([`InferenceState::widen_fresh_positions`]).
+    /// The type a position closed in this inference holds
+    /// ([`Typed::into_position`]), every position it nests widened now.
     fn into_position_type(self, budget: &InferenceState) -> TypeExpr {
-        if budget.widen_fresh_positions {
-            self.into_widened_type()
-        } else {
-            self.into_type()
-        }
+        self.into_typed().into_position(budget).into_resolved()
     }
 
     pub(super) fn into_object(self) -> ObjectExpr {
@@ -170,37 +319,14 @@ pub(super) fn run<'a>(
             Task::WidenTopLevel(policy) => {
                 let value = values.pop().expect("a part's type");
                 values.push(match policy {
-                    TopLevelLiteralPolicy::Widen => Value::Type(value.into_widened_type()),
+                    TopLevelLiteralPolicy::Widen => Value::Typed(value.into_typed().close()),
                     TopLevelLiteralPolicy::Preserve => value,
                 });
             }
             Task::Branches => {
-                let (alternate, alternate_fresh) =
-                    values.pop().expect("a part's type").into_typed();
-                let (consequent, consequent_fresh) =
-                    values.pop().expect("a part's type").into_typed();
-                // A union of a fresh literal and its regular counterpart is
-                // the regular one (`c ? "a" : ("a" as "a")` is the regular
-                // `"a"`).
-                let regular: Vec<&LiteralValue> = top_level_literals(&consequent)
-                    .filter(|literal| !consequent_fresh.contains(literal))
-                    .chain(
-                        top_level_literals(&alternate)
-                            .filter(|literal| !alternate_fresh.contains(literal)),
-                    )
-                    .collect();
-                let mut fresh: Vec<LiteralValue> = Vec::new();
-                for literal in consequent_fresh.iter().chain(alternate_fresh.iter()) {
-                    if !regular.contains(&literal) && !fresh.contains(literal) {
-                        fresh.push(literal.clone());
-                    }
-                }
-                let union = TypeExpr::union(vec![consequent, alternate]);
-                values.push(if fresh.is_empty() {
-                    Value::Type(union)
-                } else {
-                    Value::Fresh(union, fresh)
-                });
+                let alternate = values.pop().expect("a part's type").into_typed();
+                let consequent = values.pop().expect("a part's type").into_typed();
+                values.push(Value::Typed(join_branches(consequent, alternate)));
             }
             Task::BooleanOver(count) => {
                 let operands: Vec<TypeExpr> = values
@@ -337,6 +463,7 @@ fn declaration<'a>(
                 array,
                 next: 0,
                 element_types: Vec::new(),
+                deferred: Vec::new(),
                 awaiting: None,
             }));
         }
@@ -562,18 +689,91 @@ fn value<'a>(
         }
     };
     // A bare literal is fresh, except in a const context, whose literals
-    // are written as they are.
+    // are written as they are; a read is as fresh as its binding, which the
+    // positions it is closed in leave to the binding's resolution.
     values.push(match &ty {
         TypeExpr::Literal(literal)
             if policy != MemberLiteralPolicy::ConstAssert
                 && scalar_literal_type(expr).is_some() =>
         {
             let literal = literal.clone();
-            Value::Fresh(ty, vec![literal])
+            let mut typed = Typed::plain(ty);
+            typed.fresh.push(literal);
+            Value::Typed(typed)
+        }
+        TypeExpr::TypeOf(read)
+            if budget.defer_read_widening
+                && policy != MemberLiteralPolicy::ConstAssert
+                && read.type_args.is_empty() =>
+        {
+            let read = read.clone();
+            let mut typed = Typed::plain(ty);
+            typed.reads.push(read);
+            Value::Typed(typed)
         }
         _ => Value::Type(ty),
     });
     Ok(())
+}
+
+/// A conditional's two branch types joined, their unions flattened into
+/// one. A union of a fresh literal and its regular counterpart is the
+/// regular one (`c ? "a" : ("a" as "a")` is the regular `"a"`). The
+/// positions each branch nests stay addressable by their paths only while
+/// at most one branch is an object or array literal: the paths do not tell
+/// two such branches apart, so theirs widen now.
+fn join_branches(mut consequent: Typed, mut alternate: Typed) -> Typed {
+    if (!consequent.nested.is_empty() || !alternate.nested.is_empty())
+        && holds_composite(&consequent.ty)
+        && holds_composite(&alternate.ty)
+    {
+        for branch in [&mut consequent, &mut alternate] {
+            let ty = std::mem::replace(&mut branch.ty, TypeExpr::Primitive(PrimitiveName::Any));
+            branch.ty = resolve_deferred(ty, &std::mem::take(&mut branch.nested));
+        }
+    }
+    let regular: Vec<LiteralValue> = top_level_literals(&consequent.ty)
+        .filter(|literal| !consequent.fresh.contains(literal))
+        .chain(
+            top_level_literals(&alternate.ty).filter(|literal| !alternate.fresh.contains(literal)),
+        )
+        .cloned()
+        .collect();
+    let mut fresh: Vec<LiteralValue> = Vec::new();
+    for literal in consequent.fresh.iter().chain(alternate.fresh.iter()) {
+        if !regular.contains(literal) && !fresh.contains(literal) {
+            fresh.push(literal.clone());
+        }
+    }
+    let mut reads = consequent.reads;
+    for read in alternate.reads {
+        if !reads.contains(&read) {
+            reads.push(read);
+        }
+    }
+    let mut nested = consequent.nested;
+    nested.extend(alternate.nested);
+    let mut members = Vec::new();
+    append_union_members(&mut members, consequent.ty);
+    append_union_members(&mut members, alternate.ty);
+    Typed {
+        ty: TypeExpr::union(members),
+        fresh,
+        reads,
+        nested,
+    }
+}
+
+/// Whether `ty` is, or a member of the union it is, an object or array
+/// type.
+fn holds_composite(ty: &TypeExpr) -> bool {
+    let members: &[TypeExpr] = match ty {
+        TypeExpr::Union(members) => members,
+        other => std::slice::from_ref(other),
+    };
+    members
+        .iter()
+        .any(|member| matches!(member, TypeExpr::Object(_) | TypeExpr::Array { .. }))
 }
 
 /// The literals at `ty`'s top level: itself, or the members of the union
@@ -619,6 +819,8 @@ pub(super) struct DeclarationArrayFrame<'a> {
     array: &'a oxc_ast::ast::ArrayExpression<'a>,
     next: usize,
     element_types: Vec<TypeExpr>,
+    /// The positions the elements nest, at the element type.
+    deferred: Vec<Deferred>,
     /// Whether the part asked for is a spread's source.
     awaiting: Option<bool>,
 }
@@ -635,11 +837,11 @@ impl<'a> Frame<'a> for DeclarationArrayFrame<'a> {
         budget: &mut InferenceState,
     ) -> InferenceResult<Step<'a>> {
         if let Some(delivered) = delivered {
-            let ty = delivered.into_type();
+            let element = delivered.into_typed();
             if self.awaiting.take() == Some(true) {
-                spread_element_types(&mut self.element_types, &ty);
+                spread_element_types(&mut self.element_types, &element.into_resolved());
             } else {
-                append_union_members(&mut self.element_types, ty);
+                add_element(&mut self.element_types, &mut self.deferred, element);
             }
         }
         while let Some(element) = self.array.elements.get(self.next) {
@@ -671,11 +873,26 @@ impl<'a> Frame<'a> for DeclarationArrayFrame<'a> {
                 }
             }
         }
-        Ok(Step::Done(Value::Type(element_union_array(
-            std::mem::take(&mut self.element_types),
-            budget,
-        ))))
+        Ok(Step::Done(Value::Typed(Typed {
+            nested: std::mem::take(&mut self.deferred),
+            ..Typed::plain(element_union_array(
+                std::mem::take(&mut self.element_types),
+                budget,
+            ))
+        })))
     }
+}
+
+/// Add an array literal element's type to the element union, and the
+/// positions it nests to the element type's: each element is a position of
+/// its own, closed before the elements join.
+fn add_element(
+    element_types: &mut Vec<TypeExpr>,
+    deferred: &mut Vec<Deferred>,
+    mut element: Typed,
+) {
+    deferred.extend(element.nested_under(&DeclaredReadStep::Element));
+    append_union_members(element_types, element.ty);
 }
 
 /// A spread's source contributes its element types (array / tuple /
@@ -722,6 +939,8 @@ pub(super) struct ValueArrayFrame<'a> {
     next: usize,
     tuple_elements: Vec<TupleElement>,
     element_types: Vec<TypeExpr>,
+    /// The positions the elements nest, at the element type.
+    deferred: Vec<Deferred>,
     /// Whether the part asked for is a spread's source.
     awaiting: Option<bool>,
 }
@@ -748,6 +967,7 @@ impl<'a> ValueArrayFrame<'a> {
             next: 0,
             tuple_elements: Vec::new(),
             element_types: Vec::new(),
+            deferred: Vec::new(),
             awaiting: None,
         }
     }
@@ -789,11 +1009,11 @@ impl<'a> Frame<'a> for ValueArrayFrame<'a> {
             })));
         }
         if let Some(delivered) = delivered {
-            let ty = delivered.into_position_type(budget);
+            let element = delivered.into_typed().into_position(budget);
             if self.awaiting.take() == Some(true) {
-                spread_element_types(&mut self.element_types, &ty);
+                spread_element_types(&mut self.element_types, &element.into_resolved());
             } else {
-                append_union_members(&mut self.element_types, ty);
+                add_element(&mut self.element_types, &mut self.deferred, element);
             }
         }
         // `strictNullChecks` off: a bare nullish element adds nothing to
@@ -827,10 +1047,13 @@ impl<'a> Frame<'a> for ValueArrayFrame<'a> {
                 }
             }
         }
-        Ok(Step::Done(Value::Type(element_union_array(
-            std::mem::take(&mut self.element_types),
-            budget,
-        ))))
+        Ok(Step::Done(Value::Typed(Typed {
+            nested: std::mem::take(&mut self.deferred),
+            ..Typed::plain(element_union_array(
+                std::mem::take(&mut self.element_types),
+                budget,
+            ))
+        })))
     }
 }
 
@@ -935,6 +1158,11 @@ pub(super) struct ObjectFrame<'a> {
     as_type: bool,
     next: usize,
     members: Vec<ObjectMember>,
+    /// The positions the members nest, by the member's key.
+    deferred: Vec<Deferred>,
+    /// Whether a spread contributes members: a later reader then addresses
+    /// no member by its key.
+    spread: bool,
     awaiting: Option<ObjectAwait<'a>>,
 }
 
@@ -950,6 +1178,8 @@ impl<'a> ObjectFrame<'a> {
             as_type,
             next: 0,
             members: Vec::new(),
+            deferred: Vec::new(),
+            spread: false,
             awaiting: None,
         }
     }
@@ -1059,15 +1289,28 @@ impl<'a> Frame<'a> for ObjectFrame<'a> {
                     key,
                     property,
                     readonly,
-                } => data_member(
-                    key,
-                    property,
-                    delivered.into_position_type(budget),
-                    readonly,
-                ),
-                ObjectAwait::Spread => ObjectMember::Spread(verter_type_expr::SpreadMember::new(
-                    delivered.into_position_type(budget),
-                )),
+                } => {
+                    let mut value = delivered.into_typed().into_position(budget);
+                    let ty = match key.cloned_known() {
+                        Some(known) => {
+                            // A later member of the same key is the one the
+                            // object holds.
+                            let step = DeclaredReadStep::Member(known);
+                            self.deferred
+                                .retain(|deferred| deferred.path.first() != Some(&step));
+                            self.deferred.extend(value.nested_under(&step));
+                            value.ty
+                        }
+                        None => value.into_resolved(),
+                    };
+                    data_member(key, property, ty, readonly)
+                }
+                ObjectAwait::Spread => {
+                    self.spread = true;
+                    ObjectMember::Spread(verter_type_expr::SpreadMember::new(
+                        delivered.into_position_type(budget),
+                    ))
+                }
             };
             self.members.push(member);
         }
@@ -1139,13 +1382,25 @@ impl<'a> Frame<'a> for ObjectFrame<'a> {
                 }
             }
         }
-        let object = ObjectExpr {
+        let object = TypeExpr::Object(Arc::new(ObjectExpr {
             properties: std::mem::take(&mut self.members),
+        }));
+        let typed = Typed {
+            nested: std::mem::take(&mut self.deferred),
+            ..Typed::plain(object)
         };
-        Ok(Step::Done(if self.as_type {
-            Value::Type(TypeExpr::Object(Arc::new(object)))
+        Ok(Step::Done(if self.as_type && !self.spread {
+            Value::Typed(typed)
         } else {
-            Value::Object(object)
+            let resolved = typed.into_resolved();
+            if self.as_type {
+                Value::Type(resolved)
+            } else {
+                let TypeExpr::Object(object) = &resolved else {
+                    unreachable!("an object literal's type is an object")
+                };
+                Value::Object(ObjectExpr::clone(object))
+            }
         }))
     }
 }

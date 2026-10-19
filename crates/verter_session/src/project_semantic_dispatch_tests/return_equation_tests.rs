@@ -211,6 +211,7 @@ fn flow_call_expression_records_a_resolve_call_hold() {
     let expression = IndexedValueExpression::Call(IndexedValueCall {
         point: 17,
         report_point: 17,
+        report_end: 17,
         kind: IndexedValueCallKind::Call,
         callee: Box::new(IndexedValueExpression::Value(
             verter_type_expr::TypeExpr::Primitive(PrimitiveName::Any),
