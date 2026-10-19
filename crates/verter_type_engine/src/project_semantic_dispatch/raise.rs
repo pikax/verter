@@ -52,7 +52,7 @@ pub use openness::{
     ENUMERATION_DOMAIN_OPENNESS_NODE_BUDGET,
 };
 pub(in crate::project_semantic_dispatch) use openness::{
-    deref_slot_body, is_l1_object_filter_utility,
+    deref_slot_body, is_l1_object_filter_utility, ClosednessChain, ClosednessProofTable,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use shape_engine::folded_nodes_for_tests;

@@ -8783,6 +8783,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             super::dispatch_txn::FlowMemberReuse,
         )>,
     ) {
+        let Some(recording) = self.begin_transaction_read() else {
+            return (read(), None);
+        };
+        let value = read();
+        let complete = complete(&value);
+        let recorded = recording.finish(self, complete);
+        (value, recorded)
+    }
+
+    /// Begin recording a transaction read whose work does not run inside one
+    /// closure (the explicit-stack form of [`Self::record_transaction_read`]):
+    /// every channel the reads in between reach is recorded until
+    /// [`TransactionReadRecording::finish`]. `None` when the read could not
+    /// be replayed — no live tracer, no live build-local frame, or a
+    /// cold-compute completeness already partial. Recordings nest, and each
+    /// finishes before the one begun before it.
+    pub(super) fn begin_transaction_read(&self) -> Option<TransactionReadRecording<'_>> {
         // A recording is only replayable when every channel an enclosing
         // build observes is observable here: a live tracer, a live
         // build-local frame and a cold-compute completeness that can show
@@ -8794,41 +8811,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             && !(completeness_scope_active
                 && crate::request_context::current_cold_compute_completeness().is_partial());
         if !recordable {
-            return (read(), None);
+            return None;
         }
         let private_completeness = (!completeness_scope_active)
             .then(crate::request_context::ColdComputeCompletenessScope::enter);
         let evidence_epoch = self.canonical_evidence_epoch.get();
         let frame = super::BuildLocalTaintGuard::push(&self.build_local_taint);
         let refusals = crate::fact_tracing::RefusalObservationScope::enter();
-        let (value, reads) = crate::resolver_core::resolver_context::record_fact_reads(read);
-        let refused = refusals.observed();
-        drop(refusals);
-        let observed = frame.finish();
-        let folded_partial =
-            crate::request_context::current_cold_compute_completeness().is_partial();
-        if let Some(scope) = private_completeness {
-            scope.discard();
-        }
-        self.fold_observed_frame_into_top(&observed);
-        let refusal = match refused {
-            Some(reason) => verter_session_query::facts::reuse::ObservedRefusal::Typed(reason),
-            None if reads.non_cacheable || observed.cache_suppress => {
-                verter_session_query::facts::reuse::ObservedRefusal::Unattributed
-            }
-            None => verter_session_query::facts::reuse::ObservedRefusal::None,
-        };
-        let complete = !observed.result_is_partial && !folded_partial && complete(&value);
-        let reuse = verter_session_query::facts::reuse::classify_reuse(refusal, complete);
-        if !reuse.is_request_reusable() {
-            return (value, None);
-        }
-        let replay = super::dispatch_txn::FlowMemberReuse {
+        let reads = crate::resolver_core::resolver_context::FactReadRecording::begin();
+        Some(TransactionReadRecording {
             reads,
-            observed_self_roots: observed.observed_self_roots,
-            canonical_evidence_deposited: self.canonical_evidence_epoch.get() != evidence_epoch,
-        };
-        (value, Some((reuse, replay)))
+            refusals,
+            frame,
+            private_completeness,
+            evidence_epoch,
+        })
     }
 
     /// Replay a read [`Self::record_transaction_read`] recorded into the
@@ -20512,4 +20509,68 @@ pub fn index_key_probes_for_tests() -> usize {
 struct ClauseBaseSubstitution<'n> {
     names: Vec<&'n str>,
     bases: Vec<SemanticNodeId>,
+}
+
+/// A transaction read being recorded across the steps of its work
+/// ([`ProjectSemanticDispatch::begin_transaction_read`]). Dropped unfinished
+/// — an unwind — it uninstalls every scope it installed and records nothing.
+pub(super) struct TransactionReadRecording<'g> {
+    // Uninstalled innermost first: the recorder, then the refusal scope,
+    // the build-local frame and the private completeness scope.
+    reads: crate::resolver_core::resolver_context::FactReadRecording,
+    refusals: crate::fact_tracing::RefusalObservationScope,
+    frame: super::BuildLocalTaintGuard<'g>,
+    private_completeness: Option<crate::request_context::ColdComputeCompletenessScope>,
+    evidence_epoch: u64,
+}
+
+impl TransactionReadRecording<'_> {
+    /// End the recording: fold what it observed into the enclosing build,
+    /// and return what reusing the read must replay — `None` when it is not
+    /// reusable (it was partial, `complete` is false, or its refusal is not
+    /// one a later reader of this transaction may share).
+    pub(super) fn finish<C: crate::resolver_core::ResolverCapabilities>(
+        self,
+        dispatch: &ProjectSemanticDispatch<'_, C>,
+        complete: bool,
+    ) -> Option<(
+        verter_session_query::facts::reuse::ReuseClass,
+        super::dispatch_txn::FlowMemberReuse,
+    )> {
+        let Self {
+            reads,
+            refusals,
+            frame,
+            private_completeness,
+            evidence_epoch,
+        } = self;
+        let reads = reads.finish();
+        let refused = refusals.observed();
+        drop(refusals);
+        let observed = frame.finish();
+        let folded_partial =
+            crate::request_context::current_cold_compute_completeness().is_partial();
+        if let Some(scope) = private_completeness {
+            scope.discard();
+        }
+        dispatch.fold_observed_frame_into_top(&observed);
+        let refusal = match refused {
+            Some(reason) => verter_session_query::facts::reuse::ObservedRefusal::Typed(reason),
+            None if reads.non_cacheable || observed.cache_suppress => {
+                verter_session_query::facts::reuse::ObservedRefusal::Unattributed
+            }
+            None => verter_session_query::facts::reuse::ObservedRefusal::None,
+        };
+        let complete = !observed.result_is_partial && !folded_partial && complete;
+        let reuse = verter_session_query::facts::reuse::classify_reuse(refusal, complete);
+        if !reuse.is_request_reusable() {
+            return None;
+        }
+        let replay = super::dispatch_txn::FlowMemberReuse {
+            reads,
+            observed_self_roots: observed.observed_self_roots,
+            canonical_evidence_deposited: dispatch.canonical_evidence_epoch.get() != evidence_epoch,
+        };
+        Some((reuse, replay))
+    }
 }

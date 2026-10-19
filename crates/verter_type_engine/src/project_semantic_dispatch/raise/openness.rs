@@ -11,6 +11,18 @@
 //! with the depth of an alias chain, a nest of mapped types or of
 //! instantiation arguments, or a mix of them.
 //!
+//! A few leaves read through a dispatcher query instead — a conditional's
+//! decision, a carrier head's resolution, an escape's lowering and the
+//! one-hop reduction behind a builtin the registry rule cannot prove
+//! closed — and that query may ask a gate here again, opening a nested
+//! evaluation inside the step. Such a nested evaluation re-derives nothing
+//! an evaluation of this transaction already proved: every declaration and
+//! instantiation proof that completes is kept on the dispatch transaction
+//! ([`ClosednessProofTable`]) and answers each later demand, and the query
+//! the leaf issued is itself memoized by the dispatcher. A deep chain
+//! therefore nests no deeper than the novelty of the questions it asks,
+//! never one evaluation per hop.
+//!
 //! The semantic limits are deliberate and typed:
 //!
 //! - one work budget ([`ENUMERATION_DOMAIN_OPENNESS_NODE_BUDGET`] per
@@ -19,16 +31,24 @@
 //!   undecidable — OPEN for a key-domain question, CLOSED for the
 //!   outer-generic question, `Unavailable` for a closedness proof — and the
 //!   budget is deterministic, so the same inputs refuse the same way cold
-//!   and warm;
+//!   and warm: a reused proof charges the evaluation what it charged when
+//!   it ran;
 //! - a declaration already being proven on this dispatcher's chain is a
 //!   refused cycle (`Unavailable`), never a proof;
-//! - no verdict outlives its evaluation: each one re-derives from the live
-//!   facts it roots on the active fact tracer.
+//! - a proof is reused only where running it again would answer the same:
+//!   one that met a context-dependent refusal (an exhausted budget, an
+//!   unfinished or cancelled dispatcher read, a carrier being normalized
+//!   below it, a non-cacheable read) is never kept, one whose cycle refusal
+//!   names a proof below it is reused only while that proof is in flight
+//!   ([`ClosednessChain`]), and a reuse replays the fact reads the proof
+//!   rooted on the active fact tracer, so a warm entry built over it is
+//!   invalidated by the same edits.
 
 use std::rc::Rc;
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use smallvec::SmallVec;
 use verter_retention::heap_size::OwnedValue;
 use verter_session_query::type_solver::prepared::PreparedTypeDecl;
 use verter_type_expr::facts::ClosednessRecipe;
@@ -83,9 +103,10 @@ pub fn userland_instantiation_body_is_closed_object<
 /// unresolved name), a budget exhaustion, or an in-flight cycle refusal is a
 /// REFUSAL to answer, not a proof of openness. Consumers that only need the
 /// carrier-stop direction treat both non-`ProvenClosed` arms identically
-/// (open-OR-UNKNOWN preserves the carrier — the L1 rule), and no verdict is
-/// ever cached across evaluations — each query re-derives it from the live
-/// facts, rooted by `observe_closedness_walk_consult`.
+/// (open-OR-UNKNOWN preserves the carrier — the L1 rule). No verdict outlives
+/// the dispatch transaction, and within it a proof is reused only under the
+/// conditions the module docs state, replaying the facts it rooted through
+/// `observe_closedness_walk_consult`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClosednessVerdict {
     /// The walk PROVED a finite enumerable key domain.
@@ -159,7 +180,7 @@ pub(super) fn observe_closedness_walk_consult<C: crate::resolver_core::ResolverC
 /// even while another (losing) branch contains an open parameter. All
 /// identity is NODE identity (`SemanticNodeId`) — never a borrowed
 /// `TypeExpr` (compile-witnessed by [`key_domain_binding_carries_no_type_expr`]).
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum KeyDomainBinding {
     /// Bound to an argument the walk judged OPEN.
     Open,
@@ -276,7 +297,8 @@ enum OperandPosition {
 /// proof of openness (a free type parameter in a key-reachable position, a
 /// non-enumerable surface). `Unavailable` ⇒ a REFUSAL (missing prepared
 /// decl / fact, unresolved name, genuine cycle, budget exhaustion) — never
-/// collapsed into a proof, never cached.
+/// collapsed into a proof; a refusal that depends on its context is never
+/// reused.
 pub fn prepared_decl_body_is_closed<C: crate::resolver_core::ResolverCapabilities>(
     dispatch: &ProjectSemanticDispatch<'_, C>,
     canonical_id: &str,
@@ -449,10 +471,20 @@ fn lower_body_under_env<C: crate::resolver_core::ResolverCapabilities>(
     body: &TypeExpr,
     env: &FxHashMap<String, SemanticNodeId>,
 ) -> SemanticNodeId {
+    // The lowered nodes are scoped at the content version the body was
+    // read from: a query over them roots on that version, so it is the
+    // same self-root every other read of the file records. A placeholder
+    // version would conflict with it and leave every such query
+    // unadmittable — recomputed by each evaluation that asks it again.
+    let whole_hash = dispatch
+        .ctx
+        .ensure_indexed_ready_serve(prepared.root_identity.canonical_id.as_ref())
+        .map(|serve| serve.indexed.whole_hash)
+        .unwrap_or_default();
     let scope = crate::semantic_query::NodeScopeId::File {
         canonical_id: prepared.root_identity.canonical_id.clone(),
         owner: prepared.root_identity.owner,
-        whole_hash: crate::semantic_query::HashValue::default(),
+        whole_hash,
         local_scope: None,
     };
     let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::empty();
@@ -1114,7 +1146,7 @@ struct Defaults {
 }
 
 /// A suspended question, resumed with the answer of the question it asked.
-enum Frame {
+enum Frame<'a> {
     /// Settle a visited node's verdict into its walk.
     Settle(OpenMemoKey),
     /// Open as soon as one of `children` is; `otherwise` when none is.
@@ -1126,9 +1158,9 @@ enum Frame {
     EndWalk,
     /// A node is open unless the proof it asked for proves it closed.
     NotClosed,
-    /// The answer of the declaration proof whose in-flight entry this frame
-    /// releases.
-    LeaveDecl,
+    /// The answer of the declaration or instantiation proof whose in-flight
+    /// entry this frame releases, and which it records for reuse.
+    LeaveProof(Box<ProofSpan<'a>>),
     /// A recipe escape's classified node: closed, open, or — open with the
     /// budget exhausted — undecided.
     Classified,
@@ -1168,6 +1200,185 @@ enum Frame {
     Defaults(Defaults),
 }
 
+/// One proof in flight on a [`ClosednessChain`].
+#[derive(Debug)]
+struct ChainLink {
+    /// Tells this proof apart from every other one entered at the same
+    /// position of the chain.
+    push: u64,
+    /// The positions below this one whose in-flight cycle refusal the proof
+    /// observed — directly or through a proof it ran or reused.
+    cycle_dependencies: SmallVec<[usize; 2]>,
+}
+
+/// The positions (and pushes) of the in-flight proofs a completed proof's
+/// cycle refusals depended on.
+type CycleDependencies = SmallVec<[(usize, u64); 2]>;
+
+/// The closedness proofs in flight on one dispatcher, innermost last, and
+/// the context-dependent refusals its evaluations have met.
+///
+/// A proof that refuses a back-edge to a proof BELOW it answers for that
+/// context only: run where the lower proof is not in flight, it would not
+/// refuse. The chain records such a dependency on every proof between the
+/// two, so a completed proof is reused only while each proof it depended on
+/// is still in flight at the same position ([`Self::holds`]). A refusal of
+/// the proof itself, or of one entered within it, is its own and reused
+/// freely.
+#[derive(Debug, Default)]
+pub(in crate::project_semantic_dispatch) struct ClosednessChain {
+    active: indexmap::IndexSet<
+        crate::project_semantic_dispatch::InstantiateIdentity,
+        rustc_hash::FxBuildHasher,
+    >,
+    links: Vec<ChainLink>,
+    pushes: u64,
+    /// Refusals that depend on more than a proof's inputs — an exhausted
+    /// budget, an unfinished dispatcher read, a carrier already being
+    /// normalized. A proof during which this moves is never reused.
+    context_refusals: u64,
+}
+
+impl ClosednessChain {
+    /// Enter the proof of `identity`: `false` — and a cycle dependency for
+    /// every proof above the refused one — when it is already in flight.
+    fn enter(&mut self, identity: crate::project_semantic_dispatch::InstantiateIdentity) -> bool {
+        if let Some(position) = self.active.get_index_of(&identity) {
+            let top = self.links.len() - 1;
+            if position < top {
+                insert_dependency(&mut self.links[top].cycle_dependencies, position);
+            }
+            return false;
+        }
+        self.active.insert(identity);
+        self.pushes += 1;
+        self.links.push(ChainLink {
+            push: self.pushes,
+            cycle_dependencies: SmallVec::new(),
+        });
+        true
+    }
+
+    /// Leave the innermost proof: its cycle dependencies, each of which
+    /// below its parent becomes the parent's too.
+    fn leave(&mut self) -> CycleDependencies {
+        self.active.pop();
+        let Some(link) = self.links.pop() else {
+            return CycleDependencies::new();
+        };
+        let parent = self.links.len().checked_sub(1);
+        let mut dependencies = CycleDependencies::new();
+        for position in link.cycle_dependencies {
+            dependencies.push((position, self.links[position].push));
+            if let Some(parent) = parent.filter(|&parent| position < parent) {
+                insert_dependency(&mut self.links[parent].cycle_dependencies, position);
+            }
+        }
+        dependencies
+    }
+
+    /// Whether every proof `dependencies` names is still in flight where it
+    /// was.
+    fn holds(&self, dependencies: &CycleDependencies) -> bool {
+        dependencies.iter().all(|&(position, push)| {
+            self.links
+                .get(position)
+                .is_some_and(|link| link.push == push)
+        })
+    }
+
+    /// A reused proof's cycle dependencies become the innermost proof's.
+    fn observe(&mut self, dependencies: &CycleDependencies) {
+        let Some(top) = self.links.len().checked_sub(1) else {
+            return;
+        };
+        for &(position, _) in dependencies {
+            if position < top {
+                insert_dependency(&mut self.links[top].cycle_dependencies, position);
+            }
+        }
+    }
+}
+
+fn insert_dependency(dependencies: &mut SmallVec<[usize; 2]>, position: usize) {
+    if !dependencies.contains(&position) {
+        dependencies.push(position);
+    }
+}
+
+/// The question a completed closedness proof answers.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ClosednessProofKey {
+    Decl(crate::project_semantic_dispatch::InstantiateIdentity),
+    Instantiation(
+        crate::project_semantic_dispatch::InstantiateIdentity,
+        Arc<[KeyDomainBinding]>,
+    ),
+}
+
+/// A closedness proof completed on the dispatch transaction: its verdict,
+/// the work it charged, what it depended on, and what reusing it replays.
+#[derive(Debug)]
+struct CompletedProof {
+    verdict: ClosednessVerdict,
+    /// The budget the proof charged its evaluation; a reuse charges the
+    /// same, so an evaluation refuses for budget exactly where running the
+    /// proof again would.
+    cost: u32,
+    cycle_dependencies: CycleDependencies,
+    /// A canonical names no content version: the proof answers only under
+    /// the edit clocks it ran under.
+    served_at: crate::project_semantic_dispatch::WorkspaceEdit,
+    reuse: verter_session_query::facts::reuse::ReuseClass,
+    replay: crate::project_semantic_dispatch::dispatch_txn::FlowMemberReuse,
+}
+
+/// The closedness proofs completed on one dispatch transaction — the reuse
+/// that keeps a proof from being re-derived by every evaluation a dispatcher
+/// query re-enters. Only a proof that met no context-dependent refusal and
+/// whose reads an enclosing build could observe enters; nothing is evicted.
+#[derive(Default)]
+pub(in crate::project_semantic_dispatch) struct ClosednessProofTable {
+    proofs: FxHashMap<ClosednessProofKey, Arc<CompletedProof>>,
+}
+
+impl std::fmt::Debug for ClosednessProofTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClosednessProofTable")
+            .field("proofs", &self.proofs.len())
+            .finish()
+    }
+}
+
+impl ClosednessProofTable {
+    fn get(
+        &self,
+        key: &ClosednessProofKey,
+        at: crate::project_semantic_dispatch::WorkspaceEdit,
+    ) -> Option<Arc<CompletedProof>> {
+        self.proofs
+            .get(key)
+            .filter(|proof| proof.served_at == at)
+            .cloned()
+    }
+
+    fn complete(&mut self, key: ClosednessProofKey, proof: CompletedProof) {
+        if proof.reuse.is_request_reusable() {
+            self.proofs.insert(key, Arc::new(proof));
+        }
+    }
+}
+
+/// A closedness proof being evaluated: what [`Frame::LeaveProof`] needs to
+/// record it when it answers.
+struct ProofSpan<'a> {
+    key: ClosednessProofKey,
+    recording: Option<crate::project_semantic_dispatch::build::TransactionReadRecording<'a>>,
+    budget: u32,
+    context_refusals: u64,
+    served_at: crate::project_semantic_dispatch::WorkspaceEdit,
+}
+
 /// The openness / closedness machine described in the module docs.
 ///
 /// A question either answers at once or pushes the [`Frame`] that resumes
@@ -1187,18 +1398,19 @@ struct Openness<'a, C: crate::resolver_core::ResolverCapabilities> {
     /// The work budget every walk and proof of this evaluation charges.
     budget: u32,
     walks: Vec<OpenWalk>,
-    frames: Vec<Frame>,
+    frames: Vec<Frame<'a>>,
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> Drop for Openness<'_, C> {
     /// An evaluation abandoned mid-proof (an unwinding panic) releases the
-    /// dispatch-wide in-flight entries its frames still hold, so the
-    /// dispatcher's cycle guard never refuses a declaration no proof is
-    /// evaluating.
+    /// dispatch-wide in-flight entries its frames still hold, innermost
+    /// first, so the dispatcher's cycle guard never refuses a declaration no
+    /// proof is evaluating; the abandoned proofs record nothing.
     fn drop(&mut self) {
-        for frame in self.frames.drain(..) {
-            if matches!(frame, Frame::LeaveDecl) {
-                self.dispatch.pop_closedness_active();
+        while let Some(frame) = self.frames.pop() {
+            if let Frame::LeaveProof(span) = frame {
+                self.dispatch.closedness.borrow_mut().leave();
+                drop(span);
             }
         }
     }
@@ -1240,13 +1452,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> Openness<'a, C> {
         }
     }
 
-    /// Charge one unit of work; `false` when the budget is spent.
+    /// Charge one unit of work; `false` when the budget is spent — a
+    /// refusal of this evaluation's own, under which no proof in flight is
+    /// recorded for reuse.
     fn charge(&mut self) -> bool {
         if self.budget == 0 {
+            self.context_refusal();
             return false;
         }
         self.budget -= 1;
         true
+    }
+
+    /// Record a refusal that depends on more than the inputs of the proofs
+    /// in flight, so none of them is recorded for reuse.
+    fn context_refusal(&self) {
+        self.dispatch.closedness.borrow_mut().context_refusals += 1;
     }
 
     fn current(&mut self) -> &mut OpenWalk {
@@ -1279,44 +1500,134 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> Openness<'a, C> {
                 owner,
                 name,
             } => {
-                // DISPATCH-WIDE in-flight cycle guard, NOT a permanent visited
-                // set: the entry leaves with the proof's answer, so two
-                // SIBLING references to the same decl (a diamond — `Foo & Bar`
-                // both reaching `Shared`) are each judged on their merits;
-                // only a genuine back-edge on the current closedness chain
-                // (true recursion — including one that round-trips through a
-                // recipe escape's lowering and a key-domain gate's fresh walk)
-                // refuses — UNAVAILABLE, not a proof of openness.
-                if !self.dispatch.push_closedness_active((
-                    canonical_id.clone(),
-                    owner,
-                    name.clone(),
-                )) {
-                    return Flow::verdict(ClosednessVerdict::Unavailable);
+                let identity = (canonical_id.clone(), owner, name.clone());
+                if let Some(answer) = self.enter_proof(ClosednessProofKey::Decl(identity)) {
+                    return answer;
                 }
-                self.frames.push(Frame::LeaveDecl);
                 self.decl(&canonical_id, owner, &name)
             }
             Ask::Instantiation { base, args } => {
-                // DISPATCH-WIDE in-flight guard (shared with the bare-decl
-                // route): a KEY-reachable self-instantiation — including one
-                // round-tripping through a recipe escape's lowering — is a
-                // genuine recursion; refuse.
-                if !self.dispatch.push_closedness_active((
+                let identity = (
                     base.canonical_id.clone(),
                     base.owner,
                     base.decl_name.clone(),
-                )) {
-                    return Flow::verdict(ClosednessVerdict::Unavailable);
+                );
+                let key = ClosednessProofKey::Instantiation(identity, Arc::from(args.as_slice()));
+                if let Some(answer) = self.enter_proof(key) {
+                    return answer;
                 }
-                self.frames.push(Frame::LeaveDecl);
                 self.instantiation(base, args)
             }
             Ask::Recipes { env, recipes } => self.recipes(env, recipes, 0),
         }
     }
 
-    fn resume(&mut self, frame: Frame, answer: Answer) -> Flow {
+    /// Enter the proof `key` names: its refusal when it is already in
+    /// flight, its reused verdict when this transaction completed it, or —
+    /// `None` — the frame that records it once it answers.
+    ///
+    /// The in-flight set is the DISPATCH-WIDE cycle guard, NOT a permanent
+    /// visited set: the entry leaves with the proof's answer, so two SIBLING
+    /// references to the same declaration (a diamond — `Foo & Bar` both
+    /// reaching `Shared`) are each judged on their merits; only a genuine
+    /// back-edge on the current closedness chain (true recursion, including
+    /// one that round-trips through a recipe escape's lowering and a gate a
+    /// dispatcher query re-enters) refuses — UNAVAILABLE, not a proof of
+    /// openness. An instantiation shares its declaration's entry: a
+    /// key-reachable self-instantiation is a genuine recursion.
+    ///
+    /// A completed proof is reused only where running it again would answer
+    /// the same: under the edit clocks it ran under, while every in-flight
+    /// proof its cycle refusals depended on still is, and with the budget to
+    /// pay what it charged. Reusing it replays its reads into the live
+    /// scopes and its cycle dependencies into the proof in flight, exactly
+    /// as running it would.
+    fn enter_proof(&mut self, key: ClosednessProofKey) -> Option<Flow> {
+        let identity = match &key {
+            ClosednessProofKey::Decl(identity) | ClosednessProofKey::Instantiation(identity, _) => {
+                identity.clone()
+            }
+        };
+        if !self.dispatch.closedness.borrow_mut().enter(identity) {
+            return Some(Flow::verdict(ClosednessVerdict::Unavailable));
+        }
+        let served_at = self.dispatch.workspace_edit();
+        let completed = self
+            .dispatch
+            .dispatch_txn
+            .borrow()
+            .closedness_proofs
+            .get(&key, served_at)
+            .filter(|proof| {
+                proof.cost <= self.budget
+                    && self
+                        .dispatch
+                        .closedness
+                        .borrow()
+                        .holds(&proof.cycle_dependencies)
+            });
+        if let Some(proof) = completed {
+            self.dispatch.closedness.borrow_mut().leave();
+            self.budget -= proof.cost;
+            self.dispatch
+                .replay_transaction_read(&proof.reuse, &proof.replay);
+            self.dispatch
+                .closedness
+                .borrow_mut()
+                .observe(&proof.cycle_dependencies);
+            return Some(Flow::verdict(proof.verdict));
+        }
+        let span = ProofSpan {
+            key,
+            recording: self.dispatch.begin_transaction_read(),
+            budget: self.budget,
+            context_refusals: self.dispatch.closedness.borrow().context_refusals,
+            served_at,
+        };
+        self.frames.push(Frame::LeaveProof(Box::new(span)));
+        None
+    }
+
+    /// Leave the proof `span` records, which answered `verdict`, and record
+    /// it for reuse when nothing but its inputs decided it: no
+    /// context-dependent refusal, cancellation or edit while it ran, and
+    /// reads an enclosing build observes completely.
+    fn leave_proof(&mut self, span: ProofSpan<'a>, verdict: ClosednessVerdict) {
+        let cycle_dependencies = self.dispatch.closedness.borrow_mut().leave();
+        let ProofSpan {
+            key,
+            recording,
+            budget,
+            context_refusals,
+            served_at,
+        } = span;
+        let Some(recording) = recording else {
+            return;
+        };
+        let undisturbed = self.dispatch.closedness.borrow().context_refusals == context_refusals
+            && !self.dispatch.cancellation.is_cancelled()
+            && self.dispatch.workspace_edit() == served_at;
+        let Some((reuse, replay)) = recording.finish(self.dispatch, undisturbed) else {
+            return;
+        };
+        self.dispatch
+            .dispatch_txn
+            .borrow_mut()
+            .closedness_proofs
+            .complete(
+                key,
+                CompletedProof {
+                    verdict,
+                    cost: budget - self.budget,
+                    cycle_dependencies,
+                    served_at,
+                    reuse,
+                    replay,
+                },
+            );
+    }
+
+    fn resume(&mut self, frame: Frame<'a>, answer: Answer) -> Flow {
         match frame {
             Frame::Settle(key) => {
                 let open = answer.open();
@@ -1339,8 +1650,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> Openness<'a, C> {
                 Flow::Answer(answer)
             }
             Frame::NotClosed => Flow::open(!answer.verdict().is_closed()),
-            Frame::LeaveDecl => {
-                self.dispatch.pop_closedness_active();
+            Frame::LeaveProof(span) => {
+                self.leave_proof(*span, answer.verdict());
                 Flow::Answer(answer)
             }
             Frame::Classified => {
@@ -1892,16 +2203,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> Openness<'a, C> {
         // the check/extends operands terminates bounded instead of
         // diverging.
         let dispatch = self.dispatch;
-        if let Some(
-            crate::project_semantic_dispatch::conditional_decision::ConditionalReading::Reduced(
-                selected,
-            ),
-        ) = dispatch.probe_optional(|| {
+        match dispatch.probe_optional(|| {
             crate::project_semantic_dispatch::conditional_decision::exact_reading(
                 dispatch.conditional_outcome(node),
             )
         }) {
-            return Flow::visit(selected, position);
+            Some(
+                crate::project_semantic_dispatch::conditional_decision::ConditionalReading::Reduced(
+                    selected,
+                ),
+            ) => return Flow::visit(selected, position),
+            Some(_) => {}
+            // An unfinished or aborted decision is the context's, not the
+            // conditional's: classified whole here, it is no proof to reuse.
+            None => self.context_refusal(),
         }
         self.frames.push(Frame::Conditional {
             data,
@@ -2085,11 +2400,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> Openness<'a, C> {
             // KEY-DOMAIN question: all-closed arguments are a CONCRETE
             // surface only when the base actually resolves (prepared decl /
             // registry builtin); an unresolvable base is undecidable ⇒ open.
-            return Flow::open(!instantiation_base_is_resolvable(
-                self.dispatch.ctx,
-                base,
-                &mut self.budget,
-            ));
+            let ctx = self.dispatch.ctx;
+            return Flow::open(!instantiation_base_is_resolvable(ctx, base, &mut || {
+                self.charge()
+            }));
         }
         if !role.per_argument_key_domain() {
             // The outer-generic-reachability question asks only "does an
@@ -2182,6 +2496,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> Openness<'a, C> {
                 )
                 .into_complete_node()
         }) else {
+            // A partial demand (a cycle, a connected limit, a fault, a
+            // cancellation) answers OPEN for this context only.
+            self.context_refusal();
             return Flow::open(true);
         };
         if reduced == node {
@@ -2192,6 +2509,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> Openness<'a, C> {
 
     /// Resolve an unresolved carrier's head and judge what it names.
     fn carrier_head(&mut self, node: SemanticNodeId, position: OperandPosition) -> Flow {
+        if self.dispatch.carrier_normalizing.borrow().contains(&node) {
+            // The carrier is being normalized below this evaluation: its
+            // head resolution answers the carrier itself, for this context
+            // only.
+            self.context_refusal();
+        }
         let resolved = self
             .dispatch
             .resolve_carrier_subject_node(node, ProjectionReductionContext::structural_transit());
@@ -2600,7 +2923,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> Openness<'a, C> {
 fn instantiation_base_is_resolvable<C: crate::resolver_core::ResolverCapabilities>(
     ctx: &dyn crate::resolver_core::ResolverContext<C>,
     base: &crate::semantic_query::DeclIdentity,
-    budget: &mut u32,
+    charge: &mut dyn FnMut() -> bool,
 ) -> bool {
     if base.canonical_id.as_ref() == "__builtin__" {
         return verter_session_query::type_solver::builtin::BuiltinUtility::from_name(
@@ -2608,10 +2931,9 @@ fn instantiation_base_is_resolvable<C: crate::resolver_core::ResolverCapabilitie
         )
         .is_some();
     }
-    if *budget == 0 {
+    if !charge() {
         return false;
     }
-    *budget -= 1;
     observe_closedness_walk_consult(ctx, base.canonical_id.as_ref());
     if ctx
         .prepared_type_decl_return_only(
@@ -2645,4 +2967,72 @@ fn instantiation_base_is_resolvable<C: crate::resolver_core::ResolverCapabilitie
         }
     }
     false
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use super::{ClosednessChain, CycleDependencies};
+
+    fn proof(name: &str) -> crate::project_semantic_dispatch::InstantiateIdentity {
+        (
+            verter_type_expr::OwnedStr::from("/chain.ts"),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            verter_type_expr::OwnedStr::from(name),
+        )
+    }
+
+    fn positions(dependencies: &CycleDependencies) -> Vec<usize> {
+        dependencies.iter().map(|&(position, _)| position).collect()
+    }
+
+    #[test]
+    fn a_refusal_of_a_lower_proof_binds_every_proof_above_it_to_that_proof() {
+        let mut chain = ClosednessChain::default();
+        assert!(chain.enter(proof("A")));
+        assert!(chain.enter(proof("B")));
+        assert!(chain.enter(proof("C")));
+        assert!(!chain.enter(proof("A")), "A is in flight: a cycle refusal");
+        let c = chain.leave();
+        assert_eq!(positions(&c), [0], "C refused A, below it");
+        assert!(chain.holds(&c));
+        let b = chain.leave();
+        assert_eq!(positions(&b), [0], "B ran C, so it depends on A too");
+        let a = chain.leave();
+        assert!(a.is_empty(), "a refusal of A itself is A's own");
+        assert!(
+            !chain.holds(&c),
+            "with A gone, C's refusal no longer applies"
+        );
+        assert!(chain.enter(proof("A")));
+        assert!(
+            !chain.holds(&c),
+            "a proof of A entered again is not the one C refused"
+        );
+    }
+
+    #[test]
+    fn a_refusal_of_the_innermost_proof_is_its_own() {
+        let mut chain = ClosednessChain::default();
+        assert!(chain.enter(proof("A")));
+        assert!(chain.enter(proof("B")));
+        assert!(!chain.enter(proof("B")));
+        assert!(chain.leave().is_empty(), "B refused itself");
+        assert!(chain.leave().is_empty());
+    }
+
+    #[test]
+    fn a_reused_proof_binds_the_proof_reusing_it_to_what_it_depended_on() {
+        let mut chain = ClosednessChain::default();
+        assert!(chain.enter(proof("A")));
+        assert!(chain.enter(proof("B")));
+        assert!(!chain.enter(proof("A")));
+        let b = chain.leave();
+        assert!(chain.enter(proof("C")));
+        chain.observe(&b);
+        assert_eq!(
+            positions(&chain.leave()),
+            [0],
+            "C reused B, which refused A: C is A's context's too"
+        );
+    }
 }

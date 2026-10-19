@@ -445,22 +445,17 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// the active-instantiation back-edge are the PRIMARY termination mechanism,
     /// this is only the pre-memo guard). NOT an arbitrary depth budget.
     pub(super) carrier_normalizing: std::cell::RefCell<smallvec::SmallVec<[SemanticNodeId; 8]>>,
-    /// In-flight KEY-DOMAIN closedness decl evaluations rooted at this
-    /// dispatcher — the DISPATCH-WIDE cycle guard of the fact-native
-    /// closedness evaluator (`raise::prepared_decl_body_is_closed` /
-    /// `raise::prepared_instantiation_key_domain_is_closed`). The recipe
-    /// escapes shallow-lower authored positions, and a lowering-time
-    /// execution (a literal indexed access, a decidable conditional) can
-    /// consult the enumeration/mapped key-domain gates, whose evaluations
-    /// re-enter the closedness evaluator with FRESH budgets — a per-chain
-    /// visited set cannot see across that re-entry, so a genuinely recursive
-    /// decl would recurse without bound. A back-edge on THIS dispatch-wide
-    /// in-flight set refuses (`Unavailable` — never a proof), while sibling
-    /// diamonds stay fine (entries pop on exit). Insertion-ordered with
-    /// constant-time membership, so a chain of any depth checks each hop at
-    /// constant cost.
-    pub(super) closedness_active:
-        std::cell::RefCell<indexmap::IndexSet<InstantiateIdentity, rustc_hash::FxBuildHasher>>,
+    /// The KEY-DOMAIN closedness proofs in flight on this dispatcher — the
+    /// DISPATCH-WIDE cycle guard of the fact-native closedness evaluator
+    /// (`raise::prepared_decl_body_is_closed` /
+    /// `raise::prepared_instantiation_key_domain_is_closed`), shared by every
+    /// evaluation the dispatcher runs, including one a dispatcher query
+    /// re-enters from inside another's step. A back-edge on it refuses
+    /// (`Unavailable` — never a proof), while sibling diamonds stay fine
+    /// (entries pop on exit); the chain also records which in-flight proofs
+    /// each refusal depended on, so a completed proof is reused only while
+    /// those proofs are still in flight (see `raise::ClosednessChain`).
+    closedness: std::cell::RefCell<raise::ClosednessChain>,
     /// The binder-aware free-type-variable summary of every node a
     /// conditional decision or relation asked about, kept for this
     /// dispatcher's lifetime ([`conditional_decision::FreeTypeVariables`]).
@@ -1095,7 +1090,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             instantiate_active: std::cell::RefCell::new(ActiveInstantiations::default()),
             awaited_active: std::cell::RefCell::new(build::AwaitedPath::default()),
             carrier_normalizing: std::cell::RefCell::new(smallvec::SmallVec::new()),
-            closedness_active: std::cell::RefCell::new(indexmap::IndexSet::default()),
+            closedness: std::cell::RefCell::default(),
             free_type_variables: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             heritage_ancestry: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             build_local_taint: std::cell::RefCell::new(smallvec::SmallVec::new()),
@@ -1162,7 +1157,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             instantiate_active,
             awaited_active,
             carrier_normalizing,
-            closedness_active,
+            closedness,
             free_type_variables,
             heritage_ancestry,
             build_local_taint,
@@ -1193,7 +1188,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         instantiate_active.swap(&other.instantiate_active);
         awaited_active.swap(&other.awaited_active);
         carrier_normalizing.swap(&other.carrier_normalizing);
-        closedness_active.swap(&other.closedness_active);
+        closedness.swap(&other.closedness);
         free_type_variables.swap(&other.free_type_variables);
         heritage_ancestry.swap(&other.heritage_ancestry);
         build_local_taint.swap(&other.build_local_taint);
@@ -2897,22 +2892,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// call this after a successful `push_instantiate_active`.
     pub fn pop_instantiate_active(&self) {
         self.instantiate_active.borrow_mut().pop();
-    }
-
-    /// Push `identity` onto the in-flight closedness-evaluation stack.
-    /// Returns `true` when the identity was not already present (caller
-    /// MUST pair with [`Self::pop_closedness_active`]); `false` = a genuine
-    /// back-edge on the current closedness chain — the caller refuses
-    /// (`Unavailable`) and must NOT pop.
-    pub(super) fn push_closedness_active(&self, identity: InstantiateIdentity) -> bool {
-        self.closedness_active.borrow_mut().insert(identity)
-    }
-
-    /// Pop the most-recent in-flight closedness entry. Caller MUST only
-    /// call this after a successful `push_closedness_active`.
-    pub(super) fn pop_closedness_active(&self) {
-        let mut active = self.closedness_active.borrow_mut();
-        active.pop();
     }
 
     /// Check whether `identity` is currently being instantiated on this

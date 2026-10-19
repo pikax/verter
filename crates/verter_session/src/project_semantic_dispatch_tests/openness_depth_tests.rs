@@ -11,9 +11,10 @@ use std::sync::Arc;
 
 use super::carrier_head_resolution_tests::{host, upsert_ts};
 use super::raise::{
-    builtin_lowering_argument_is_open, mapped_type_key_domain_is_open_or_unknown,
+    builtin_lowering_argument_is_open, enable_dispatch_trace_for_test,
+    keys_built_cold_more_than_once, mapped_type_key_domain_is_open_or_unknown,
     prepared_decl_body_is_closed, utility_enumeration_domain_is_open_or_unknown, ClosednessVerdict,
-    ENUMERATION_DOMAIN_OPENNESS_NODE_BUDGET,
+    DISPATCH_TRACE, ENUMERATION_DOMAIN_OPENNESS_NODE_BUDGET,
 };
 use super::ProjectSemanticDispatch;
 use crate::VerterHost;
@@ -317,6 +318,36 @@ fn a_long_alias_chain_decides_on_a_small_stack() {
     });
 }
 
+/// What deciding the head `A0` of one chain cost.
+struct ChainProbe {
+    verdict: ClosednessVerdict,
+    /// The budget the evaluation charged.
+    charged: u32,
+    /// The dispatcher queries entered, the ones nested evaluations issue
+    /// included.
+    dispatches: usize,
+    /// The queries built cold more than once — each a stored answer that
+    /// should have served the repeat.
+    rebuilt: usize,
+}
+
+/// Decide `A0` of `source` on a fresh small-stack thread, whose dispatch
+/// counters start empty.
+fn probe_chain_head(source: String) -> ChainProbe {
+    on_a_small_stack(move || {
+        let host = chain_host(source);
+        let _trace = enable_dispatch_trace_for_test();
+        let mut budget = full_budget();
+        let verdict = decl_closedness(&host, "A0", &mut budget);
+        ChainProbe {
+            verdict,
+            charged: full_budget() - budget,
+            dispatches: DISPATCH_TRACE.with(|trace| trace.borrow().len()),
+            rebuilt: keys_built_cold_more_than_once(),
+        }
+    })
+}
+
 #[test]
 fn mixed_declaration_hops_decide_on_a_small_stack() {
     on_a_small_stack(|| {
@@ -327,13 +358,6 @@ fn mixed_declaration_hops_decide_on_a_small_stack() {
             ClosednessVerdict::ProvenClosed,
             "control: a short alias / Pick / mapped chain onto a closed object proves closed"
         );
-        let shallow_open = chain_host(mixed_chain(6, "() => string"));
-        let mut budget = full_budget();
-        assert_ne!(
-            decl_closedness(&shallow_open, "A0", &mut budget),
-            ClosednessVerdict::ProvenClosed,
-            "control: the short chain onto a function body is not proven closed"
-        );
 
         let deep = chain_host(mixed_chain(DEPTH, "{ a: string; b: number }"));
         let mut budget = full_budget();
@@ -342,15 +366,46 @@ fn mixed_declaration_hops_decide_on_a_small_stack() {
             ClosednessVerdict::ProvenClosed,
             "a {DEPTH}-hop alias / Pick / mapped chain decides as its shallow control does"
         );
-
-        let cyclic = chain_host(mixed_chain(6, "A0"));
-        let mut budget = full_budget();
-        assert_ne!(
-            decl_closedness(&cyclic, "A0", &mut budget),
-            ClosednessVerdict::ProvenClosed,
-            "a mixed chain that closes back onto its head is never proven closed"
-        );
     });
+
+    // An open or cyclic bottom leaves every `Pick` hop unprovable by the
+    // registry rule, so each one also reads the reduced instantiation —
+    // a query that asks the enumeration gate about the rest of the chain
+    // again. The deep chain must still decide as its control does, on the
+    // small stack, with work linear in its hops: no query rebuilt, no
+    // suffix re-derived by each nested evaluation.
+    for (bottom, label) in [("() => string", "a function body"), ("A0", "its own head")] {
+        let control = probe_chain_head(mixed_chain(6, bottom));
+        assert_ne!(
+            control.verdict,
+            ClosednessVerdict::ProvenClosed,
+            "control: the short chain onto {label} is not proven closed"
+        );
+        let deep = probe_chain_head(mixed_chain(DEPTH, bottom));
+        assert_eq!(
+            deep.verdict, control.verdict,
+            "a {DEPTH}-hop mixed chain onto {label} decides as its shallow control does"
+        );
+        assert_eq!(
+            deep.rebuilt, 0,
+            "the {DEPTH}-hop chain onto {label} built {} queries cold more than once",
+            deep.rebuilt
+        );
+        let linear = |control: usize, deep: usize| deep * 6 <= control * DEPTH * 2;
+        assert!(
+            linear(control.charged as usize, deep.charged as usize),
+            "the evaluation's work grows linearly with the hops onto {label}: {} at 6, {} at \
+             {DEPTH}",
+            control.charged,
+            deep.charged
+        );
+        assert!(
+            linear(control.dispatches, deep.dispatches),
+            "the queries the hops onto {label} issue grow linearly: {} at 6, {} at {DEPTH}",
+            control.dispatches,
+            deep.dispatches
+        );
+    }
 }
 
 #[test]
@@ -453,27 +508,114 @@ fn a_budget_refusal_mid_chain_is_unavailable_and_leaves_no_proof_open() {
         assert_eq!(budget, 0, "the refusal is the budget's");
 
         // The refused run left no declaration on the dispatch-wide in-flight
-        // guard: a leaked entry would refuse the retry as a cycle.
+        // guard (a leaked entry would refuse the retry as a cycle), and —
+        // run where a build records its proofs for reuse — kept none of the
+        // proofs the refusal decided, so the retry derives its own.
         let dispatch = ProjectSemanticDispatch::new(closed.as_ref());
-        let mut first = DEPTH as u32;
-        let _ = prepared_decl_body_is_closed(
-            &dispatch,
-            FILE,
-            verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            "A0",
-            &mut first,
-        );
-        let mut retry = full_budget();
-        assert_eq!(
+        let _builder = dispatch.enter_construction_scope();
+        let (refused, _) = in_a_traced_build(&closed, &dispatch, || {
+            let mut first = DEPTH as u32;
+            prepared_decl_body_is_closed(
+                &dispatch,
+                FILE,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "A0",
+                &mut first,
+            )
+        });
+        assert_eq!(refused, ClosednessVerdict::Unavailable);
+        let (retried, _) = in_a_traced_build(&closed, &dispatch, || {
+            let mut retry = full_budget();
             prepared_decl_body_is_closed(
                 &dispatch,
                 FILE,
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 "A0",
                 &mut retry,
-            ),
+            )
+        });
+        assert_eq!(
+            retried,
             ClosednessVerdict::ProvenClosed,
             "the same dispatcher re-derives the proof with a full budget after a refusal"
+        );
+    });
+}
+
+/// Run `probe` where a cold build runs it — under a fact tracer, with a
+/// build-local frame open, the scope a completed proof is recorded in —
+/// and report whether the finalised read set roots the chain's file.
+fn in_a_traced_build<R>(
+    host: &VerterHost,
+    dispatch: &Dispatch<'_>,
+    probe: impl FnOnce() -> R,
+) -> (R, bool) {
+    use verter_session_query::facts::{
+        fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise,
+    };
+    let (value, read_set) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        || {
+            let frame = super::BuildLocalTaintGuard::push(&dispatch.build_local_taint);
+            let value = probe();
+            let _ = frame.finish();
+            value
+        },
+    );
+    let facts = match read_set.finalise() {
+        FactReadSetFinalise::Ok(facts) => facts,
+        other => panic!("the chain's tracer must finalise: {other:?}"),
+    };
+    let rooted = facts.iter().any(|fact| {
+        matches!(
+            fact,
+            FactVersionRef::FileWholeHash { canonical_id, .. } if canonical_id == FILE
+        )
+    });
+    (value, rooted)
+}
+
+#[test]
+fn a_reused_proof_charges_and_roots_what_running_it_did() {
+    on_a_small_stack(|| {
+        let host = chain_host(mixed_chain(12, "() => string"));
+        let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+        let _builder = dispatch.enter_construction_scope();
+        let prove = || {
+            let _trace = enable_dispatch_trace_for_test();
+            let mut budget = full_budget();
+            let verdict = prepared_decl_body_is_closed(
+                &dispatch,
+                FILE,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "A0",
+                &mut budget,
+            );
+            let dispatches = DISPATCH_TRACE.with(|trace| trace.borrow().len());
+            (verdict, full_budget() - budget, dispatches)
+        };
+        let ((verdict, charged, dispatches), rooted) = in_a_traced_build(&host, &dispatch, prove);
+        assert_eq!(verdict, ClosednessVerdict::ProvenOpen);
+        assert!(
+            dispatches > 0,
+            "control: the first proof issues its reductions"
+        );
+        assert!(rooted, "control: the first proof roots the chain's file");
+
+        let ((reused, recharged, redispatched), rerooted) =
+            in_a_traced_build(&host, &dispatch, prove);
+        assert_eq!(
+            redispatched, 0,
+            "the transaction answers the repeated proof without issuing a query"
+        );
+        assert_eq!(reused, verdict, "a reused proof answers as running it did");
+        assert_eq!(
+            recharged, charged,
+            "a reused proof charges the evaluation what running it charged"
+        );
+        assert!(
+            rerooted,
+            "a reused proof roots the chain's file on the tracer live now, as running it would"
         );
     });
 }
