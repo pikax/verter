@@ -466,7 +466,7 @@ fn failed_publication_is_absorbing_in_all_target_ffi_lanes() {
                 sources: Vec::new(),
             }],
             events: Vec::new(),
-            root_chain: Vec::new(),
+            root_chain: Default::default(),
             status: cm::BranchStatus::Resolved,
         }],
     };
@@ -2640,7 +2640,7 @@ fn component_meta_nested_lanes_zip_onto_the_correct_nested_members() {
                 condition_text: None,
                 props: vec![prop_entry("inherited"), prop_entry("extraA")],
                 events: vec![event_entry("changed")],
-                root_chain: Vec::new(),
+                root_chain: Default::default(),
                 status: cm::BranchStatus::Resolved,
             },
             cm::FallthroughBranch {
@@ -2650,7 +2650,7 @@ fn component_meta_nested_lanes_zip_onto_the_correct_nested_members() {
                 // zip collapses / misroutes it).
                 props: vec![prop_entry("inherited")],
                 events: vec![event_entry("changed")],
-                root_chain: Vec::new(),
+                root_chain: Default::default(),
                 status: cm::BranchStatus::Resolved,
             },
         ],
@@ -2846,7 +2846,7 @@ fn fallthrough_branch(
         condition_text: None,
         props,
         events,
-        root_chain: Vec::new(),
+        root_chain: Default::default(),
         status: verter_session_query::analysis::component_meta::BranchStatus::Resolved,
     }
 }

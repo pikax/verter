@@ -7,7 +7,7 @@ use verter_session_query::analysis::component_meta::{
     AcceptedSurfaceCompleteness, BranchStatus, ComponentMetaAnalysis, ConsumedRootBindings,
     FallthroughBranch, FallthroughEventEntry, FallthroughPropEntry, FallthroughSurface,
     InheritedSource, MemberAvailability, MemberProvenance, PartialBranchReason, ResolvedRootStep,
-    RootReachability, RootTargetRef, UnresolvedBranchReason,
+    RootChain, RootReachability, RootTargetRef, UnresolvedBranchReason,
 };
 use verter_session_query::analysis::types::AnalyzedImport;
 use verter_type_expr::facts::{ClosedTypeFact, LeafTypeFact, SemanticTypeSource, SourcePosition};
@@ -87,6 +87,69 @@ impl IntrinsicMemberTypeSource {
             },
         }
     }
+}
+
+/// Physical work one thread's fallthrough composition performed: the root
+/// steps it wrote into branch chains and the evidence entries it wrote into
+/// a parent's fact list while folding child surfaces into their parents.
+///
+/// Opt-in observation: compiled only into test and `semantic-observe`
+/// builds. Production composition records nothing and has no enabled check.
+#[cfg(any(test, feature = "semantic-observe"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FallthroughCompositionWork {
+    pub root_steps: usize,
+    pub fact_entries: usize,
+}
+
+#[cfg(any(test, feature = "semantic-observe"))]
+thread_local! {
+    static COMPOSITION_WORK: std::cell::Cell<FallthroughCompositionWork> =
+        const { std::cell::Cell::new(FallthroughCompositionWork { root_steps: 0, fact_entries: 0 }) };
+}
+
+/// This thread's composition work since its last
+/// [`reset_fallthrough_composition_work`].
+#[cfg(any(test, feature = "semantic-observe"))]
+pub fn fallthrough_composition_work() -> FallthroughCompositionWork {
+    COMPOSITION_WORK.with(std::cell::Cell::get)
+}
+
+/// Zero this thread's composition work.
+#[cfg(any(test, feature = "semantic-observe"))]
+pub fn reset_fallthrough_composition_work() {
+    COMPOSITION_WORK.with(|work| work.set(FallthroughCompositionWork::default()));
+}
+
+#[inline]
+fn record_composition_work(root_steps: usize, fact_entries: usize) {
+    #[cfg(any(test, feature = "semantic-observe"))]
+    COMPOSITION_WORK.with(|work| {
+        let mut current = work.get();
+        current.root_steps = current.root_steps.saturating_add(root_steps);
+        current.fact_entries = current.fact_entries.saturating_add(fact_entries);
+        work.set(current);
+    });
+    #[cfg(not(any(test, feature = "semantic-observe")))]
+    let _ = (root_steps, fact_entries);
+}
+
+/// Record the links `chain` physically allocated on top of `shared`: every
+/// link walked before reaching `shared`'s head allocation. One when the hop
+/// shares its child's chain; the whole chain when it copied it.
+#[inline]
+fn record_root_links_written(chain: &RootChain, shared: &RootChain) {
+    #[cfg(any(test, feature = "semantic-observe"))]
+    {
+        let shared_head = shared.links().next().map(|(link, _)| link);
+        let written = chain
+            .links()
+            .take_while(|(link, _)| Some(*link) != shared_head)
+            .count();
+        record_composition_work(written, 0);
+    }
+    #[cfg(not(any(test, feature = "semantic-observe")))]
+    let _ = (chain, shared);
 }
 
 fn type_publication_from_position(
@@ -395,9 +458,9 @@ pub fn append_native_candidate_branch<H: FallthroughResolverHost>(
         condition_text,
         props: inherited_props,
         events: inherited_events,
-        root_chain: vec![ResolvedRootStep::NativeTag {
+        root_chain: RootChain::single(ResolvedRootStep::NativeTag {
             tag: tag.to_string(),
-        }],
+        }),
         status,
     });
 }
@@ -442,10 +505,9 @@ pub fn append_component_candidate_branches<H: FallthroughResolverHost>(
         return;
     };
 
-    extend_unique_fact_versions(
-        fact_versions,
-        host.current_dependency_fact_versions(&child_id),
-    );
+    let dependency_facts = host.current_dependency_fact_versions(&child_id);
+    record_composition_work(0, dependency_facts.len());
+    extend_unique_fact_versions(fact_versions, dependency_facts);
 
     if !verter_language::LanguageRegistry::global()
         .classify_static(&child_id)
@@ -475,10 +537,34 @@ pub fn append_component_candidate_branches<H: FallthroughResolverHost>(
         return;
     };
 
-    extend_unique_fact_versions(
-        fact_versions,
-        child_resolution.fact_versions().iter().cloned(),
-    );
+    // The child's evidence enters as ONE shared receipt over the child's own
+    // list — its own facts and the receipts of what it consumed — never a
+    // copy of every fact the child reached. A chain's evidence is therefore
+    // each hop's facts plus one edge per hop, shared, and still validates
+    // exactly when every fact it reaches validates.
+    //
+    // A receipt reaching the parent's own facts (a root chain cycling back
+    // through the parent's file) is the one exception: it enters as its flat
+    // leaves, so every consumer that keeps the owner's own facts out of an
+    // outer signature by `canonical_id()` still sees them. Only a cycle pays
+    // this copy, and only at the owner it cycles back to.
+    if !child_resolution.fact_versions().is_empty() {
+        let receipt = verter_session_query::facts::receipt::ResultReceipt::new(
+            child_resolution.fact_versions().to_vec(),
+        );
+        if receipt.references_canonical(parent_canonical_id) {
+            let mut leaves = Vec::new();
+            receipt.all_leaves(|leaf| {
+                leaves.push(leaf.clone());
+                true
+            });
+            record_composition_work(0, leaves.len());
+            extend_unique_fact_versions(fact_versions, leaves);
+        } else {
+            record_composition_work(0, child_resolution.fact_versions().len() + 1);
+            extend_unique_fact_versions(fact_versions, [FactVersionRef::Receipt(receipt)]);
+        }
+    }
 
     match child_resolution.fallthrough_surface() {
         FallthroughSurface::None { .. } => {
@@ -510,10 +596,10 @@ pub fn append_component_candidate_branches<H: FallthroughResolverHost>(
                 condition_text,
                 props: inherited_props,
                 events: inherited_events,
-                root_chain: vec![ResolvedRootStep::Component {
+                root_chain: RootChain::single(ResolvedRootStep::Component {
                     canonical_id: child_id,
                     component_name: component_name.to_string(),
-                }],
+                }),
                 status,
             });
         }
@@ -575,11 +661,15 @@ pub fn append_component_candidate_branches<H: FallthroughResolverHost>(
                 inherited_props.sort_by(|left, right| left.name.cmp(&right.name));
                 inherited_events.sort_by(|left, right| left.name.cmp(&right.name));
 
-                let mut root_chain = vec![ResolvedRootStep::Component {
-                    canonical_id: child_id.clone(),
-                    component_name: component_name.to_string(),
-                }];
-                root_chain.extend(child_branch.root_chain.clone());
+                // One new step for this hop; the child's chain is shared.
+                let root_chain = RootChain::prepend(
+                    ResolvedRootStep::Component {
+                        canonical_id: child_id.clone(),
+                        component_name: component_name.to_string(),
+                    },
+                    &child_branch.root_chain,
+                );
+                record_root_links_written(&root_chain, &child_branch.root_chain);
 
                 let status = match &child_branch.status {
                     BranchStatus::Resolved => {
@@ -910,10 +1000,10 @@ pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
                                 condition_text: branch.condition_text.clone(),
                                 props: Vec::new(),
                                 events: Vec::new(),
-                                root_chain: vec![ResolvedRootStep::Unresolved {
+                                root_chain: RootChain::single(ResolvedRootStep::Unresolved {
                                     tag: "component".to_string(),
                                     reason: UnresolvedBranchReason::DynamicComponentIs,
-                                }],
+                                }),
                                 status: BranchStatus::Unresolved {
                                     reason: UnresolvedBranchReason::DynamicComponentIs,
                                 },
@@ -1024,12 +1114,12 @@ pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
                                     condition_text: branch.condition_text.clone(),
                                     props: Vec::new(),
                                     events: Vec::new(),
-                                    root_chain: vec![ResolvedRootStep::Unresolved {
+                                    root_chain: RootChain::single(ResolvedRootStep::Unresolved {
                                         tag: name.clone(),
                                         reason: UnresolvedBranchReason::UnresolvedChildImport {
                                             import_source: None,
                                         },
-                                    }],
+                                    }),
                                     status: BranchStatus::Unresolved {
                                         reason: UnresolvedBranchReason::UnresolvedChildImport {
                                             import_source: None,
@@ -1046,12 +1136,12 @@ pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
                             condition_text: branch.condition_text.clone(),
                             props: Vec::new(),
                             events: Vec::new(),
-                            root_chain: vec![ResolvedRootStep::Unresolved {
+                            root_chain: RootChain::single(ResolvedRootStep::Unresolved {
                                 tag: tag.clone(),
                                 reason: UnresolvedBranchReason::RootTarget {
                                     reason: reason.clone(),
                                 },
-                            }],
+                            }),
                             status: BranchStatus::Unresolved {
                                 reason: UnresolvedBranchReason::RootTarget {
                                     reason: reason.clone(),
@@ -1283,12 +1373,12 @@ fn unresolved_child_import_branch(
         condition_text,
         props: Vec::new(),
         events: Vec::new(),
-        root_chain: vec![ResolvedRootStep::Unresolved {
+        root_chain: RootChain::single(ResolvedRootStep::Unresolved {
             tag: component_name.to_string(),
             reason: UnresolvedBranchReason::UnresolvedChildImport {
                 import_source: import_source.clone(),
             },
-        }],
+        }),
         status: BranchStatus::Unresolved {
             reason: UnresolvedBranchReason::UnresolvedChildImport { import_source },
         },
@@ -1306,10 +1396,10 @@ fn unresolved_child_resolution_branch(
         condition_text,
         props: Vec::new(),
         events: Vec::new(),
-        root_chain: vec![ResolvedRootStep::Component {
+        root_chain: RootChain::single(ResolvedRootStep::Component {
             canonical_id: child_id,
             component_name: component_name.to_string(),
-        }],
+        }),
         status: BranchStatus::Unresolved {
             reason: UnresolvedBranchReason::ChildResolutionFailed,
         },
@@ -2279,7 +2369,8 @@ mod tests {
                         events: vec![],
                         root_chain: vec![ResolvedRootStep::NativeTag {
                             tag: "div".to_string(),
-                        }],
+                        }]
+                        .into(),
                         status: BranchStatus::Resolved,
                     }],
                 },
@@ -2324,6 +2415,115 @@ mod tests {
         assert_eq!(branches.len(), 1);
         assert_eq!(branches[0].branch_key, "0.0");
         assert_eq!(facts.len(), 2);
+    }
+
+    /// A child's evidence enters its parent as one shared receipt, unless it
+    /// reaches the parent's own facts (a root chain cycling back through the
+    /// parent's file): then it enters flat, so the owner-excluding filter
+    /// every outer signature applies (`canonical_id() != owner`) still keeps
+    /// the parent's own facts out.
+    #[test]
+    fn child_evidence_reaching_the_owner_enters_flat_and_other_children_stay_shared() {
+        use verter_session_query::facts::fact_cache::FactVersionRef;
+        use verter_session_query::facts::receipt::ResultReceipt;
+
+        let compose = |child_facts: Vec<FactVersionRef>| {
+            let mut host = TestHost::default();
+            host.canonical_routes.insert(
+                ("/App.vue".to_string(), "./Child.vue".to_string()),
+                "/Child.vue".to_string(),
+            );
+            host.child_resolutions.insert(
+                "/Child.vue".to_string(),
+                TestResolution {
+                    accepted_props: vec![],
+                    accepted_events: vec![],
+                    fallthrough_surface: FallthroughSurface::Branches {
+                        branches: vec![FallthroughBranch {
+                            branch_key: "0".to_string(),
+                            condition_text: None,
+                            props: vec![],
+                            events: vec![],
+                            root_chain: super::RootChain::single(ResolvedRootStep::NativeTag {
+                                tag: "div".to_string(),
+                            }),
+                            status: BranchStatus::Resolved,
+                        }],
+                    },
+                    fact_versions: child_facts,
+                },
+            );
+            let mut facts = vec![own_fact("/App.vue")];
+            append_component_candidate_branches(
+                &host,
+                "/App.vue",
+                "Child",
+                "./Child.vue",
+                None,
+                None,
+                "0".to_string(),
+                None,
+                &[],
+                &[],
+                &[],
+                None,
+                &FxHashSet::default(),
+                &FxHashSet::default(),
+                &FxHashSet::default(),
+                &mut Vec::new(),
+                &mut false,
+                &mut false,
+                &mut facts,
+                &mut FxHashSet::default(),
+            );
+            facts
+        };
+        let cross_file = |facts: &[FactVersionRef]| -> Vec<FactVersionRef> {
+            facts
+                .iter()
+                .filter(|fact| fact.canonical_id() != Some("/App.vue"))
+                .cloned()
+                .collect()
+        };
+
+        let shared = compose(vec![
+            own_fact("/Child.vue"),
+            FactVersionRef::Receipt(ResultReceipt::new(vec![own_fact("/Leaf.vue")])),
+        ]);
+        let receipts: Vec<&ResultReceipt> = shared
+            .iter()
+            .filter_map(|fact| match fact {
+                FactVersionRef::Receipt(receipt) => Some(receipt),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(receipts.len(), 1, "a non-cycling child stays one receipt");
+        assert!(!receipts[0].references_canonical("/App.vue"));
+        let leaves = evidence_leaves(&cross_file(&shared));
+        assert!(leaves.contains(&own_fact("/Child.vue")));
+        assert!(leaves.contains(&own_fact("/Leaf.vue")));
+
+        let cycling = compose(vec![
+            own_fact("/Child.vue"),
+            FactVersionRef::Receipt(ResultReceipt::new(vec![
+                own_fact("/Leaf.vue"),
+                own_fact("/App.vue"),
+            ])),
+        ]);
+        assert!(
+            cycling.iter().all(|fact| !matches!(
+                fact,
+                FactVersionRef::Receipt(receipt) if receipt.references_canonical("/App.vue")
+            )),
+            "no receipt carries the owner's own facts past the owner filter"
+        );
+        let leaves = evidence_leaves(&cross_file(&cycling));
+        assert!(leaves.contains(&own_fact("/Child.vue")));
+        assert!(leaves.contains(&own_fact("/Leaf.vue")));
+        assert!(
+            !leaves.contains(&own_fact("/App.vue")),
+            "the owner's own facts stay out of its cross-file evidence"
+        );
     }
 
     #[test]
@@ -2379,7 +2579,8 @@ mod tests {
                         events: vec![],
                         root_chain: vec![ResolvedRootStep::NativeTag {
                             tag: "div".to_string(),
-                        }],
+                        }]
+                        .into(),
                         status: BranchStatus::Resolved,
                     }],
                 },
@@ -2472,7 +2673,7 @@ mod tests {
                     }],
                 }],
                 events: vec![],
-                root_chain: vec![],
+                root_chain: Default::default(),
                 status: BranchStatus::Resolved,
             },
             FallthroughBranch {
@@ -2480,7 +2681,7 @@ mod tests {
                 condition_text: None,
                 props: vec![],
                 events: vec![],
-                root_chain: vec![],
+                root_chain: Default::default(),
                 status: BranchStatus::Unresolved {
                     reason:
                         verter_session_query::analysis::component_meta::UnresolvedBranchReason::DynamicComponentIs,
@@ -3152,7 +3353,7 @@ mod tests {
                 condition_text: None,
                 props: rows_a,
                 events: Vec::new(),
-                root_chain: Vec::new(),
+                root_chain: Default::default(),
                 status: BranchStatus::Resolved,
             },
             FallthroughBranch {
@@ -3160,7 +3361,7 @@ mod tests {
                 condition_text: None,
                 props: rows_b,
                 events: Vec::new(),
-                root_chain: Vec::new(),
+                root_chain: Default::default(),
                 status: BranchStatus::Resolved,
             },
         ];
@@ -3193,7 +3394,7 @@ mod tests {
             condition_text: None,
             props,
             events,
-            root_chain: Vec::new(),
+            root_chain: Default::default(),
             status: BranchStatus::Resolved,
         }
     }
@@ -3880,5 +4081,183 @@ mod tests {
             "an untyped branch side neither conflicts nor revives — the \
              one-sided merge adopts the typed side"
         );
+    }
+
+    /// Every non-receipt fact an evidence list reaches, receipts walked.
+    fn evidence_leaves(
+        facts: &[verter_session_query::facts::fact_cache::FactVersionRef],
+    ) -> Vec<verter_session_query::facts::fact_cache::FactVersionRef> {
+        use verter_session_query::facts::fact_cache::FactVersionRef;
+        let mut walk = verter_session_query::facts::receipt::ReceiptWalk::default();
+        let mut leaves = Vec::new();
+        for fact in facts {
+            match fact {
+                FactVersionRef::Receipt(receipt) => {
+                    walk.leaves(receipt, |leaf| {
+                        leaves.push(leaf.clone());
+                        true
+                    });
+                }
+                leaf => leaves.push(leaf.clone()),
+            }
+        }
+        leaves
+    }
+
+    fn own_fact(canonical: &str) -> verter_session_query::facts::fact_cache::FactVersionRef {
+        verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+            canonical_id: canonical.to_string(),
+            hash: [9; 16],
+        }
+    }
+
+    /// Resolve a `hops`-deep single-root chain `C0 -> C1 -> … -> C{hops}`
+    /// whose last component roots at a `<div>`, bottom-up, each parent
+    /// reading its child's resolution as a warm child surface. Answers the
+    /// composition work the chain cost and the top component's resolution.
+    fn resolve_chain(
+        hops: usize,
+    ) -> (
+        super::FallthroughCompositionWork,
+        super::ResolvedFallthroughSurface,
+    ) {
+        let canonical = |index: usize| format!("/C{index}.vue");
+        let mut host = TestHost::default();
+        host.intrinsic_members.insert(
+            "div".to_string(),
+            vec![IntrinsicSurfaceMember {
+                name: "title".to_string(),
+                kind: IntrinsicMemberKind::Attr,
+                source: IntrinsicMemberTypeSource::Resolved(SemanticTypeSource::Closed(
+                    ClosedTypeFact::Leaf(LeafTypeFact::Primitive(PrimitiveName::String)),
+                )),
+            }],
+        );
+        for index in 0..hops {
+            host.canonical_routes.insert(
+                (canonical(index), format!("./C{}.vue", index + 1)),
+                canonical(index + 1),
+            );
+        }
+
+        super::reset_fallthrough_composition_work();
+        let mut top = None;
+        for index in (0..=hops).rev() {
+            let target = if index == hops {
+                RootTargetRef::NativeElement {
+                    element_index: 0,
+                    tag: "div".to_string(),
+                }
+            } else {
+                RootTargetRef::ComponentUsage {
+                    element_index: 0,
+                    usage_index: 0,
+                    name: format!("C{}", index + 1),
+                    import_source: Some(format!("./C{}.vue", index + 1)),
+                }
+            };
+            let meta = empty_component_meta(RootReachability::Branches {
+                branches: vec![RootBranch {
+                    branch_index: 0,
+                    condition_text: None,
+                    target,
+                    consumed: ConsumedRootBindings::default(),
+                    has_unknown_spread: false,
+                }],
+            });
+            let resolved = resolve_fallthrough_surface(
+                &host,
+                &canonical(index),
+                &(),
+                &meta,
+                None,
+                None,
+                vec![own_fact(&canonical(index))],
+                &mut FxHashSet::default(),
+            );
+            if index == 0 {
+                top = Some(resolved);
+            } else {
+                host.child_resolutions.insert(
+                    canonical(index),
+                    TestResolution {
+                        accepted_props: resolved.accepted_props,
+                        accepted_events: resolved.accepted_events,
+                        fallthrough_surface: resolved.fallthrough_surface,
+                        fact_versions: resolved.fact_versions,
+                    },
+                );
+            }
+        }
+        (
+            super::fallthrough_composition_work(),
+            top.expect("the chain's top component resolves"),
+        )
+    }
+
+    /// Folding a child surface into its parent shares the child's root
+    /// chain and evidence instead of copying them, so a deep single-root
+    /// chain costs work linear in its depth. Each doubling of the depth
+    /// (128, 256, 512, 1024 hops) may at most roughly double the root steps
+    /// and evidence entries composition writes; copying every child chain
+    /// and fact list into every ancestor quadruples them.
+    ///
+    /// The top component still sees the whole ordered chain and every
+    /// hop's evidence.
+    #[test]
+    fn deep_root_chains_compose_in_linear_work() {
+        let mut previous: Option<super::FallthroughCompositionWork> = None;
+        for hops in [128usize, 256, 512, 1024] {
+            let (work, top) = resolve_chain(hops);
+
+            let FallthroughSurface::Branches { branches } = &top.fallthrough_surface else {
+                panic!("the chain top has a single-root branch surface");
+            };
+            assert_eq!(branches.len(), 1);
+            let chain: Vec<&ResolvedRootStep> = branches[0].root_chain.iter().collect();
+            assert_eq!(chain.len(), hops + 1, "one step per hop plus the element");
+            for (index, step) in chain.iter().take(hops).enumerate() {
+                assert_eq!(
+                    **step,
+                    ResolvedRootStep::Component {
+                        canonical_id: format!("/C{}.vue", index + 1),
+                        component_name: format!("C{}", index + 1),
+                    },
+                    "the chain keeps source order, outermost hop first"
+                );
+            }
+            assert_eq!(
+                *chain[hops],
+                ResolvedRootStep::NativeTag {
+                    tag: "div".to_string()
+                }
+            );
+            assert!(top.accepted_props.iter().any(|prop| prop.name == "title"));
+
+            let leaves = evidence_leaves(&top.fact_versions);
+            for index in 0..=hops {
+                let fact = own_fact(&format!("/C{index}.vue"));
+                assert!(
+                    leaves.contains(&fact),
+                    "the top's evidence reaches hop {index} at depth {hops}"
+                );
+            }
+
+            if let Some(previous) = previous {
+                assert!(
+                    work.root_steps * 4 <= previous.root_steps * 9,
+                    "root steps grew from {} to {} when the depth doubled to {hops}",
+                    previous.root_steps,
+                    work.root_steps
+                );
+                assert!(
+                    work.fact_entries * 4 <= previous.fact_entries * 9,
+                    "evidence entries grew from {} to {} when the depth doubled to {hops}",
+                    previous.fact_entries,
+                    work.fact_entries
+                );
+            }
+            previous = Some(work);
+        }
     }
 }
