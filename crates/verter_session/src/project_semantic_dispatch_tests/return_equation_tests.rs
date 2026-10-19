@@ -201,6 +201,7 @@ fn mixed_seeded_component_close_stages_both_domains() {
 fn flow_call_expression_records_a_resolve_call_hold() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let flow_key = dispatch.flow_return_key_for(&flow_identity("indexedCall"));
     let idx = dispatch
         .dispatch_txn

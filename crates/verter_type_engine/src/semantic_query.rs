@@ -5227,16 +5227,13 @@ impl DepSignature {
     }
 
     /// An interned rail of `entries`, whose cell block its interner's weak
-    /// entry may keep allocated past the rail: the block is charged by the
-    /// returned share, which the rail keeps and the interner's entry keeps
-    /// a clone of, so it stays charged until both have let go.
+    /// entry may keep allocated past the rail: the block is charged by a
+    /// share the rail keeps and every weak view of it keeps a clone of, so
+    /// it stays charged until both have let go.
     pub(crate) fn interned_rail(
         entries: Vec<DepEntry>,
         ctx: verter_session_query::retention::owned::ChargeCtx<'_>,
-    ) -> (
-        verter_session_query::retention::owned::Owned<DepRail>,
-        verter_session_query::retention::owned::BlockShare,
-    ) {
+    ) -> verter_session_query::retention::owned::Owned<DepRail> {
         verter_session_query::retention::owned::Owned::new_with_shared_block(
             DepRail(entries.into_boxed_slice()),
             ctx,
@@ -7451,15 +7448,70 @@ pub struct RecursionOrBudgetCap {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiagnosticAnalysisShell;
 
-/// A query value paired with the provenance of the work that produced it.
+/// A query value paired with the provenance of the work that produced it,
+/// and the delivery that owns the graph operands the value names.
 ///
 /// Provenance lives ONLY on the [`Value`](QueryResult::Value) arm of a
 /// [`QueryResult`]; the `Recursive` / `Error` arms are control / failure arms
 /// that never carry provenance.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// The output is the owning carrier of a dispatcher's result: the operation
+/// that produced it releases everything else when it ends, so the value's
+/// nodes stay live exactly as long as this output or a clone of it does —
+/// past the dispatcher, the cache and every construction scope. The value
+/// itself is an identity label that authorizes nothing; a read borrows a
+/// capability from the output ([`Self::node`]) that cannot outlive it. A
+/// copied label kept after the output drops names a released node.
+#[derive(Debug, Clone)]
 pub struct SemanticQueryOutput<T> {
     pub value: T,
     pub provenance: ResultProvenance,
+    delivery: crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease,
+}
+
+/// Two outputs are equal when their values and provenance are; the delivery
+/// is ownership transport, never identity.
+impl<T: PartialEq> PartialEq for SemanticQueryOutput<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value && self.provenance == other.provenance
+    }
+}
+impl<T: Eq> Eq for SemanticQueryOutput<T> {}
+
+impl<T> SemanticQueryOutput<T> {
+    /// An output owned by the delivery that roots its value's operands.
+    #[must_use]
+    pub(crate) fn delivered(
+        value: T,
+        provenance: ResultProvenance,
+        delivery: crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease,
+    ) -> Self {
+        Self {
+            value,
+            provenance,
+            delivery,
+        }
+    }
+
+    /// Borrow a node this output owns. An ordinal the output does not own
+    /// is foreign: a copied label never authorizes a read.
+    pub fn node(
+        &self,
+        id: SemanticNodeId,
+    ) -> Result<crate::semantic_query_memo::node_roots::NodeRef<'_>, QueryError> {
+        self.delivery.node_ref(id)
+    }
+
+    /// The same delivery carrying a value derived from this one: the owner
+    /// travels with the narrowed value.
+    #[must_use]
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> SemanticQueryOutput<U> {
+        SemanticQueryOutput {
+            value: f(self.value),
+            provenance: self.provenance,
+            delivery: self.delivery,
+        }
+    }
 }
 
 /// Provenance of a resolved value: how trustworthy the inputs that produced it
@@ -7601,28 +7653,12 @@ pub(crate) fn narrow_output_to_type_node(
 ) -> QueryResult<SemanticQueryOutput<SemanticNodeId>> {
     match result {
         QueryResult::Value(out) => match out.value {
-            SemanticQueryValue::TypeNode(node) => QueryResult::Value(SemanticQueryOutput {
-                value: node,
-                provenance: out.provenance,
-            }),
+            SemanticQueryValue::TypeNode(node) => QueryResult::Value(out.map(|_| node)),
             other => QueryResult::Error(QueryError::ValueDomainMismatch {
                 expected: SemanticQueryValueTag::TypeNode,
                 actual: other.tag(),
             }),
         },
-        QueryResult::Recursive(n) => QueryResult::Recursive(n),
-        QueryResult::Error(e) => QueryResult::Error(e),
-    }
-}
-
-/// Drop provenance from a typed-node result, recovering the node-or-control
-/// [`QueryResult`] the convenience wrappers expose.
-#[must_use]
-pub(crate) fn strip_output_provenance<T>(
-    result: QueryResult<SemanticQueryOutput<T>>,
-) -> QueryResult<T> {
-    match result {
-        QueryResult::Value(out) => QueryResult::Value(out.value),
         QueryResult::Recursive(n) => QueryResult::Recursive(n),
         QueryResult::Error(e) => QueryResult::Error(e),
     }
@@ -11906,8 +11942,11 @@ pub trait SemanticQueryApi {
         narrow_output_to_type_node(self.execute(key))
     }
 
-    fn resolve_decl(&self, key: ResolveDeclKey) -> QueryResult<SemanticNodeId> {
-        strip_output_provenance(self.execute_type_node(SemanticQueryKey::ResolveDecl(key)))
+    fn resolve_decl(
+        &self,
+        key: ResolveDeclKey,
+    ) -> QueryResult<SemanticQueryOutput<SemanticNodeId>> {
+        self.execute_type_node(SemanticQueryKey::ResolveDecl(key))
     }
     // NOTE: there is deliberately NO `instantiate` convenience method: an
     // `Instantiate` key's context must come from the sealed
@@ -11920,36 +11959,32 @@ pub trait SemanticQueryApi {
         base: SemanticNodeId,
         member: Arc<str>,
         mode: ProjectionMode,
-    ) -> QueryResult<SemanticNodeId> {
-        strip_output_provenance(self.execute_type_node(SemanticQueryKey::ProjectMember {
+    ) -> QueryResult<SemanticQueryOutput<SemanticNodeId>> {
+        self.execute_type_node(SemanticQueryKey::ProjectMember {
             base,
             member: member.into(),
             mode,
-        }))
+        })
     }
     fn indexed_access(
         &self,
         base: SemanticNodeId,
         index: IndexKey,
         mode: ProjectionMode,
-    ) -> QueryResult<SemanticNodeId> {
-        strip_output_provenance(self.execute_type_node(SemanticQueryKey::IndexedAccess {
-            base,
-            index,
-            mode,
-        }))
+    ) -> QueryResult<SemanticQueryOutput<SemanticNodeId>> {
+        self.execute_type_node(SemanticQueryKey::IndexedAccess { base, index, mode })
     }
     fn project_path(
         &self,
         base: SemanticNodeId,
         path: verter_type_expr::OwnedSlice<PathSegment>,
         mode: ProjectionMode,
-    ) -> QueryResult<SemanticNodeId> {
-        strip_output_provenance(self.execute_type_node(SemanticQueryKey::ProjectPath {
+    ) -> QueryResult<SemanticQueryOutput<SemanticNodeId>> {
+        self.execute_type_node(SemanticQueryKey::ProjectPath {
             base,
             path,
             context: ProjectionReductionContext::published(mode),
-        }))
+        })
     }
 }
 
@@ -12467,6 +12502,7 @@ mod tests {
         let clean = QueryResult::Value(SemanticQueryOutput {
             value: SemanticQueryValue::TypeNode(node),
             provenance: ResultProvenance::clean(),
+            delivery: Default::default(),
         });
         match narrow_output_to_type_node(clean) {
             QueryResult::Value(out) => {
@@ -12484,6 +12520,7 @@ mod tests {
         let overloads = QueryResult::Value(SemanticQueryOutput {
             value: SemanticQueryValue::OverloadSet(Vec::<SignatureRef>::new().into()),
             provenance: ResultProvenance::clean(),
+            delivery: Default::default(),
         });
         match narrow_output_to_type_node(overloads) {
             QueryResult::Error(QueryError::ValueDomainMismatch { expected, actual }) => {

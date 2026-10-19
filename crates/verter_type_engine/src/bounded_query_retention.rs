@@ -313,6 +313,20 @@ where
         ledger.retain(|(_, k)| k != key);
     }
 
+    /// Retain a batch's surviving keys in one ledger pass, preserving FIFO
+    /// order. The caller holds the same exclusive cache lock required by
+    /// [`Self::forget_key_under_exclusive_lock`]; no admission may race it.
+    pub(crate) fn retain_keys_under_exclusive_lock(&self, mut keep: impl FnMut(&K) -> bool) {
+        let mut ledger = self.ledger.lock();
+        ledger.retain(|(_, key)| keep(key));
+        if ledger.is_empty() {
+            *ledger = VecDeque::new();
+        } else if ledger.capacity() > ledger.len().saturating_mul(4) {
+            let keep = ledger.len().saturating_mul(2);
+            ledger.shrink_to(keep);
+        }
+    }
+
     /// Drop the single ledger entry identified by `seq`. Used when an
     /// individual candidate / entry (not a whole key) is evicted — the
     /// sequence number is unique per admission, so this removes exactly

@@ -60,7 +60,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             // widen unless the argument's contextual typing kept them — the
             // authored expression holding the literal has a literal context
             // for its contextual type (`isLiteralOfContextualType`: `{ v: "x" }`
-            // against `{ v: T }` keeps `"x"` for `T extends string`).
+            // against `{ v: T }` keeps `"x"` for `T extends string`), as does an object
+            // argument deposited whole at a naked position whose constraint
+            // gives the member a literal context.
             if literal_mode == crate::semantic_query::ArgumentLiteralMode::Widened {
                 // A fresh union (a call's result whose literal members are
                 // fresh, `h(1)` over `h<T>(x: T): T | undefined`) is kept
@@ -84,8 +86,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     && policy == crate::semantic_query::ConstParamPolicy::NonConst
                     && !fresh_literals.is_empty();
                 if !preserve_top_literal {
-                    bound = if !deposit_is_top_level
-                        && policy == crate::semantic_query::ConstParamPolicy::NonConst
+                    bound = if policy == crate::semantic_query::ConstParamPolicy::NonConst
                         && !context_keeps.is_empty()
                     {
                         self.contextual_literal_candidate(bound, &context_keeps, policy)

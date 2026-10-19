@@ -103,7 +103,7 @@ fn advance_semantic_imports(host: &VerterHost) {
     assert!(
         host.project_type_store().resolved_import_facts().admit(
             key,
-            Arc::new(ResolvedImportFacts::new()),
+            crate::resolver_core::CachedValue::new(ResolvedImportFacts::new()),
             witness
         ),
         "fixture invariant: the admission must succeed, or no domain moved"
@@ -194,6 +194,7 @@ fn a_declined_deferred_close_cannot_hide_a_live_domain_advance() {
             );
             let dispatch =
                 verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            let _builder = dispatch.enter_construction_scope();
             verter_type_engine::project_semantic_dispatch::evaluate::forwarding_tests::assert_deferred_close_preserves_execution_validity(
                 &dispatch, finalise, moved,
             );

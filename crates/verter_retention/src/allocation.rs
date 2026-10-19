@@ -196,6 +196,24 @@ impl AliasSet {
         }
     }
 
+    /// Take over the owned allocations `inner` reached, each once across
+    /// both sets, and return the bytes of those this set counts in full
+    /// instead of collecting. A data tree whose part is measured on a set
+    /// of its own — one that counts the part's raw `Arc`s, which a tree's
+    /// cell owns — hands that part's owned handles to the cell's set.
+    pub fn absorb(&mut self, inner: &mut AliasSet) -> usize {
+        let mut counted = 0;
+        for child in inner.take_children().into_vec() {
+            if !self.first_allocation(&child) {
+                continue;
+            }
+            if !self.collect_child(|| Arc::clone(&child)) {
+                counted += super::owned::counted_in_full(&*child, self);
+            }
+        }
+        counted
+    }
+
     /// The owned children the measurement reached, each once.
     pub(crate) fn take_children(&mut self) -> Box<[Arc<dyn super::owned::Node>]> {
         self.children

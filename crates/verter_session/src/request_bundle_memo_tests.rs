@@ -151,7 +151,7 @@ fn overlay_bundle_computes_once_sequentially_per_request_world() {
         )
         .expect("second read must serve the bundle");
     assert!(
-        Arc::ptr_eq(&first, &second),
+        crate::resolver_core::CachedValue::ptr_eq(&first, &second),
         "the second overlay bundle read within the SAME request must be a \
          request-scoped memo hit (Arc::ptr_eq), not a re-materialisation",
     );
@@ -228,7 +228,7 @@ fn fresh_request_observes_new_overlay_content() {
         .expect("request 2 bundle must materialise");
 
     assert!(
-        !Arc::ptr_eq(&bundle_a, &bundle_b),
+        !crate::resolver_core::CachedValue::ptr_eq(&bundle_a, &bundle_b),
         "a new request must never be served the previous request's bundle",
     );
     assert_eq!(
@@ -287,7 +287,7 @@ fn fresh_request_same_overlay_content_rematerializes() {
     };
 
     assert!(
-        !Arc::ptr_eq(&bundle_1, &bundle_2),
+        !crate::resolver_core::CachedValue::ptr_eq(&bundle_1, &bundle_2),
         "the memo is request-scoped: a fresh request (fresh completion \
          overlay) re-materialises even for identical overlay content",
     );
@@ -338,7 +338,7 @@ fn base_and_overlay_bundle_memos_are_isolated() {
         .is_some()
     );
     assert!(
-        Arc::ptr_eq(&dep_first, &dep_second),
+        crate::resolver_core::CachedValue::ptr_eq(&dep_first, &dep_second),
         "the base-path canonical is memoised too — the second read must serve the SAME \
          value rather than re-validating and re-materialising",
     );
@@ -459,7 +459,7 @@ fn external_supersession_between_snapshots_misses_memo() {
     };
 
     assert!(
-        !Arc::ptr_eq(&bundle_1, &bundle_2),
+        !crate::resolver_core::CachedValue::ptr_eq(&bundle_1, &bundle_2),
         "a retry attempt under a fresh (externally-moved) view must NOT \
          reuse the superseded attempt's memoised bundle — the compat token \
          keys the memo to one externally-coherent world",
@@ -555,7 +555,7 @@ fn resolution_retarget_between_snapshots_misses_memo() {
     };
 
     assert!(
-        !Arc::ptr_eq(&bundle_1, &bundle_2),
+        !crate::resolver_core::CachedValue::ptr_eq(&bundle_1, &bundle_2),
         "a retry attempt after a resolution retarget must NOT reuse the \
          pre-retarget memoised bundle — its resolved import edges were \
          computed against the world the retarget replaced",
@@ -604,7 +604,7 @@ fn unattributed_refusal_is_not_memoized() {
         .expect("the second read re-materialises");
 
     assert!(
-        !Arc::ptr_eq(&first, &second),
+        !crate::resolver_core::CachedValue::ptr_eq(&first, &second),
         "an unattributed refusal must NOT be memoised — the second \
          read re-materialises per-call",
     );
@@ -723,7 +723,9 @@ fn base_touch(
     memo: &CanonicalCompletionOverlay,
     owner: &str,
 ) -> (
-    Option<Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>>,
+    Option<
+        crate::resolver_core::CachedValue<crate::resolver_core::prepared_decl::PreparedDeclBundle>,
+    >,
     bool,
     u64,
 ) {
@@ -815,7 +817,8 @@ fn base_bundle_computes_once_sequentially_per_request_world() {
          shared cache happens to hold the value"
     );
     assert!(
-        Arc::ptr_eq(&bundles[0], &bundles[1]) && Arc::ptr_eq(&bundles[1], &bundles[2]),
+        crate::resolver_core::CachedValue::ptr_eq(&bundles[0], &bundles[1])
+            && crate::resolver_core::CachedValue::ptr_eq(&bundles[1], &bundles[2]),
         "every touch inside one request world serves the SAME value"
     );
     assert_eq!(
@@ -1024,6 +1027,7 @@ fn superseded_or_fenced_bundle_is_not_request_memoized() {
     );
 
     let hits_before = request_memo_hits(&host);
+    let shared_before = host.provenance().bundle_cache_hits.load(Ordering::Relaxed);
     let (second, _, _) = base_touch(&host, &request, &owner);
     let second = second.expect("second touch served");
     assert_eq!(
@@ -1032,9 +1036,18 @@ fn superseded_or_fenced_bundle_is_not_request_memoized() {
         "a memo entry recorded under a superseded store-view token must NOT be served — \
          the token is the request world's identity, and reuse is bounded by it"
     );
+    // The unrelated edit leaves the owner's bundle valid in the new world, so
+    // the shared cache — which validates it against the new view — serves the
+    // very cell the first touch admitted; the superseded memo entry is not
+    // what served it.
+    assert_eq!(
+        host.provenance().bundle_cache_hits.load(Ordering::Relaxed) - shared_before,
+        1,
+        "the second touch is the shared cache's validated read, not the superseded world's memo"
+    );
     assert!(
-        !Arc::ptr_eq(&first, &second),
-        "the superseded world's value must not be reused"
+        crate::resolver_core::CachedValue::ptr_eq(&first, &second),
+        "the shared cache serves the one admitted bundle cell"
     );
 
     // Arm (b): FENCED non-reproducible MISS. A surface-empty owner served
@@ -1099,7 +1112,10 @@ fn request_world_token_change_forces_new_bundle() {
     let first = first.expect("attempt 1 served");
     let (memo_hit, _, memo_flights) = base_touch(&host, &request, owner);
     assert!(
-        Arc::ptr_eq(&first, &memo_hit.expect("attempt 1 replay served")),
+        crate::resolver_core::CachedValue::ptr_eq(
+            &first,
+            &memo_hit.expect("attempt 1 replay served")
+        ),
         "fixture invariant: with the token unchanged the memo DOES serve the entry — \
          otherwise the miss below proves nothing about the token"
     );
@@ -1116,7 +1132,7 @@ fn request_world_token_change_forces_new_bundle() {
     let (second, _, second_flights) = base_touch(&host, &request, owner);
     let second = second.expect("attempt 2 served");
     assert!(
-        !Arc::ptr_eq(&first, &second),
+        !crate::resolver_core::CachedValue::ptr_eq(&first, &second),
         "a touch under a MOVED request-world token must not be served the previous \
          world's memoised bundle"
     );

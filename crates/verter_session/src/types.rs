@@ -1884,9 +1884,9 @@ pub struct VirtualFileResponse {
     /// Rendered virtual ID (bundler or LSP format, matching the query).
     pub id: String,
     /// Compiled code for this virtual node.
-    pub code: Arc<str>,
+    pub code: verter_type_expr::OwnedStr,
     /// Source map (JSON string), if `source_map` was enabled in the profile.
-    pub source_map: Option<Arc<str>>,
+    pub source_map: Option<verter_type_expr::OwnedStr>,
     /// Output language (e.g. `"js"`, `"ts"`, `"css"`, `"scss"`).
     pub lang: Option<String>,
     /// `true` if this is last-known-good fallback output (current source has errors).
@@ -2845,8 +2845,8 @@ pub(crate) struct ParseSnapshot {
 
 #[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub(crate) struct CachedVirtualFile {
-    pub(crate) code: Arc<str>,
-    pub(crate) source_map: Option<Arc<str>>,
+    pub(crate) code: verter_type_expr::OwnedStr,
+    pub(crate) source_map: Option<verter_type_expr::OwnedStr>,
     pub(crate) lang: Option<String>,
     pub(crate) meta: VirtualMeta,
 }
@@ -2854,30 +2854,45 @@ pub(crate) struct CachedVirtualFile {
 /// Cached IDE output for LSP type checking, stored separately from virtual files.
 #[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub(crate) struct CachedTsx {
-    pub(crate) code: Arc<str>,
-    pub(crate) source_map: Option<Arc<str>>,
+    pub(crate) code: verter_type_expr::OwnedStr,
+    pub(crate) source_map: Option<verter_type_expr::OwnedStr>,
     pub(crate) is_jsx: bool,
     #[heap_size(with = "crate::heap_size_foreign::destructured_block")]
     pub(crate) destructured_block: Option<verter_compiler::compile::types::DestructuredBlockMeta>,
+}
+
+/// A delivered text allocation is charged even when no cache accepted it.
+/// Already retained cells keep their existing shared charge.
+pub(crate) fn pin_generated_texts(
+    code: &verter_type_expr::OwnedStr,
+    source_map: Option<&verter_type_expr::OwnedStr>,
+    ctx: verter_session_query::retention::owned::ChargeCtx<'_>,
+) {
+    code.pin(ctx);
+    if let Some(map) = source_map {
+        map.pin(ctx);
+    }
 }
 
 /// Response from [`VerterHost::get_ide`].
 #[derive(Debug, Clone)]
 pub struct IdeResponse {
     /// The generated TSX/JSX code.
-    pub code: Arc<str>,
+    pub code: verter_type_expr::OwnedStr,
     /// JSON source map (if available).
-    pub source_map: Option<Arc<str>>,
+    pub source_map: Option<verter_type_expr::OwnedStr>,
     /// `true` for JavaScript SFCs (.jsx output), `false` for TypeScript (.tsx output).
     pub is_jsx: bool,
     /// Structured metadata for the destructured block region, if present.
     pub destructured_block: Option<verter_compiler::compile::types::DestructuredBlockMeta>,
 }
 
-impl From<&CachedTsx> for IdeResponse {
-    fn from(tsx: &CachedTsx) -> Self {
+impl IdeResponse {
+    /// The response for a compiled IDE output: its code and map are the
+    /// output's own text cells, so the response shares their charge.
+    pub(crate) fn from_cached(tsx: &CachedTsx) -> Self {
         Self {
-            code: Arc::clone(&tsx.code),
+            code: tsx.code.clone(),
             source_map: tsx.source_map.clone(),
             is_jsx: tsx.is_jsx,
             destructured_block: tsx.destructured_block.clone(),
@@ -2898,10 +2913,10 @@ pub struct CompiledVirtualNode {
     /// Which node of the carrier this row is.
     pub node: VirtualNodeKind,
     /// Compiled code for this node.
-    pub code: Arc<str>,
+    pub code: verter_type_expr::OwnedStr,
     /// This node's own JSON source map, when the request asked for maps
     /// and the node has one.
-    pub source_map: Option<Arc<str>>,
+    pub source_map: Option<verter_type_expr::OwnedStr>,
     /// Output language (e.g. `"js"`, `"ts"`, `"css"`, `"scss"`).
     pub lang: Option<String>,
     /// Block-specific metadata (scope id, block type, index).
@@ -3213,8 +3228,8 @@ pub(crate) enum CompileProducts {
     /// The reason is carried STRUCTURALLY, so no consumer recovers it by
     /// scanning diagnostic text for a framework-specific code prefix.
     RuntimeSurfaceRefused {
-        diagnostic_code: Arc<str>,
-        message: Arc<str>,
+        diagnostic_code: verter_type_expr::OwnedStr,
+        message: verter_type_expr::OwnedStr,
     },
 }
 
@@ -3526,6 +3541,12 @@ pub struct ProfileState {
     pub(crate) compile_slots: FxHashMap<u64, CompileSlot>,
     pub(crate) latest_diagnostics: FxHashMap<u64, DiagnosticsSnapshot>,
     pub(crate) diagnostics_generation: u64,
+    /// The IDE output the latest compile under one IDE profile delivered
+    /// when the account refused to retain its slot: the document's surface,
+    /// held for the IDE readers that cannot compute, charged to them —
+    /// pinned, never a cache entry a compile reuses. Replaced by the next
+    /// compile under that profile, dropped once a slot retains one.
+    delivered_ide: Option<(u64, crate::resolver_core::CachedValue<CachedTsx>)>,
 }
 
 #[allow(dead_code)]
@@ -3572,6 +3593,42 @@ impl ProfileState {
     /// invalidation callers and is left untouched here.
     pub(crate) fn compile_slots_clear_for_node(&mut self) {
         self.compile_slots.clear();
+        self.delivered_ide = None;
+    }
+
+    /// Keep `tsx` as the IDE surface the latest compile under `profile_hash`
+    /// delivered without a slot retaining it, charged to its readers.
+    pub(crate) fn deliver_unretained_ide(
+        &mut self,
+        profile_hash: u64,
+        tsx: CachedTsx,
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) {
+        let surface = crate::resolver_core::CachedValue::new(tsx);
+        surface.pin(verter_session_query::retention::owned::ChargeCtx::new(
+            account,
+        ));
+        self.delivered_ide = Some((profile_hash, surface));
+    }
+
+    /// Forget the surface delivered under `profile_hash`, if it is the one
+    /// held: a retained slot or an unservable compile supersedes it.
+    pub(crate) fn forget_unretained_ide(&mut self, profile_hash: u64) {
+        if self
+            .delivered_ide
+            .as_ref()
+            .is_some_and(|(held, _)| *held == profile_hash)
+        {
+            self.delivered_ide = None;
+        }
+    }
+
+    /// The surface delivered under `profile_hash` while no slot retains one.
+    pub(crate) fn unretained_ide(&self, profile_hash: u64) -> Option<&CachedTsx> {
+        self.delivered_ide
+            .as_ref()
+            .filter(|(held, _)| *held == profile_hash)
+            .map(|(_, surface)| &**surface)
     }
 }
 
@@ -3608,7 +3665,11 @@ impl ProfileState {
 /// can carry a generation the successor reaches again.
 #[derive(Debug)]
 pub(crate) struct RawTemplateAnalysisEntry {
-    pub(crate) template: Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
+    pub(crate) template: verter_session_query::retention::heap_size::OwnedValue<
+        verter_session_query::analysis::template::TemplateAnalysisSnapshot,
+    >,
+    /// The slot's cache hold on the template, refused with the slot.
+    _template_hold: verter_session_query::retention::owned::OwnedHold,
     /// Scheduler source version of the source read the template's
     /// inputs were captured from.
     pub(crate) source_version: verter_scheduler::node::SourceVersion,
@@ -3804,7 +3865,9 @@ impl DerivedRawState {
     /// newer-generation compute already installed.
     pub(crate) fn install_raw_template_analysis(
         &mut self,
-        template: Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
+        template: verter_session_query::retention::heap_size::OwnedValue<
+            verter_session_query::analysis::template::TemplateAnalysisSnapshot,
+        >,
         admission: RawTemplateSlotAdmission,
         account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) {
@@ -3827,8 +3890,17 @@ impl DerivedRawState {
             {
                 return;
             }
+            // The slot retains the template it serves, refusably: refused,
+            // the slot is left as it was and the template stays its
+            // callers' alone.
+            let Ok(template_hold) = template.hold(
+                verter_session_query::retention::owned::ChargeCtx::new(account),
+            ) else {
+                return;
+            };
             self.raw_template_analysis = Some(RawTemplateAnalysisEntry {
                 template,
+                _template_hold: template_hold,
                 source_version,
                 template_class_signature,
             });
@@ -3904,7 +3976,7 @@ pub(crate) struct ResolvedComponentMetaCacheEntry {
     /// validation clones the handle without copying the slice
     /// (R3/R26/R28 fact-validation substrate).
     pub fact_versions: Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
-    pub state: Arc<crate::meta_resolve::ResolvedComponentMetaState>,
+    pub state: crate::resolver_core::CachedValue<crate::meta_resolve::ResolvedComponentMetaState>,
 }
 
 #[derive(Debug, Clone)]

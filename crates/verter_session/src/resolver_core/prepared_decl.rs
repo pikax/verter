@@ -3,10 +3,14 @@ use std::cell::Cell;
 use std::sync::{Arc, OnceLock};
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use verter_session_query::retention::StoreAccount;
+use verter_session_query::type_solver::prepared::NameResolutionTable;
 use verter_session_query::type_solver::prepared::PreparedExternalDep;
 use verter_session_query::type_solver::{
     PreparedTypeDecl, PreparedValueDecl, ResolvedRootIdentity,
 };
+
+use super::{CachedData, CachedValue};
 use verter_type_expr::TopLevelOwnerId;
 
 use super::ShallowFileState;
@@ -39,16 +43,81 @@ use type_prep::{
 /// decl-body lease pin leaves `value` VACANT and releases the gate, so a later
 /// demand under a live lease recomputes — the lease-miss is never persisted as
 /// absence (a write-once `OnceLock` alone could not express that).
-struct PreparedDeclSlot<T> {
-    value: OnceLock<Option<Arc<T>>>,
+///
+/// A slot fills after its bundle is admitted, so a committed declaration is
+/// its own self-charged cell, held by the slot: the bundle's retention grows
+/// with every committed declaration, refusably. A refused hold commits
+/// nothing — the declaration is returned uncached, charged to its caller,
+/// and a later demand rebuilds it.
+struct PreparedDeclSlot<T: CachedData> {
+    value: OnceLock<Option<Held<T>>>,
     build_gate: parking_lot::Mutex<()>,
 }
 
-impl<T> PreparedDeclSlot<T> {
+impl<T: CachedData> PreparedDeclSlot<T> {
     fn new() -> Self {
         Self {
             value: OnceLock::new(),
             build_gate: parking_lot::Mutex::new(()),
+        }
+    }
+
+    /// The committed value, when the slot holds one.
+    fn committed(&self) -> Option<Option<CachedValue<T>>> {
+        self.value
+            .get()
+            .map(|committed| committed.as_ref().map(|held| held.value.clone()))
+    }
+
+    /// Commit `value` — a genuine result or a genuine absence — and return
+    /// it. A declaration the account refuses to retain is returned
+    /// uncached, charged to its caller; the slot stays vacant.
+    fn commit(&self, value: Option<T>, account: &StoreAccount) -> Option<CachedValue<T>> {
+        let Some(value) = value else {
+            let _ = self.value.set(None);
+            return None;
+        };
+        let held = Held::retain(CachedValue::new(value), account);
+        let value = held.value().clone();
+        if let Ok(held) = held {
+            let _ = self.value.set(Some(held));
+        }
+        Some(value)
+    }
+}
+
+/// A cell a bundle retains after its admission, with the bundle's hold on
+/// it: the cell's charge is retained while the bundle keeps it and passes,
+/// pinned, to the readers still sharing the cell when the bundle drops.
+struct Held<T: CachedData> {
+    value: CachedValue<T>,
+    _hold: verter_session_query::retention::owned::OwnedHold,
+}
+
+impl<T: CachedData> Held<T> {
+    /// The bundle's hold on `value`; on refusal the value is charged to the
+    /// caller that keeps it instead, and nothing is retained.
+    fn retain(value: CachedValue<T>, account: &StoreAccount) -> Result<Self, CachedValue<T>> {
+        let ctx = verter_session_query::retention::owned::ChargeCtx::new(account.get());
+        match value.hold(ctx) {
+            Ok(hold) => Ok(Self { value, _hold: hold }),
+            Err(_) => {
+                value.pin(ctx);
+                Err(value)
+            }
+        }
+    }
+}
+
+trait HeldValue<T: CachedData> {
+    fn value(&self) -> &CachedValue<T>;
+}
+
+impl<T: CachedData> HeldValue<T> for Result<Held<T>, CachedValue<T>> {
+    fn value(&self) -> &CachedValue<T> {
+        match self {
+            Ok(held) => &held.value,
+            Err(value) => value,
         }
     }
 }
@@ -59,13 +128,35 @@ type PreparedValueDeclSlot = Arc<PreparedDeclSlot<PreparedValueDecl>>;
 type PreparedValueDeclSlots =
     Arc<FxHashMap<verter_type_expr::DeclBindingKey, PreparedValueDeclSlot>>;
 type OwnerNameResolutionBases =
-    Arc<FxHashMap<verter_type_expr::TopLevelOwnerId, Arc<OnceLock<SharedNameResolutionBase>>>>;
+    Arc<FxHashMap<verter_type_expr::TopLevelOwnerId, Arc<OnceLock<Held<NameResolutionMap>>>>>;
 
-/// Per-FILE shared `name_resolution` base table (interned `Arc<str>` names →
-/// resolved root identities): built once per prepared-decl cache and shared
-/// via `Arc` by every non-namespaced prepared decl of the defining file. See
-/// `PreparedTypeDecl::name_resolution` for the sharing + interning contract.
-type SharedNameResolutionBase = Arc<FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>>;
+/// The names one resolution table maps.
+type NameResolutionMap = FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>;
+
+/// Per-FILE shared `name_resolution` base table (interned names → resolved
+/// root identities): built once per prepared-decl cache and shared by every
+/// non-namespaced prepared decl of the defining file. One self-charged cell,
+/// so it is charged once however many declarations and readers share it.
+/// See `PreparedTypeDecl::name_resolution` for the sharing + interning
+/// contract.
+type SharedNameResolutionBase = NameResolutionTable;
+
+/// The per-owner base for one cold build: the bundle's retained table, or
+/// a fresh one retained now — or, when the account refuses it, returned
+/// uncached and charged to the declaration build that keeps it.
+fn name_resolution_base(
+    base_cell: &OnceLock<Held<NameResolutionMap>>,
+    account: &StoreAccount,
+    build: impl FnOnce() -> Result<NameResolutionMap, PreparationFailure>,
+) -> Result<SharedNameResolutionBase, PreparationFailure> {
+    if let Some(base) = base_cell.get() {
+        return Ok(base.value.clone());
+    }
+    match Held::retain(NameResolutionTable::new(build()?), account) {
+        Ok(held) => Ok(base_cell.get_or_init(|| held).value.clone()),
+        Err(uncached) => Ok(uncached),
+    }
+}
 
 /// FINAL defining-file canonicalization of a file's import targets, computed
 /// at bundle materialization through the SAME route authority the carrier
@@ -81,7 +172,7 @@ type SharedNameResolutionBase = Arc<FxHashMap<verter_type_expr::OwnedStr, Resolv
 /// `(canonical, owner, symbol)`, including for a cold direct target. An absent
 /// entry is an unresolved owner and produces `MissingExternalOwner`; consumers
 /// never substitute the importer owner or rematch by name.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, verter_retention::heap_size::HeapSize)]
 pub struct ImportCanonicalization {
     /// `(local owner, local name) → FINAL (canonical, owner, symbol)` for
     /// every resolvable import, canonicalized through the authoritative type or
@@ -728,7 +819,7 @@ fn prepare_local_value_decl_outcome_with_base(
     // identities are interned `Arc<str>` allocations minted through the
     // store-owned pool.
     prepared.name_resolution = match shared_name_resolution_base {
-        Some(base) => Arc::clone(base),
+        Some(base) => base.clone(),
         None => match build_value_name_resolution_base(
             canonical_id,
             state,
@@ -737,7 +828,7 @@ fn prepare_local_value_decl_outcome_with_base(
             import_canonicalization,
             interner,
         ) {
-            Ok(base) => Arc::new(base),
+            Ok(base) => NameResolutionTable::new(base),
             Err(failure) => return PreparedDeclOutcome::Failed(failure),
         },
     };
@@ -781,11 +872,14 @@ pub fn prepare_exported_value_decl(
 pub struct PreparedTypeDeclCache {
     canonical_id: verter_type_expr::OwnedStr,
     state: Arc<ShallowFileState>,
-    dep_edges: Arc<FxHashMap<String, String>>,
+    dep_edges: DepEdges,
     import_canonicalization: Arc<ImportCanonicalization>,
     /// Handle to the store-owned identity intern pool (per-store
     /// lifetime) — the cold build below mints every identity through it.
     interner: Arc<IdentityInterner>,
+    /// The account the declarations and name tables committed after the
+    /// bundle's admission are retained on.
+    account: StoreAccount,
     slots: PreparedTypeDeclSlots,
     /// Per-FILE TYPE-space `name_resolution` base table, built lazily ONCE
     /// per cache (`OnceLock` collapses concurrent initializers) and shared
@@ -864,7 +958,7 @@ impl PreparedTypeDeclCache {
     pub fn get(
         &self,
         symbol_name: &str,
-    ) -> Result<Option<Arc<PreparedTypeDecl>>, PreparationFailure> {
+    ) -> Result<Option<CachedValue<PreparedTypeDecl>>, PreparationFailure> {
         self.get_in(
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             symbol_name,
@@ -875,22 +969,22 @@ impl PreparedTypeDeclCache {
         &self,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
-    ) -> Result<Option<Arc<PreparedTypeDecl>>, PreparationFailure> {
+    ) -> Result<Option<CachedValue<PreparedTypeDecl>>, PreparationFailure> {
         let key = verter_type_expr::DeclBindingKey::new(owner, symbol_name);
         let Some(slot) = self.slots.get(&key) else {
             return Ok(None);
         };
         // Warm fast path — no gate.
-        if let Some(cached) = slot.value.get() {
-            return Ok(cached.clone());
+        if let Some(cached) = slot.committed() {
+            return Ok(cached);
         }
         // Cold: serialise the build under the resettable in-flight gate
         // (cooperative wait, never a spin), then re-check warm — a concurrent
         // winner may have committed while we blocked, so we reuse its result
         // rather than rebuild (single-flight for the successful case).
         let _gate = slot.build_gate.lock();
-        if let Some(cached) = slot.value.get() {
-            return Ok(cached.clone());
+        if let Some(cached) = slot.committed() {
+            return Ok(cached);
         }
         // A broken decl-body lease pin surfaces the DISTINCT `LeaseMiss` — fail
         // CLOSED via ReturnOnly: leave `value` VACANT (release the gate without
@@ -907,19 +1001,16 @@ impl PreparedTypeDeclCache {
             .name_resolution_bases
             .get(&owner)
             .expect("every prepared slot owner has a name-resolution base");
-        let name_resolution_base = if let Some(base) = base_cell.get() {
-            base
-        } else {
-            let built = Arc::new(build_type_name_resolution_base(
+        let name_resolution_base = name_resolution_base(base_cell, &self.account, || {
+            build_type_name_resolution_base(
                 &self.canonical_id,
                 self.state.as_ref(),
                 owner,
                 (!self.dep_edges.is_empty()).then_some(self.dep_edges.as_ref()),
                 &self.import_canonicalization,
                 &self.interner,
-            )?);
-            base_cell.get_or_init(|| built)
-        };
+            )
+        })?;
         match prepare_local_type_decl_outcome_with_base(
             &self.canonical_id,
             self.state.as_ref(),
@@ -927,7 +1018,7 @@ impl PreparedTypeDeclCache {
             symbol_name,
             (!self.dep_edges.is_empty()).then_some(self.dep_edges.as_ref()),
             &self.import_canonicalization,
-            Some(name_resolution_base),
+            Some(&name_resolution_base),
             &self.interner,
         ) {
             PreparedDeclOutcome::LeaseMiss => {
@@ -940,11 +1031,7 @@ impl PreparedTypeDeclCache {
                 );
                 Ok(None)
             }
-            PreparedDeclOutcome::Ready(value) => {
-                let committed = value.map(Arc::new);
-                let _ = slot.value.set(committed.clone());
-                Ok(committed)
-            }
+            PreparedDeclOutcome::Ready(value) => Ok(slot.commit(value, &self.account)),
             PreparedDeclOutcome::Failed(failure) => Err(failure),
         }
     }
@@ -981,7 +1068,7 @@ impl PreparedTypeDeclCache {
                 ) {
                     Ok(Some(declaration)) => PreparedTypeDeclResolution::AuthoredPartial {
                         root_identity,
-                        declaration: Arc::new(declaration),
+                        declaration: CachedValue::new(declaration),
                         failure,
                     },
                     Ok(None) => PreparedTypeDeclResolution::Failed {
@@ -1023,17 +1110,26 @@ impl PreparedTypeDeclCache {
         self.cold_build_count
             .load(std::sync::atomic::Ordering::Relaxed)
     }
+
+    /// This cache, retaining what it commits on `account`.
+    #[cfg(test)]
+    pub(crate) fn charged_to_for_tests(mut self, account: StoreAccount) -> Self {
+        self.account = account;
+        self
+    }
 }
 
 #[derive(Clone)]
 pub struct PreparedValueDeclCache {
     canonical_id: verter_type_expr::OwnedStr,
     state: Arc<ShallowFileState>,
-    dep_edges: Arc<FxHashMap<String, String>>,
+    dep_edges: DepEdges,
     import_canonicalization: Arc<ImportCanonicalization>,
     /// Handle to the store-owned identity intern pool (per-store
     /// lifetime) — the cold build below mints every identity through it.
     interner: Arc<IdentityInterner>,
+    /// See [`PreparedTypeDeclCache::account`].
+    account: StoreAccount,
     slots: PreparedValueDeclSlots,
     /// Per-FILE VALUE-space `name_resolution` base table — see
     /// [`PreparedTypeDeclCache::name_resolution_base`]; the value space has
@@ -1069,7 +1165,7 @@ impl PreparedValueDeclCache {
             .get(&owner)
             .and_then(|cell| cell.get())
         {
-            Some(base) => Arc::clone(base),
+            Some(base) => base.value.clone(),
             None => match build_value_name_resolution_base(
                 &self.canonical_id,
                 self.state.as_ref(),
@@ -1078,7 +1174,7 @@ impl PreparedValueDeclCache {
                 &self.import_canonicalization,
                 &self.interner,
             ) {
-                Ok(base) => Arc::new(base),
+                Ok(base) => NameResolutionTable::new(base),
                 Err(failure) => return PreparedDeclOutcome::Failed(failure),
             },
         };
@@ -1124,7 +1220,7 @@ impl PreparedValueDeclCache {
     pub fn get(
         &self,
         symbol_name: &str,
-    ) -> Result<Option<Arc<PreparedValueDecl>>, PreparationFailure> {
+    ) -> Result<Option<CachedValue<PreparedValueDecl>>, PreparationFailure> {
         self.get_in(
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             symbol_name,
@@ -1141,7 +1237,7 @@ impl PreparedValueDeclCache {
         &self,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
-    ) -> Result<Option<Arc<PreparedValueDecl>>, PreparationFailure> {
+    ) -> Result<Option<CachedValue<PreparedValueDecl>>, PreparationFailure> {
         let Some(slot) = self
             .slots
             .get(&verter_type_expr::DeclBindingKey::new(owner, symbol_name))
@@ -1149,8 +1245,8 @@ impl PreparedValueDeclCache {
             return Ok(None);
         };
         // Warm fast path — no gate.
-        if let Some(cached) = slot.value.get() {
-            return Ok(cached.clone());
+        if let Some(cached) = slot.committed() {
+            return Ok(cached);
         }
         // Cold: serialise under the resettable in-flight gate, then re-check
         // warm (single-flight) — same primitive as the type cache above. A
@@ -1159,26 +1255,23 @@ impl PreparedValueDeclCache {
         // symbol and a later live-lease demand recomputes; only a genuine
         // result or genuine absence is cacheable.
         let _gate = slot.build_gate.lock();
-        if let Some(cached) = slot.value.get() {
-            return Ok(cached.clone());
+        if let Some(cached) = slot.committed() {
+            return Ok(cached);
         }
         let base_cell = self
             .name_resolution_bases
             .get(&owner)
             .expect("every prepared slot owner has a name-resolution base");
-        let name_resolution_base = if let Some(base) = base_cell.get() {
-            base
-        } else {
-            let built = Arc::new(build_value_name_resolution_base(
+        let name_resolution_base = name_resolution_base(base_cell, &self.account, || {
+            build_value_name_resolution_base(
                 &self.canonical_id,
                 self.state.as_ref(),
                 owner,
                 (!self.dep_edges.is_empty()).then_some(self.dep_edges.as_ref()),
                 &self.import_canonicalization,
                 &self.interner,
-            )?);
-            base_cell.get_or_init(|| built)
-        };
+            )
+        })?;
         match prepare_local_value_decl_outcome_with_base(
             &self.canonical_id,
             self.state.as_ref(),
@@ -1186,7 +1279,7 @@ impl PreparedValueDeclCache {
             symbol_name,
             (!self.dep_edges.is_empty()).then_some(self.dep_edges.as_ref()),
             &self.import_canonicalization,
-            Some(name_resolution_base),
+            Some(&name_resolution_base),
             &self.interner,
         ) {
             PreparedDeclOutcome::LeaseMiss => {
@@ -1199,11 +1292,7 @@ impl PreparedValueDeclCache {
                 );
                 Ok(None)
             }
-            PreparedDeclOutcome::Ready(value) => {
-                let committed = value.map(Arc::new);
-                let _ = slot.value.set(committed.clone());
-                Ok(committed)
-            }
+            PreparedDeclOutcome::Ready(value) => Ok(slot.commit(value, &self.account)),
             // A genuine preparation failure is NOT written into the
             // write-once slot (nothing to cache — the next demand recomputes
             // it, same non-persistence the `LeaseMiss` arm applies) and is
@@ -1230,11 +1319,13 @@ impl PreparedValueDeclCache {
 /// Valid as long as its `ImportRoute` and `FileWholeHash` facts match the
 /// current store view. Never incrementally merged — rebuilt wholesale when the
 /// import graph or file content changes.
-#[derive(Clone)]
 pub struct PreparedDeclBundle {
-    input_projection: super::request_inputs::CachedProjection<
-        verter_session_query::inputs::prepared::PreparedInputRecord,
-    >,
+    /// The engine's input record, minted on first read after admission:
+    /// its own cell, held by the bundle (see [`Held`]).
+    input_projection: OnceLock<Held<verter_session_query::inputs::prepared::PreparedInputRecord>>,
+    /// The account the cells this bundle commits after admission are
+    /// retained on.
+    account: StoreAccount,
     /// The content version (`ShallowFileState::whole_hash`) of the
     /// canonical file this bundle was built from. A consumer that
     /// resolves a declaration through this bundle and roots a cache
@@ -1247,18 +1338,158 @@ pub struct PreparedDeclBundle {
     /// The dep_edges snapshot used to build this bundle.
     /// Stored so `SessionSolverHost::with_declaration_scope` can read it
     /// instead of recomputing dependency resolutions from the store view.
-    pub dep_edges: Arc<FxHashMap<String, String>>,
+    pub dep_edges: DepEdges,
     /// Exact declaration-scope surfaces partitioned by lexical owner.
     /// There is deliberately no ordinary-owner fallback: an absent owner has
     /// an empty scope rather than inheriting module-zero declarations.
-    pub owner_scopes: Arc<FxHashMap<TopLevelOwnerId, PreparedOwnerScope>>,
+    pub owner_scopes: verter_session_query::inputs::prepared::OwnerScopes,
+}
+
+/// A file's resolved import specifiers: one self-charged cell the bundle and
+/// both declaration caches share.
+pub type DepEdges = CachedValue<FxHashMap<String, String>>;
+
+impl verter_retention::heap_size::HeapSize for PreparedDeclBundle {
+    /// The bundle as admitted: both declaration caches' tables and its shared
+    /// cells. What it commits afterwards — declarations, name tables, the
+    /// engine's input record — is each its own cell, held by the bundle as
+    /// it fills ([`Held`]). The file's shallow state is the file artifact
+    /// store's and the identity pool the project store's; the bundle shares
+    /// both, owns neither.
+    fn heap_size<'t>(
+        &'t self,
+        meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+    ) -> usize {
+        let Self {
+            input_projection: _,
+            account: _,
+            owner_whole_hash: _,
+            prepared_type_decls,
+            prepared_value_decls,
+            dep_edges,
+            owner_scopes,
+        } = self;
+        prepared_type_decls.heap_size(meter)
+            + prepared_value_decls.heap_size(meter)
+            + dep_edges.heap_size(meter)
+            + owner_scopes.heap_size(meter)
+    }
+}
+
+impl verter_retention::heap_size::HeapSize for PreparedTypeDeclCache {
+    /// See [`PreparedDeclBundle`]'s measurement.
+    fn heap_size<'t>(
+        &'t self,
+        meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+    ) -> usize {
+        let Self {
+            canonical_id,
+            state: _,
+            dep_edges,
+            import_canonicalization,
+            interner: _,
+            account: _,
+            slots,
+            name_resolution_bases,
+            #[cfg(test)]
+                cold_build_count: _,
+        } = self;
+        canonical_id.heap_size(meter)
+            + dep_edges.heap_size(meter)
+            + import_canonicalization.heap_size(meter)
+            + slot_table_heap(slots, meter)
+            + base_table_heap(name_resolution_bases, meter)
+    }
+}
+
+impl verter_retention::heap_size::HeapSize for PreparedValueDeclCache {
+    /// See [`PreparedDeclBundle`]'s measurement.
+    fn heap_size<'t>(
+        &'t self,
+        meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+    ) -> usize {
+        let Self {
+            canonical_id,
+            state: _,
+            dep_edges,
+            import_canonicalization,
+            interner: _,
+            account: _,
+            slots,
+            name_resolution_bases,
+        } = self;
+        canonical_id.heap_size(meter)
+            + dep_edges.heap_size(meter)
+            + import_canonicalization.heap_size(meter)
+            + slot_table_heap(slots, meter)
+            + base_table_heap(name_resolution_bases, meter)
+    }
+}
+
+/// A declaration cache's slot table: its block, its buckets, each key's
+/// heap and each slot's block. A committed value is its own held cell.
+fn slot_table_heap<'t, T: CachedData>(
+    slots: &'t Arc<FxHashMap<verter_type_expr::DeclBindingKey, Arc<PreparedDeclSlot<T>>>>,
+    meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+) -> usize {
+    use verter_retention::heap_size::HeapSize;
+    use verter_session_query::retention::allocation::arc_block_bytes;
+    if !meter.first(slots) {
+        return 0;
+    }
+    arc_block_bytes(std::mem::size_of::<
+        FxHashMap<verter_type_expr::DeclBindingKey, Arc<PreparedDeclSlot<T>>>,
+    >()) + verter_retention::heap_size::hash_table_bytes(
+        slots.capacity(),
+        std::mem::size_of::<(verter_type_expr::DeclBindingKey, Arc<PreparedDeclSlot<T>>)>(),
+    ) + slots
+        .iter()
+        .map(|(key, slot)| {
+            key.heap_size(meter)
+                + if meter.first(slot) {
+                    arc_block_bytes(std::mem::size_of::<PreparedDeclSlot<T>>())
+                } else {
+                    0
+                }
+        })
+        .sum::<usize>()
+}
+
+/// A declaration cache's per-owner base table: its block, its buckets and
+/// each owner's lazily filled cell block. A built base is its own held
+/// cell.
+fn base_table_heap<'t>(
+    bases: &'t OwnerNameResolutionBases,
+    meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+) -> usize {
+    use verter_session_query::retention::allocation::arc_block_bytes;
+    type Base = Arc<OnceLock<Held<NameResolutionMap>>>;
+    if !meter.first(bases) {
+        return 0;
+    }
+    arc_block_bytes(std::mem::size_of::<FxHashMap<TopLevelOwnerId, Base>>())
+        + verter_retention::heap_size::hash_table_bytes(
+            bases.capacity(),
+            std::mem::size_of::<(TopLevelOwnerId, Base)>(),
+        )
+        + bases
+            .values()
+            .map(|base| {
+                if meter.first(base) {
+                    arc_block_bytes(std::mem::size_of::<OnceLock<Held<NameResolutionMap>>>())
+                } else {
+                    0
+                }
+            })
+            .sum::<usize>()
 }
 
 impl PreparedDeclBundle {
-    pub(crate) fn input_record(
-        &self,
-    ) -> Arc<verter_session_query::inputs::prepared::PreparedInputRecord> {
-        self.input_projection.get_or_init(|| {
+    pub(crate) fn input_record(&self) -> verter_session_query::inputs::prepared::PreparedInputRef {
+        if let Some(record) = self.input_projection.get() {
+            return record.value.clone();
+        }
+        let record = CachedValue::new(
             verter_session_query::inputs::prepared::PreparedInputRecord {
                 observation_id: {
                     static NEXT_OBSERVATION: std::sync::atomic::AtomicU64 =
@@ -1266,9 +1497,15 @@ impl PreparedDeclBundle {
                     NEXT_OBSERVATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                 },
                 owner_whole_hash: self.owner_whole_hash,
-                owner_scopes: Arc::clone(&self.owner_scopes),
-            }
-        })
+                owner_scopes: self.owner_scopes.clone(),
+            },
+        );
+        match Held::retain(record, &self.account) {
+            Ok(held) => self.input_projection.get_or_init(|| held).value.clone(),
+            // Refused: the record is its reader's, minted afresh per read
+            // until the account has room.
+            Err(uncached) => uncached,
+        }
     }
 
     /// Exact declaration scope for `owner`.
@@ -1338,7 +1575,7 @@ pub fn build_prepared_decl_bundle(
     interner: &Arc<IdentityInterner>,
 ) -> PreparedDeclBundle {
     verter_audit::attribute_scope!(PreparedDeclBuild);
-    let dep_edges = Arc::new(dep_edges);
+    let dep_edges = DepEdges::new(dep_edges);
     let import_canonicalization = Arc::new(import_canonicalization);
 
     let header_index = &state.headers;
@@ -1402,24 +1639,25 @@ pub fn build_prepared_decl_bundle(
 
     let owner_whole_hash = state.whole_hash;
     PreparedDeclBundle {
-        input_projection: super::request_inputs::CachedProjection::default(),
+        input_projection: OnceLock::new(),
+        account: StoreAccount::default(),
         owner_whole_hash,
         prepared_type_decls: build_prepared_type_decl_cache(
             canonical_id,
             Arc::clone(&state),
-            Arc::clone(&dep_edges),
+            dep_edges.clone(),
             Arc::clone(&import_canonicalization),
             interner,
         ),
         prepared_value_decls: build_prepared_value_decl_cache(
             canonical_id,
             Arc::clone(&state),
-            Arc::clone(&dep_edges),
+            dep_edges.clone(),
             Arc::clone(&import_canonicalization),
             interner,
         ),
         dep_edges,
-        owner_scopes: Arc::new(owner_scopes),
+        owner_scopes: verter_session_query::inputs::prepared::OwnerScopes::new(owner_scopes),
     }
 }
 
@@ -1427,7 +1665,7 @@ pub fn build_prepared_decl_bundle(
 pub fn build_prepared_type_decl_cache(
     canonical_id: &str,
     state: Arc<ShallowFileState>,
-    dep_edges: Arc<FxHashMap<String, String>>,
+    dep_edges: DepEdges,
     import_canonicalization: Arc<ImportCanonicalization>,
     interner: &Arc<IdentityInterner>,
 ) -> PreparedTypeDeclCache {
@@ -1476,6 +1714,7 @@ pub fn build_prepared_type_decl_cache(
         dep_edges,
         import_canonicalization,
         interner: Arc::clone(interner),
+        account: StoreAccount::default(),
         slots: Arc::new(slots),
         name_resolution_bases: Arc::new(name_resolution_bases),
         #[cfg(test)]
@@ -1487,7 +1726,7 @@ pub fn build_prepared_type_decl_cache(
 pub fn build_prepared_value_decl_cache(
     canonical_id: &str,
     state: Arc<ShallowFileState>,
-    dep_edges: Arc<FxHashMap<String, String>>,
+    dep_edges: DepEdges,
     import_canonicalization: Arc<ImportCanonicalization>,
     interner: &Arc<IdentityInterner>,
 ) -> PreparedValueDeclCache {
@@ -1536,6 +1775,7 @@ pub fn build_prepared_value_decl_cache(
         dep_edges,
         import_canonicalization,
         interner: Arc::clone(interner),
+        account: StoreAccount::default(),
         slots: Arc::new(slots),
         name_resolution_bases: Arc::new(name_resolution_bases),
     }

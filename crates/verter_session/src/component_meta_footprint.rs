@@ -52,13 +52,25 @@ pub(crate) fn cached_result_footprint(
         whole_hash,
     } = result;
     let mut aliases = AliasSet::new();
+    let analysis = analysis.offer(&mut aliases);
     let mut meter = Meter::new(&mut aliases);
     let m = &mut meter;
-    let bytes =
-        analysis.heap(m) + resolution_template.heap(m) + canonical_id.heap(m) + inline(whole_hash);
+    let bytes = analysis + resolution_template.heap(m) + canonical_id.heap(m) + inline(whole_hash);
     verter_session_query::retention::Footprint {
         bytes,
         handles: aliases.take_handles(),
+    }
+}
+
+/// A shared component-meta analysis cell's value, measured whole.
+impl verter_retention::heap_size::HeapSize
+    for crate::component_meta_cached_result::ComponentMetaAnalysisCell
+{
+    fn heap_size<'t>(
+        &'t self,
+        meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+    ) -> usize {
+        self.0.heap(&mut Meter::new(meter.handles()))
     }
 }
 
@@ -166,15 +178,6 @@ fn borrowed_arc_slice<T: PayloadHeap>(slice: &[T], m: &mut Meter<'_>) -> usize {
 fn borrowed_arc_value<T: PayloadHeap>(value: &T, m: &mut Meter<'_>) -> usize {
     if m.first_borrow(value) {
         arc_block_bytes(std::mem::size_of::<T>()) + value.heap(m)
-    } else {
-        0
-    }
-}
-
-/// An `Arc<str>` payload its owner exposes only as a borrowed `str`.
-fn borrowed_arc_str(text: &str, m: &mut Meter<'_>) -> usize {
-    if m.first_borrow(text) {
-        arc_block_bytes(text.len())
     } else {
         0
     }
@@ -1589,19 +1592,21 @@ impl PayloadHeap for publ::TypePublication {
 }
 
 impl PayloadHeap for publ::ResolvedTypeAuthority {
-    /// Fields are private: the outcome is borrowed in place, the diagnostic
-    /// list is an `Arc` slice exposed only as a borrow.
+    /// Fields are private: the outcome is borrowed in place; the diagnostic
+    /// list is an owned list, charged by its own cell.
     fn heap(&self, m: &mut Meter<'_>) -> usize {
         self.outcome().heap(m)
             + self.provenance().heap(m)
-            + borrowed_arc_slice(self.diagnostics(), m)
+            + self.diagnostics_list().offer(&mut *m.aliases)
     }
 }
 
 impl PayloadHeap for publ::ResolvedTypeOutcome {
     fn heap(&self, m: &mut Meter<'_>) -> usize {
         match self {
-            Self::Present { source, exactness } => arc_heap(source, m) + exactness.heap(m),
+            Self::Present { source, exactness } => {
+                source.offer(&mut *m.aliases) + exactness.heap(m)
+            }
             Self::Absent { absence } => absence.heap(m),
             Self::Failed { failure } => failure.heap(m),
         }
@@ -1629,10 +1634,10 @@ impl PayloadHeap for publ::ResolutionDiagnostic {
 
 impl PayloadHeap for publ::AuthoredTypeEvidence {
     /// Fields are private: the authored locator is borrowed in place, the
-    /// text is an `Arc<str>` exposed only as a borrow.
+    /// text is an owned string, charged by its own cell.
     fn heap(&self, m: &mut Meter<'_>) -> usize {
         self.source().locator().heap(m)
-            + borrowed_arc_str(self.text(), m)
+            + self.owned_text().offer(&mut *m.aliases)
             + self.provenance().heap(m)
     }
 }
@@ -1655,7 +1660,7 @@ impl PayloadHeap for publ::PublicationResult {
                 reason,
                 provenance,
             } => {
-                arc_heap(selected_source, m)
+                selected_source.offer(&mut *m.aliases)
                     + semantic_authority.heap(m)
                     + exactness.heap(m)
                     + reason.heap(m)

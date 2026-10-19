@@ -310,10 +310,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         receiver.map_or(value, |receiver| self.bind_callee_receiver(value, receiver))
     }
 
-    /// The typed call-resolution authority: reentry hold, validated warm
-    /// result, then root-family or inline mixed-obligation execution.
-    pub fn execute_resolve_call(&self, key: ResolveCallKey) -> ResolveCallStep {
-        self.execute_resolve_call_with_declared_result(key).0
+    construction_ordinal_seam! {
+        /// The typed call-resolution authority: reentry hold, validated warm
+        /// result, then root-family or inline mixed-obligation execution.
+        fn execute_resolve_call(&self, key: ResolveCallKey) -> ResolveCallStep {
+            self.execute_resolve_call_with_declared_result(key).0
+        }
     }
 
     pub(super) fn execute_resolve_call_with_declared_result(
@@ -2603,7 +2605,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // members (`SkipContextSensitive` reads the sensitive ones
                 // as the non-inferring `anyFunctionType`); what it deposits
                 // is kept only when that reading relates.
-                if let Some(view) = argument.first_pass {
+                if let Some(view) = argument
+                    .first_pass
+                    .filter(|_| self.first_pass_infers_into(target, &visible_type_params))
+                {
                     let checkpoint = self.relation_session_checkpoint();
                     let deposits_before = self.accepted_inference_deposits();
                     let step = self.call_argument_relation(
@@ -4454,13 +4459,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
         policy: ConstParamPolicy,
     ) -> SemanticNodeId {
-        self.call_shape_transform(node, policy, &mut FxHashMap::default())
+        self.call_inference_candidate_keeping(node, policy, &[])
+    }
+
+    /// [`Self::call_inference_candidate`] with each literal in `keeps` (a
+    /// literal the argument's contextual typing kept) left as written.
+    pub(super) fn call_inference_candidate_keeping(
+        &self,
+        node: SemanticNodeId,
+        policy: ConstParamPolicy,
+        keeps: &[SemanticNodeId],
+    ) -> SemanticNodeId {
+        self.call_shape_transform(node, policy, keeps, &mut FxHashMap::default())
     }
 
     fn call_shape_transform(
         &self,
         node: SemanticNodeId,
         policy: ConstParamPolicy,
+        keeps: &[SemanticNodeId],
         memo: &mut FxHashMap<SemanticNodeId, SemanticNodeId>,
     ) -> SemanticNodeId {
         if let Some(cached) = memo.get(&node) {
@@ -4470,14 +4487,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         memo.insert(node, node);
         let result = match graph.node_data(node).as_deref() {
             Some(SemanticNodeData::Literal(_) | SemanticNodeData::EnumLiteral(_))
-                if policy == ConstParamPolicy::NonConst =>
+                if policy == ConstParamPolicy::NonConst && !keeps.contains(&node) =>
             {
                 self.widened_literal(node)
             }
             Some(SemanticNodeData::Tuple { elements, .. }) => {
                 let values = elements
                     .iter()
-                    .map(|element| self.call_shape_transform(element.value, policy, memo))
+                    .map(|element| self.call_shape_transform(element.value, policy, keeps, memo))
                     .collect::<Vec<_>>();
                 if policy == ConstParamPolicy::Const {
                     let mut mapped = elements
@@ -4512,7 +4529,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             Some(SemanticNodeData::Array { element, .. }) => {
-                let element = self.call_shape_transform(*element, policy, memo);
+                let element = self.call_shape_transform(*element, policy, keeps, memo);
                 graph.intern_preserving_scope(
                     node,
                     SemanticNodeData::Array {
@@ -4524,7 +4541,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(SemanticNodeData::Union(members)) => {
                 let transformed = members
                     .iter()
-                    .map(|member| self.call_shape_transform(*member, policy, memo))
+                    .map(|member| self.call_shape_transform(*member, policy, keeps, memo))
                     .collect::<Vec<_>>();
                 let widened = transformed
                     .iter()
@@ -4553,7 +4570,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let category = members.origin_category();
                 let members = members
                     .iter()
-                    .map(|member| self.call_shape_transform(*member, policy, memo))
+                    .map(|member| self.call_shape_transform(*member, policy, keeps, memo))
                     .collect::<Vec<_>>();
                 // Order- and scope-preserving rebuild: an intersection
                 // reaching call-shape transformation may be an
@@ -4577,7 +4594,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .map(crate::semantic_query::SurfaceMember::clone)
                     .collect::<Vec<_>>();
                 for member in &mut members {
-                    member.value = self.call_shape_transform(member.value, policy, memo);
+                    member.value = self.call_shape_transform(member.value, policy, keeps, memo);
                     member.readonly = policy == ConstParamPolicy::Const;
                 }
                 graph.intern_preserving_scope(

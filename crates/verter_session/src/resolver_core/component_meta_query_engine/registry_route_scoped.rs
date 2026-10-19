@@ -142,12 +142,12 @@ impl ComponentMetaQueryEngine<'_> {
         let body_root = {
             let dispatch = self.semantic_dispatch();
             dispatch
-                .raise_authored_locator_to_hot(
+                .owning().raise_authored_locator_to_hot(
                     &body_locator,
                     verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Navigate,
                     ),
-                )
+                ).into_value_in(self.builder())
                 .at_optional_boundary()
                 .map(|hot: verter_type_engine::semantic_query::HotTypeRef| hot.node())?
         };
@@ -257,12 +257,11 @@ impl ComponentMetaQueryEngine<'_> {
                 if let Some(fact) = prepared.member_index.get(member_key) {
                     return Some((fact.clone(), crossed));
                 }
-                let Some(root) =
-                    crate::resolver_core::component_meta_registry::prepared_body_root_node(
-                        self.dispatch,
-                        prepared.as_ref(),
-                    )
-                else {
+                let raised = crate::resolver_core::component_meta_registry::prepared_body_root_node(
+                    self.dispatch,
+                    prepared.as_ref(),
+                );
+                let Some(root) = *raised.value() else {
                     continue;
                 };
                 match self

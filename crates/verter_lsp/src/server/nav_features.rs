@@ -107,7 +107,7 @@ pub(super) fn child_contract_completion_analysis(
         .collect();
     let mut analysis =
         verter_session_query::analysis::file_analysis::FileAnalysisSnapshot::default();
-    analysis.template = Some(std::sync::Arc::new(
+    analysis.template = Some(verter_session_query::retention::heap_size::OwnedValue::new(
         verter_session_query::analysis::template::TemplateAnalysisSnapshot {
             prop_definitions,
             emit_definitions,

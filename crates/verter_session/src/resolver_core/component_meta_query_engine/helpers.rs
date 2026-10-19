@@ -154,6 +154,8 @@ where
         canonical_dependencies: prepared_type_decl_canonical_dependencies(
             resolved.canonical_id.as_ref(),
             prepared.as_ref(),
-        ),
+        )
+        .into_iter()
+        .collect(),
     }))
 }

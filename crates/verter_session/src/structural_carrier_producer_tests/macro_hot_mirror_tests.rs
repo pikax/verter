@@ -191,6 +191,7 @@ fn bare_ref_macro_arg_mirrors_to_bare_ref_carrier_and_reentry_matches_eager() {
         "<script setup lang=\"ts\">\nimport type { Props } from './types'\ndefineProps<Props>()\n</script>\n<template><div /></template>\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let macro_index = first_macro_index(&host, "/C.vue");
 
     let handle = macro_type_arg_hot_ref(&host, "/C.vue", macro_index)

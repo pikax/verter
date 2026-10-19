@@ -886,6 +886,17 @@ impl QueryNode for CompileOutputNodeFactValidatedSession {
         }
     }
 
+    /// Session-mode candidates are never built through the substrate's
+    /// `query::lookup` (see [`Self::compute`]); a session slot charges its
+    /// own products ([`Self::publish`]).
+    fn candidate_footprint(
+        &self,
+        _key: &Self::Key,
+        value: &Self::Value,
+    ) -> verter_session_query::retention::Footprint {
+        verter_session_query::retention::heap_size::footprint(value)
+    }
+
     /// Session-mode publish-core is not routed through the substrate's
     /// `query::lookup` yet — production publish flows through
     /// [`Self::publish`] above. The arm returns a rejection so an

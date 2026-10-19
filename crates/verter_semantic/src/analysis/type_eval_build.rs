@@ -26,8 +26,8 @@ use oxc_ast::ast::{
     Statement, TSAccessibility, TSEnumDeclaration, TSExternalModuleDeclaration,
     TSInterfaceDeclaration, TSModuleBlock, TSNamespaceDeclaration, TSNamespaceDeclarationBody,
     TSSignature, TSThisParameter, TSType, TSTypeAliasDeclaration, TSTypeName,
-    TSTypeOperatorOperator, TSTypeParameterDeclaration, UnaryOperator, VariableDeclarationKind,
-    VariableDeclarator,
+    TSTypeOperatorOperator, TSTypeParameterDeclaration, UnaryExpression, UnaryOperator,
+    VariableDeclarationKind, VariableDeclarator,
 };
 use oxc_ast_visit::Visit;
 use verter_session_query::analysis::fact_projection::{
@@ -4951,15 +4951,7 @@ fn initializer_literal_freshness(init: &Expression<'_>) -> DeclaredLiteralFreshn
         Expression::TemplateLiteral(template) if template.expressions.is_empty() => {
             DeclaredLiteralFreshness::Widening
         }
-        Expression::UnaryExpression(unary)
-            if matches!(
-                (unary.operator, &unary.argument),
-                (
-                    UnaryOperator::UnaryNegation | UnaryOperator::UnaryPlus,
-                    Expression::NumericLiteral(_)
-                ) | (UnaryOperator::UnaryNegation, Expression::BigIntLiteral(_))
-            ) =>
-        {
+        Expression::UnaryExpression(unary) if signed_literal(unary) => {
             DeclaredLiteralFreshness::Widening
         }
         Expression::ConditionalExpression(conditional) => {
@@ -6145,15 +6137,14 @@ fn expanded_field_authority(
     exactness: verter_session_query::analysis::type_expand::ExpansionExactness,
     diagnostics: &[verter_session_query::analysis::type_expand::ExpansionDiagnostic],
 ) -> verter_type_expr::ResolvedTypeAuthority {
-    let diagnostics: Arc<[verter_type_expr::ResolutionDiagnostic]> = diagnostics
+    let diagnostics: verter_type_expr::ResolutionDiagnostics = diagnostics
         .iter()
         .map(|diagnostic| verter_type_expr::ResolutionDiagnostic {
             kind: publication_diagnostic_kind(diagnostic.reason),
-            context: Arc::from(diagnostic.context.as_str()),
-            property_name: diagnostic.property_name.as_deref().map(Arc::from),
+            context: diagnostic.context.as_str().into(),
+            property_name: diagnostic.property_name.as_deref().map(Into::into),
         })
-        .collect::<Vec<_>>()
-        .into();
+        .collect();
     verter_type_expr::ResolvedTypeAuthority::present(
         source,
         publication_exactness(exactness),
@@ -7072,16 +7063,22 @@ pub fn indexed_literal_mode(expr: Option<&Expression<'_>>) -> IndexedValueLitera
                     pending.push(&conditional.consequent);
                     pending.push(&conditional.alternate);
                 }
-                arm if literal_mode_of_leaf(arm) == IndexedValueLiteralMode::Widened => {}
+                arm if bare_literal_expression(arm) => {}
                 _ => return IndexedValueLiteralMode::Literal,
             }
         }
         return IndexedValueLiteralMode::Widened;
     }
-    expr.map_or(IndexedValueLiteralMode::Literal, literal_mode_of_leaf)
+    match expr {
+        Some(expr) if bare_literal_expression(expr) => IndexedValueLiteralMode::Widened,
+        _ => IndexedValueLiteralMode::Literal,
+    }
 }
 
-fn literal_mode_of_leaf(expr: &Expression<'_>) -> IndexedValueLiteralMode {
+/// Whether one unwrapped expression is a bare literal — a scalar literal
+/// (a signed numeric or negated bigint literal among them), a template, an
+/// object literal or an array literal.
+fn bare_literal_expression(expr: &Expression<'_>) -> bool {
     match expr {
         Expression::StringLiteral(_)
         | Expression::NumericLiteral(_)
@@ -7089,9 +7086,24 @@ fn literal_mode_of_leaf(expr: &Expression<'_>) -> IndexedValueLiteralMode {
         | Expression::BigIntLiteral(_)
         | Expression::TemplateLiteral(_)
         | Expression::ObjectExpression(_)
-        | Expression::ArrayExpression(_) => IndexedValueLiteralMode::Widened,
-        _ => IndexedValueLiteralMode::Literal,
+        | Expression::ArrayExpression(_) => true,
+        Expression::UnaryExpression(unary) => signed_literal(unary),
+        _ => false,
     }
+}
+
+/// Whether a unary expression spells a literal of its own value: a signed
+/// numeric literal (`-1`, `+1`) or a negated bigint literal (`-1n`). The
+/// checker types it as the fresh literal it spells
+/// (`checkPrefixUnaryExpression`).
+fn signed_literal(unary: &UnaryExpression<'_>) -> bool {
+    matches!(
+        (unary.operator, &unary.argument),
+        (
+            UnaryOperator::UnaryNegation | UnaryOperator::UnaryPlus,
+            Expression::NumericLiteral(_)
+        ) | (UnaryOperator::UnaryNegation, Expression::BigIntLiteral(_))
+    )
 }
 
 /// A contextual declarator whose method bodies need the initializer's flow

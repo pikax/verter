@@ -1600,6 +1600,18 @@ declare function ng(x: { v: "a" | "b" }): 1;
 export function l44() { return pu(c ? { v: "a" } : { v: "b" }); }
 export function l45() { return fa(c ? "a" : "b"); }
 export function l46() { return ng(c ? { v: "a" } : { v: "b" }); }
+declare function tq<T extends { v: "a" | "b" }>(x: T): T;
+declare function tqf<T extends { v: "a" | "b"; f: (n: number) => void }>(x: T): T;
+declare function tqm<T extends { v: "a" | "b" }>(x: { o: T; f: (n: number) => void }): T;
+declare function tqk<T extends { "1": "a" | "b" }>(x: T): T;
+declare function nk<T extends string>(x: { "1": T }): T;
+export function l47() { return tq({ v: "a" }); }
+export function l48() { return tqf({ v: "a", f: (n) => {} }); }
+export function l49() { return tqm({ o: { v: "a" }, f: (n) => {} }); }
+export function l50() { return tqk({ 1: "a" }); }
+export function l51() { return nk({ 1: "x" }); }
+declare function tqs<T extends { v: string; f: (n: number) => void }>(x: T): T;
+export function l52() { return tqs({ v: "a", f: (n) => {} }); }
 "##;
 
 /// Each candidate evaluates a nested argument literal under its own type
@@ -1622,7 +1634,11 @@ export function l46() { return ng(c ? { v: "a" } : { v: "b" }); }
 /// nested. A member's contextual type falls
 /// back to an applicable index signature; a string mapping is a string
 /// literal context; and an acyclic constraint chain is read to its end,
-/// however long.
+/// however long. A type parameter types an object argument's members
+/// through its constraint, whether the argument is deposited whole or read
+/// by a context-sensitive literal's first pass, which deposits nothing
+/// into a naked type parameter, so a callback member is typed by the
+/// constraint; a numeric key names the member its string spelling names.
 #[test]
 fn candidate_literal_contexts() {
     let failures = Matrix::new(CANDIDATE_LITERAL_CONTEXTS).four(&[
@@ -1942,6 +1958,48 @@ fn candidate_literal_contexts() {
             r#"string[]"#,
         ),
         (Read::Return(r#"l46"#), r#"1"#, r#"1"#, r#"1"#, r#"1"#),
+        (
+            Read::Return(r#"l47"#),
+            r#"{ v: "a"; }"#,
+            r#"{ v: "a"; }"#,
+            r#"{ v: "a"; }"#,
+            r#"{ v: "a"; }"#,
+        ),
+        (
+            Read::Return(r#"l48"#),
+            r#"{ v: "a"; f: (n: number) => void; }"#,
+            r#"{ v: "a"; f: (n: number) => void; }"#,
+            r#"{ v: "a"; f: (n: number) => void; }"#,
+            r#"{ v: "a"; f: (n: number) => void; }"#,
+        ),
+        (
+            Read::Return(r#"l49"#),
+            r#"{ v: "a"; }"#,
+            r#"{ v: "a"; }"#,
+            r#"{ v: "a"; }"#,
+            r#"{ v: "a"; }"#,
+        ),
+        (
+            Read::Return(r#"l50"#),
+            r#"{ 1: "a"; }"#,
+            r#"{ 1: "a"; }"#,
+            r#"{ 1: "a"; }"#,
+            r#"{ 1: "a"; }"#,
+        ),
+        (
+            Read::Return(r#"l51"#),
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+        ),
+        (
+            Read::Return(r#"l52"#),
+            r#"{ v: string; f: (n: number) => void; }"#,
+            r#"{ v: string; f: (n: number) => void; }"#,
+            r#"{ v: string; f: (n: number) => void; }"#,
+            r#"{ v: string; f: (n: number) => void; }"#,
+        ),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
@@ -1981,6 +2039,11 @@ export function n19() { return id(c ? { a: 1 } : { a: 2 }); }
 export function n20() { return id(c ? { a: 2 } : { a: 1 }); }
 export function n21() { return id(c ? { a: 1 } : { a: "s" }); }
 export function n22() { return id(c ? { a: 1 } : { a: 2, b: "x" }); }
+declare function fa<T>(x: T): T[];
+export function n23() { return pu({ v: c ? -1 : 2 }); }
+export function n24() { return fa(-1); }
+export function n25() { return fa(c ? -1 : 2); }
+export function n26() { return pa([c ? -1n : 2n]); }
 "##;
 
 /// A literal's freshness belongs to its authored occurrence: a fresh
@@ -1990,7 +2053,8 @@ export function n22() { return id(c ? { a: 1 } : { a: 2, b: "x" }); }
 /// argument keeps its literal, and a `const` type parameter keeps every
 /// nested literal readonly. A conditional's object arms the widening makes
 /// alike are one type in either order, while arms that stay unlike keep
-/// both.
+/// both. A signed numeric or negated bigint literal is as fresh as an
+/// unsigned one, alone or as a conditional arm.
 #[test]
 fn authored_literal_occurrences() {
     let failures = Matrix::new(AUTHORED_LITERAL_OCCURRENCES).four(&[
@@ -2126,6 +2190,34 @@ fn authored_literal_occurrences() {
             r#"{ a: number; b?: undefined; } | { a: number; b: string; }"#,
             r#"{ a: number; b?: undefined; } | { a: number; b: string; }"#,
             r#"{ a: number; b?: undefined; } | { a: number; b: string; }"#,
+        ),
+        (
+            Read::Return(r#"n23"#),
+            r#"number"#,
+            r#"number"#,
+            r#"number"#,
+            r#"number"#,
+        ),
+        (
+            Read::Return(r#"n24"#),
+            r#"number[]"#,
+            r#"number[]"#,
+            r#"number[]"#,
+            r#"number[]"#,
+        ),
+        (
+            Read::Return(r#"n25"#),
+            r#"number[]"#,
+            r#"number[]"#,
+            r#"number[]"#,
+            r#"number[]"#,
+        ),
+        (
+            Read::Return(r#"n26"#),
+            r#"bigint"#,
+            r#"bigint"#,
+            r#"bigint"#,
+            r#"bigint"#,
         ),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));

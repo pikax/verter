@@ -56,6 +56,7 @@ pub type FactAuthoredPropertyKey = AuthoredPropertyKey<TypeBodySlot, ValueDeclId
     NoTypeExpr,
     NoStoredSpan,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 pub enum TopLevelOwnerKind {
     Module,
@@ -85,6 +86,7 @@ pub enum TopLevelOwnerKind {
     NoTypeExpr,
     NoStoredSpan,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 pub struct TopLevelOwnerId {
     kind: TopLevelOwnerKind,
@@ -807,6 +809,7 @@ pub enum DeclarationOrigin {
     NoTypeExpr,
     NoStoredSpan,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 pub struct ValueDeclIdentityPart {
     /// Canonical id of the file declaring the value symbol.
@@ -852,6 +855,7 @@ impl verter_retention::owned::Measured for ValueDeclIdentityPart {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct HeritageBaseFact {
     /// The base name exactly as written.
@@ -879,6 +883,7 @@ pub struct HeritageBaseFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct VueIgnoredHeritageFact {
     /// Source-order contributor within a same-owner, same-name declaration
@@ -1011,6 +1016,7 @@ pub struct FollowLocatorPayload {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 #[no_typeexpr(recursive_self)]
 #[no_storedspan(recursive_self)]
@@ -1098,6 +1104,7 @@ pub enum ClosednessRecipe {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct KeyDomainClosednessFact {
     /// Whether EVERY contributor body is a closed-object SHAPE (an `Object`,
@@ -1884,6 +1891,7 @@ pub struct EnumMemberNamesFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum ValueAnnotationClass {
     /// A `typeof X` peel target (paired with `typeof_alias_target`).
@@ -1910,6 +1918,7 @@ pub enum ValueAnnotationClass {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum InferenceUnavailableReason {
     DepthBudgetExceeded,
@@ -1929,6 +1938,7 @@ pub enum InferenceUnavailableReason {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct ValueTypeAnnotationFact {
     /// Whether the declaration carries the nominal `unique symbol` type.
@@ -1993,6 +2003,7 @@ pub struct ValueTypeAnnotationFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum DeclaredLiteralFreshness {
     /// The declared type's literals are regular.
@@ -2103,6 +2114,7 @@ pub enum AuthoredReferenceHeadFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct ProgramExpressionIdentity {
     /// Canonical file containing the parsed expression record.
@@ -2122,6 +2134,7 @@ pub struct ProgramExpressionIdentity {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum SemanticExpressionSource {
     /// A parsed expression record in the retained program index.
@@ -2225,6 +2238,7 @@ pub struct TypeParamDeclFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum TypeBodyClass {
     /// `type X = ...`.
@@ -2249,6 +2263,7 @@ pub enum TypeBodyClass {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct PreparedTypeBodyFacts {
     /// The body classification.
@@ -2313,6 +2328,7 @@ pub struct FunctionParamFact {
     NoTypeExpr,
     NoStoredSpan,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 pub enum FunctionPartIdentity {
     /// The declaration's own callable body (`function f` declarations and
@@ -2355,6 +2371,7 @@ pub enum FunctionPartIdentity {
     NoTypeExpr,
     NoStoredSpan,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 pub struct FlowFunctionReturnIdentity {
     /// The owning declaration's content-free anchor.
@@ -2660,6 +2677,7 @@ pub struct ObjectShapeFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum EnumScalar {
     /// A folded numeric literal, as the canonical `f64` display string
@@ -2693,6 +2711,7 @@ pub enum EnumScalar {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum EnumPrimitiveDomain {
     /// A numeric enum member domain.
@@ -2718,6 +2737,7 @@ pub enum EnumPrimitiveDomain {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct EnumMemberEntry {
     /// The member name.
@@ -2747,6 +2767,7 @@ pub struct EnumMemberEntry {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct EnumConstantExpr {
     /// The program's steps, in evaluation order.
@@ -2764,6 +2785,7 @@ pub struct EnumConstantExpr {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum EnumConstantStep {
     /// A number literal, as the canonical `f64` display string.
@@ -2798,6 +2820,7 @@ pub enum EnumConstantStep {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum EnumConstantUnaryOp {
     /// `+x`.
@@ -2820,6 +2843,7 @@ pub enum EnumConstantUnaryOp {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum EnumConstantBinaryOp {
     /// `|`.
@@ -2859,6 +2883,7 @@ pub enum EnumConstantBinaryOp {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct EnumMemberFact {
     /// The ordered enum members.
@@ -2877,6 +2902,7 @@ pub struct EnumMemberFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct PreparedMemberFact {
     /// Whether the member is optional.
@@ -2924,6 +2950,7 @@ pub struct PreparedMemberFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct PreparedValueMemberFact {
     /// Whether the value member is a method.
@@ -2944,6 +2971,7 @@ pub struct PreparedValueMemberFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum PreparedCaseTransformKind {
     /// `Capitalize<K>`.
@@ -2967,6 +2995,7 @@ pub enum PreparedCaseTransformKind {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum PreparedKeyFilterShapeFact {
     /// No key filter.
@@ -2990,6 +3019,7 @@ pub enum PreparedKeyFilterShapeFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum PreparedKeyRemapShapeFact {
     /// Identity remap.
@@ -3016,6 +3046,7 @@ pub enum PreparedKeyRemapShapeFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum PreparedValueRuleShapeFact {
     /// The value passes through unchanged.
@@ -3036,6 +3067,7 @@ pub enum PreparedValueRuleShapeFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum PreparedForwardingKind {
     /// Identity type parameters are forwarded unchanged.
@@ -3056,6 +3088,7 @@ pub enum PreparedForwardingKind {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct PreparedForwardPayloadFact {
     /// The forwarded target name.
@@ -3079,6 +3112,7 @@ pub struct PreparedForwardPayloadFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum PreparedWrapperKindFact {
     /// Not a wrapper.
@@ -3106,6 +3140,7 @@ pub enum PreparedWrapperKindFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct PreparedSurfaceModifiersFact {
     /// Optionality overlay (`Some(true)` add `?`, `Some(false)` remove, `None`
@@ -3129,6 +3164,7 @@ pub struct PreparedSurfaceModifiersFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct PreparedWrapperShapeFact {
     /// The wrapper kind discriminant.
@@ -3158,6 +3194,7 @@ pub struct PreparedWrapperShapeFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum PreparedProjectionClassFact {
     /// The decl projects its own directly-declared members.

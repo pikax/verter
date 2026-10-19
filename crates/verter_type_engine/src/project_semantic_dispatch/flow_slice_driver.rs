@@ -1,7 +1,7 @@
 //! Request-local flow artifact execution. Shared stores expose claims and
 //! immutable products; this driver alone requests owned source lowering.
-use verter_session_query::flow::bundle::FlowGraphBundle;
 use verter_session_query::flow::bundle::FlowSliceFunctionKey;
+use verter_session_query::flow::bundle::{FlowGraphBundle, FlowGraphBundleRef};
 
 use crate::cache_runtime::flow_slice_node::*;
 use crate::cache_runtime::node::{ArtifactNode, ComputeCtx, QueryFlightKey};
@@ -13,11 +13,11 @@ use crate::resolver_core::ResolverContext;
 use dashmap::DashMap;
 use std::sync::Arc;
 use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_session_query::flow::binding::FlowBindingMapError;
 use verter_session_query::flow::flow_ir::FlowSliceIR;
 use verter_session_query::flow::hashing::compute_flow_slice_hash;
 use verter_session_query::flow::lower::lower_slice_plan;
 use verter_session_query::flow::peeker::{ReturnPathPeeker, SliceDemand};
-use verter_session_query::flow::{binding::FlowBindingMapError, skeleton::FunctionBodySkeleton};
 
 /// Fixture acquisition belongs to the test driver, never shared storage.
 #[cfg(any(test, feature = "test-support"))]
@@ -70,7 +70,7 @@ impl<'a> FlowSliceDriver<'a> {
     pub fn graph_bundle(
         &self,
         key: &FlowSliceFunctionKey,
-    ) -> Result<Option<Arc<FlowGraphBundle>>, FlowBindingMapError> {
+    ) -> Result<Option<FlowGraphBundleRef>, FlowBindingMapError> {
         if self.flags.is_cancelled() {
             crate::request_context::observe_execution_abort(
                 crate::semantic_query::ExecutionAbort::Cancelled,
@@ -94,11 +94,14 @@ impl<'a> FlowSliceDriver<'a> {
         }
     }
 
-    pub fn skeleton_for(&self, key: &FlowSliceFunctionKey) -> Option<Arc<FunctionBodySkeleton>> {
+    pub fn skeleton_for(
+        &self,
+        key: &FlowSliceFunctionKey,
+    ) -> Option<verter_session_query::flow::bundle::SkeletonRef> {
         self.graph_bundle(key)
             .ok()
             .flatten()
-            .map(|bundle| Arc::clone(bundle.skeleton()))
+            .map(|bundle| verter_session_query::flow::bundle::SkeletonRef::of(&bundle))
     }
 
     pub fn lookup_hash(&self, key: FlowSliceHashKey) -> Option<FlowSliceHashOutcome> {

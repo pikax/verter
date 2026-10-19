@@ -61,10 +61,14 @@ fn upsert(host: &VerterHost, source: &str) {
 
 fn persisted_template(
     host: &VerterHost,
-) -> Option<Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>> {
+) -> Option<
+    verter_session_query::retention::heap_size::OwnedValue<
+        verter_session_query::analysis::template::TemplateAnalysisSnapshot,
+    >,
+> {
     host.derived_raw_cache().get(CANONICAL).and_then(|d| {
         d.raw_template_analysis()
-            .map(|entry| Arc::clone(&entry.template))
+            .map(|entry| entry.template.clone())
     })
 }
 
@@ -380,7 +384,7 @@ fn quiescent_scheduler_lane_still_persists_and_warm_serves_the_template() {
     let persisted = persisted_template(&host)
         .expect("the quiescent compute must persist — live scheduler reads are store-published");
     assert!(
-        Arc::ptr_eq(&persisted, cold_tpl),
+        verter_session_query::retention::heap_size::OwnedValue::ptr_eq(&persisted, cold_tpl),
         "the served template IS the persisted value",
     );
 
@@ -392,7 +396,7 @@ fn quiescent_scheduler_lane_still_persists_and_warm_serves_the_template() {
         .as_ref()
         .expect("the warm read carries the template");
     assert!(
-        Arc::ptr_eq(warm_tpl, &persisted),
+        verter_session_query::retention::heap_size::OwnedValue::ptr_eq(warm_tpl, &persisted),
         "the warm read serves the persisted slot value, not a recompute",
     );
 }

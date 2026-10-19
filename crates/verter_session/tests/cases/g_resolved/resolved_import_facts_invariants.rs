@@ -64,8 +64,8 @@ fn upsert(host: &VerterHost, canonical: &str, source: &str) {
 /// facts' internal shape. Returns a unique `Arc` per call so the
 /// `Arc::ptr_eq` checks in the tests can distinguish admission
 /// races.
-fn synthetic_facts() -> Arc<ResolvedImportFacts> {
-    Arc::new(ResolvedImportFacts::new())
+fn synthetic_facts() -> verter_retention::heap_size::OwnedValue<ResolvedImportFacts> {
+    verter_retention::heap_size::OwnedValue::new(ResolvedImportFacts::new())
 }
 
 /// Build a `ResolvedImportFactsKey` with explicit hash components.
@@ -88,7 +88,11 @@ fn key_with(
 /// Seed the store under the SAME witness the production producer
 /// composes for `key.canonical`, so a seeded bundle validates through
 /// exactly the rail a produced one does.
-fn seed(host: &VerterHost, key: ResolvedImportFactsKey, payload: Arc<ResolvedImportFacts>) -> bool {
+fn seed(
+    host: &VerterHost,
+    key: ResolvedImportFactsKey,
+    payload: verter_retention::heap_size::OwnedValue<ResolvedImportFacts>,
+) -> bool {
     let facts = host
         .resolved_import_facts_witness_for(key.canonical.as_ref(), key.content_hash)
         .expect("the production witness must be rootable for a seeded owner");
@@ -118,7 +122,7 @@ fn key_excludes_lib_env_hash() {
     // Two `HostView` instances differ only in their `lib_env_hash`
     // dimension. The resolved-import facts cache key must not
     // include `lib_env_hash`, so both views look up the SAME slot
-    // and observe the SAME `Arc<ResolvedImportFacts>`.
+    // and observe the SAME `verter_retention::heap_size::OwnedValue<ResolvedImportFacts>`.
     let host = fresh_host();
     upsert(&host, "/x.ts", "export const a = 1;");
 
@@ -142,7 +146,7 @@ fn key_excludes_lib_env_hash() {
         RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
     );
     let payload = synthetic_facts();
-    let admitted = seed(&host, key, Arc::clone(&payload));
+    let admitted = seed(&host, key, payload.clone());
     assert!(admitted, "first admission should win on the empty cache");
 
     let view_a =
@@ -158,11 +162,11 @@ fn key_excludes_lib_env_hash() {
         .expect("view B must see the cached payload under its lib env hash");
 
     assert!(
-        Arc::ptr_eq(&observed_a, &observed_b),
+        verter_retention::heap_size::OwnedValue::ptr_eq(&observed_a, &observed_b),
         "two views differing only in `lib_env_hash` must reach the same cache slot (R21 scoping rule)"
     );
     assert!(
-        Arc::ptr_eq(&observed_a, &payload),
+        verter_retention::heap_size::OwnedValue::ptr_eq(&observed_a, &payload),
         "the cached payload must be the same `Arc` admitted above"
     );
 }
@@ -190,7 +194,7 @@ fn lib_change_does_not_invalidate_resolved_import_facts() {
         RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
     );
     let payload = synthetic_facts();
-    seed(&host, key, Arc::clone(&payload));
+    seed(&host, key, payload.clone());
 
     let view_with_dom_lib = HostView::with_env_hashes(
         Arc::clone(&host),
@@ -208,7 +212,7 @@ fn lib_change_does_not_invalidate_resolved_import_facts() {
         .resolved_import_facts("/y.ts")
         .expect("node-lib view sees the cached payload");
     assert!(
-        Arc::ptr_eq(&observed_dom, &observed_node),
+        verter_retention::heap_size::OwnedValue::ptr_eq(&observed_dom, &observed_node),
         "a `lib_env_hash` change MUST NOT invalidate `ResolvedImportFacts` (R21)"
     );
     assert_eq!(
@@ -304,8 +308,8 @@ fn two_resolve_envs_coexist() {
     let payload_a = synthetic_facts();
     let payload_b = synthetic_facts();
 
-    seed(&host, key_a, Arc::clone(&payload_a));
-    seed(&host, key_b, Arc::clone(&payload_b));
+    seed(&host, key_a, payload_a.clone());
+    seed(&host, key_b, payload_b.clone());
 
     assert_eq!(
         host.project_type_store()
@@ -330,15 +334,15 @@ fn two_resolve_envs_coexist() {
         .resolved_import_facts("/w.ts")
         .expect("view B reads its entry");
     assert!(
-        Arc::ptr_eq(&observed_a, &payload_a),
+        verter_retention::heap_size::OwnedValue::ptr_eq(&observed_a, &payload_a),
         "view A must see its OWN admitted payload"
     );
     assert!(
-        Arc::ptr_eq(&observed_b, &payload_b),
+        verter_retention::heap_size::OwnedValue::ptr_eq(&observed_b, &payload_b),
         "view B must see its OWN admitted payload"
     );
     assert!(
-        !Arc::ptr_eq(&observed_a, &observed_b),
+        !verter_retention::heap_size::OwnedValue::ptr_eq(&observed_a, &observed_b),
         "the two payloads are distinct `Arc`s"
     );
 }
@@ -480,14 +484,14 @@ fn insert_if_absent_is_first_writer_wins() {
     let payload_first = synthetic_facts();
     let payload_second = synthetic_facts();
     assert!(
-        !Arc::ptr_eq(&payload_first, &payload_second),
+        !verter_retention::heap_size::OwnedValue::ptr_eq(&payload_first, &payload_second),
         "the two payloads start as distinct `Arc`s — pre-condition"
     );
 
-    let admitted_first = seed(&host, key.clone(), Arc::clone(&payload_first));
+    let admitted_first = seed(&host, key.clone(), payload_first.clone());
     assert!(admitted_first, "the first writer wins");
 
-    let admitted_second = seed(&host, key.clone(), Arc::clone(&payload_second));
+    let admitted_second = seed(&host, key.clone(), payload_second.clone());
     assert!(
         !admitted_second,
         "the second writer must lose; admission returns false"
@@ -499,11 +503,11 @@ fn insert_if_absent_is_first_writer_wins() {
         .resolved_import_facts("/a.ts")
         .expect("the entry is admitted under this view's env");
     assert!(
-        Arc::ptr_eq(&observed, &payload_first),
+        verter_retention::heap_size::OwnedValue::ptr_eq(&observed, &payload_first),
         "the cache MUST preserve the first admitted `Arc` (first-writer-wins)"
     );
     assert!(
-        !Arc::ptr_eq(&observed, &payload_second),
+        !verter_retention::heap_size::OwnedValue::ptr_eq(&observed, &payload_second),
         "the second writer's `Arc` MUST NOT have replaced the first"
     );
 }
@@ -625,7 +629,7 @@ fn specifier_retarget_reseats_the_slot_under_an_unchanged_key() {
         .resolved_import_facts(owner)
         .expect("the retargeted bundle must be served");
     assert!(
-        !Arc::ptr_eq(&after, &before),
+        !verter_retention::heap_size::OwnedValue::ptr_eq(&after, &before),
         "the bundle admitted under the old route surface must no longer be \
          served after the retarget"
     );

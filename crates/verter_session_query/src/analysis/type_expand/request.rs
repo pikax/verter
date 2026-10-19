@@ -389,15 +389,14 @@ impl ExpandedField {
         declared_in_macro_type_arg: bool,
         provenance: ResolutionProvenance,
     ) -> Self {
-        let publication_diagnostics: Arc<[ResolutionDiagnostic]> = diagnostics
+        let publication_diagnostics: verter_type_expr::ResolutionDiagnostics = diagnostics
             .iter()
             .map(|diagnostic| ResolutionDiagnostic {
                 kind: diagnostic.reason.into(),
-                context: Arc::from(diagnostic.context.as_str()),
-                property_name: diagnostic.property_name.as_deref().map(Arc::from),
+                context: diagnostic.context.as_str().into(),
+                property_name: diagnostic.property_name.as_deref().map(Into::into),
             })
-            .collect::<Vec<_>>()
-            .into();
+            .collect();
         let authority = ResolvedTypeAuthority::from_source_position(
             &source,
             exactness.into(),

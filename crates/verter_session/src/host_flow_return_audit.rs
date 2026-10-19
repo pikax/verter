@@ -138,7 +138,10 @@ impl VerterHost {
             let key = dispatch.flow_return_key_with_demand(function, demand);
             // Typed incompleteness never publishes clean: an answer composed
             // from a degraded member return carries a typed degradation.
-            let (step, partial) = dispatch.execute_flow_return_observing_degraded_read(key);
+            let delivered = dispatch
+                .owning()
+                .execute_flow_return_observing_degraded_read(key);
+            let (step, partial) = delivered.value().clone();
             #[cfg(feature = "test-support")]
             verter_type_engine::cancel_trace::mark("evaluated");
             match step {
