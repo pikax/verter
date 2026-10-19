@@ -2487,66 +2487,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.evaluate_deferred_demand(node, context, DeferredEvaluationDemand::MappedIndexValue)
     }
 
-    /// A mapped member binds its helper application through the same
-    /// Instantiate query as whole-surface publication. The resulting body's
-    /// operators reduce, while its object interiors remain addressable.
+    /// Consume a mapped member's helper aliases through the shared value
+    /// evaluator. Navigate keeps object interiors addressable while the
+    /// publication demand still reduces the selected operators.
     pub(super) fn evaluate_mapped_member_value_outcome(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
     ) -> EvaluateDeferredOutcome {
-        let evaluated = self.evaluate_selected_value_outcome(node, context);
-        if evaluated.completeness.is_partial() {
-            return evaluated;
-        }
-        let Some(SemanticNodeData::InstantiationRef { base, args }) = self
-            .graph()
-            .node_data(evaluated.node)
-            .as_deref()
-            .map(crate::semantic_query::SemanticNodeData::clone)
-        else {
-            return evaluated;
-        };
-        let slot = self.type_slot_for(
-            base.canonical_id.clone(),
-            base.owner,
-            base.decl_name.clone(),
-        );
-        let read = self.execute_read(SemanticQueryKey::Instantiate(
-            crate::semantic_query::InstantiateKey::new(
-                slot,
-                args.as_arc().clone(),
-                self.instantiate_context_for(&base.canonical_id, context),
-            ),
-        ));
-        let evaluated = EvaluateDeferredOutcome {
-            completeness: evaluated
-                .completeness
-                .or_partial_if(read.result_is_partial(), read.partial_reason_classes()),
-            availability: evaluated.availability.join(read.fact_status),
-            cache_suppress: evaluated.cache_suppress | read.cache_suppress,
-            ..evaluated
-        };
-        if evaluated.completeness.is_partial() {
-            return evaluated;
-        }
-        let QueryResult::Value(instantiated) = read.value else {
-            return evaluated;
-        };
-        let body = self.evaluate_deferred_outcome(instantiated, context);
-        EvaluateDeferredOutcome {
-            node: if matches!(
-                self.graph().node_data(body.node).as_deref(),
-                Some(SemanticNodeData::Opaque(_))
-            ) {
-                evaluated.node
-            } else {
-                body.node
-            },
-            completeness: evaluated.completeness.merge(body.completeness),
-            availability: evaluated.availability.join(body.availability),
-            cache_suppress: evaluated.cache_suppress | body.cache_suppress,
-        }
+        self.evaluate_mapped_index_value_outcome(node, context.with_mode(ProjectionMode::Navigate))
     }
 
     fn evaluate_deferred_demand(
@@ -2927,6 +2876,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 let frame = frames.last_mut().expect("active evaluator frame");
                                 self.deferred_read_action(frame, read, || current)
                             }
+                            SemanticNodeData::Opaque(QueryError::RecursiveRef { .. })
+                                if demand == DeferredEvaluationDemand::MappedIndexValue =>
+                            {
+                                let carrier = self.self_reference_declaration(current).unwrap_or(current);
+                                frames.last_mut().expect("active evaluator frame").advance_or_finish(carrier)
+                            }
                             SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
                                 canonical_id,
                                 owner,
@@ -3147,6 +3102,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             | SemanticNodeData::ImportType(_) => true,
             // The mapped-index-value arm reads the declaration's kind.
             SemanticNodeData::InstantiationRef { .. } => {
+                demand == DeferredEvaluationDemand::MappedIndexValue
+            }
+            SemanticNodeData::Opaque(QueryError::RecursiveRef { .. }) => {
                 demand == DeferredEvaluationDemand::MappedIndexValue
             }
             data => {
