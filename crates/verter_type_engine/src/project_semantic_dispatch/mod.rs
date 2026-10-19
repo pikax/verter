@@ -635,10 +635,12 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// never served: the claim computes.
     published_results: std::cell::RefCell<rustc_hash::FxHashMap<SemanticQueryKey, PublishedResult>>,
     /// The request-local completions this dispatcher has open
-    /// ([`completes_request_locally`]): a key read again while its own
+    /// ([`completes_request_locally`]), each at the checking site it is
+    /// evaluated at: a key read again at the same site while its own
     /// completion runs is the same-path recursion a family-memo claim would
-    /// answer with its recursion carrier.
-    request_local_open: std::cell::RefCell<rustc_hash::FxHashSet<SemanticQueryKey>>,
+    /// answer with its recursion carrier. A read at the other site is a
+    /// distinct demand and never closes a cycle through it.
+    request_local_open: std::cell::RefCell<RequestLocalOpenSet>,
     /// The receipt of each root evaluation this dispatcher admitted as
     /// finishing as itself ([`Self::admit_self_evaluation`]): one step under
     /// the evaluation's own identity, a pure function of that identity, so
@@ -1791,10 +1793,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// Whether `key` has a request-local completion open on this dispatcher
-    /// ([`completes_request_locally`]).
+    /// ([`completes_request_locally`]) at the current checking site.
     fn request_local_is_open(&self, key: &SemanticQueryKey) -> bool {
         let open = self.request_local_open.borrow();
-        !open.is_empty() && completes_request_locally(key) && open.contains(key)
+        !open.is_empty()
+            && completes_request_locally(key)
+            && open.contains(&(key.clone(), self.checking_site.get()))
     }
 
     /// Keep a result this dispatcher's build just published, under the
@@ -5039,7 +5043,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             match attempt {
                 Err(read) => read,
                 Ok(attempt) => {
-                    let _open = RequestLocalOpen::enter(&self.request_local_open, key);
+                    let _open = RequestLocalOpen::enter(
+                        &self.request_local_open,
+                        key,
+                        self.checking_site.get(),
+                    );
                     let traced_build = traced_build.take().expect("the completion runs once");
                     let computed_at = self.workspace_edit();
                     let request = crate::request_context::current_request_budget();
@@ -5183,30 +5191,40 @@ fn completes_request_locally(key: &SemanticQueryKey) -> bool {
     )
 }
 
-/// An open request-local completion of one key, closed when dropped
-/// (including on unwind) so a later read of the key is never mistaken for
-/// a same-path re-entry.
+/// The request-local completions a dispatcher has open, each with the
+/// checking site it is evaluated at: the same key at the other site is a
+/// distinct demand ([`completes_request_locally`]).
+type RequestLocalOpenSet = rustc_hash::FxHashSet<(
+    SemanticQueryKey,
+    crate::semantic_query::checker_policy::TupleSplicePosition,
+)>;
+
+/// An open request-local completion of one key at one checking site,
+/// closed when dropped (including on unwind) so a later read of the key is
+/// never mistaken for a same-path re-entry.
 struct RequestLocalOpen<'d> {
-    open: &'d std::cell::RefCell<rustc_hash::FxHashSet<SemanticQueryKey>>,
-    key: SemanticQueryKey,
+    open: &'d std::cell::RefCell<RequestLocalOpenSet>,
+    demand: (
+        SemanticQueryKey,
+        crate::semantic_query::checker_policy::TupleSplicePosition,
+    ),
 }
 
 impl<'d> RequestLocalOpen<'d> {
     fn enter(
-        open: &'d std::cell::RefCell<rustc_hash::FxHashSet<SemanticQueryKey>>,
+        open: &'d std::cell::RefCell<RequestLocalOpenSet>,
         key: &SemanticQueryKey,
+        site: crate::semantic_query::checker_policy::TupleSplicePosition,
     ) -> Self {
-        open.borrow_mut().insert(key.clone());
-        Self {
-            open,
-            key: key.clone(),
-        }
+        let demand = (key.clone(), site);
+        open.borrow_mut().insert(demand.clone());
+        Self { open, demand }
     }
 }
 
 impl Drop for RequestLocalOpen<'_> {
     fn drop(&mut self) {
-        self.open.borrow_mut().remove(&self.key);
+        self.open.borrow_mut().remove(&self.demand);
     }
 }
 

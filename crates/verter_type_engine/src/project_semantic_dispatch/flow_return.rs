@@ -2165,11 +2165,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// natively beneath the call, one native level per declared return a
     /// chain of calls reaches, so it is not made there and the call keeps
     /// its lazy carrier for the demand that reads it.
+    ///
+    /// An evaluation that keeps an unchecked carrier answers for this
+    /// context alone: the same evaluation where the check runs may be the
+    /// checker's recovery instead. Its build is therefore never admitted,
+    /// so the next demand that can check the return computes it — the
+    /// shared result never depends on which demand evaluated it first.
     fn read_declared_call_return(
         &self,
         key: crate::semantic_query::SemanticQueryKey,
     ) -> Option<crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>> {
         if crate::semantic_execution::drive_running() && !self.flow_seam_reads_here() {
+            self.fold_into_top_build_local_taint_with(
+                false,
+                true,
+                crate::semantic_query::PartialReasonSet::empty(),
+            );
             return None;
         }
         Some(self.execute_read(key))

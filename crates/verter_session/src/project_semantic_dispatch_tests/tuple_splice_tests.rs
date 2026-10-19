@@ -994,6 +994,66 @@ fn inline_indexed_arguments_check_their_declared_tuple_return() {
     }
 }
 
+/// A call's lazy declared return a drive evaluates without checking it (a
+/// signature probe evaluating the body inline) never decides what a later
+/// demand of the same flow return reads: the answer is the checker's TS2800
+/// recovery whichever demand reaches the function first.
+#[test]
+fn a_declared_return_check_does_not_depend_on_the_first_demand() {
+    let source = format!(
+        "declare const z: {};\n\
+         {CONCAT}declare function concat<T extends unknown[]>(a: T): Concat<T, T>;\n\
+         export function h() {{ return concat(z); }}\n",
+        zeros(5_000)
+    );
+    let answer = |host: &Arc<crate::VerterHost>, module: &str| {
+        let result = flow_return_audited_on_host(host, module, "h")
+            .into_result()
+            .unwrap_or_else(|error| panic!("`h` returns: {error:?}"));
+        let store_view = host.resolver_store_view_read().into_owned_view();
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+        let dispatch = ProjectSemanticDispatch::new(&ctx);
+        (
+            recovery(&dispatch, result.return_type())
+                .map(|(diagnostic, basis, _)| (diagnostic, basis)),
+            result.degradation(),
+        )
+    };
+    let expected = (
+        Some((TS2800, RecoveryBasis::Budget)),
+        Some(verter_type_engine::semantic_query::FlowReturnDegradation::OperationBudget),
+    );
+    for probe in ["ReturnType<typeof h>", "typeof h"] {
+        // The exact module the probe evaluates, so both orders read the
+        // same bytes.
+        let module = format!(
+            "{source}\nexport function __checker_probe() {{ \
+                const __probe: {probe} = null as any; \
+                return __probe; \
+            }}\n"
+        );
+        let fresh = default_probe_host();
+        assert_eq!(
+            answer(&fresh, &module),
+            expected,
+            "`h` read first ({probe})"
+        );
+        assert_eq!(
+            answer(&fresh, &module),
+            expected,
+            "`h` read again ({probe})"
+        );
+        let probed = default_probe_host();
+        with_probe_outcome_on_host(&probed, ProbeProject::default(), &source, probe, |_, _| ());
+        assert_eq!(
+            answer(&probed, &module),
+            expected,
+            "`h` read after the probe `{probe}`"
+        );
+    }
+}
+
 /// A traversal commits exactly the admitted prefix, even when its last
 /// window is smaller than a batch; an unpaid product constructs no list.
 #[test]
@@ -1358,6 +1418,85 @@ fn a_task_producing_a_query_at_one_site_still_evaluates_it_at_the_other() {
     );
     drop(expression_lease);
     drop(type_lease);
+}
+
+/// A request-local completion open at one checking site never answers the
+/// same query read at the other site: the two recover differently, so the
+/// other site evaluates it as its own demand, at both the synchronous and
+/// the frame entry. A read at the open completion's own site is same-path
+/// recursion.
+#[test]
+fn a_request_local_completion_at_one_site_still_evaluates_at_the_other() {
+    use verter_type_engine::project_semantic_dispatch::TaskOutcomeForTests;
+    use verter_type_engine::semantic_query::{PrimitiveKind, QueryResult, SemanticQueryValue};
+    // One cold host per read, so no read is served by an earlier one.
+    let read = |opened_at_expression: bool, read_at_expression: bool, through_frame: bool| {
+        let host = default_probe_host();
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let _builder = dispatch.enter_construction_scope();
+        let graph = dispatch.graph();
+        let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let boolean = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+        let key = SemanticQueryKey::Conditional {
+            check: string,
+            extends: string,
+            true_branch: number,
+            false_branch: boolean,
+            distributive: false,
+            pending: None,
+        };
+        let answer = dispatch.with_request_local_open_for_tests(
+            &key,
+            opened_at_expression,
+            read_at_expression,
+            || {
+                if through_frame {
+                    dispatch
+                        .with_semantic_task_for_tests(key.clone(), |slot| {
+                            let task = slot.as_mut().expect("the task is lent");
+                            match task.poll_for_tests(std::task::Waker::noop()) {
+                                std::task::Poll::Ready(TaskOutcomeForTests::Answered(
+                                    QueryResult::Value(SemanticQueryValue::TypeNode(node)),
+                                )) => QueryResult::Value(node),
+                                std::task::Poll::Ready(TaskOutcomeForTests::Answered(
+                                    QueryResult::Recursive(node),
+                                )) => QueryResult::Recursive(node),
+                                other => panic!("the drive answers a type: {other:?}"),
+                            }
+                        })
+                        .expect("the demand is cold")
+                } else {
+                    dispatch.execute_read(key.clone()).value().clone()
+                }
+            },
+        );
+        assert_eq!(
+            dispatch.open_request_state_for_tests().request_local_open,
+            0
+        );
+        match answer {
+            QueryResult::Value(node) if node == number => "evaluated",
+            QueryResult::Recursive(_) => "recursion",
+            other => panic!("the read answers the conditional or recursion: {other:?}"),
+        }
+    };
+    for through_frame in [false, true] {
+        for opened_at_expression in [false, true] {
+            assert_eq!(
+                read(opened_at_expression, !opened_at_expression, through_frame),
+                "evaluated",
+                "an opposite-site read evaluates (frame entry: {through_frame}, \
+                 open at expression: {opened_at_expression})"
+            );
+            assert_eq!(
+                read(opened_at_expression, opened_at_expression, through_frame),
+                "recursion",
+                "a same-site read is same-path recursion (frame entry: {through_frame}, \
+                 open at expression: {opened_at_expression})"
+            );
+        }
+    }
 }
 
 /// Rest discovery and transparent aliases use the same metered traversal

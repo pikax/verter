@@ -583,6 +583,33 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     pub fn free_type_variable_summaries_for_tests(&self) -> usize {
         self.free_type_variables.borrow().len()
     }
+
+    /// Run `body` while a request-local completion of `key` is held open at
+    /// the type site (or the expression site when `opened_at_expression`),
+    /// with every demand `body` makes evaluated at the expression site when
+    /// `read_at_expression`.
+    pub fn with_request_local_open_for_tests<R>(
+        &self,
+        key: &SemanticQueryKey,
+        opened_at_expression: bool,
+        read_at_expression: bool,
+        body: impl FnOnce() -> R,
+    ) -> R {
+        let site = |expression| {
+            if expression {
+                TupleSplicePosition::Expression
+            } else {
+                TupleSplicePosition::Type
+            }
+        };
+        let _open = super::RequestLocalOpen::enter(
+            &self.request_local_open,
+            key,
+            site(opened_at_expression),
+        );
+        let _site = self.checking_site_scope(site(read_at_expression));
+        body()
+    }
 }
 
 impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Drop for SemanticTask<'p, 'a, C> {
@@ -814,7 +841,10 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
             return Start::Answer(Ok(dispatch.recursion_delivery(key, Recursion::SamePath)));
         }
         if dispatch.completes_nested_request_locally(key) {
-            dispatch.request_local_open.borrow_mut().insert(key.clone());
+            dispatch
+                .request_local_open
+                .borrow_mut()
+                .insert((key.clone(), demand.site));
             return Start::Produce(
                 self.producing_frame(key, FrameProducer::RequestLocal { attempt }),
             );
@@ -1100,7 +1130,7 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
             self.dispatch
                 .request_local_open
                 .borrow_mut()
-                .remove(&frame.key);
+                .remove(&(frame.key.clone(), frame.site));
         }
     }
 }
@@ -1920,7 +1950,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     ),
                     carrier,
                 };
-                self.request_local_open.borrow_mut().remove(&frame.key);
+                self.request_local_open
+                    .borrow_mut()
+                    .remove(&(frame.key.clone(), frame.site));
                 return delivery;
             }
         };

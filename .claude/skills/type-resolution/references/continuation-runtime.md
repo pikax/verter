@@ -164,6 +164,10 @@ Anywhere else inside a running drive — a body an inline signature probe
 evaluates beneath a decision, a callee evaluated inline — the check is not
 made and the call keeps its lazy carrier: starting the return's work there
 would nest natively, one level per declared return a chain of calls reaches.
+The evaluation that keeps such an unchecked carrier is never admitted (its
+build is cache-suppressed, not partial), so the shared result is always the
+one a demand that can check the return computes, whichever demand comes
+first.
 A typeof frame installs no decision seam: its projection consumes each
 delivery where its evaluation reads it, so a sequential chain of reads in
 its body (an alias walk, say) costs one step per read rather than a full
@@ -175,4 +179,5 @@ never drive another execution inside a frame step.
 A semantic task's demand identity is the query together with its checking
 site (`QueryDemand`): a result completed at one site never answers a need at
 the other, and a need closes a cycle only through an open demand at its own
-site.
+site. A request-local completion is held open together with its site, so the
+same holds for it at both the frame and the synchronous entry.
