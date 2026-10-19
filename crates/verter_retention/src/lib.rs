@@ -789,6 +789,18 @@ impl Provenance {
 }
 
 impl SemanticRetentionAccount {
+    /// Move `bytes` of ACTIVE attribution from one provenance to another
+    /// when a charge's provenance changes, so the old owner's balance settles.
+    #[inline]
+    fn rehome_active(&self, from: Provenance, to: Provenance, bytes: usize) {
+        if bytes == 0 || from == to {
+            return;
+        }
+        let _admission_lock = self.lock_aggregate_state();
+        self.note_active_locked(from, 0, bytes);
+        self.note_active_locked(to, bytes, 0);
+    }
+
     /// Note an ACTIVE transition of a charge of `provenance` to the open
     /// measurement windows: the ACTIVE total just moved by `rise` or `fall`
     /// bytes. Called only while [`Self::lock_aggregate_state`] is held,
@@ -914,7 +926,11 @@ impl RetentionCharge {
                     "the holds' backing is charged to the account their charge is"
                 );
                 if bytes > 0 {
-                    self.provenance = self.provenance.merged(backing.provenance);
+                    let merged = self.provenance.merged(backing.provenance);
+                    if self.class == ChargeClass::Active {
+                        account.rehome_active(self.provenance, merged, self.bytes);
+                    }
+                    self.provenance = merged;
                 }
                 account.reclassify(backing.class, self.class, bytes, self.provenance);
             }

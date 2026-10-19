@@ -307,8 +307,13 @@ fn provenance_follows_the_charge_and_mixed_provenance_is_unknown() {
     let report = window.finish();
     assert_eq!(
         report.attributed(),
-        Err(ActiveWitnessRejection::UnknownProvenance { transitions: 2 })
+        Err(ActiveWitnessRejection::UnknownProvenance { transitions: 3 })
     );
+    assert_eq!(account.snapshot().active_bytes, 0);
+    let fresh = account.open_active_window(&owner);
+    let report = fresh.finish();
+    assert_eq!((report.active_at_open, report.active_at_close), (0, 0));
+    assert!(report.attributed().is_ok());
     drop(names);
 }
 
@@ -382,11 +387,14 @@ fn an_abandoned_window_deregisters_and_later_windows_start_fresh() {
 
     let window = account.open_active_window(&owner);
     let only = Arc::downgrade(&account);
+    drop(owner);
     drop(account);
     let account = only.upgrade().expect("the open window keeps its account");
+    drop(account);
+    assert!(only.upgrade().is_some(), "only the open window keeps it");
     let report = window.finish();
     assert_eq!((report.transitions, report.peak_active_bytes), (0, 0));
-    assert!(account.active_windows.inner.lock().states.is_empty());
+    assert!(only.upgrade().is_none(), "finishing releases the account");
 }
 
 /// An open window changes no admission decision: the same sequence of

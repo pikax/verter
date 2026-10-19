@@ -114,8 +114,15 @@ impl RetentionCharge {
             same_account && self.class == other.class,
             "absorb merges charges of one class on one account"
         );
+        let merged = self.provenance.merged(other.provenance);
+        if self.class == ChargeClass::Active {
+            if let Some(account) = self.account.as_ref() {
+                account.rehome_active(self.provenance, merged, self.bytes);
+                account.rehome_active(other.provenance, merged, other.bytes);
+            }
+        }
         self.bytes += other.bytes;
-        self.provenance = self.provenance.merged(other.provenance);
+        self.provenance = merged;
         // The absorbed charge's bytes are this charge's now: it must not
         // release them.
         other.account = None;

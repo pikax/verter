@@ -114,7 +114,9 @@ impl ActiveWindows {
         let mut registry = self.inner.lock();
         let owner_active = owner.map(|owner| {
             let active = registry.owner_active.entry(owner).or_default();
-            *active = (*active + rise).saturating_sub(fall);
+            *active = (*active + rise)
+                .checked_sub(fall)
+                .expect("a fall never exceeds the owner's recorded ACTIVE bytes");
             let active = *active;
             if active == 0 {
                 registry.owner_active.remove(&owner);
