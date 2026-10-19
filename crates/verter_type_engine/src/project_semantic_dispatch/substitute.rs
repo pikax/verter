@@ -59,7 +59,75 @@ use crate::semantic_query::{
     SurfaceMember, SurfaceView, TypeParamDecl,
 };
 
+/// Separate identities for a public substitution and each recursive node
+/// it consumes: their receipts cannot accidentally hide a child's usage.
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+enum SubstitutionCost {
+    Root(SemanticNodeId, SemanticNodeId, SemanticNodeId),
+    Node(SemanticNodeId, SemanticNodeId, SemanticNodeId),
+}
+
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
+    fn priced_substitution_read(
+        &self,
+        node: SemanticNodeId,
+        parameter: SemanticNodeId,
+        arg: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        let (value, receipt) = self
+            .graph()
+            .substitute_memo_get_priced(node, parameter, arg)?;
+        matches!(
+            self.admit_served(&receipt, super::cost_receipt::Nesting::InPlace),
+            super::ServedAdmission::Admitted
+        )
+        .then_some(value)
+    }
+
+    /// Open the cost recording of one substitution walk, rooted at its
+    /// operands. `None` when an operand is not live in this graph (released
+    /// or foreign): the walk still runs on its `node_data` fallback, but it
+    /// seals no receipt and so publishes nothing to the memo.
+    fn substitution_cost(
+        &self,
+        identity: SubstitutionCost,
+        node: SemanticNodeId,
+        parameter: SemanticNodeId,
+        arg: SemanticNodeId,
+    ) -> Option<super::connected_demand::CostRecording<'_, '_>> {
+        let roots = self
+            .graph()
+            .root_nodes([node, parameter, arg].into_iter().filter(|node| {
+                // Signature-clause tokens are virtual semantic leaves, not
+                // graph allocations. Their identity stays in the cost key;
+                // only actual graph operands acquire counted root holds.
+                !crate::signature_kernel::SignatureStore::is_binder_token(*node)
+            }))
+            .ok()?;
+        Some(
+            self.connected_demand
+                .record_cost(super::cost_receipt::CostIdentity::of_key(identity).with_roots(roots)),
+        )
+    }
+
+    fn finish_substitution_cost(
+        &self,
+        recording: Option<super::connected_demand::CostRecording<'_, '_>>,
+        epoch: u64,
+    ) -> Option<Arc<super::cost_receipt::DemandCostReceipt>> {
+        let recording = recording?;
+        let request = crate::request_context::current_request_budget();
+        let complete = self.canonical_evidence_epoch.get() == epoch
+            && self.connected_demand_trip().is_none()
+            && !self.cancellation.is_cancelled();
+        let receipt = recording.finish(complete, request.as_deref());
+        if let Some(receipt) = &receipt {
+            self.connected_demand
+                .record_prerequisite(receipt, super::cost_receipt::Nesting::InPlace);
+        }
+        receipt
+    }
+
     construction_ordinal_seam! {
         fn substitute_semantic_type_param(
             &self,
@@ -67,6 +135,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             parameter_node: SemanticNodeId,
             arg: SemanticNodeId,
         ) -> SemanticNodeId {
+            let _demand = self.enter_connected_demand(false).0;
             // Top-level substitute-call telemetry. Bumped at the
             // entry of `substitute_semantic_type_param` (the public
             // surface), so the snapshot reflects the number of distinct
@@ -90,9 +159,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // arena-scoped, and semantic-node ids inside one arena are
             // content-addressed integers — so a triple of ids is a
             // complete identity for the substitution result. Substitution
-            // is a pure function of its three inputs, so the cache needs
-            // no fact-signature validation.
-            if let Some(cached) = self.graph().substitute_memo_get(node, parameter_node, arg) {
+            // has an immutable complete result for its three inputs. The memo
+            // stores only complete, priced results; a budget- or site-dependent
+            // refusal never publishes. Fact-bearing canonical work advances the
+            // separate evidence fence below.
+            if let Some(cached) = self.priced_substitution_read(node, parameter_node, arg) {
                 if let Some(observer) = verter_audit::current_observer() {
                     observer.record_event(verter_audit::AuditEvent::SubstituteMemoHit);
                 }
@@ -113,13 +184,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // epoch advancing across the walk suppresses the publish; the
             // result itself still flows to the caller.
             let epoch_before = self.canonical_evidence_epoch.get();
+            let recording = self.substitution_cost(
+                SubstitutionCost::Root(node, parameter_node, arg),
+                node,
+                parameter_node,
+                arg,
+            );
             let result = self
                 .substitute_with_change_tracking(node, parameter_node, arg)
                 .0;
-            if self.canonical_evidence_epoch.get() == epoch_before && !self.cancellation.is_cancelled()
-            {
+            if let Some(receipt) = self.finish_substitution_cost(recording, epoch_before) {
                 self.graph()
-                    .substitute_memo_publish(node, parameter_node, arg, result);
+                    .substitute_memo_publish_priced(node, parameter_node, arg, result, receipt);
             }
             result
         }
@@ -716,7 +792,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if node == parameter_node {
             return (arg, true);
         }
-        if let Some(cached) = self.graph().substitute_memo_get(node, parameter_node, arg) {
+        if let Some(cached) = self.priced_substitution_read(node, parameter_node, arg) {
             if let Some(observer) = verter_audit::current_observer() {
                 observer.record_event(verter_audit::AuditEvent::RecursiveSubstituteMemoHit);
             }
@@ -736,12 +812,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // evidence is not replayable, and neither is any enclosing
         // sub-walk (ancestors observe the same epoch advance).
         let epoch_before = self.canonical_evidence_epoch.get();
+        let recording = self.substitution_cost(
+            SubstitutionCost::Node(node, parameter_node, arg),
+            node,
+            parameter_node,
+            arg,
+        );
         let (result, changed) =
             self.substitute_with_change_tracking_inner(node, parameter_node, arg);
-        if self.canonical_evidence_epoch.get() == epoch_before && !self.cancellation.is_cancelled()
-        {
+        if let Some(receipt) = self.finish_substitution_cost(recording, epoch_before) {
             self.graph()
-                .substitute_memo_publish(node, parameter_node, arg, result);
+                .substitute_memo_publish_priced(node, parameter_node, arg, result, receipt);
         }
         (result, changed)
     }
@@ -1246,6 +1327,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.substitute_index_key_with_change_tracking(index, parameter_node, arg);
                 if !(oc || ic) {
                     return (node, false);
+                }
+                // An access of the permissive instantiation's wildcard, or by
+                // it, is the wildcard (`getIndexedAccessType` returns
+                // `wildcardType` for either operand).
+                let wildcard = |id: SemanticNodeId| {
+                    matches!(
+                        self.graph().node_data(id).as_deref(),
+                        Some(SemanticNodeData::Opaque(QueryError::PermissiveWildcard))
+                    )
+                };
+                if wildcard(sub_object) {
+                    return (sub_object, true);
+                }
+                if let crate::semantic_query::IndexKey::Computed(index) = &sub_index {
+                    if wildcard(*index) {
+                        return (*index, true);
+                    }
                 }
                 (
                     self.graph().intern_preserving_scope(

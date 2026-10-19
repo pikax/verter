@@ -1773,7 +1773,17 @@ impl TsgoCompositeProvider {
         }
         // A lazy managed fallback remains Held throughout a healthy shared session.
         // Reconcile against the actual shared receipt once its demand has settled.
+        // Without a shared route the managed engine is the only one, so the write
+        // it just recorded is its demand: establishing it replays this write,
+        // and the receipt below then certifies exactly these bytes. Holding
+        // instead would leave the bytes uncertified until a query, and an
+        // uncommitted surface never issues one.
         if disposition == FileLoadDisposition::Held {
+            if self.shared.is_none() {
+                if let Err(error) = self.managed.synchronize_pending_file(path).await {
+                    tracing::debug!("managed TSGO did not establish for {path}: {error}");
+                }
+            }
             return Ok(verter_type_runtime::traits::disposition_for_applied_bytes(
                 &self.applied_content(path),
                 content,
@@ -1848,7 +1858,9 @@ impl TypeProvider for TsgoCompositeProvider {
         let path = path.to_string();
         Box::pin(async move {
             let Some(shared) = &self.shared else {
-                return Ok(());
+                // The managed engine is the only route: drive its pending demand
+                // (a held write retries an establishment that failed earlier).
+                return self.managed.synchronize_pending_file(&path).await;
             };
             let Some(source) = carrier_source_of(&path) else {
                 return Ok(());

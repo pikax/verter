@@ -564,6 +564,51 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             (check, self.conditional_operands(check, extends))
         });
         let operands_complete = operand_read.observations_are_complete();
+        let incomplete_without_recovery = !operands_complete && {
+            let (_, operands) = operand_read.value();
+            !operands.checker_recovery
+                && !self.is_conditional_checker_recovery(operands.absorbed_check)
+                && !self.is_conditional_checker_recovery(operands.extends)
+        };
+        if incomplete_without_recovery
+            && operand_read.value().0 == authored_check
+            && !self.decision_waits()
+        {
+            if let Some(arm) = self.true_through_written_arm(authored_check, extends) {
+                // An arm relation that waits on a read proves nothing yet:
+                // the frame runs the decision again once it is delivered.
+                if self.decision_waits() {
+                    let _ = arm.discard();
+                    let _ = operand_read.discard();
+                    return self.waiting_decision_output();
+                }
+                // The normalized operands are unused: the arm's own complete
+                // relation proves the true branch. Their reuse evidence
+                // still belongs to this build.
+                operand_read.preserve_reuse_evidence(self);
+                let _ = operand_read.discard();
+                if let Err(abort) = arm.adopt(self) {
+                    return super::walk::QueryBuildOutput::from((
+                        QueryResult::Error(QueryError::ExecutionAborted(abort)),
+                        self.project_generation_signature(),
+                    ));
+                }
+                if self.cancellation.is_cancelled() {
+                    return self.cancelled_build_output();
+                }
+                let winner = branches.branch(self, true);
+                let mut output = self.commit_conditional_winner(
+                    authored_check,
+                    extends,
+                    winner,
+                    ConditionalBranchSelection::True,
+                    None,
+                    false,
+                );
+                branches.committed(self, true, &mut output);
+                return output;
+            }
+        }
         let (check, operands) = match operand_read.adopt(self) {
             Ok(operands) => operands,
             Err(abort) => {
@@ -578,11 +623,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         if self.decision_waits() {
             return self.waiting_decision_output();
         }
-        if !operands_complete
-            && !operands.checker_recovery
-            && !self.is_conditional_checker_recovery(operands.absorbed_check)
-            && !self.is_conditional_checker_recovery(operands.extends)
-        {
+        if incomplete_without_recovery {
             // A relation can reject an early constituent without demanding
             // a later one. That short circuit cannot repair an operand whose
             // normalization already lacked exact evidence: an approximate
@@ -731,6 +772,110 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 )
             }
         }
+    }
+
+    /// The complete relation proving a conditional's true branch through
+    /// one written arm of its union `extends` operand, when normalizing the
+    /// whole operand could not finish: a check related to one arm is
+    /// related to the union whatever its other arms are
+    /// (`someTypeRelatedToType`), so an arm the lane cannot read never takes
+    /// that branch away. Only the true branch is proven so — the false one
+    /// needs every arm — and only for a check that neither absorbs nor
+    /// distributes as the type it names (`type An = any`, `Two<"a">` naming
+    /// `"a" | "z"`, a closed `keyof`): the checker decides such a check by
+    /// its lattice row or member by member, never as a whole related to one
+    /// arm. Operands hold no type parameter and the `extends` infers
+    /// nothing. `None` when no arm relates completely.
+    fn true_through_written_arm(
+        &self,
+        check: SemanticNodeId,
+        extends: SemanticNodeId,
+    ) -> Option<super::flow_return_fact::ObservedRead<super::dispatch_txn::RelationStep>> {
+        let arms = match self.graph().node_data(extends).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.members_arc(),
+            _ => return None,
+        };
+        if !matches!(
+            self.conditional_infer_route(extends),
+            ConditionalInferRoute::None
+        ) || !self.type_params_within(&[check, extends]).is_empty()
+        {
+            return None;
+        }
+        // Whether the check absorbs or distributes is read off the type it
+        // names; that read is evidence of the decision only when complete.
+        let plain = self.observe_read(|| self.check_neither_absorbs_nor_distributes(check));
+        if !plain.observations_are_complete() || !*plain.value() {
+            let _ = plain.discard();
+            return None;
+        }
+        if plain.adopt(self).is_err() {
+            return None;
+        }
+        for arm in arms.iter() {
+            let read = self.observe_read(|| self.execute_relate_pair(check, *arm));
+            if read.observations_are_complete()
+                && matches!(
+                    read.value(),
+                    super::dispatch_txn::RelationStep::Assignable { .. }
+                )
+            {
+                return Some(read);
+            }
+            let _ = read.discard();
+        }
+        None
+    }
+
+    /// A check no lattice row absorbs and no distribution splits, proven
+    /// positively: the type it completely names (an alias or an
+    /// instantiation read through, `Id<any>` being `any`) is a non-extreme
+    /// primitive, a literal, an object, an array or a signature. A
+    /// reference to an interface or a class names an object type. Every
+    /// other check — a union, an intersection (`1 & Id<any>` is `any`), an
+    /// indexed access, a `keyof`, a conditional, a template, a tuple, or a
+    /// name the lane cannot read completely — is not proven plain.
+    fn check_neither_absorbs_nor_distributes(&self, check: SemanticNodeId) -> bool {
+        let named = match self.graph().node_data(check).as_deref() {
+            Some(
+                SemanticNodeData::DeclRef { identity }
+                | SemanticNodeData::InstantiationRef { base: identity, .. },
+            ) if matches!(
+                self.prepared_decl_kind(identity),
+                Some(
+                    verter_session_query::declarations::TypeDeclKind::Interface
+                        | verter_session_query::declarations::TypeDeclKind::Class
+                )
+            ) =>
+            {
+                return true;
+            }
+            Some(
+                SemanticNodeData::Alias(_)
+                | SemanticNodeData::DeclRef { .. }
+                | SemanticNodeData::InstantiationRef { .. }
+                | SemanticNodeData::TypeOf(_)
+                | SemanticNodeData::BareRef(_)
+                | SemanticNodeData::ImportType(_)
+                | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. }),
+            ) => match self.resolved_conditional_operand(check) {
+                Some(named) => named,
+                None => return false,
+            },
+            _ => check,
+        };
+        self.peek_special(named).is_none()
+            && matches!(
+                self.graph().node_data(named).as_deref(),
+                Some(
+                    SemanticNodeData::Primitive(_)
+                        | SemanticNodeData::Literal(_)
+                        | SemanticNodeData::EnumLiteral(_)
+                        | SemanticNodeData::Object(_)
+                        | SemanticNodeData::Array { .. }
+                        | SemanticNodeData::Signature { .. }
+                )
+            )
     }
 
     /// What a decision that waits on a read returns: a typed gap its frame
@@ -1725,10 +1870,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     /// `step`, a relation over a permissive instantiation, except that its
     /// failure is undecided where an operand holds an operation over the
-    /// wildcard (`Uppercase<W>` and every other builtin utility, `W["k"]`, a
-    /// template hole, a conditional over it): the checker's instantiation turns such an operation into
-    /// the wildcard itself, which relates to everything, and the lane reads
-    /// the operation as written.
+    /// wildcard (`Uppercase<W>` and every other builtin utility, `keyof W`, a
+    /// template hole, a conditional over it): the checker's instantiation
+    /// turns such an operation into the wildcard itself, which relates to
+    /// everything, and the lane reads the operation as written. An access of
+    /// the wildcard is already the wildcard (substitution folds it).
     fn wildcard_failure_undecided(
         &self,
         operands: [SemanticNodeId; 2],
