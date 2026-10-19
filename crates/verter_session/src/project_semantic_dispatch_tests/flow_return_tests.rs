@@ -1798,6 +1798,12 @@ fn inline_no_value_close_folds_the_no_surface_rails() {
 /// members' nodes. Mutation recipe: publishing the member with the root's
 /// relation-only self-root set (the pre-union behavior) drops its own
 /// file from the carrier.
+///
+/// The conditional relates object types holding the classes: a decision
+/// instantiates operands that name declarations before it relates them,
+/// which would evaluate the methods' returns ahead of the relation, outside
+/// its component. Holding them in members leaves their instantiation, and
+/// the flows it reads, to the relation.
 #[test]
 fn mixed_component_member_entry_self_roots_cover_all_component_files() {
     let host = make_host();
@@ -1829,7 +1835,7 @@ fn mixed_component_member_entry_self_roots_cover_all_component_files() {
         canonical_id: Some("/ws/root.ts".to_string()),
         input_id: "/ws/root.ts".to_string(),
         source: Arc::from(
-            "import type { RootBox } from \"/ws/mixed_a\";\nimport type { NextBox } from \"/ws/mixed_b\";\nexport type RootAssign = RootBox extends NextBox ? \"yes\" : \"no\";\n",
+            "import type { RootBox } from \"/ws/mixed_a\";\nimport type { NextBox } from \"/ws/mixed_b\";\nexport type RootAssign = { v: RootBox } extends { v: NextBox } ? \"yes\" : \"no\";\n",
         ),
         file_language: crate::LanguageRegistry::global()
             .classify_static("/ws/root.ts")
@@ -8234,6 +8240,12 @@ export function pick(x: string | number) {
 /// `viaImport` (importing it) both return `1` on 7.0.2, complete.
 #[test]
 fn a_call_to_an_augmented_export_resolves_through_the_merged_overloads() {
+    use verter_type_engine::semantic_query::{
+        ProjectionMode, ProjectionReductionContext, QueryOutcome, Ready, ScopeId,
+        SemanticContextId, SignatureKind, ValueRootKey,
+    };
+    use verter_type_engine::signature_kernel::{BorrowedSet, SemanticReadView};
+
     const MAIN_CANONICAL: &str = "/ws/call-merge/main.ts";
     const MAIN_FIXTURE: &str = "export function conv(x: string): number { return 1; }\n\
                                 export function viaCall(x: string) { return conv(x); }\n";
@@ -8248,6 +8260,42 @@ fn a_call_to_an_augmented_export_resolves_through_the_merged_overloads() {
     upsert_ts(&host, AUG_CANONICAL, AUG_FIXTURE);
     upsert_ts(&host, USE_CANONICAL, USE_FIXTURE);
     with_dispatch(&host, |dispatch| {
+        let key = dispatch.typeof_key_for(
+            ValueRootKey {
+                scope: ScopeId::file(
+                    MAIN_CANONICAL,
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
+                name: "conv".into(),
+            },
+            ProjectionReductionContext::published(ProjectionMode::Navigate),
+        );
+        let read = dispatch.execute_read(key.clone());
+        let QueryResult::Value(node) = read.value() else {
+            panic!("the exported function has a type: {:?}", read.value());
+        };
+        let store = dispatch.graph().signature_store();
+        let QueryOutcome::Ready(Ready { value: set, .. }) = dispatch.signatures_of_type(
+            store,
+            *node,
+            SignatureKind::Call,
+            SemanticContextId::production(),
+        ) else {
+            panic!("the exported function has complete signatures");
+        };
+        let view = SemanticReadView::pin(store);
+        let BorrowedSet::Many(signatures) = view.read_set(set).expect("the signature set is live")
+        else {
+            panic!("the original and augmenting signatures both stay");
+        };
+        assert_eq!(signatures.len(), 2, "each declaration contributes once");
+        let roots = dispatch
+            .graph()
+            .entry_self_root_canonicals_for_tests(&key)
+            .expect("the merged function is published");
+        for file in [MAIN_CANONICAL, AUG_CANONICAL] {
+            assert!(roots.iter().any(|root| root.as_ref() == file), "{roots:?}");
+        }
         for (canonical, name) in [(MAIN_CANONICAL, "viaCall"), (USE_CANONICAL, "viaImport")] {
             let result = flow_result_value(dispatch, whole_return_key(dispatch, canonical, name));
             let expr = host

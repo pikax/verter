@@ -22,6 +22,115 @@ use crate::semantic_query::{
     SemanticQueryKey,
 };
 
+/// The free type variables below one semantic node, binder-aware: the type
+/// parameters written below it that no generic signature within declares
+/// over the position they are written in, and whether an `infer` reference
+/// sits below it. A node's summary is a function of its immutable payload
+/// and its children's summaries, so it holds for as long as the node id
+/// does.
+#[derive(Clone, Default)]
+pub(super) struct FreeTypeVariables {
+    /// The free type parameters in first-reached order, each once; `None`
+    /// when there are none, so a leaf allocates nothing.
+    params: Option<Arc<[SemanticNodeId]>>,
+    /// Whether an `InferRef` sits below, the constraints and defaults of the
+    /// type parameters written there included.
+    infer_ref: bool,
+}
+
+/// The dispatcher's summaries of [`FreeTypeVariables`] by node, kept for
+/// the dispatcher's lifetime (one request) and dropped with it. Node ids
+/// are append-only and the dispatcher asks only about nodes it keeps
+/// rooted, whose payloads therefore do not change while it holds them, so
+/// a kept summary does not go stale. A node whose last owner releases it
+/// reads as the shared placeholder afterwards; its id is never asked about
+/// again by a dispatcher that did not root it. The summaries are request
+/// state: a semantic task the dispatcher lends its state to inherits them
+/// and whatever it composes comes back to the lender with the rest of the
+/// state ([`ProjectSemanticDispatch::exchange_request_state`]), so reuse
+/// spans the task lifecycle instead of restarting per drive.
+pub(super) type FreeTypeVariableSummaries =
+    rustc_hash::FxHashMap<SemanticNodeId, FreeTypeVariables>;
+
+/// The ordered union of some summaries' free type parameters. A union
+/// that one summary's set already covers shares that set rather than
+/// copying it, so a chain of wrappers over one parameter holds one set.
+#[derive(Default)]
+struct ParamUnion {
+    shared: Option<Arc<[SemanticNodeId]>>,
+    merged: Option<(Vec<SemanticNodeId>, FxHashSet<SemanticNodeId>)>,
+}
+
+impl ParamUnion {
+    fn add(&mut self, params: &Option<Arc<[SemanticNodeId]>>) {
+        let Some(params) = params else {
+            return;
+        };
+        if let Some((order, members)) = &mut self.merged {
+            for param in params.iter() {
+                if members.insert(*param) {
+                    order.push(*param);
+                }
+            }
+            return;
+        }
+        let Some(shared) = &self.shared else {
+            self.shared = Some(Arc::clone(params));
+            return;
+        };
+        // A short set is checked by scanning; a long one merges by hashing.
+        const SCAN_LIMIT: usize = 8;
+        if Arc::ptr_eq(shared, params)
+            || (shared.len() <= SCAN_LIMIT
+                && params.len() <= shared.len()
+                && params.iter().all(|param| shared.contains(param)))
+        {
+            return;
+        }
+        let mut order = shared.to_vec();
+        let mut members: FxHashSet<SemanticNodeId> = order.iter().copied().collect();
+        for param in params.iter() {
+            if members.insert(*param) {
+                order.push(*param);
+            }
+        }
+        self.shared = None;
+        self.merged = Some((order, members));
+    }
+
+    fn finish(self) -> Option<Arc<[SemanticNodeId]>> {
+        match self.merged {
+            Some((order, _)) => Some(Arc::from(order)),
+            None => self.shared,
+        }
+    }
+
+    /// The union without the parameters `declared` binds. A short
+    /// declaration list is checked by scanning; a long one is indexed, so a
+    /// wide generic signature costs work linear in its parameters.
+    fn finish_without(
+        self,
+        declared: impl ExactSizeIterator<Item = SemanticNodeId> + Clone,
+    ) -> Option<Arc<[SemanticNodeId]>> {
+        const SCAN_LIMIT: usize = 8;
+        let params = self.finish()?;
+        if declared.len() == 0 {
+            return Some(params);
+        }
+        let indexed: Option<FxHashSet<SemanticNodeId>> =
+            (declared.len() > SCAN_LIMIT).then(|| declared.clone().collect());
+        let binds = |param: &SemanticNodeId| match &indexed {
+            Some(indexed) => indexed.contains(param),
+            None => declared.clone().any(|declared| declared == *param),
+        };
+        if !params.iter().any(binds) {
+            return Some(params);
+        }
+        let free: Vec<SemanticNodeId> = params.iter().copied().filter(|p| !binds(p)).collect();
+        (!free.is_empty()).then(|| Arc::from(free))
+    }
+}
+
 /// The infer-routing classification of a conditional's `extends` pattern
 /// (see [`ProjectSemanticDispatch::conditional_infer_route`]): bare
 /// `infer X`, an in-scope binding pattern, an out-of-scope deep pattern
@@ -464,6 +573,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 ));
             }
         };
+        // A decision whose frame waits on an operand's read decides nothing
+        // from the gap it read: its frame runs it again once delivered.
+        if self.decision_waits() {
+            return self.waiting_decision_output();
+        }
         if !operands_complete
             && !operands.checker_recovery
             && !self.is_conditional_checker_recovery(operands.absorbed_check)
@@ -506,7 +620,27 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
         }
         let check = operands.check;
+        // A decision running as its frame demands the operands its relation
+        // relates first, as the checker instantiates a conditional's check
+        // and extends types before relating them: the relation then reads
+        // them answered instead of evaluating them in place. What the
+        // demand observed is the relation's to observe, so it is dropped.
+        if self.deciding_on_the_runtime() {
+            let demanded = self.observe_read(|| {
+                for operand in [check, extends] {
+                    let _ = self.unwrap_identity_carrier_for_relation(operand);
+                }
+            });
+            let _ = demanded.discard();
+            if self.decision_waits() {
+                return self.waiting_decision_output();
+            }
+        }
         let observation = self.observe_read(|| self.conditional_branch_selection(check, extends));
+        if self.decision_waits() {
+            let _ = observation.discard();
+            return self.waiting_decision_output();
+        }
         let relation_complete = observation.observations_are_complete();
         let false_recovery = observation.value().0 == ConditionalBranchSelection::False
             && observation.operation_refusals().iter().any(|refusal| {
@@ -597,6 +731,20 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 )
             }
         }
+    }
+
+    /// What a decision that waits on a read returns: a typed gap its frame
+    /// discards, never a branch.
+    fn waiting_decision_output(&self) -> super::walk::QueryBuildOutput {
+        let reasons = crate::semantic_query::PartialReasonSet::PROPAGATED;
+        let mut output = super::walk::QueryBuildOutput::from((
+            QueryResult::Error(QueryError::IncompleteSemanticOperand { reasons }),
+            self.project_generation_signature(),
+        ));
+        output.cache_suppress = true;
+        output.mark_partial();
+        output.add_partial_reasons(reasons);
+        output
     }
 
     /// A conditional's operands as the checker constructs them before it
@@ -707,6 +855,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     recovered = true;
                     value
                 }
+                // A decision whose run waits on a read drops that run:
+                // reading on, it reaches the reads the remaining positions
+                // make in this run rather than one position per run.
+                _ if self.decision_waits() => element.value,
                 _ => return None,
             };
             let mut position = element.copy();
@@ -1693,58 +1845,117 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// Whether `node` holds a type variable free in it: a type parameter no
     /// signature within declares, or a reference to an enclosing `infer`.
     fn mentions_free_type_variable(&self, node: SemanticNodeId) -> bool {
-        if !self.type_params_within(&[node]).is_empty() {
-            return true;
-        }
-        let graph = self.graph();
-        let mut seen: FxHashSet<SemanticNodeId> = FxHashSet::default();
-        let mut stack = vec![node];
-        while let Some(node) = stack.pop() {
-            if !seen.insert(node) {
-                continue;
-            }
-            let Some(data) = graph.node_data(node) else {
-                continue;
-            };
-            if matches!(data.as_ref(), SemanticNodeData::InferRef { .. }) {
-                return true;
-            }
-            let _ = data.for_each_child(|child| stack.push(child));
-        }
-        false
+        let summary = self.free_type_variables(node);
+        summary.params.is_some() || summary.infer_ref
     }
 
     /// The free type parameters `roots` hold anywhere below them — not
-    /// those a generic signature within declares (instantiating a signature
-    /// maps its own type parameters to fresh ones) — read from an explicit
-    /// stack.
+    /// those a generic signature declares within its own scope
+    /// (instantiating a signature maps its own type parameters to fresh
+    /// ones) — in first-reached order, each once.
     pub(super) fn type_params_within(&self, roots: &[SemanticNodeId]) -> Vec<SemanticNodeId> {
+        let mut union = ParamUnion::default();
+        for root in roots {
+            union.add(&self.free_type_variables(*root).params);
+        }
+        union
+            .finish()
+            .map_or_else(Vec::new, |params| params.to_vec())
+    }
+
+    /// The binder-aware summary of the free type variables below `root`
+    /// ([`FreeTypeVariables`]). Each node's summary is composed once from
+    /// its children's and kept for the dispatcher's lifetime, so a type
+    /// that grows by one wrapper per recursive step costs one new summary
+    /// per step, never a walk of everything below it.
+    fn free_type_variables(&self, root: SemanticNodeId) -> FreeTypeVariables {
+        if let Some(found) = self.free_type_variables.borrow().get(&root) {
+            return found.clone();
+        }
         let graph = self.graph();
-        let mut seen: FxHashSet<SemanticNodeId> = FxHashSet::default();
-        let mut bound: FxHashSet<SemanticNodeId> = FxHashSet::default();
-        let mut stack: Vec<SemanticNodeId> = roots.to_vec();
-        let mut params = Vec::new();
-        while let Some(node) = stack.pop() {
-            if !seen.insert(node) {
+        // A node with no children is summarised from its own payload, without
+        // the traversal's containers.
+        if let Some(data) = graph.node_data(root) {
+            let mut has_child = false;
+            let _ = data.for_each_child(|_| has_child = true);
+            if !has_child {
+                let summary = FreeTypeVariables {
+                    params: matches!(data.as_ref(), SemanticNodeData::TypeParam { .. })
+                        .then(|| Arc::from([root])),
+                    infer_ref: matches!(data.as_ref(), SemanticNodeData::InferRef { .. }),
+                };
+                self.free_type_variables
+                    .borrow_mut()
+                    .insert(root, summary.clone());
+                return summary;
+            }
+        }
+        let mut computed: rustc_hash::FxHashMap<SemanticNodeId, FreeTypeVariables> =
+            rustc_hash::FxHashMap::default();
+        let mut on_path: FxHashSet<SemanticNodeId> = FxHashSet::default();
+        // A node reached again while it is still being composed closes a
+        // cycle: what the nodes on it see of each other is incomplete, so
+        // nothing composed by this call is kept.
+        let mut cyclic = false;
+        let mut work = vec![(root, false)];
+        let mut children = Vec::new();
+        while let Some((node, finish)) = work.pop() {
+            if computed.contains_key(&node) {
                 continue;
             }
-            let Some(data) = graph.node_data(node) else {
-                continue;
-            };
-            match data.as_ref() {
-                SemanticNodeData::TypeParam { .. } => {
-                    params.push(node);
+            if !finish {
+                if let Some(found) = self.free_type_variables.borrow().get(&node) {
+                    computed.insert(node, found.clone());
                     continue;
                 }
-                SemanticNodeData::Signature {
-                    type_parameters, ..
-                } => bound.extend(type_parameters.iter().map(|declared| declared.param)),
-                _ => {}
+                if !on_path.insert(node) {
+                    cyclic = true;
+                    continue;
+                }
+                work.push((node, true));
+                if let Some(data) = graph.node_data(node) {
+                    let _ = data.for_each_child(|child| work.push((child, false)));
+                }
+                continue;
             }
-            let _ = data.for_each_child(|child| stack.push(child));
+            on_path.remove(&node);
+            let summary = match graph.node_data(node) {
+                None => FreeTypeVariables::default(),
+                Some(data) => {
+                    children.clear();
+                    let _ = data.for_each_child(|child| children.push(child));
+                    let mut infer_ref = matches!(data.as_ref(), SemanticNodeData::InferRef { .. });
+                    let mut params = ParamUnion::default();
+                    for child in &children {
+                        if let Some(below) = computed.get(child) {
+                            infer_ref |= below.infer_ref;
+                            params.add(&below.params);
+                        }
+                    }
+                    let params = match data.as_ref() {
+                        // A type parameter is free where it is written; its
+                        // constraint and default are read where it is
+                        // declared.
+                        SemanticNodeData::TypeParam { .. } => Some(Arc::from([node])),
+                        SemanticNodeData::Signature {
+                            type_parameters, ..
+                        } => params
+                            .finish_without(type_parameters.iter().map(|declared| declared.param)),
+                        _ => params.finish(),
+                    };
+                    FreeTypeVariables { params, infer_ref }
+                }
+            };
+            computed.insert(node, summary);
         }
-        params.retain(|param| !bound.contains(param));
-        params
+        let summary = computed
+            .get(&root)
+            .cloned()
+            .expect("the traversal composes the root's summary before it ends");
+        if !cyclic {
+            self.free_type_variables.borrow_mut().extend(computed);
+        }
+        summary
     }
 
     /// Whether the checker defers the conditional `check extends extends`

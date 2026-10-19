@@ -324,6 +324,9 @@ pub mod flow_admission_fault_injection {
         /// Optional observer of actual preparation refusals, including inline demands.
         pub refused_preparations:
             std::sync::Mutex<Option<Vec<crate::semantic_query::FlowReturnKey>>>,
+        /// What happened to each contextual call a flow frame held.
+        pub contextual_routes:
+            std::sync::Mutex<Vec<crate::project_semantic_dispatch::ContextualRouteEventForTests>>,
         #[cfg(any(test, feature = "test-support"))]
         pub observe_product_execution: AtomicBool,
         #[cfg(any(test, feature = "test-support"))]
@@ -1777,20 +1780,33 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         owner: verter_type_expr::TopLevelOwnerId,
         expression: &verter_type_expr::IndexedValueExpression,
     ) -> Option<IndexedValue> {
-        let pending = || {
-            self.dispatch_txn
-                .borrow()
-                .obligations
-                .pending()
-                .pending_len()
-        };
-        let before = pending();
+        let before = self.pending_obligations();
         let node = self.evaluate_indexed_value(canonical, owner, expression, false);
-        if pending() != before {
+        self.settle_indexed_value_for_type(before, node)
+    }
+
+    /// How many obligations the transaction holds pending.
+    fn pending_obligations(&self) -> usize {
+        self.dispatch_txn
+            .borrow()
+            .obligations
+            .pending()
+            .pending_len()
+    }
+
+    /// A type-level read's value, given the obligations pending before it
+    /// was evaluated: a call that left one pending is provisional, a typed
+    /// miss ([`Self::evaluate_indexed_value_for_type`]).
+    fn settle_indexed_value_for_type(
+        &self,
+        pending_before: usize,
+        value: Option<IndexedValue>,
+    ) -> Option<IndexedValue> {
+        if self.pending_obligations() != pending_before {
             crate::request_context::mark_request_result_partial();
             return None;
         }
-        node
+        value
     }
 
     pub(crate) fn evaluate_indexed_value_expression_node_inner(
@@ -1817,133 +1833,296 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         expression: &verter_type_expr::IndexedValueExpression,
         hold_flow_result: bool,
     ) -> Option<IndexedValue> {
-        // A call's callee, receiver and arguments, and a member read's
-        // object, evaluate from an explicit stack of the records waiting on
-        // them, in that order, a record ending at a child with no value: a
-        // call nested in an argument or a receiver (`f(f(f(1)))`,
-        // `b.m().m()`) or a member read off a call's result (`f().a.b`)
-        // costs no native level.
-        struct Waiting<'e> {
-            call: &'e verter_type_expr::IndexedValueCall,
-            hold_flow_result: bool,
-            callee: Option<crate::semantic_query::SemanticNodeId>,
-            receiver: Option<Option<crate::semantic_query::SemanticNodeId>>,
-            /// The object of the member read the call's callee is: its
-            /// receiver.
-            member_receiver: Option<crate::semantic_query::SemanticNodeId>,
-            args: Vec<crate::semantic_query::CallArgKey>,
-        }
-        enum Pending<'e> {
-            Call(Waiting<'e>),
-            /// A member read waiting on its object; the callee of the call
-            /// below it when `callee`.
-            Member {
-                name: &'e Arc<str>,
-                callee: bool,
-            },
-        }
-        let mut waiting: Vec<Pending<'_>> = Vec::new();
-        let (mut current, mut hold, mut as_callee) = (expression, hold_flow_result, false);
-        loop {
-            let mut value = match self.indexed_value_leaf(canonical, owner, current) {
-                Ok(value) => value,
-                Err(IndexedRecord::Call(call)) => {
-                    waiting.push(Pending::Call(Waiting {
-                        call,
-                        hold_flow_result: hold,
-                        callee: None,
-                        receiver: None,
-                        member_receiver: None,
-                        args: Vec::with_capacity(call.args.len()),
-                    }));
-                    (current, hold, as_callee) = (&call.callee, false, true);
-                    continue;
-                }
-                Err(IndexedRecord::Member(object, name)) => {
-                    waiting.push(Pending::Member {
-                        name,
-                        callee: as_callee,
-                    });
-                    (current, hold, as_callee) = (object, false, false);
-                    continue;
-                }
-            };
-            loop {
-                let top = match waiting.last_mut() {
-                    None => return value,
-                    Some(Pending::Member { name, callee }) => {
-                        let (name, callee) = (*name, *callee);
-                        waiting.pop();
-                        let object = value.map(|object| object.node);
-                        value = object
-                            .and_then(|object| self.indexed_member_value(canonical, object, name))
-                            .map(|node| IndexedValue { node, fresh: false });
-                        if callee {
-                            if let (Some(object), Some(Pending::Call(call))) =
-                                (object, waiting.last_mut())
-                            {
-                                call.member_receiver = Some(object);
-                            }
-                        }
-                        continue;
-                    }
-                    Some(Pending::Call(top)) => top,
-                };
-                let call = top.call;
-                if top.callee.is_none() {
-                    let Some(callee) = value else {
-                        waiting.pop();
-                        value = None;
-                        continue;
-                    };
-                    top.callee = Some(callee.node);
-                    if let Some(receiver) = top.member_receiver.take() {
-                        top.receiver = Some(Some(receiver));
-                    } else if let Some(receiver) = call.receiver.as_deref() {
-                        (current, hold, as_callee) = (receiver, false, false);
-                        break;
-                    } else {
-                        top.receiver = Some(None);
-                    }
-                } else if top.receiver.is_none() {
-                    top.receiver = Some(value.map(|receiver| receiver.node));
-                } else {
-                    let Some(argument_value) = value else {
-                        waiting.pop();
-                        value = None;
-                        continue;
-                    };
-                    let argument = &call.args[top.args.len()];
-                    top.args.push(crate::semantic_query::CallArgKey::Eager {
-                        ty: argument_value.node,
-                        spread: argument.spread,
-                        context_sensitive: argument.context_sensitive,
-                        const_view: None,
-                        first_pass: None,
-                        literal_mode: indexed_argument_literal_mode(
-                            argument.literal_mode,
-                            argument_value.fresh,
-                        ),
-                    });
-                }
-                if let Some(argument) = call.args.get(top.args.len()) {
-                    (current, hold, as_callee) = (&argument.expression, false, false);
-                    break;
-                }
-                let Some(Pending::Call(finished)) = waiting.pop() else {
-                    unreachable!("the call on top")
-                };
-                value = self.resolve_indexed_call(
-                    canonical,
-                    owner,
-                    finished.call,
-                    finished.callee.expect("a resolved call has a callee"),
-                    finished.receiver.flatten(),
-                    finished.args,
-                    finished.hold_flow_result,
-                );
+        let mut run = IndexedValueRun::new(hold_flow_result);
+        match self.drain_indexed_value(canonical, owner, expression, &mut run, false, None) {
+            IndexedValuePoll::Done(value) => value,
+            IndexedValuePoll::Need(_) => {
+                unreachable!("an inline run evaluates the values it references in place")
             }
         }
+    }
+
+    /// Carry an indexed run over `root` on as far as it can go.
+    ///
+    /// A call's callee, receiver and arguments, and a member read's object,
+    /// evaluate from the run's explicit stack of the records waiting on
+    /// them, in that order, a record ending at a child with no value: a call
+    /// nested in an argument or a receiver (`f(f(f(1)))`, `b.m().m()`) or a
+    /// member read off a call's result (`f().a.b`) costs no native level.
+    ///
+    /// Run inline, the run evaluates every value its leaves name in place.
+    /// Run as a continuation (`suspend`), it stops at each leaf that is a
+    /// value's `typeof` (`id(y)` reads `typeof y`) with that `typeof` as its
+    /// need, and resumes with its value as `delivery`: a chain of values
+    /// each initialized from a call over the one before is then a chain of
+    /// frames. A call whose resolution is a machinery root
+    /// ([`Self::call_resumes_on_the_runtime`]) is its need too, resolved by
+    /// a frame of its own, and the run resumes with its result.
+    pub(super) fn drain_indexed_value(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        root: &verter_type_expr::IndexedValueExpression,
+        run: &mut IndexedValueRun,
+        suspend: bool,
+        delivery: Option<super::query_frames::FrameDelivery>,
+    ) -> IndexedValuePoll {
+        use verter_type_expr::IndexedValueExpression;
+        enum Phase {
+            Enter,
+            Deliver(Option<IndexedValue>),
+        }
+        let IndexedValueRun {
+            path,
+            waiting,
+            next,
+        } = run;
+        // The expressions along `path`: the last is the one evaluating.
+        let mut exprs: Vec<&IndexedValueExpression> = Vec::with_capacity(path.len() + 1);
+        exprs.push(root);
+        for child in path.iter() {
+            let parent = *exprs.last().expect("the root is on the stack");
+            exprs.push(indexed_child(parent, *child));
+        }
+        let (mut hold, mut as_callee) = (false, false);
+        let mut phase = match std::mem::replace(next, IndexedNext::Finished) {
+            IndexedNext::Enter {
+                hold: entered_hold,
+                as_callee: entered_as_callee,
+            } => {
+                (hold, as_callee) = (entered_hold, entered_as_callee);
+                Phase::Enter
+            }
+            IndexedNext::AwaitReference => Phase::Deliver(Some(IndexedValue {
+                node: self
+                    .consume_frame_delivery(
+                        delivery.expect("a run waiting on a value resumes with it"),
+                    )
+                    .node,
+                fresh: false,
+            })),
+            IndexedNext::AwaitCall => Phase::Deliver(self.indexed_call_delivered(
+                delivery.expect("a run waiting on a call resumes with its resolution"),
+            )),
+            IndexedNext::Finished => unreachable!("a finished run is not drained again"),
+        };
+        loop {
+            let value = match phase {
+                Phase::Enter => {
+                    let current = *exprs.last().expect("the run evaluates an expression");
+                    if suspend {
+                        if let Some(key) =
+                            self.indexed_value_reference_key(canonical, owner, current)
+                        {
+                            *next = IndexedNext::AwaitReference;
+                            return IndexedValuePoll::Need(key);
+                        }
+                    }
+                    phase = match self.indexed_value_leaf(canonical, owner, current) {
+                        Ok(value) => Phase::Deliver(value),
+                        Err(IndexedRecord::Call(call)) => {
+                            waiting.push(IndexedPending::Call {
+                                hold_flow_result: hold,
+                                callee: None,
+                                receiver: None,
+                                member_receiver: None,
+                                args: Vec::with_capacity(call.args.len()),
+                            });
+                            path.push(IndexedChild::Callee);
+                            exprs.push(&call.callee);
+                            (hold, as_callee) = (false, true);
+                            Phase::Enter
+                        }
+                        Err(IndexedRecord::Member(object)) => {
+                            waiting.push(IndexedPending::Member { callee: as_callee });
+                            path.push(IndexedChild::Object);
+                            exprs.push(object);
+                            (hold, as_callee) = (false, false);
+                            Phase::Enter
+                        }
+                    };
+                    continue;
+                }
+                Phase::Deliver(value) => value,
+            };
+            // `value` is the evaluated expression's: deliver it to the
+            // record waiting on it.
+            let Some(top) = waiting.last_mut() else {
+                return IndexedValuePoll::Done(value);
+            };
+            path.pop();
+            exprs.pop();
+            let record = *exprs.last().expect("a waiting record has its expression");
+            if let IndexedPending::Member { callee } = top {
+                let callee = *callee;
+                waiting.pop();
+                let IndexedValueExpression::Member { name, .. } = record else {
+                    unreachable!("a member record waits on a member read")
+                };
+                let object = value.map(|object| object.node);
+                let value = object
+                    .and_then(|object| self.indexed_member_value(canonical, object, name))
+                    .map(|node| IndexedValue { node, fresh: false });
+                if callee {
+                    if let (
+                        Some(object),
+                        Some(IndexedPending::Call {
+                            member_receiver, ..
+                        }),
+                    ) = (object, waiting.last_mut())
+                    {
+                        *member_receiver = Some(object);
+                    }
+                }
+                phase = Phase::Deliver(value);
+                continue;
+            }
+            let IndexedValueExpression::Call(call) = record else {
+                unreachable!("a call record waits on a call")
+            };
+            let IndexedPending::Call {
+                callee,
+                receiver,
+                member_receiver,
+                args,
+                ..
+            } = top
+            else {
+                unreachable!("the record on top is a call")
+            };
+            if callee.is_none() {
+                let Some(resolved) = value else {
+                    waiting.pop();
+                    phase = Phase::Deliver(None);
+                    continue;
+                };
+                *callee = Some(resolved.node);
+                if let Some(object) = member_receiver.take() {
+                    *receiver = Some(Some(object));
+                } else if let Some(authored) = call.receiver.as_deref() {
+                    path.push(IndexedChild::Receiver);
+                    exprs.push(authored);
+                    (hold, as_callee) = (false, false);
+                    phase = Phase::Enter;
+                    continue;
+                } else {
+                    *receiver = Some(None);
+                }
+            } else if receiver.is_none() {
+                *receiver = Some(value.map(|receiver| receiver.node));
+            } else {
+                let Some(argument_value) = value else {
+                    waiting.pop();
+                    phase = Phase::Deliver(None);
+                    continue;
+                };
+                let argument = &call.args[args.len()];
+                args.push(crate::semantic_query::CallArgKey::Eager {
+                    ty: argument_value.node,
+                    spread: argument.spread,
+                    context_sensitive: argument.context_sensitive,
+                    const_view: None,
+                    first_pass: None,
+                    literal_mode: indexed_argument_literal_mode(
+                        argument.literal_mode,
+                        argument_value.fresh,
+                    ),
+                });
+            }
+            if let Some(argument) = call.args.get(args.len()) {
+                path.push(IndexedChild::Argument(args.len()));
+                exprs.push(&argument.expression);
+                (hold, as_callee) = (false, false);
+                phase = Phase::Enter;
+                continue;
+            }
+            let Some(IndexedPending::Call {
+                hold_flow_result,
+                callee,
+                receiver,
+                args,
+                ..
+            }) = waiting.pop()
+            else {
+                unreachable!("the call on top")
+            };
+            let callee = callee.expect("a resolved call has a callee");
+            if suspend {
+                let Some(key) =
+                    self.indexed_call_key(canonical, owner, call, callee, receiver.flatten(), args)
+                else {
+                    phase = Phase::Deliver(None);
+                    continue;
+                };
+                if self.call_resumes_on_the_runtime(&key) {
+                    *next = IndexedNext::AwaitCall;
+                    return IndexedValuePoll::Need(
+                        crate::semantic_query::SemanticQueryKey::ResolveCall(Box::new(key)),
+                    );
+                }
+                phase = Phase::Deliver(self.resolve_indexed_call_key(key, hold_flow_result));
+                continue;
+            }
+            phase = Phase::Deliver(self.resolve_indexed_call(
+                canonical,
+                owner,
+                call,
+                callee,
+                receiver.flatten(),
+                args,
+                hold_flow_result,
+            ));
+        }
+    }
+
+    /// The value a call's resolution, resolved by a frame of its own,
+    /// delivers to the indexed run waiting on it: exactly what
+    /// [`Self::resolve_indexed_call`] reads from the executor.
+    fn indexed_call_delivered(
+        &self,
+        delivery: super::query_frames::FrameDelivery,
+    ) -> Option<IndexedValue> {
+        let value = match self.read_frame_delivery(delivery).value {
+            QueryResult::Value(crate::semantic_query::SemanticQueryValue::ResolveCall(result)) => {
+                let return_type = super::return_equation::resolved_call_return_type(&result);
+                Some(IndexedValue {
+                    node: return_type,
+                    fresh: self.call_result_is_fresh_literal(&result, return_type),
+                })
+            }
+            _ => None,
+        };
+        if value.is_none() {
+            crate::request_context::mark_request_result_partial();
+        }
+        value
+    }
+
+    /// The `typeof` an indexed leaf that names a value reads (`y` in
+    /// `id(y)`), exactly as its lowering would query it; `None` for any
+    /// other leaf.
+    fn indexed_value_reference_key(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        expression: &verter_type_expr::IndexedValueExpression,
+    ) -> Option<crate::semantic_query::SemanticQueryKey> {
+        let verter_type_expr::IndexedValueExpression::Value(TypeExpr::TypeOf(value_ref)) =
+            expression
+        else {
+            return None;
+        };
+        if !value_ref.type_args.is_empty() {
+            return None;
+        }
+        self.typeof_reference_key(
+            &verter_type_expr::OwnedStr::from(canonical),
+            owner,
+            value_ref,
+            crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Navigate,
+            ),
+        )
     }
 
     construction_ordinal_seam! {
@@ -2013,8 +2192,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 regular(self.global_template_strings_array(canonical, owner))
             }
             IndexedValueExpression::Call(call) => return Err(IndexedRecord::Call(call)),
-            IndexedValueExpression::Member { object, name } => {
-                return Err(IndexedRecord::Member(object, name))
+            IndexedValueExpression::Member { object, .. } => {
+                return Err(IndexedRecord::Member(object))
             }
         })
     }
@@ -2032,6 +2211,36 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         args: Vec<crate::semantic_query::CallArgKey>,
         hold_flow_result: bool,
     ) -> Option<IndexedValue> {
+        let key = self.indexed_call_key(canonical, owner, call, callee, receiver, args)?;
+        self.resolve_indexed_call_key(key, hold_flow_result)
+    }
+
+    /// Resolve one indexed call's key through the executor.
+    fn resolve_indexed_call_key(
+        &self,
+        key: crate::semantic_query::ResolveCallKey,
+        hold_flow_result: bool,
+    ) -> Option<IndexedValue> {
+        let (result, held) =
+            self.execute_indexed_resolve_call_with_flow_hold(key, hold_flow_result);
+        if result.is_none() && !held {
+            crate::request_context::mark_request_result_partial();
+        }
+        result
+    }
+
+    /// The executor key of one indexed call over its evaluated callee,
+    /// receiver and arguments; `None` when its explicit type arguments do
+    /// not lower.
+    fn indexed_call_key(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        call: &verter_type_expr::IndexedValueCall,
+        callee: crate::semantic_query::SemanticNodeId,
+        receiver: Option<crate::semantic_query::SemanticNodeId>,
+        args: Vec<crate::semantic_query::CallArgKey>,
+    ) -> Option<crate::semantic_query::ResolveCallKey> {
         use verter_type_expr::IndexedValueCallKind;
         let explicit_type_args = call
             .explicit_type_args
@@ -2050,29 +2259,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let callee = receiver.map_or(callee, |receiver| {
             self.bind_callee_receiver(callee, receiver)
         });
-        let (result, held) = self.execute_indexed_resolve_call_with_flow_hold(
-            crate::semantic_query::ResolveCallKey {
-                point: crate::semantic_query::ProgramPointId {
-                    canonical_id: verter_type_expr::OwnedStr::from(canonical),
-                    offset: call.point,
-                },
-                callee,
-                kind: match call.kind {
-                    IndexedValueCallKind::Call => crate::semantic_query::CallKind::Call,
-                    IndexedValueCallKind::Construct => crate::semantic_query::CallKind::Construct,
-                },
-                receiver,
-                args: Arc::from(args.into_boxed_slice()),
-                explicit_type_args: Arc::from(explicit_type_args.into_boxed_slice()),
-                flow: crate::semantic_query::FlowNarrowingKey::empty(),
-                context: self.resolve_call_context_for(canonical),
+        Some(crate::semantic_query::ResolveCallKey {
+            point: crate::semantic_query::ProgramPointId {
+                canonical_id: verter_type_expr::OwnedStr::from(canonical),
+                offset: call.point,
             },
-            hold_flow_result,
-        );
-        if result.is_none() && !held {
-            crate::request_context::mark_request_result_partial();
-        }
-        result
+            callee,
+            kind: match call.kind {
+                IndexedValueCallKind::Call => crate::semantic_query::CallKind::Call,
+                IndexedValueCallKind::Construct => crate::semantic_query::CallKind::Construct,
+            },
+            receiver,
+            args: Arc::from(args.into_boxed_slice()),
+            explicit_type_args: Arc::from(explicit_type_args.into_boxed_slice()),
+            flow: crate::semantic_query::FlowNarrowingKey::empty(),
+            context: self.resolve_call_context_for(canonical),
+        })
     }
 
     /// Consume an inferred declaration's indexed semantic expression source.
@@ -2084,6 +2286,76 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.probe_optional(|| {
             self.semantic_expression_source_value(source, owner)
                 .map(|value| value.node)
+        })
+    }
+
+    /// [`Self::execute_semantic_expression_source`] on the continuation
+    /// runtime: an indexed expression source stops at each value its leaves
+    /// name and resumes with that value's `typeof` as `delivery`, and the
+    /// observations its steps make are one optional probe's, adopted when
+    /// it yields a value and dropped when it yields none.
+    pub(super) fn drain_semantic_expression_source(
+        &self,
+        source: &verter_type_expr::facts::SemanticExpressionSource,
+        run: &mut ExpressionSourceRun,
+        delivery: Option<super::query_frames::FrameDelivery>,
+    ) -> ExpressionSourcePoll {
+        let scope = match run.observed.take() {
+            Some(observed) => observed.resume(self),
+            None => self.begin_read_observation(),
+        };
+        let mut delivered = delivery;
+        let owner = run.owner;
+        let value = loop {
+            let indexed = match &mut run.state {
+                ExpressionSourceState::Unrouted => {
+                    match self.route_semantic_expression_source(source) {
+                        ExpressionSourceRoute::Evaluated(value) => break value,
+                        ExpressionSourceRoute::Indexed {
+                            serve,
+                            canonical,
+                            expression,
+                        } => ExpressionSourceState::Indexed {
+                            _serve: serve,
+                            canonical,
+                            expression,
+                            run: IndexedValueRun::new(false),
+                            pending_before: self.pending_obligations(),
+                        },
+                    }
+                }
+                ExpressionSourceState::Indexed {
+                    canonical,
+                    expression,
+                    run: indexed,
+                    pending_before,
+                    ..
+                } => {
+                    match self.drain_indexed_value(
+                        canonical,
+                        owner,
+                        expression,
+                        indexed,
+                        true,
+                        delivered.take(),
+                    ) {
+                        IndexedValuePoll::Need(key) => {
+                            run.observed = Some(scope.finish(()));
+                            return ExpressionSourcePoll::Need(key);
+                        }
+                        IndexedValuePoll::Done(value) => {
+                            break self.settle_indexed_value_for_type(*pending_before, value)
+                        }
+                    }
+                }
+            };
+            run.state = indexed;
+        };
+        let read = scope.finish(value.map(|value| value.node));
+        ExpressionSourcePoll::Done(if read.value().is_some() {
+            read.adopt(self).ok().flatten()
+        } else {
+            read.discard().ok().flatten()
         })
     }
 
@@ -2109,8 +2381,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         source: &verter_type_expr::facts::SemanticExpressionSource,
         owner: verter_type_expr::TopLevelOwnerId,
     ) -> Option<IndexedValue> {
+        match self.route_semantic_expression_source(source) {
+            ExpressionSourceRoute::Evaluated(value) => value,
+            ExpressionSourceRoute::Indexed {
+                serve: _serve,
+                canonical,
+                expression,
+            } => self.evaluate_indexed_value_for_type(&canonical, owner, &expression),
+        }
+    }
+
+    /// Where an expression source's value comes from: a value its source
+    /// evaluated, or the indexed expression record its source names, served
+    /// by `serve`, which [`Self::drain_indexed_value`] evaluates.
+    fn route_semantic_expression_source(
+        &self,
+        source: &verter_type_expr::facts::SemanticExpressionSource,
+    ) -> ExpressionSourceRoute {
         let regular = |node: Option<crate::semantic_query::SemanticNodeId>| {
-            node.map(|node| IndexedValue { node, fresh: false })
+            ExpressionSourceRoute::Evaluated(node.map(|node| IndexedValue { node, fresh: false }))
         };
         match source {
             verter_type_expr::facts::SemanticExpressionSource::FunctionReturn(source) => {
@@ -2121,7 +2410,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     verter_type_expr::facts::FunctionReturnSource::Flow(identity) => {
                         identity.anchor.canonical_id.as_ref()
                     }
-                    verter_type_expr::facts::FunctionReturnSource::Absent => return None,
+                    verter_type_expr::facts::FunctionReturnSource::Absent => {
+                        return ExpressionSourceRoute::Evaluated(None)
+                    }
                 };
                 regular(
                     match self.execute_function_return_source(source, canonical) {
@@ -2135,11 +2426,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 )
             }
             verter_type_expr::facts::SemanticExpressionSource::ProgramExpression(point) => {
-                let (_serve, source_demand) = self
+                let Some((serve, source_demand)) = self
                     .ctx
-                    .indexed_expression_source(point.canonical_id.as_ref())?;
+                    .indexed_expression_source(point.canonical_id.as_ref())
+                else {
+                    return ExpressionSourceRoute::Evaluated(None);
+                };
                 let index = source_demand.function_program_index();
-                let record = index.expression(point)?;
+                let Some(record) = index.expression(point) else {
+                    return ExpressionSourceRoute::Evaluated(None);
+                };
                 match &record.source {
                     verter_session_query::function_program::ProgramExpressionSource::FunctionReturn(source) => {
                         regular(match self.execute_function_return_source(source, point.canonical_id.as_ref()) {
@@ -2156,11 +2452,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     } => regular(self.initializer_value(identity, *readonly)),
                     verter_session_query::function_program::ProgramExpressionSource::FieldInitializer { .. } => {
                         crate::request_context::mark_request_result_partial();
-                        None
+                        ExpressionSourceRoute::Evaluated(None)
                     }
                     verter_session_query::function_program::ProgramExpressionSource::UnsupportedCall => {
                         crate::request_context::mark_request_result_partial();
-                        None
+                        ExpressionSourceRoute::Evaluated(None)
                     }
                     verter_session_query::function_program::ProgramExpressionSource::SemanticCall {
                         initializer: Some(initializer), ..
@@ -2175,19 +2471,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             Some(SemanticNodeData::Opaque(QueryError::UnmodeledPosition))
                         )) {
                             crate::request_context::mark_request_result_partial();
-                            None
+                            ExpressionSourceRoute::Evaluated(None)
                         } else {
                             regular(node)
                         }
                     },
                     verter_session_query::function_program::ProgramExpressionSource::Value
                     | verter_session_query::function_program::ProgramExpressionSource::SemanticCall { .. } => {
-                        let expression = source_demand.indexed_program_expression_ir(record)?;
-                        self.evaluate_indexed_value_for_type(
-                            point.canonical_id.as_ref(),
-                            owner,
-                            expression.as_ref(),
-                        )
+                        match source_demand.indexed_program_expression_ir(record) {
+                            Some(expression) => ExpressionSourceRoute::Indexed {
+                                serve,
+                                canonical: Arc::clone(&point.canonical_id),
+                                expression,
+                            },
+                            None => ExpressionSourceRoute::Evaluated(None),
+                        }
                     }
                 }
             }
@@ -3005,6 +3303,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// refused admission — aborts and retires the ENTIRE deferred batch
     /// without publishing anything, so `ReturnOnly` stays non-publishing
     /// and no torn or provisional member can warm.
+    ///
+    /// A root demanded outside any drive evaluates as a frame of the
+    /// continuation runtime, whose completion releases the batch the same
+    /// way, by the same publication.
     pub(super) fn execute_flow_return_cold_build(
         &self,
         key: SemanticQueryKey,
@@ -3013,6 +3315,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             matches!(key, SemanticQueryKey::FlowReturn(_)),
             "the flow-return executor admits FlowReturn keys only"
         );
+        if self.drives_on_the_runtime(&key) {
+            return self.drive_query(key);
+        }
         let SemanticQueryKey::FlowReturn(root_key) = key.clone() else {
             unreachable!("the flow-return executor admits FlowReturn keys only")
         };
@@ -3027,7 +3332,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// Drain the SCC-closed member batch onto the root's published
     /// carrier, fenced on the FLOW root's own published candidate.
-    fn flow_return_drain_completed_members(
+    pub(super) fn flow_return_drain_completed_members(
         &self,
         root_key: &FlowReturnKey,
         carrier: &crate::semantic_query_memo::PublishedMemoCandidate,
@@ -9025,7 +9330,167 @@ pub(crate) struct IndexedValue {
 /// evaluates over its children: a call, or a member read off a value.
 enum IndexedRecord<'e> {
     Call(&'e verter_type_expr::IndexedValueCall),
-    Member(&'e verter_type_expr::IndexedValueExpression, &'e Arc<str>),
+    Member(&'e verter_type_expr::IndexedValueExpression),
+}
+
+/// Where an expression source's value comes from
+/// ([`ProjectSemanticDispatch::route_semantic_expression_source`]).
+enum ExpressionSourceRoute {
+    /// The value its source evaluated.
+    Evaluated(Option<IndexedValue>),
+    /// The indexed expression record its source names, and the serve that
+    /// holds it.
+    Indexed {
+        serve: verter_session_query::inputs::indexed::IndexedInputServe,
+        canonical: Arc<str>,
+        expression: Arc<verter_type_expr::IndexedValueExpression>,
+    },
+}
+
+/// An expression source's evaluation on the continuation runtime between
+/// the steps of its frame
+/// ([`ProjectSemanticDispatch::drain_semantic_expression_source`]).
+pub(super) struct ExpressionSourceRun {
+    owner: verter_type_expr::TopLevelOwnerId,
+    state: ExpressionSourceState,
+    /// What its earlier steps observed, until the next step resumes it.
+    observed: Option<super::flow_return_fact::ObservedRead<()>>,
+}
+
+impl ExpressionSourceRun {
+    /// The scope the source evaluates in.
+    pub(super) fn owner(&self) -> verter_type_expr::TopLevelOwnerId {
+        self.owner
+    }
+
+    /// An evaluation of a source in `owner`'s scope.
+    pub(super) fn new(owner: verter_type_expr::TopLevelOwnerId) -> Self {
+        Self {
+            owner,
+            state: ExpressionSourceState::Unrouted,
+            observed: None,
+        }
+    }
+}
+
+enum ExpressionSourceState {
+    /// The source is not routed yet.
+    Unrouted,
+    /// Its indexed expression record is evaluating.
+    Indexed {
+        _serve: verter_session_query::inputs::indexed::IndexedInputServe,
+        canonical: Arc<str>,
+        expression: Arc<verter_type_expr::IndexedValueExpression>,
+        run: IndexedValueRun,
+        /// The obligations pending before the evaluation began.
+        pending_before: usize,
+    },
+}
+
+/// Where an expression source's evaluation stands after it ran as far as
+/// it could.
+pub(super) enum ExpressionSourcePoll {
+    /// Its value.
+    Done(Option<SemanticNodeId>),
+    /// It waits on this `typeof`.
+    Need(crate::semantic_query::SemanticQueryKey),
+}
+
+/// An indexed expression's evaluation in progress
+/// ([`ProjectSemanticDispatch::drain_indexed_value`]): where it stands in
+/// the expression and the records waiting on their children. It names its
+/// position by the children it descended through, never by borrowing the
+/// expression, so it can wait across the evaluation of a value it needs.
+pub(super) struct IndexedValueRun {
+    /// The children descended through from the root to the expression
+    /// evaluating: one per waiting record.
+    path: Vec<IndexedChild>,
+    /// The records waiting on a child, outermost first.
+    waiting: Vec<IndexedPending>,
+    next: IndexedNext,
+}
+
+impl IndexedValueRun {
+    /// A run over a root expression; `hold_flow_result` when the root's own
+    /// call holds its result on the enclosing flow frame.
+    pub(super) fn new(hold_flow_result: bool) -> Self {
+        Self {
+            path: Vec::new(),
+            waiting: Vec::new(),
+            next: IndexedNext::Enter {
+                hold: hold_flow_result,
+                as_callee: false,
+            },
+        }
+    }
+}
+
+/// Where an indexed run stands after it ran as far as it could.
+pub(super) enum IndexedValuePoll {
+    /// The root's value.
+    Done(Option<IndexedValue>),
+    /// The run waits on the `typeof` of a value a leaf names.
+    Need(crate::semantic_query::SemanticQueryKey),
+}
+
+/// What an indexed run does when it is next drained.
+enum IndexedNext {
+    /// Evaluate the expression at its position: a call's result held on
+    /// the enclosing flow frame when `hold`, the callee of the call below
+    /// it when `as_callee`.
+    Enter { hold: bool, as_callee: bool },
+    /// Take the delivered value as the leaf's at its position.
+    AwaitReference,
+    /// Take the delivered resolution as the value of the call it resolves.
+    AwaitCall,
+    /// Nothing: the run finished.
+    Finished,
+}
+
+/// The child of an indexed record a run descends into.
+#[derive(Clone, Copy)]
+enum IndexedChild {
+    Callee,
+    Receiver,
+    Argument(usize),
+    /// A member read's object.
+    Object,
+}
+
+/// The child `child` of the indexed record `parent`.
+fn indexed_child(
+    parent: &verter_type_expr::IndexedValueExpression,
+    child: IndexedChild,
+) -> &verter_type_expr::IndexedValueExpression {
+    use verter_type_expr::IndexedValueExpression;
+    match (parent, child) {
+        (IndexedValueExpression::Call(call), IndexedChild::Callee) => &call.callee,
+        (IndexedValueExpression::Call(call), IndexedChild::Receiver) => call
+            .receiver
+            .as_deref()
+            .expect("a run descends only into an authored receiver"),
+        (IndexedValueExpression::Call(call), IndexedChild::Argument(ordinal)) => {
+            &call.args[ordinal].expression
+        }
+        (IndexedValueExpression::Member { object, .. }, IndexedChild::Object) => object,
+        _ => unreachable!("a run descends only into a record's children"),
+    }
+}
+
+/// An indexed record waiting on one of its children.
+enum IndexedPending {
+    Call {
+        hold_flow_result: bool,
+        callee: Option<SemanticNodeId>,
+        receiver: Option<Option<SemanticNodeId>>,
+        /// The object of the member read the call's callee is: its
+        /// receiver.
+        member_receiver: Option<SemanticNodeId>,
+        args: Vec<crate::semantic_query::CallArgKey>,
+    },
+    /// A member read waiting on its object; the callee of the call below it
+    /// when `callee`.
+    Member { callee: bool },
 }
 
 /// The inference deposit mode of an indexed call argument: a bare literal,
@@ -9687,6 +10152,7 @@ use branches::{BranchStep, DeadPath, Entered};
 use nested::{NestedChildParts, NestedDemand, NestedSignatureStep};
 #[path = "flow_return_operators.rs"]
 mod operators;
+pub(super) use call_stack::HeldContextualRoute;
 use call_stack::{CallArgumentWait, CallDrive, CallFunctionWait, CallInFlight, CallStep};
 
 #[path = "flow_return_call_effects.rs"]
@@ -9698,8 +10164,12 @@ use contextual::ContextualSignature;
 mod correlation;
 #[path = "flow_return_destructure.rs"]
 mod destructure;
+#[path = "flow_return_disjunction.rs"]
+mod disjunction;
 #[path = "flow_return_footprint.rs"]
 mod footprint;
+#[cfg(any(test, feature = "semantic-observe"))]
+pub use disjunction::{disjunction_work_observed, DisjunctionWork};
 
 #[path = "flow_return_schedule.rs"]
 pub mod schedule;
@@ -10081,6 +10551,26 @@ pub(super) trait FlowDemandDriver {
     fn arena(&self) -> super::arena_ops::ArenaOps<'_>;
     fn call_undecided_relations(&self) -> u64;
     fn discard_call_relation_observations(&self, count: u64);
+    /// Count again the undecided relations a held executor attempt
+    /// observed, for the run that resumes it.
+    fn restore_call_relation_observations(&self, count: u64);
+    /// Open a window in which a contextual callback types while its call's
+    /// collector waits ([`ProjectSemanticDispatch::open_contextual_window`]).
+    fn open_contextual_window(&self) -> bool;
+    fn close_contextual_window(&self);
+    /// Whether the running flow evaluation waits on a demand its frame must
+    /// produce first.
+    fn contextual_window_waits(&self) -> bool;
+    /// Whether relating a typed callback to its call's held contextual
+    /// target waits on a demand the frame must produce first
+    /// ([`ProjectSemanticDispatch::contextual_delivery_waits`]).
+    fn contextual_delivery_waits(
+        &self,
+        state: &super::call_resolve::ContextualCallState,
+        typed: SemanticNodeId,
+    ) -> bool;
+    fn hold_contextual_route(&self, route: HeldContextualRoute);
+    fn take_held_contextual_route(&self, asked: &ResolveCallKey) -> Option<HeldContextualRoute>;
     fn pending_obligation_count(&self) -> usize;
     fn enter_lexical_demand(&self, canonical: Arc<str>) -> super::LexicalDemandScopeGuard<'_>;
     fn presence_intersection_for_flow(
@@ -10710,6 +11200,32 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     fn discard_call_relation_observations(&self, count: u64) {
         let mut txn = self.dispatch_txn.borrow_mut();
         txn.call.undecided_relations = txn.call.undecided_relations.saturating_sub(count);
+    }
+    fn restore_call_relation_observations(&self, count: u64) {
+        let mut txn = self.dispatch_txn.borrow_mut();
+        txn.call.undecided_relations = txn.call.undecided_relations.saturating_add(count);
+    }
+    fn open_contextual_window(&self) -> bool {
+        ProjectSemanticDispatch::open_contextual_window(self)
+    }
+    fn close_contextual_window(&self) {
+        ProjectSemanticDispatch::close_contextual_window(self);
+    }
+    fn contextual_window_waits(&self) -> bool {
+        ProjectSemanticDispatch::contextual_window_waits(self)
+    }
+    fn contextual_delivery_waits(
+        &self,
+        state: &super::call_resolve::ContextualCallState,
+        typed: SemanticNodeId,
+    ) -> bool {
+        ProjectSemanticDispatch::contextual_delivery_waits(self, state, typed)
+    }
+    fn hold_contextual_route(&self, route: HeldContextualRoute) {
+        ProjectSemanticDispatch::hold_contextual_route(self, route);
+    }
+    fn take_held_contextual_route(&self, asked: &ResolveCallKey) -> Option<HeldContextualRoute> {
+        ProjectSemanticDispatch::take_held_contextual_route(self, asked)
     }
     fn pending_obligation_count(&self) -> usize {
         self.dispatch_txn
@@ -11378,6 +11894,31 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     }
     fn discard_call_relation_observations(&self, count: u64) {
         self.driver.discard_call_relation_observations(count);
+    }
+    fn restore_call_relation_observations(&self, count: u64) {
+        self.driver.restore_call_relation_observations(count);
+    }
+    fn open_contextual_window(&self) -> bool {
+        self.driver.open_contextual_window()
+    }
+    fn close_contextual_window(&self) {
+        self.driver.close_contextual_window();
+    }
+    fn contextual_window_waits(&self) -> bool {
+        self.driver.contextual_window_waits()
+    }
+    fn contextual_delivery_waits(
+        &self,
+        state: &super::call_resolve::ContextualCallState,
+        typed: SemanticNodeId,
+    ) -> bool {
+        self.driver.contextual_delivery_waits(state, typed)
+    }
+    fn hold_contextual_route(&self, route: HeldContextualRoute) {
+        self.driver.hold_contextual_route(route);
+    }
+    fn take_held_contextual_route(&self, asked: &ResolveCallKey) -> Option<HeldContextualRoute> {
+        self.driver.take_held_contextual_route(asked)
     }
     fn pending_obligation_count(&self) -> usize {
         self.driver.pending_obligation_count()
@@ -12251,45 +12792,6 @@ pub fn standing_narrowings(
         .into_iter()
         .map(|(_, subject, node)| (subject.clone(), node))
         .collect()
-}
-
-/// Fold a ledger `window` into `standing`, the facts standing one per
-/// subject: a fact about a subject already standing replaces it where it
-/// stands, and a kill drops what it names. Per subject, the newest fact and
-/// the place the subject first stood are those of [`standing_narrowings`]
-/// over the same entries.
-fn fold_standing_narrowings(
-    standing: &mut Vec<(
-        FlowProductSubject,
-        verter_session_query::flow::slice::SliceNarrowSubject,
-        SemanticNodeId,
-    )>,
-    window: &[NarrowingLedgerEntry],
-) {
-    for entry in window {
-        match entry {
-            NarrowingLedgerEntry::Established {
-                root,
-                subject,
-                node,
-            } => match standing
-                .iter_mut()
-                .find(|(_, candidate, _)| candidate == subject)
-            {
-                Some(fact) => *fact = (root.clone(), subject.clone(), *node),
-                None => standing.push((root.clone(), subject.clone(), *node)),
-            },
-            NarrowingLedgerEntry::Cleared { root } => {
-                standing.retain(|(candidate, _, _)| candidate != root);
-            }
-            NarrowingLedgerEntry::ClearedBelow { root, path } => {
-                standing.retain(|(candidate, subject, _)| {
-                    candidate != root
-                        || !(subject.path.len() > path.len() && subject.path.starts_with(path))
-                });
-            }
-        }
-    }
 }
 
 /// Parameter initialization also establishes its hoisted declaration aliases.
@@ -19033,131 +19535,6 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 verter_session_query::flow::policy::FlowGap::GuardNarrowing,
             )),
         }
-    }
-
-    /// The union-of-facts reading of a disjunction: each disjunct's
-    /// narrow is computed against the starting overlay as the operands
-    /// before it LEFT it — `a || b` is true through `a`, or through `b`
-    /// once `a` is false, exactly as the checker narrows the right operand
-    /// by the left's other edge — and a subject narrowed by every disjunct
-    /// lands the union of the per-disjunct narrows. A subject some
-    /// disjunct leaves unnarrowed contributes its ORIGINAL type to that
-    /// union — which is the original type, so no narrow is established
-    /// for it.
-    fn apply_guard_union(
-        &mut self,
-        parts: &[verter_session_query::flow::slice::SliceGuard],
-        positive: bool,
-    ) {
-        let mut alternatives: Vec<
-            Vec<(
-                verter_session_query::flow::slice::SliceNarrowSubject,
-                SemanticNodeId,
-            )>,
-        > = Vec::with_capacity(parts.len());
-        // Each alternative reads every earlier part the other way, then its
-        // own part. The earlier parts' readings are applied once, as a
-        // prefix that grows by one part per alternative, and the prefix's
-        // standing facts are kept one per subject (the newest, where the
-        // subject first stood — all the union reads), so a chain of `n`
-        // conjuncts costs `n` applications here rather than `n²`.
-        let base = self.narrowing_snapshot();
-        let mut prefix_standing = Vec::new();
-        for (index, part) in parts.iter().enumerate() {
-            let prefix = self.narrowing_snapshot();
-            self.apply_guard_scoped(part, positive);
-            let mut alternative = prefix_standing.clone();
-            fold_standing_narrowings(
-                &mut alternative,
-                &self.narrowing_writes[prefix.writes.min(self.narrowing_writes.len())..],
-            );
-            alternatives.push(
-                alternative
-                    .into_iter()
-                    .map(|(_, subject, node)| (subject, node))
-                    .collect(),
-            );
-            self.restore_narrowings(prefix);
-            if index + 1 < parts.len() {
-                let extension = self.narrowing_writes.len();
-                self.apply_guard_scoped(part, !positive);
-                fold_standing_narrowings(&mut prefix_standing, &self.narrowing_writes[extension..]);
-            }
-        }
-        self.restore_narrowings(base);
-        for (subject, node) in self.union_of_alternatives(alternatives) {
-            self.push_narrowing(&subject, node);
-        }
-    }
-
-    /// The per-reference union over `alternatives`, each the facts one
-    /// path established in write order (the newest fact about a reference
-    /// is the one standing at its end): a reference every alternative
-    /// narrowed, with the union of its per-alternative narrows. A
-    /// reference some alternative leaves unnarrowed has its original type
-    /// on that path, which the union would be, so it is left out.
-    fn union_of_alternatives(
-        &mut self,
-        alternatives: Vec<
-            Vec<(
-                verter_session_query::flow::slice::SliceNarrowSubject,
-                SemanticNodeId,
-            )>,
-        >,
-    ) -> Vec<(
-        verter_session_query::flow::slice::SliceNarrowSubject,
-        SemanticNodeId,
-    )> {
-        let alternatives: Vec<Vec<_>> = alternatives
-            .into_iter()
-            .map(|applied| {
-                let mut final_overlay: Vec<(
-                    verter_session_query::flow::slice::SliceNarrowSubject,
-                    SemanticNodeId,
-                )> = Vec::with_capacity(applied.len());
-                for (subject, node) in applied {
-                    match final_overlay
-                        .iter_mut()
-                        .find(|(candidate, _)| *candidate == subject)
-                    {
-                        Some((_, current)) => *current = node,
-                        None => final_overlay.push((subject, node)),
-                    }
-                }
-                final_overlay
-            })
-            .collect();
-        let mut unions = Vec::new();
-        let mut subjects: Vec<verter_session_query::flow::slice::SliceNarrowSubject> = Vec::new();
-        for alternative in &alternatives {
-            for (subject, _) in alternative {
-                if !subjects.contains(subject) {
-                    subjects.push(subject.clone());
-                }
-            }
-        }
-        for subject in subjects {
-            let narrowed_in_all = alternatives.iter().all(|alternative| {
-                alternative
-                    .iter()
-                    .any(|(candidate, _)| *candidate == subject)
-            });
-            if !narrowed_in_all {
-                continue;
-            }
-            let nodes: Vec<SemanticNodeId> = alternatives
-                .iter()
-                .flat_map(|alternative| {
-                    alternative
-                        .iter()
-                        .filter(|(candidate, _)| *candidate == subject)
-                        .map(|(_, node)| *node)
-                })
-                .collect();
-            let node = self.union(&nodes);
-            unions.push((subject, node));
-        }
-        unions
     }
 
     /// Read the type predicate the function's single return establishes
@@ -27918,11 +28295,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 }
                 call_stack::ResolveCallProgress::Function(function) => {
                     let call_stack::RouteFunction { at, request } = *function;
+                    let window = self.open_function_argument_window(&at);
                     let node = self.eval_nested_demand(request.demand);
+                    if window {
+                        self.dispatch.close_contextual_window();
+                    }
                     progress = self.deliver_resolve_call_function(
                         at,
                         request.mark,
                         Positional::Value(node),
+                        window,
                     );
                 }
             }

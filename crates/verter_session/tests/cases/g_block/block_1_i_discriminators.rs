@@ -69,7 +69,7 @@ fn execute_read_cold_build_persists_traced_facts() {
     )
     .expect("read query_frames.rs");
     assert!(
-        frames_src.contains("FactTracerBasisSource::from_ctx(frame.dispatch.ctx)"),
+        frames_src.contains("FactTracerBasisSource::from_ctx(self.ctx)"),
         "a cold build run as a continuation frame traces its steps from the same \
          request-bound basis source"
     );

@@ -274,8 +274,8 @@ fn both_flight_arms_replay_the_producer_footprint() {
         .load(std::sync::atomic::Ordering::Acquire);
 
     /// Produce the bundle inside a fresh fact tracer and return the sealed
-    /// observation set. `FactReadSet` is `!Send`, so the seal happens on the
-    /// producing thread and only the `Arc`-backed finalise crosses back.
+    /// observation set. The tracer is installed on the producing thread, so
+    /// the seal happens there and only the `Arc`-backed finalise crosses back.
     fn traced_produce(host: &VerterHost) -> FactReadSetFinalise {
         let ((), read_set) = host.with_fact_tracer(
             verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,

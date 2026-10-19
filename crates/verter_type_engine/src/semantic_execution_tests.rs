@@ -3,6 +3,7 @@
 //! failures, stops and deterministic order.
 
 use std::rc::Rc;
+use std::task::{Poll, Waker};
 
 use super::{DemandState, EvalStep, External, Outcome, Program, SemanticExecution, Start};
 
@@ -117,13 +118,13 @@ impl<E: Fn(u64) -> Vec<u64>> Program for ChainProgram<E> {
         self.reusable
     }
 
-    fn wait(&mut self, subscription: u64) -> External<Self> {
+    fn poll_subscription(&mut self, subscription: &mut u64, _: &Waker) -> Poll<External<Self>> {
         if self.outside_restarts > 0 {
             self.outside_restarts -= 1;
             self.outside = None;
-            return External::Restart;
+            return Poll::Ready(External::Restart);
         }
-        External::Complete(Ok(subscription * 10))
+        Poll::Ready(External::Complete(Ok(*subscription * 10)))
     }
 
     fn stop(&self) -> Option<&'static str> {
@@ -320,7 +321,7 @@ fn a_tail_transition_replaces_the_frame_in_place() {
         fn reusable(&self, _: &(), _: &u32) -> bool {
             true
         }
-        fn wait(&mut self, _: ()) -> External<Self> {
+        fn poll_subscription(&mut self, _: &mut (), _: &Waker) -> Poll<External<Self>> {
             unreachable!()
         }
         fn stop(&self) -> Option<()> {
@@ -383,7 +384,7 @@ fn a_drive_inside_a_step_is_refused() {
         fn reusable(&self, _: &u8, _: &()) -> bool {
             true
         }
-        fn wait(&mut self, _: ()) -> External<Self> {
+        fn poll_subscription(&mut self, _: &mut (), _: &Waker) -> Poll<External<Self>> {
             unreachable!()
         }
         fn stop(&self) -> Option<()> {
@@ -442,7 +443,7 @@ impl Program for Spawner {
     fn reusable(&self, _: &u32, _: &u64) -> bool {
         true
     }
-    fn wait(&mut self, _: ()) -> External<Self> {
+    fn poll_subscription(&mut self, _: &mut (), _: &Waker) -> Poll<External<Self>> {
         unreachable!()
     }
     fn stop(&self) -> Option<()> {
@@ -550,13 +551,17 @@ impl Program for Joins {
         true
     }
 
-    fn wait(&mut self, (subscription, _alive): (u64, Rc<()>)) -> External<Self> {
-        let left = self.left.entry(subscription).or_insert(self.restarts);
+    fn poll_subscription(
+        &mut self,
+        (subscription, _alive): &mut (u64, Rc<()>),
+        _: &Waker,
+    ) -> Poll<External<Self>> {
+        let left = self.left.entry(*subscription).or_insert(self.restarts);
         if *left > 0 {
             *left -= 1;
-            return External::Restart;
+            return Poll::Ready(External::Restart);
         }
-        External::Complete(Ok(1))
+        Poll::Ready(External::Complete(Ok(1)))
     }
 
     fn stop(&self) -> Option<()> {
@@ -649,4 +654,274 @@ fn a_stop_while_joining_drops_the_subscription() {
     let counters = execution.counters();
     assert_eq!(counters.external_waits, 3 + 5);
     assert_eq!(counters.subscription_inspections, counters.external_waits);
+}
+
+/// An outside producer's state, shared with whoever resolves it: its value
+/// once resolved, and the wakers registered under the same lock.
+#[derive(Default)]
+struct OutsideCell {
+    state: std::sync::Mutex<(Option<u64>, Vec<Waker>)>,
+}
+
+impl OutsideCell {
+    /// Resolve the producer with `value` and wake every registered poller.
+    fn resolve(&self, value: u64) {
+        let wakers = {
+            let mut state = self.state.lock().expect("the cell is never poisoned");
+            state.0 = Some(value);
+            std::mem::take(&mut state.1)
+        };
+        for waker in wakers {
+            waker.wake();
+        }
+    }
+}
+
+/// A program whose root `0` needs `1`, which needs the demand `2` an
+/// outside producer owns. Its frames, subscriptions and values are `Send`.
+#[derive(Default)]
+struct Outside {
+    cell: std::sync::Arc<OutsideCell>,
+    /// Held by every live frame.
+    alive: std::sync::Arc<()>,
+    /// The request id each step saw installed on its thread.
+    seen_requests: Vec<Option<u64>>,
+    stop: bool,
+}
+
+struct OutsideFrame {
+    n: u64,
+    needed: bool,
+    _alive: std::sync::Arc<()>,
+}
+
+impl Program for Outside {
+    type Demand = u64;
+    type Frame = OutsideFrame;
+    type Value = u64;
+    type Failure = ();
+    type Role = ();
+    type Subscription = std::sync::Arc<OutsideCell>;
+
+    fn start(&mut self, demand: &u64) -> Start<Self> {
+        if *demand == 2 {
+            return Start::Subscribe(std::sync::Arc::clone(&self.cell));
+        }
+        Start::Produce(OutsideFrame {
+            n: *demand,
+            needed: false,
+            _alive: std::sync::Arc::clone(&self.alive),
+        })
+    }
+
+    fn step(
+        &mut self,
+        frame: &mut OutsideFrame,
+        delivery: Option<Outcome<Self>>,
+    ) -> EvalStep<Self> {
+        self.seen_requests
+            .push(verter_execution::request_context::current_request_id());
+        if !frame.needed {
+            frame.needed = true;
+            return EvalStep::Need {
+                demand: frame.n + 1,
+                role: (),
+            };
+        }
+        EvalStep::Complete(frame.n + delivery.expect("a need delivers").expect("no failure"))
+    }
+
+    fn close_cycle(&mut self, _: &u64, _: ()) -> Outcome<Self> {
+        unreachable!("the chain has no cycle")
+    }
+
+    fn reusable(&self, _: &u64, _: &u64) -> bool {
+        true
+    }
+
+    fn poll_subscription(
+        &mut self,
+        cell: &mut std::sync::Arc<OutsideCell>,
+        waker: &Waker,
+    ) -> Poll<External<Self>> {
+        let mut state = cell.state.lock().expect("the cell is never poisoned");
+        match state.0 {
+            Some(value) => Poll::Ready(External::Complete(Ok(value))),
+            None => {
+                state.1.push(waker.clone());
+                Poll::Pending
+            }
+        }
+    }
+
+    fn stop(&self) -> Option<()> {
+        self.stop.then_some(())
+    }
+}
+
+/// Counts its wakes.
+#[derive(Default)]
+struct CountingWaker(std::sync::atomic::AtomicUsize);
+
+impl std::task::Wake for CountingWaker {
+    fn wake(self: std::sync::Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &std::sync::Arc<Self>) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+fn assert_send<T: Send>(_: &T) {}
+
+/// A poll runs the chain until its tip waits on the outside producer and
+/// returns `Pending`, keeping every frame suspended; the producer resolving
+/// on another thread wakes the poll's waker, and the execution — `Send`,
+/// moved to that thread with its one exclusive driver — resumes there and
+/// completes with the same answer a blocking drive gives.
+#[test]
+fn a_pending_execution_resumes_on_another_thread_once_woken() {
+    let mut program = Outside::default();
+    let mut execution = SemanticExecution::new();
+    assert_send(&execution);
+    let counter = std::sync::Arc::new(CountingWaker::default());
+    let waker = Waker::from(std::sync::Arc::clone(&counter));
+    assert!(execution.poll(&mut program, Some(0), &waker).is_pending());
+    assert!(execution.is_pending());
+    assert_eq!(
+        execution.live_frames(),
+        2,
+        "the root and its need stay parked"
+    );
+    // A spurious poll stays pending and runs nothing again.
+    let steps = execution.counters().steps;
+    assert!(execution.poll(&mut program, None, &waker).is_pending());
+    assert_eq!(execution.counters().steps, steps);
+    assert_eq!(execution.counters().pending_polls, 2);
+
+    let cell = std::sync::Arc::clone(&program.cell);
+    std::thread::spawn(move || cell.resolve(40))
+        .join()
+        .expect("the producer resolves");
+    assert!(counter.0.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+
+    let (outcome, live, pending) = std::thread::spawn(move || {
+        let outcome = execution.poll(&mut program, None, &waker);
+        (outcome, execution.live_frames(), execution.is_pending())
+    })
+    .join()
+    .expect("the resumed execution completes");
+    assert_eq!(outcome, Poll::Ready(Ok(1 + 40)));
+    assert_eq!((live, pending), (0, false));
+
+    let mut blocking = Outside::default();
+    blocking.cell.resolve(40);
+    assert_eq!(SemanticExecution::new().drive(&mut blocking, 0), Ok(41));
+}
+
+/// Dropping a pending execution — its request cancelled or abandoned —
+/// releases every suspended frame and the subscription it held.
+#[test]
+fn dropping_a_pending_execution_releases_its_frames_and_subscription() {
+    let mut program = Outside::default();
+    let mut execution = SemanticExecution::new();
+    let waker = Waker::from(std::sync::Arc::new(CountingWaker::default()));
+    assert!(execution.poll(&mut program, Some(0), &waker).is_pending());
+    assert_eq!(std::sync::Arc::strong_count(&program.alive), 3);
+    assert_eq!(std::sync::Arc::strong_count(&program.cell), 2);
+    drop(execution);
+    assert_eq!(std::sync::Arc::strong_count(&program.alive), 1);
+    assert_eq!(std::sync::Arc::strong_count(&program.cell), 1);
+}
+
+/// A stop observed while the drive is pending abandons every open demand:
+/// the next poll is `Ready` with the stop, holding no frame or subscription.
+#[test]
+fn a_stop_while_pending_releases_frames_and_subscription() {
+    let mut program = Outside::default();
+    let mut execution = SemanticExecution::new();
+    let waker = Waker::from(std::sync::Arc::new(CountingWaker::default()));
+    assert!(execution.poll(&mut program, Some(0), &waker).is_pending());
+    program.stop = true;
+    assert_eq!(
+        execution.poll(&mut program, None, &waker),
+        Poll::Ready(Err(()))
+    );
+    assert!(!execution.is_pending());
+    assert_eq!(execution.live_frames(), 0);
+    assert_eq!(std::sync::Arc::strong_count(&program.alive), 1);
+    assert_eq!(std::sync::Arc::strong_count(&program.cell), 1);
+    assert_eq!(execution.demand_state(&1), None);
+}
+
+/// A blocking drive parks while its tip waits on the outside producer, and
+/// the producer's wake from another thread resumes it.
+#[test]
+fn a_blocking_drive_parks_until_the_producer_wakes_it() {
+    let mut program = Outside::default();
+    let cell = std::sync::Arc::clone(&program.cell);
+    let producer = std::thread::spawn(move || {
+        // Resolve only once the drive registered its waker.
+        while cell.state.lock().expect("never poisoned").1.is_empty() {
+            std::thread::yield_now();
+        }
+        cell.resolve(7);
+    });
+    let mut execution = SemanticExecution::new();
+    assert_eq!(execution.drive(&mut program, 0), Ok(1 + 7));
+    producer.join().expect("the producer resolves");
+    assert!(execution.counters().pending_polls >= 1);
+}
+
+/// A request context bound to the execution is installed on the stepping
+/// thread for each step and that thread's own restored after it.
+#[test]
+fn a_bound_request_context_is_installed_for_each_step_on_any_thread() {
+    use verter_execution::request_context::{
+        current_request_id, CacheEventKind, OpaqueContextGuard, OpaqueRequestContext,
+        RequestContextLike, TlsUninstall,
+    };
+    struct Request;
+    struct Installed(#[allow(dead_code)] OpaqueContextGuard);
+    impl TlsUninstall for Installed {
+        fn uninstall(self: Box<Self>) {}
+    }
+    impl RequestContextLike for Request {
+        fn request_id(&self) -> u64 {
+            77
+        }
+        fn capture_enabled(&self) -> bool {
+            false
+        }
+        fn on_dedup_joiner(&self, _: std::sync::Arc<str>, _: u64, _: bool) {}
+        fn record_cache_event(&self, _: CacheEventKind) {}
+        fn install_tls(self: std::sync::Arc<Self>) -> Box<dyn TlsUninstall + Send> {
+            Box::new(Installed(OpaqueContextGuard::install(
+                OpaqueRequestContext(self),
+            )))
+        }
+    }
+    let mut program = Outside::default();
+    let mut execution = SemanticExecution::new();
+    execution.bind_request_context(OpaqueRequestContext(std::sync::Arc::new(Request)));
+    let waker = Waker::from(std::sync::Arc::new(CountingWaker::default()));
+    assert!(execution.poll(&mut program, Some(0), &waker).is_pending());
+    assert_eq!(
+        current_request_id(),
+        None,
+        "the poll leaves its thread's TLS"
+    );
+    program.cell.resolve(1);
+    let (program, outside_steps) = std::thread::spawn(move || {
+        assert_eq!(
+            execution.poll(&mut program, None, &waker),
+            Poll::Ready(Ok(2))
+        );
+        (program, current_request_id())
+    })
+    .join()
+    .expect("the resumed execution completes");
+    assert_eq!(outside_steps, None, "the resuming thread's TLS is restored");
+    assert_eq!(program.seen_requests, vec![Some(77); 4]);
 }

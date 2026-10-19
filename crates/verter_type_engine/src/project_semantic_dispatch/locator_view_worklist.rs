@@ -185,21 +185,35 @@ enum ProjectionFrame {
         node: SemanticNodeId,
         context: ProjectionReductionContext,
     },
+    /// A member-path or applied `typeof` whose read the run is waiting on:
+    /// the delivery's answer decides whether the read falls back, applies
+    /// its type arguments, or is the node's projection.
+    AwaitTypeof {
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+        read: Box<TypeofRead>,
+    },
 }
 
 const _: () = assert!(std::mem::size_of::<ProjectionFrame>() <= 32);
 
 /// How a projection run treats the instantiations it reaches.
 ///
-/// Run inline, a projection evaluates each instantiation where it reaches
-/// it. Run as a continuation, it parks the node instead, records the
-/// instantiation as the run's need, and stops: the caller delivers the
-/// instantiated node to [`ProjectSemanticDispatch::drain_projection`],
-/// which resumes the run exactly where it stopped.
+/// Run inline, a projection evaluates each instantiation, and decides each
+/// conditional type, where it reaches it. Run as a continuation, it parks
+/// the node instead, records the instantiation (or the conditional's
+/// decision) as the run's need, and stops: the caller delivers the
+/// instantiated node (or the decided one) to
+/// [`ProjectSemanticDispatch::drain_projection`], which resumes the run
+/// exactly where it stopped.
 #[derive(Debug, Default)]
 pub(super) struct ProjectionSeam {
     suspend: bool,
     need: Option<SemanticQueryKey>,
+    /// The conditional decision the run stopped at, until it is delivered.
+    awaiting_decision: Option<SemanticQueryKey>,
+    /// A delivered decision, until the frame that needed it takes it.
+    decided: Option<(SemanticQueryKey, SemanticNodeId)>,
 }
 
 impl ProjectionSeam {
@@ -212,9 +226,38 @@ impl ProjectionSeam {
     pub(super) fn suspending() -> Self {
         Self {
             suspend: true,
-            need: None,
+            ..Self::default()
         }
     }
+}
+
+/// What the read a projection run waited on answered: the node it
+/// delivers, and the fact status of the value it answered — `None` when it
+/// answered none (an error or a recursion carrier), whose node is then the
+/// shared miss.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ProjectionDelivery {
+    pub(super) node: SemanticNodeId,
+    pub(super) answered: Option<crate::semantic_query::FactStatus>,
+}
+
+/// A member-path or applied `typeof` a reference projection reads: the
+/// `TypeOf` query reading it now, the namespace-qualified read a member
+/// path falls back to when that one answers no value, and the type
+/// arguments the answer applies.
+pub(super) struct TypeofRead {
+    key: SemanticQueryKey,
+    fallback: Option<SemanticQueryKey>,
+    type_args: Arc<[SemanticNodeId]>,
+    argument_context: ProjectionReductionContext,
+}
+
+/// Where a `typeof` read stands after one of its queries answered.
+enum TypeofReadStep {
+    /// It reads its fallback next.
+    Read(Box<TypeofRead>),
+    /// The reference's projection plan.
+    Plan(ReferenceProjectionPlan),
 }
 
 /// A projection run the caller can resume: the explicit stack of what
@@ -253,6 +296,9 @@ enum ReferenceProjectionPlan {
     /// The reference projects to the node this query answers: an
     /// instantiation, or a value's `typeof`.
     Query(SemanticQueryKey),
+    /// The reference is a member-path or applied `typeof` a suspending run
+    /// reads from the runtime.
+    Typeof(Box<TypeofRead>),
     NeedsArgs {
         continuation: CarrierArgsContinuation,
         args: Arc<[SemanticNodeId]>,
@@ -464,6 +510,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         data: &SemanticNodeData,
         inputs: &LocatorViewInputs<'_>,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        suspend: bool,
     ) -> ReferenceProjectionPlan {
         match data {
             // The terminal nominal carrier IS the type it denotes: resolving
@@ -502,52 +549,31 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         self.typeof_key_with_path(value_root, path, context),
                     );
                 }
-                let result = match self.execute_type_node(self.typeof_key_with_path(
-                    value_root.clone(),
-                    path.clone(),
-                    context,
-                )) {
-                    QueryResult::Value(SemanticQueryOutput {
-                        value, provenance, ..
-                    }) => (value, provenance.fact_status),
-                    _ if !path.is_empty() => {
-                        let joined: Arc<str> =
-                            Arc::from(format!("{}.{}", value_root.name, path[0]));
-                        let rest = verter_type_expr::OwnedSlice::from(&path[1..]);
-                        match self.execute_type_node(self.typeof_key_with_path(
-                            ValueRootKey {
-                                scope: value_root.scope.clone(),
-                                name: verter_type_expr::OwnedStr::from(joined),
-                            },
-                            rest,
-                            context,
-                        )) {
-                            QueryResult::Value(SemanticQueryOutput {
-                                value, provenance, ..
-                            }) => (value, provenance.fact_status),
-                            _ => {
-                                return ReferenceProjectionPlan::Ready(
-                                    self.opaque(QueryError::Miss),
-                                );
-                            }
-                        }
-                    }
-                    _ => {
-                        return ReferenceProjectionPlan::Ready(self.opaque(QueryError::Miss));
-                    }
-                };
-                if type_args.is_empty() {
-                    ReferenceProjectionPlan::Ready(result.0)
-                } else {
-                    ReferenceProjectionPlan::NeedsArgs {
-                        continuation: CarrierArgsContinuation::ApplyTypeof {
-                            base: result.0,
-                            source_status: result.1,
+                // A member path whose read answers no value falls back to the
+                // namespace-qualified value its first step names.
+                let fallback = path.first().map(|first| {
+                    let joined: Arc<str> = Arc::from(format!("{}.{first}", value_root.name));
+                    self.typeof_key_with_path(
+                        ValueRootKey {
+                            scope: value_root.scope.clone(),
+                            name: verter_type_expr::OwnedStr::from(joined),
                         },
-                        args: type_args,
-                        argument_context: context,
-                    }
+                        verter_type_expr::OwnedSlice::from(&path[1..]),
+                        context,
+                    )
+                });
+                let read = Box::new(TypeofRead {
+                    key: self.typeof_key_with_path(value_root, path, context),
+                    fallback,
+                    type_args,
+                    argument_context: context,
+                });
+                // A suspending projection waits on each read as it waits on
+                // an instantiation; an inline one reads them in place.
+                if suspend {
+                    return ReferenceProjectionPlan::Typeof(read);
                 }
+                self.read_typeof_in_place(read)
             }
             SemanticNodeData::DeclRef { identity } => {
                 if self.is_instantiate_active(
@@ -747,7 +773,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         memo: &mut ViewMemo,
         seam: &mut ProjectionSeam,
-        delivery: Option<SemanticNodeId>,
+        delivery: Option<ProjectionDelivery>,
     ) -> ProjectionPoll {
         if let Some(key) = seam.need.take() {
             return ProjectionPoll::Need(key);
@@ -762,11 +788,36 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         };
         let frames = &mut run.frames;
-        if let Some(instantiated) = delivery {
-            let Some(ProjectionFrame::AwaitInstantiation { node, context }) = frames.pop() else {
-                unreachable!("a delivery resumes the node that awaited it")
-            };
-            self.memoize_projected(memo, node, context, instantiated);
+        if let Some(delivered) = delivery {
+            match seam.awaiting_decision.take() {
+                // The decision the conditional on top of the stack needed:
+                // the conditional takes it when it runs again.
+                Some(decision) => seam.decided = Some((decision, delivered.node)),
+                None => match frames.pop() {
+                    Some(ProjectionFrame::AwaitInstantiation { node, context }) => {
+                        self.memoize_projected(memo, node, context, delivered.node);
+                    }
+                    Some(ProjectionFrame::AwaitTypeof {
+                        node,
+                        context,
+                        read,
+                    }) => match self.advance_typeof_read(read, delivered) {
+                        // Its fallback is the run's next need.
+                        TypeofReadStep::Read(read) => {
+                            seam.need = Some(read.key.clone());
+                            frames.push(ProjectionFrame::AwaitTypeof {
+                                node,
+                                context,
+                                read,
+                            });
+                        }
+                        TypeofReadStep::Plan(plan) => {
+                            self.install_reference_plan(node, context, plan, memo, frames);
+                        }
+                    },
+                    _ => unreachable!("a delivery resumes the node that awaited it"),
+                },
+            }
         }
         let mut trip: Option<ProjectionFailure> = None;
         // A step that stops at an instantiation leaves the run at once: the
@@ -993,16 +1044,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         pending: pending.clone(),
                     };
                     work_credit.settle();
-                    let selected = match self.execute_type_node(SemanticQueryKey::Conditional {
-                        check: projected(memo, *check, Self::conditional_check_context(context)),
-                        extends: projected(memo, *extends, extends_context),
-                        true_branch: *true_branch_ref,
-                        false_branch: *false_branch_ref,
-                        distributive: *distributive,
-                        pending: pending.clone(),
-                    }) {
-                        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
-                        _ => self.opaque(QueryError::Miss),
+                    let Some(selected) = self.decided_conditional(
+                        SemanticQueryKey::Conditional {
+                            check: projected(
+                                memo,
+                                *check,
+                                Self::conditional_check_context(context),
+                            ),
+                            extends: projected(memo, *extends, extends_context),
+                            true_branch: *true_branch_ref,
+                            false_branch: *false_branch_ref,
+                            distributive: *distributive,
+                            pending: pending.clone(),
+                        },
+                        seam,
+                    ) else {
+                        frames.push(ProjectionFrame::ConditionalAfterExtends {
+                            node,
+                            context,
+                            data: data.clone(),
+                            extends_context,
+                        });
+                        break;
                     };
                     if let Err(reasons) = work_credit.refresh() {
                         trip = Some(reasons.into());
@@ -1101,16 +1164,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         unreachable!("conditional finish frame must carry a conditional")
                     };
                     work_credit.settle();
-                    let result = match self.execute_type_node(SemanticQueryKey::Conditional {
-                        check: projected(memo, *check, Self::conditional_check_context(context)),
-                        extends: projected(memo, *extends, extends_context),
-                        true_branch: projected(memo, *true_branch_ref, context),
-                        false_branch: projected(memo, *false_branch_ref, context),
-                        distributive: *distributive,
-                        pending: pending.clone(),
-                    }) {
-                        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
-                        _ => self.opaque(QueryError::Miss),
+                    let Some(result) = self.decided_conditional(
+                        SemanticQueryKey::Conditional {
+                            check: projected(
+                                memo,
+                                *check,
+                                Self::conditional_check_context(context),
+                            ),
+                            extends: projected(memo, *extends, extends_context),
+                            true_branch: projected(memo, *true_branch_ref, context),
+                            false_branch: projected(memo, *false_branch_ref, context),
+                            distributive: *distributive,
+                            pending: pending.clone(),
+                        },
+                        seam,
+                    ) else {
+                        frames.push(ProjectionFrame::ConditionalFinish {
+                            node,
+                            context,
+                            data: data.clone(),
+                            extends_context,
+                        });
+                        break;
                     };
                     if let Err(reasons) = work_credit.refresh() {
                         trip = Some(reasons.into());
@@ -1193,7 +1268,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                     self.memoize_projected(memo, node, context, result);
                 }
-                ProjectionFrame::AwaitInstantiation { .. } => {
+                ProjectionFrame::AwaitInstantiation { .. }
+                | ProjectionFrame::AwaitTypeof { .. } => {
                     unreachable!("an awaiting node resumes only with its delivery")
                 }
                 ProjectionFrame::ReferenceArgsResume {
@@ -1276,6 +1352,116 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 ProjectedViewOutcome::complete(projected(memo, root, root_context))
             },
         )
+    }
+
+    /// The node the conditional decision `key` a projection reached
+    /// selects: decided in place by an inline run; by a continuation, the
+    /// decision delivered for it, or `None` once the run needs it.
+    fn decided_conditional(
+        &self,
+        key: SemanticQueryKey,
+        seam: &mut ProjectionSeam,
+    ) -> Option<SemanticNodeId> {
+        if !seam.suspend {
+            return Some(self.instantiated_node(key));
+        }
+        if let Some((decision, decided)) = seam.decided.take() {
+            verter_debug_assert!(
+                decision == key,
+                "a delivered decision resumes the conditional that needed it"
+            );
+            return Some(decided);
+        }
+        seam.awaiting_decision = Some(key.clone());
+        seam.need = Some(key);
+        None
+    }
+
+    /// Carry a `typeof` read on with what its query answered.
+    fn advance_typeof_read(
+        &self,
+        mut read: Box<TypeofRead>,
+        answer: ProjectionDelivery,
+    ) -> TypeofReadStep {
+        let Some(source_status) = answer.answered else {
+            return match read.fallback.take() {
+                Some(fallback) => {
+                    read.key = fallback;
+                    TypeofReadStep::Read(read)
+                }
+                None => TypeofReadStep::Plan(ReferenceProjectionPlan::Ready(
+                    self.opaque(QueryError::Miss),
+                )),
+            };
+        };
+        TypeofReadStep::Plan(if read.type_args.is_empty() {
+            ReferenceProjectionPlan::Ready(answer.node)
+        } else {
+            ReferenceProjectionPlan::NeedsArgs {
+                continuation: CarrierArgsContinuation::ApplyTypeof {
+                    base: answer.node,
+                    source_status,
+                },
+                args: read.type_args,
+                argument_context: read.argument_context,
+            }
+        })
+    }
+
+    /// Read a `typeof` in place, its fallback included.
+    fn read_typeof_in_place(&self, mut read: Box<TypeofRead>) -> ReferenceProjectionPlan {
+        loop {
+            let answer = match self.execute_type_node(read.key.clone()) {
+                QueryResult::Value(SemanticQueryOutput {
+                    value, provenance, ..
+                }) => ProjectionDelivery {
+                    node: value,
+                    answered: Some(provenance.fact_status),
+                },
+                _ => ProjectionDelivery {
+                    node: self.opaque(QueryError::Miss),
+                    answered: None,
+                },
+            };
+            match self.advance_typeof_read(read, answer) {
+                TypeofReadStep::Read(next) => read = next,
+                TypeofReadStep::Plan(plan) => return plan,
+            }
+        }
+    }
+
+    /// Install a reference's projection plan reached after its `typeof` read
+    /// answered: memoize a ready node, or schedule its type arguments.
+    fn install_reference_plan(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+        plan: ReferenceProjectionPlan,
+        memo: &mut ViewMemo,
+        frames: &mut SmallVec<[ProjectionFrame; 16]>,
+    ) {
+        match plan {
+            ReferenceProjectionPlan::Ready(result) => {
+                self.memoize_projected(memo, node, context, result);
+            }
+            ReferenceProjectionPlan::NeedsArgs {
+                continuation,
+                args,
+                argument_context,
+            } => frames.push(ProjectionFrame::ReferenceArgsResume {
+                node,
+                context,
+                state: Box::new(ReferenceArgsState {
+                    continuation,
+                    args,
+                    argument_context,
+                    next_arg: 0,
+                }),
+            }),
+            ReferenceProjectionPlan::Query(_) | ReferenceProjectionPlan::Typeof(_) => {
+                unreachable!("an answered typeof read plans no further query")
+            }
+        }
     }
 
     /// The node an instantiation a projection reached evaluates to.
@@ -1638,6 +1824,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     data.as_ref(),
                     inputs,
                     substitutions,
+                    seam.suspend,
                 );
                 match plan {
                     ReferenceProjectionPlan::Ready(result) => {
@@ -1655,6 +1842,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         work_credit.refresh()?;
                         self.memoize_projected(memo, node, context, result);
                         Ok(false)
+                    }
+                    ReferenceProjectionPlan::Typeof(read) => {
+                        verter_debug_assert!(seam.suspend, "an inline run reads typeof in place");
+                        seam.need = Some(read.key.clone());
+                        frames.push(ProjectionFrame::AwaitTypeof {
+                            node,
+                            context,
+                            read,
+                        });
+                        Ok(true)
                     }
                     ReferenceProjectionPlan::NeedsArgs {
                         continuation,
