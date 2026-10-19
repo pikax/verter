@@ -56,9 +56,9 @@ use verter_session_query::declarations::{
     ValueDeclGroup, ValueDeclKind,
 };
 use verter_session_query::facts::{
-    produce_shallow_route_facts, type_body_fingerprint, value_body_fingerprint, CrossDeclLens,
-    EmptyRouteFactLens, HashOutcome, RouteFactLens, TransientTypeBody, UnresolvedLens,
-    ValueBodyFingerprintInput,
+    compute_class_member_read_hash, compute_semantic_hash, produce_shallow_route_facts,
+    type_body_fingerprint, value_body_fingerprint, CrossDeclLens, EmptyRouteFactLens, HashOutcome,
+    RouteFactLens, TransientTypeBody, UnresolvedLens, ValueBodyFingerprintInput,
 };
 use verter_session_query::source::transient_parts::{TransientTypeParts, TransientValueParts};
 use verter_session_query::type_solver::prepared::{
@@ -2686,6 +2686,69 @@ impl DeclBodyMemo {
                 DemandOutcome::Ready(Some(Arc::new(selection)))
             }
         }
+    }
+
+    /// The member-read fingerprint of the name `member` of the
+    /// single-statement class `class` — the class `Member` fact a member read
+    /// roots on in place of the file's whole hash
+    /// ([`compute_class_member_read_hash`]): every instance element declaring
+    /// the name (the `ClassMembersNamed` selection, colliding names
+    /// included) and the `extends` reference, each fingerprinted from its
+    /// lease-only re-borrow, so the class's other members are never lowered.
+    /// `None` when the symbol is not a class one top-level statement
+    /// declares: a class that gains a same-name contributor, or stops being
+    /// a class, moves the fact to absence. A broken lease is a refusal.
+    pub fn class_member_read_hash_in(
+        &self,
+        owner: TopLevelOwnerId,
+        class: &str,
+        member: &str,
+    ) -> SourceRead<Option<HashOutcome>> {
+        let refused = || {
+            DemandOutcome::<()>::LeaseMiss
+                .into_source_read()
+                .map(|_| None)
+        };
+        let elements = match self.transient_class_body_selection(
+            owner,
+            class,
+            ClassBodyRequest::MembersNamed(verter_type_expr::locators::class_member_name_hash(
+                member,
+            )),
+        ) {
+            DemandOutcome::LeaseMiss => return refused(),
+            DemandOutcome::Ready(None) => return SourceRead::clean(None),
+            DemandOutcome::Ready(Some(elements)) => elements,
+        };
+        let heritage =
+            match self.transient_class_body_selection(owner, class, ClassBodyRequest::Heritage) {
+                DemandOutcome::LeaseMiss => return refused(),
+                DemandOutcome::Ready(heritage) => heritage,
+            };
+        let lens = self.shallow_lens();
+        let lens = lens.for_owner(owner);
+        let space = verter_session_query::facts::SymbolSpace::Type;
+        // One fingerprint per declaring element, in selection (source) order:
+        // an object-level hash would sort the members and lose which
+        // declaration comes first.
+        let elements: Vec<HashOutcome> = match &elements.body {
+            TypeExpr::Object(object) => object
+                .properties
+                .iter()
+                .map(|member| {
+                    let single = TypeExpr::Object(Arc::new(ObjectExpr {
+                        properties: vec![member.clone()],
+                    }));
+                    compute_semantic_hash(&single, space, &lens)
+                })
+                .collect(),
+            other => vec![compute_semantic_hash(other, space, &lens)],
+        };
+        let heritage = heritage.map(|heritage| compute_semantic_hash(&heritage.body, space, &lens));
+        SourceRead::clean(Some(compute_class_member_read_hash(
+            &elements,
+            heritage.as_ref(),
+        )))
     }
 
     /// The re-derived JSDoc-`@typedef` payload body of one demanded typedef
