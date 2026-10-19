@@ -73,6 +73,11 @@ pub struct TransientValueParts {
     /// shape references `T`) from the SAME statements' type-side parts,
     /// unioned first-seen-by-name. Empty for plain value declarations.
     pub type_parameters: Vec<TypeParam>,
+    /// The positions of the initializer-inferred annotation whose widening
+    /// waits on the bindings they read (strict last-wins, the annotation
+    /// rule): the declaration's `typeof` widens each by its reads'
+    /// freshness. `None` when it has none.
+    pub read_provenance: Option<Arc<verter_type_expr::DeclaredReadProvenance>>,
 }
 
 /// Owned TRANSIENT type-declaration parts of one demanded symbol, re-lowered
