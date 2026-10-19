@@ -1,8 +1,10 @@
 //! The public host's ACTIVE-occupancy window reads the one aggregate
-//! account the host's semantic workload charges: a workload's retained
-//! charges and an ACTIVE charge on the host's account land on the account
-//! the window and the host's retention snapshot read, and an open window
-//! changes no answer.
+//! account the host's semantic workload charges: a genuine request's
+//! retained charges land on the account the window and the host's retention
+//! snapshot read, its truthful ACTIVE peak is zero (no production producer
+//! charges ACTIVE bytes through an owner), and an open window changes no
+//! answer. Owned, foreign and untagged ACTIVE attribution is proven by the
+//! retention owner's unit tests and, through the host's account, below.
 
 use std::sync::{Arc, Mutex};
 
@@ -67,16 +69,9 @@ fn a_host_window_measures_the_account_its_semantic_workload_charges() {
         after_workload.retained_bytes > before.retained_bytes,
         "the workload charged the account the window reads"
     );
-    let held = account
-        .reserve_as(&owner, ChargeClass::Active, 4_096)
-        .admitted()
-        .expect("active admitted");
-    assert_eq!(
-        host.retention_snapshot().active_bytes,
-        after_workload.active_bytes + 4_096
-    );
-    assert_eq!(window.observe().active_at_close, 4_096);
-    drop(held);
+    // No production producer charges ACTIVE bytes through an owner, so the
+    // genuine request's truthful ACTIVE peak is zero: the window reports it
+    // as attributable zero, never a total or lifetime figure.
     let report = window.finish();
     assert_eq!(
         report.active_at_open + report.rise_bytes - report.fall_bytes,
@@ -85,7 +80,8 @@ fn a_host_window_measures_the_account_its_semantic_workload_charges() {
     let peak = report
         .attributed()
         .expect("a workload alone on the account is attributable");
-    assert!(peak.crossed(4_096));
+    assert_eq!(peak.peak_active_bytes, 0);
+    assert!(!peak.crossed(1));
 
     assert_eq!(
         request_icon_box(&self::host()),

@@ -912,6 +912,14 @@ impl<'a> ConnectedDemandLedger<'a> {
         }
     }
 
+    /// Whether the construction-byte allowance has tripped the demand.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn memory_limit_tripped(&self) -> bool {
+        self.tripped
+            .get()
+            .contains(PartialReasonSet::CONNECTED_MEMORY_LIMIT)
+    }
+
     /// The `(limit, actual, rail)` triple describing why the demand tripped,
     /// for the budget-exceeded carrier the dispatcher reports. Purely
     /// operational reporting — the ledger owns the numbers, so no consumer
