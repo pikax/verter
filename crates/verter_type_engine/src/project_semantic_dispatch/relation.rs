@@ -7209,7 +7209,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     fn follow_relation_aliases(&self, node: SemanticNodeId) -> SemanticNodeId {
         let graph = self.graph();
         let mut current = node;
-        let mut seen = FxHashSet::default();
+        let mut seen = crate::semantic_query::small_node_set::SmallNodeSet::default();
         while seen.insert(current) {
             match graph.node_data(current).as_deref() {
                 Some(SemanticNodeData::Alias(inner)) => current = *inner,
@@ -10037,7 +10037,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let graph = self.graph();
             let transit = ProjectionReductionContext::structural_transit();
             let mut current = id;
-            let mut seen = FxHashSet::default();
+            let mut seen = crate::semantic_query::small_node_set::SmallNodeSet::default();
             while seen.insert(current) {
                 let Some(data) = graph.node_data(current) else {
                     return IdentityCarrierUnwrap::Unresolvable;

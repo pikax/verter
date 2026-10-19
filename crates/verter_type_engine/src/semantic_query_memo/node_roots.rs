@@ -537,22 +537,40 @@ impl Drop for ConstructionOwners {
 /// The delivery owners one construction owner holds: the first few in an
 /// inline array scanned with integer compares — most owners hold a handful,
 /// and a debug build hashes each insert through several calls — and every
-/// one in a set once the array fills.
+/// one in a sorted list, searched by bisection, once the array fills. An
+/// owner that spills holds tens of deliveries, so keeping the list sorted
+/// moves a few words per insert where a hash set probes through generic
+/// calls.
 #[derive(Default)]
 struct DeliveredOwners {
     inline: [usize; DELIVERED_INLINE],
     inline_len: usize,
-    spilled: Option<rustc_hash::FxHashSet<usize>>,
+    spilled: Option<Vec<usize>>,
 }
 
-/// Delivery owners [`DeliveredOwners`] keeps before it spills to a set.
+/// Delivery owners [`DeliveredOwners`] keeps before it spills to a list.
 const DELIVERED_INLINE: usize = 8;
 
 impl DeliveredOwners {
     /// Record `owner`; `false` when it was already recorded.
     fn insert(&mut self, owner: usize) -> bool {
         if let Some(spilled) = self.spilled.as_mut() {
-            return spilled.insert(owner);
+            let mut low = 0;
+            let mut high = spilled.len();
+            while low < high {
+                let middle = low + (high - low) / 2;
+                let held = spilled[middle];
+                if held == owner {
+                    return false;
+                }
+                if held < owner {
+                    low = middle + 1;
+                } else {
+                    high = middle;
+                }
+            }
+            spilled.insert(low, owner);
+            return true;
         }
         let mut index = 0;
         while index < self.inline_len {
@@ -566,8 +584,10 @@ impl DeliveredOwners {
             self.inline_len += 1;
             return true;
         }
-        let mut spilled: rustc_hash::FxHashSet<usize> = self.inline.iter().copied().collect();
-        spilled.insert(owner);
+        let mut spilled = Vec::with_capacity(DELIVERED_INLINE * 4);
+        spilled.extend_from_slice(&self.inline);
+        spilled.push(owner);
+        spilled.sort_unstable();
         self.spilled = Some(spilled);
         true
     }
@@ -1170,6 +1190,28 @@ impl<T> Constructed<T> {
         Constructed {
             value: f(self.value),
             hold: self.hold,
+        }
+    }
+}
+
+#[cfg(test)]
+mod delivered_owners_tests {
+    use super::DeliveredOwners;
+
+    /// Each owner is recorded once, before and after the inline array
+    /// spills, whatever order the owners arrive in.
+    #[test]
+    fn each_owner_is_recorded_once_across_the_spill() {
+        let owners: Vec<usize> = (0..200usize).map(|i| (i * 7919) % 211 * 16).collect();
+        let mut delivered = DeliveredOwners::default();
+        for (arrived, owner) in owners.iter().enumerate() {
+            assert!(delivered.insert(*owner), "first delivery of {owner}");
+            for earlier in &owners[..=arrived] {
+                assert!(
+                    !delivered.insert(*earlier),
+                    "{earlier} after {arrived} deliveries"
+                );
+            }
         }
     }
 }

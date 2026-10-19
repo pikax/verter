@@ -2011,7 +2011,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     pub(super) fn type_is_generic(&self, node: SemanticNodeId) -> bool {
         let graph = self.graph();
         let mut pending = vec![node];
-        let mut seen: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut seen = crate::semantic_query::small_node_set::SmallNodeSet::default();
         while let Some(node) = pending.pop() {
             if !seen.insert(node) {
                 continue;
