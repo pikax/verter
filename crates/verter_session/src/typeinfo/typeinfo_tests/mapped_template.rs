@@ -322,9 +322,25 @@ fn recursive_mapped_index_publishes_dotted_paths_across_five_modules() {
     assert_recursive_paths_layout(100, 5);
 }
 
+/// Tripling the entities triples the work: instantiations and fact-signature
+/// proof work stay linear in the entity count rather than growing with the
+/// pairs of entities each recursive path can reach.
 #[test]
-fn recursive_mapped_index_publishes_dotted_paths_for_three_hundred_entities() {
-    assert_recursive_paths_layout(300, 5);
+fn recursive_mapped_index_path_work_grows_linearly_with_entity_count() {
+    let small = assert_recursive_paths_layout(25, 5);
+    let large = assert_recursive_paths_layout(75, 5);
+    assert!(
+        large.instantiations <= small.instantiations * 4,
+        "instantiations must grow linearly: {} at 25 entities, {} at 75",
+        small.instantiations,
+        large.instantiations,
+    );
+    assert!(
+        large.proof_work <= small.proof_work * 4,
+        "fact-signature proof work must grow linearly: {} at 25 entities, {} at 75",
+        small.proof_work,
+        large.proof_work,
+    );
 }
 
 #[test]
@@ -669,7 +685,7 @@ fn recursive_paths_host(count: usize, groups: usize, budget: usize) -> Arc<crate
 /// `Paths<Api>` over `count` entities spread across `groups` mutually
 /// importing modules publishes every dotted path to depth 3, as tsc does,
 /// with instantiations linear in the entity count.
-fn assert_recursive_paths_layout(count: usize, groups: usize) {
+fn assert_recursive_paths_layout(count: usize, groups: usize) -> RecursivePathsWork {
     // Complete enumeration of the larger closures needs an explicit
     // request allowance; the smallest layout exercises the default fuse.
     let host = recursive_paths_host(count, groups, if count <= 20 { 0 } else { 50_000 });
@@ -724,6 +740,16 @@ fn assert_recursive_paths_layout(count: usize, groups: usize) {
         })
         .collect::<BTreeSet<_>>();
     assert_eq!(actual, expected, "{count} entities/{groups} modules");
+    RecursivePathsWork {
+        instantiations: stats.instantiate_count,
+        proof_work,
+    }
+}
+
+/// The work one `Paths<Api>` resolution spent, read from the engine's counters.
+struct RecursivePathsWork {
+    instantiations: u64,
+    proof_work: usize,
 }
 
 #[test]

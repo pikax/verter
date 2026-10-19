@@ -702,6 +702,31 @@ impl<T> ObservedRead<T> {
     }
 }
 
+impl ObservedRead<()> {
+    /// Re-open a stepped read's observation for its next step: a fresh
+    /// scope that already holds what the read observed in its earlier
+    /// steps, so a read whose computation waits across the steps of a
+    /// continuation frame observes exactly what it would in one native call.
+    pub(super) fn resume<'d, C: crate::resolver_core::ResolverCapabilities>(
+        self,
+        dispatch: &'d ProjectSemanticDispatch<'_, C>,
+    ) -> ReadObservationScope<'d> {
+        let scope = dispatch.begin_read_observation();
+        if let Some(abort) = self.abort {
+            crate::request_context::observe_execution_abort(abort);
+        }
+        crate::request_context::fold_result_completeness(self.completeness);
+        dispatch.fold_observed_frame_into_top(&self.frame);
+        dispatch.degraded_member_reads.set(
+            dispatch
+                .degraded_member_reads
+                .get()
+                .saturating_add(self.degraded_member_reads),
+        );
+        scope
+    }
+}
+
 impl ObservedRead<FlowReturnStep> {
     /// Consume the separately certified selected value, retaining source roots
     /// and reuse refusal. The whole-return preparation is not its value proof.

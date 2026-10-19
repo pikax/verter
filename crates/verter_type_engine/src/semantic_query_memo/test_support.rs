@@ -124,7 +124,7 @@ impl SemanticGraphStore {
                 state.dep_signature = Some(empty_signature());
             }
         }
-        inflight.ready.notify_all();
+        inflight.wake_subscribers();
         true
     }
 

@@ -39,7 +39,7 @@ use verter_session_query::retention::{
 /// charged for. A receipt is meaningful only under the revision that
 /// recorded it, and a refusal only under the [`BudgetProfile`] that refused
 /// it.
-pub const COST_MODEL_REVISION: u32 = 2;
+pub const COST_MODEL_REVISION: u32 = 3;
 
 /// The exact identity of one semantic computation: the canonical demand
 /// and the materialized point it answers, as the memo's prepared key
@@ -283,6 +283,11 @@ pub struct CostDependency {
 pub struct OperationFootprint {
     /// The deepest nested query level its closure needs below its entry.
     pub query_depth: u16,
+    /// The deepest nested query level a continuation frame of its closure
+    /// needs below that frame's own entry. A frame runs from its drive,
+    /// never nested in the frame that needed it, so its depth is not
+    /// counted below whatever its result's reader was evaluating.
+    pub frame_query_depth: u16,
     /// The deepest instantiation frame its closure runs, counted from its
     /// own frame (0 when it runs no frame below its own).
     pub instantiation_height: u16,
@@ -372,32 +377,47 @@ impl DemandCostReceipt {
         };
         for dependency in &unique {
             let below = dependency.receipt.footprint;
-            footprint.query_depth = footprint.query_depth.max(
-                below
-                    .query_depth
-                    .saturating_add(dependency.nesting.query_levels()),
-            );
+            let levels = dependency.nesting.query_levels();
             footprint.instantiation_required = footprint
                 .instantiation_required
                 .max(below.instantiation_required);
             footprint.tail_steps = footprint.tail_steps.max(below.tail_steps);
             match dependency.nesting {
-                // The result's frames run one level below the consumer's.
+                // The result's frames run one level below the consumer's,
+                // each from the drive: its own nesting is a frame's.
                 Nesting::Frame { .. } => {
                     footprint.instantiation_height = footprint
                         .instantiation_height
                         .max(below.instantiation_height.saturating_add(1));
+                    footprint.frame_query_depth = footprint
+                        .frame_query_depth
+                        .max(below.query_depth)
+                        .max(below.frame_query_depth);
                 }
                 // The result's frames run in a drive of their own, from
-                // its first frame, wherever the consumer is.
+                // its first frame, entered where the consumer is: every
+                // frame of it nests below the consumer's entry.
                 Nesting::Drive => {
                     footprint.instantiation_required = footprint
                         .instantiation_required
                         .max(u32::from(below.instantiation_height) + 1);
+                    footprint.query_depth = footprint.query_depth.max(
+                        below
+                            .query_depth
+                            .max(below.frame_query_depth)
+                            .saturating_add(levels),
+                    );
                 }
                 // A result read synchronously is evaluated without frames
-                // inside a running drive.
-                Nesting::InPlace | Nesting::Entered => {}
+                // inside a running drive; frames its closure ran keep
+                // running from the drive.
+                Nesting::InPlace | Nesting::Entered => {
+                    footprint.query_depth = footprint
+                        .query_depth
+                        .max(below.query_depth.saturating_add(levels));
+                    footprint.frame_query_depth =
+                        footprint.frame_query_depth.max(below.frame_query_depth);
+                }
             }
         }
         Arc::new(Self {

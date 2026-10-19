@@ -116,9 +116,63 @@ pub(super) struct InflightState {
     /// cold winner skips warm publish when the flag is set so the stale
     /// result never re-populates the cache.
     pub(super) aborted: bool,
+    /// The wakers of subscribers that polled the flight while it was
+    /// unresolved, each registered under this lock with its subscription's
+    /// own registration id; the flight wakes every one once it resolves
+    /// ([`FlightCell::wake_subscribers`]). Two subscriptions polled with the
+    /// same executor waker hold two registrations, so withdrawing one never
+    /// withdraws the other.
+    pub(super) wakers: Vec<(WakeRegistration, std::task::Waker)>,
+    /// The id the next waker registration on this flight takes.
+    pub(super) next_registration: u64,
+}
+
+/// One subscription's waker registration on a flight.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct WakeRegistration(u64);
+
+impl InflightState {
+    /// Register `waker` for one subscription, returning its registration.
+    pub(super) fn register_waker(&mut self, waker: std::task::Waker) -> WakeRegistration {
+        let registration = WakeRegistration(self.next_registration);
+        self.next_registration += 1;
+        self.wakers.push((registration, waker));
+        registration
+    }
+
+    /// Withdraw exactly `registration`, leaving every other subscription's.
+    pub(super) fn withdraw_waker(&mut self, registration: WakeRegistration) {
+        self.wakers.retain(|(id, _)| *id != registration);
+    }
+
+    /// Whether `registration` is still on the flight with a waker that wakes
+    /// the same task as `waker`.
+    pub(super) fn holds_waker(
+        &self,
+        registration: WakeRegistration,
+        waker: &std::task::Waker,
+    ) -> bool {
+        self.wakers
+            .iter()
+            .any(|(id, registered)| *id == registration && registered.will_wake(waker))
+    }
 }
 
 impl FlightCell {
+    /// Wake every subscriber after the flight resolved (completed or
+    /// aborted) under its lock: the blocking ones on the condvar, the
+    /// polling ones through their registered wakers. A poll registers its
+    /// waker only after finding the flight unresolved under the same lock,
+    /// so every waker registered before the resolution is taken here and
+    /// none is registered after it.
+    pub(super) fn wake_subscribers(&self) {
+        self.ready.notify_all();
+        let wakers = std::mem::take(&mut self.state.lock().wakers);
+        for (_, waker) in wakers {
+            waker.wake();
+        }
+    }
+
     /// An unclaimed cell whose storage is pinned against `account`.
     pub(super) fn charged(
         account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
@@ -234,7 +288,7 @@ impl<'a> Drop for InflightPanicGuard<'a> {
                 crate::semantic_query::PartialReasonSet::SEMANTIC_QUERY_FAULT,
             );
         }
-        self.inflight.ready.notify_all();
+        self.inflight.wake_subscribers();
         // `ptr_eq`-guarded remove: only retire THIS guard's own
         // in-flight entry. A cross-view joiner that forked may have
         // installed a fresh `FlightCell` for the same key; an
@@ -381,7 +435,7 @@ impl InlineMemberFlight {
     /// the table [`super::SemanticGraphStore::begin_inline_member_flight`]
     /// claimed in.
     pub(super) fn notify_and_retire(self, store: &super::SemanticGraphStore) {
-        self.inflight.ready.notify_all();
+        self.inflight.wake_subscribers();
         store.retire_inflight(&self.prepared, &self.inflight, false);
     }
 }
@@ -441,7 +495,7 @@ impl super::SemanticGraphStore {
                 crate::semantic_query::PartialReasonSet::SEMANTIC_QUERY_FAULT,
             );
         }
-        flight.inflight.ready.notify_all();
+        flight.inflight.wake_subscribers();
         self.retire_inflight(&flight.prepared, &flight.inflight, false);
     }
 }

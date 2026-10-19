@@ -1586,6 +1586,29 @@ fn frame_entry<'i>(
         .map(|matched| matched.entry())
 }
 
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    /// Whether `key`'s body calls with a function value among the
+    /// arguments: a callback the call's contextual route may type while its
+    /// candidate's collector is held. Read off the function's indexed call
+    /// sites in the served index of its file, the one its evaluation reads.
+    pub(in crate::project_semantic_dispatch) fn flow_body_types_callbacks(
+        &self,
+        key: &FlowReturnKey,
+    ) -> bool {
+        let canonical = key.function.declaration_slot.defining_canonical.as_ref();
+        let Some((_serve, Some(source_demand))) = self.ctx.indexed_flow_source(canonical) else {
+            return false;
+        };
+        let index = source_demand.function_program_index();
+        frame_entry(&index, key).is_some_and(|entry| {
+            entry
+                .call_sites()
+                .iter()
+                .any(|site| site.args.iter().any(|argument| argument.is_function_value))
+        })
+    }
+}
+
 /// Whether `outer` contains `inner` (inclusive at both edges).
 fn contains(outer: verter_span::Span, inner: verter_span::Span) -> bool {
     outer.start <= inner.start && inner.end <= outer.end

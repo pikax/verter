@@ -95,30 +95,279 @@ fn alias_chains_up_to_500_long_answer_cold_on_a_small_stack() {
     });
 }
 
-/// The call's return through 500 aliases, and a chain of 1,000 aliases,
-/// answer as the shorter chains do, on a 1 MiB thread — the least a host
-/// asks from — in a fresh process.
+/// `f` over the evaluated rows, read on a 1 MiB thread — the least a host
+/// asks from.
+fn on_a_one_mebibyte_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(f)
+        .expect("spawn the probing thread")
+        .join()
+        .expect("the probe answers")
+}
+
+/// `probe` over `source` displayed twice on one host: cold, then warm from
+/// what the cold evaluation kept.
+fn cold_and_warm_displays(source: &str, probe: &str) -> [String; 2] {
+    use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node;
+    use verter_type_engine::semantic_query::{ProjectionMode, ProjectionReductionContext};
+    let host = super::checker_probe_lane_tests::default_probe_host();
+    [(); 2].map(|()| {
+        super::checker_probe_lane_tests::with_probe_on_host(
+            &host,
+            Default::default(),
+            source,
+            probe,
+            |dispatch, node| {
+                let value = dispatch
+                    .normalize_node_for_structural_fact_demand(
+                        node,
+                        ProjectionReductionContext::published(ProjectionMode::Expanded),
+                    )
+                    .into_usable_node()
+                    .expect("the probe answers");
+                render_node(dispatch, value, 0)
+            },
+        )
+    })
+}
+
+/// The call's return through 500 aliases answers as the shorter chains do,
+/// every row, on a 1 MiB thread, in a fresh process — and the same again
+/// warm on the host the cold evaluation filled.
 ///
-/// TypeScript 7.0.2 (all four settings at 500, `strictNullChecks` on and
-/// off at 1,000): no TS2589; under `strictNullChecks` `typeof c` and
-/// `gj`'s return are `"ok" | undefined`.
+/// TypeScript 7.0.2 (all four settings at 500): no TS2589; under
+/// `strictNullChecks` `typeof c` and `gj`'s return are `"ok" | undefined`.
 #[test]
-#[ignore = "the flow return of a call whose declared return is a chain of 500 or more aliases produces no result"]
-fn alias_chains_500_and_1000_long_answer_every_row_cold_on_a_one_mebibyte_stack() {
+fn alias_chains_500_long_answer_every_row_cold_and_warm_on_a_one_mebibyte_stack() {
     in_a_fresh_process(test_path!(), || {
-        for (length, rows) in [(500, &ALIAS_CHAIN_ROWS[1..]), (1000, ALIAS_CHAIN_ROWS)] {
-            let mismatches = std::thread::Builder::new()
-                .stack_size(1 << 20)
-                .spawn(move || evaluated_mismatches(&alias_chain(length), rows))
-                .expect("spawn the probing thread")
-                .join()
-                .expect("the probe answers");
-            assert_eq!(
-                mismatches,
-                Vec::<String>::new(),
-                "a chain of {length} aliases"
-            );
+        let (mismatches, displays) = on_a_one_mebibyte_stack(|| {
+            let source = alias_chain(500);
+            (
+                evaluated_mismatches(&source, ALIAS_CHAIN_ROWS),
+                cold_and_warm_displays(&source, "ReturnType<typeof gj>"),
+            )
+        });
+        assert_eq!(mismatches, Vec::<String>::new(), "a chain of 500 aliases");
+        assert_eq!(displays[0], displays[1], "cold and warm answer alike");
+    });
+}
+
+/// A chain of 500 values each declared `typeof` the one before evaluates
+/// on a 1 MiB thread, cold and warm alike: each value's `typeof` builds as
+/// a frame whose annotation needs the `typeof` it names from the runtime,
+/// instead of evaluating it one native level deeper.
+///
+/// TypeScript 7.0.2: `typeof v500` is `"ok"`.
+#[test]
+fn typeof_chains_500_deep_answer_cold_and_warm_on_a_one_mebibyte_stack() {
+    in_a_fresh_process(test_path!(), || {
+        let mut source = String::from("declare const v0: \"ok\";\n");
+        for level in 1..=500 {
+            source.push_str(&format!("declare const v{level}: typeof v{};\n", level - 1));
         }
+        let displays = on_a_one_mebibyte_stack(move || {
+            assert_eq!(
+                evaluated_mismatches(&source, &[("typeof v500", "\"ok\"")]),
+                Vec::<String>::new()
+            );
+            cold_and_warm_displays(&source, "typeof v500")
+        });
+        assert_eq!(displays[0], displays[1], "cold and warm answer alike");
+    });
+}
+
+/// A chain of 500 constants each initialized from the one before evaluates
+/// on a 1 MiB thread, cold and warm alike: each constant's `typeof` lowers
+/// its initializer's inferred type as a frame that needs the `typeof` it
+/// names from the runtime.
+///
+/// TypeScript 7.0.2: `typeof x500` is `"ok"`.
+#[test]
+fn initializer_chains_500_deep_answer_cold_and_warm_on_a_one_mebibyte_stack() {
+    in_a_fresh_process(test_path!(), || {
+        let mut source = String::from("const x0 = \"ok\" as const;\n");
+        for level in 1..=500 {
+            source.push_str(&format!("const x{level} = x{};\n", level - 1));
+        }
+        let displays = on_a_one_mebibyte_stack(move || {
+            assert_eq!(
+                evaluated_mismatches(&source, &[("typeof x500", "\"ok\"")]),
+                Vec::<String>::new()
+            );
+            cold_and_warm_displays(&source, "typeof x500")
+        });
+        assert_eq!(displays[0], displays[1], "cold and warm answer alike");
+    });
+}
+
+/// A chain of 500 constants each initialized by a call over the one before
+/// evaluates on a 1 MiB thread, cold and warm alike: each constant's
+/// initializer evaluates as its `typeof`'s frame, which needs the `typeof`
+/// of the value its argument names from the runtime instead of evaluating
+/// it in place.
+///
+/// TypeScript 7.0.2, `--strict` and with `strictNullChecks` and
+/// `noImplicitAny` off: `typeof y500` is `"ok"`.
+#[test]
+fn call_initializer_chains_500_deep_answer_cold_and_warm_on_a_one_mebibyte_stack() {
+    in_a_fresh_process(test_path!(), || {
+        let mut source =
+            String::from("declare function id<T>(x: T): T;\nconst y0 = \"ok\" as const;\n");
+        for level in 1..=500 {
+            source.push_str(&format!("const y{level} = id(y{});\n", level - 1));
+        }
+        let displays = on_a_one_mebibyte_stack(move || {
+            assert_eq!(
+                evaluated_mismatches(&source, &[("typeof y500", "\"ok\"")]),
+                Vec::<String>::new()
+            );
+            cold_and_warm_displays(&source, "typeof y500")
+        });
+        assert_eq!(displays[0], displays[1], "cold and warm answer alike");
+    });
+}
+
+/// Chains of 500 values whose member reads the same member of the one
+/// before — object literals, and classes' statics — evaluate on a 1 MiB
+/// thread, cold and warm alike: a member path's `typeof` lowers the member
+/// where the value declares it as its frame's projection, which needs the
+/// member-path `typeof` its value names from the runtime instead of
+/// evaluating it in place.
+///
+/// TypeScript 7.0.2, `--strict` and with `strictNullChecks` and
+/// `noImplicitAny` off: `typeof y500.v` and `typeof C500.v` are `"ok"`.
+#[test]
+fn member_path_typeof_chains_500_deep_answer_cold_and_warm_on_a_one_mebibyte_stack() {
+    in_a_fresh_process(test_path!(), || {
+        let mut literals = String::from("const y0 = { v: \"ok\" as const };\n");
+        let mut statics = String::from("class C0 { static v = \"ok\" as const; }\n");
+        for level in 1..=500 {
+            literals.push_str(&format!("const y{level} = {{ v: y{}.v }};\n", level - 1));
+            statics.push_str(&format!(
+                "class C{level} {{ static v = C{}.v; }}\n",
+                level - 1
+            ));
+        }
+        let displays = on_a_one_mebibyte_stack(move || {
+            [(literals, "typeof y500.v"), (statics, "typeof C500.v")].map(|(source, probe)| {
+                assert_eq!(
+                    evaluated_mismatches(&source, &[(probe, "\"ok\"")]),
+                    Vec::<String>::new(),
+                    "{probe}"
+                );
+                (probe, cold_and_warm_displays(&source, probe))
+            })
+        });
+        for (probe, [cold, warm]) in displays {
+            assert_eq!(cold, warm, "{probe}: cold and warm answer alike");
+        }
+    });
+}
+
+/// A chain of 500 functions each returning the type the one before returns
+/// evaluates on a 1 MiB thread, cold and warm alike: a function's `typeof`
+/// lowers its signatures one at a time as its frame's projections, which
+/// need the instantiations and `typeof`s they reach from the runtime.
+///
+/// TypeScript 7.0.2, `--strict` and with `strictNullChecks` and
+/// `noImplicitAny` off: `ReturnType<typeof h500>` is `"ok"`.
+#[test]
+fn signature_chains_500_deep_answer_cold_and_warm_on_a_one_mebibyte_stack() {
+    in_a_fresh_process(test_path!(), || {
+        let mut source = String::from("function h0(): \"ok\" { return \"ok\"; }\n");
+        for level in 1..=500 {
+            source.push_str(&format!(
+                "declare function h{level}(): ReturnType<typeof h{}>;\n",
+                level - 1
+            ));
+        }
+        let displays = on_a_one_mebibyte_stack(move || {
+            assert_eq!(
+                evaluated_mismatches(&source, &[("ReturnType<typeof h500>", "\"ok\"")]),
+                Vec::<String>::new()
+            );
+            cold_and_warm_displays(&source, "ReturnType<typeof h500>")
+        });
+        assert_eq!(displays[0], displays[1], "cold and warm answer alike");
+    });
+}
+
+/// A chain of `length` non-generic aliases, each a conditional over the one
+/// before whose true branch is `branch` of the one before:
+/// `C<i> = C<i-1> extends string ? branch(i-1) : never`.
+fn conditional_chain(length: usize, branch: impl Fn(usize) -> String) -> String {
+    let mut source = String::from("type C0 = \"ok\";\n");
+    for level in 1..=length {
+        let p = level - 1;
+        source.push_str(&format!(
+            "type C{level} = C{p} extends string ? {} : never;\n",
+            branch(p)
+        ));
+    }
+    source
+}
+
+/// Chains of non-generic conditional aliases, each deciding over the one
+/// before, evaluate on a 1 MiB thread, cold and warm alike: deciding a
+/// conditional needs its operands' instantiations from the runtime instead
+/// of normalizing them in place one native level deeper. Five hundred
+/// levels whose branch is a literal; a hundred whose branch selects the
+/// alias before, which a decided branch keeps as a carrier, so each level's
+/// decision walks the carriers below it — that walk, not the runtime, bounds
+/// its length here.
+///
+/// TypeScript 7.0.2, `--strict` and with `strictNullChecks` and
+/// `noImplicitAny` off: `C500` over the literal branches and `C100` over the
+/// alias branches are `"ok"`.
+#[test]
+fn conditional_chains_decide_cold_and_warm_on_a_one_mebibyte_stack() {
+    in_a_fresh_process(test_path!(), || {
+        let displays = on_a_one_mebibyte_stack(|| {
+            [
+                (conditional_chain(500, |_| "\"ok\"".to_owned()), "C500"),
+                (conditional_chain(100, |p| format!("C{p}")), "C100"),
+            ]
+            .map(|(source, probe)| (probe, cold_and_warm_displays(&source, probe)))
+        });
+        for (probe, [cold, warm]) in displays {
+            assert_eq!(cold, "\"ok\"", "{probe} decides cold");
+            assert_eq!(warm, cold, "{probe} decides warm as it does cold");
+        }
+    });
+}
+
+/// A chain alternating a member projection, an instantiation, a flow return
+/// and a call at every level — `g<i>` returns `id(b["v"])` over
+/// `b: B<i-1>`, and `B<i>` projects `ReturnType<typeof g<i>>` — answers on
+/// a 1 MiB thread, cold and warm alike.
+///
+/// TypeScript 7.0.2: `ReturnType<typeof g150>` is `"ok"`.
+#[test]
+fn alternating_projection_instantiation_flow_and_call_chains_answer_on_a_one_mebibyte_stack() {
+    in_a_fresh_process(test_path!(), || {
+        const LENGTH: usize = 150;
+        let mut source = String::from(
+            "declare function id<T>(x: T): T;\n\
+             function g0() { return \"ok\" as const; }\n\
+             type B0 = { v: ReturnType<typeof g0> };\n",
+        );
+        for level in 1..=LENGTH {
+            source.push_str(&format!(
+                "function g{level}(b: B{p}) {{ return id(b[\"v\"]); }}\n\
+                 type B{level} = {{ v: ReturnType<typeof g{level}> }};\n",
+                p = level - 1
+            ));
+        }
+        let probe = format!("ReturnType<typeof g{LENGTH}>");
+        let displays = on_a_one_mebibyte_stack(move || {
+            assert_eq!(
+                evaluated_mismatches(&source, &[(probe.as_str(), "\"ok\"")]),
+                Vec::<String>::new()
+            );
+            cold_and_warm_displays(&source, &probe)
+        });
+        assert_eq!(displays[0], displays[1], "cold and warm answer alike");
     });
 }
 

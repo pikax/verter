@@ -3597,7 +3597,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             reduction.completeness = reduction
                                 .completeness
                                 .merge(ResultCompleteness::partial(reasons));
-                            return self.end_composite(reduction, None);
+                            // A conditional decision whose run waits on a
+                            // read drops that run: reading on, it reaches
+                            // the reads the remaining arms make in this run
+                            // rather than one arm per run.
+                            if !self.decision_waits() {
+                                return self.end_composite(reduction, None);
+                            }
+                            arm
                         }
                     };
                     // A union joins a named union's members, whatever they

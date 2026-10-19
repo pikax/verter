@@ -398,6 +398,82 @@ fn span_open() -> bool {
     COMPONENT_META_SPAN_OPEN.with(Cell::get)
 }
 
+/// The component-meta charges of a semantic task, which may be polled on a
+/// thread other than the one that lent it its request: one span standing
+/// for every span open where it was lent (none when none was). Each poll
+/// installs it as the polling thread's only span, so a charge lands in the
+/// task — never in a span the polling thread has open for other work — and
+/// the task's return folds it into the spans it was lent under.
+#[derive(Default)]
+pub(crate) struct TaskSpanCarry {
+    open: bool,
+    /// The task's span while it is not polled: one entry when `open`.
+    stack: Vec<ComponentMetaSpan>,
+}
+
+impl TaskSpanCarry {
+    /// The carry of a task lent here: open exactly when a span is.
+    pub(crate) fn lend() -> Self {
+        let open = span_open();
+        Self {
+            open,
+            stack: if open {
+                vec![ComponentMetaSpan::default()]
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    /// Install the task's span on this thread for one poll; the returned
+    /// guard restores the thread's own spans and takes the task's back.
+    pub(crate) fn install(&mut self) -> TaskSpanInstall<'_> {
+        let thread =
+            COMPONENT_META_SPANS.with(|spans| spans.replace(std::mem::take(&mut self.stack)));
+        let thread_open = COMPONENT_META_SPAN_OPEN.with(|open| open.replace(self.open));
+        TaskSpanInstall {
+            carry: self,
+            thread,
+            thread_open,
+        }
+    }
+
+    /// Fold what the task charged into every span open on this thread, the
+    /// one that lent it, as if each charge had been made here.
+    pub(crate) fn return_to_lender(self) {
+        let Some(span) = self.stack.into_iter().next() else {
+            return;
+        };
+        if !span_open() {
+            return;
+        }
+        COMPONENT_META_SPANS.with(|spans| {
+            for open in spans.borrow_mut().iter_mut() {
+                open.work = open.work.saturating_add(span.work);
+                open.bytes = open.bytes.saturating_add(span.bytes);
+                open.trip = open.trip.union(span.trip);
+                open.schedule_cuts = open.schedule_cuts.saturating_add(span.schedule_cuts);
+                open.certificates = open.certificates.saturating_add(span.certificates);
+            }
+        });
+    }
+}
+
+/// A task's span installed for one poll ([`TaskSpanCarry::install`]).
+pub(crate) struct TaskSpanInstall<'c> {
+    carry: &'c mut TaskSpanCarry,
+    thread: Vec<ComponentMetaSpan>,
+    thread_open: bool,
+}
+
+impl Drop for TaskSpanInstall<'_> {
+    fn drop(&mut self) {
+        self.carry.stack =
+            COMPONENT_META_SPANS.with(|spans| spans.replace(std::mem::take(&mut self.thread)));
+        COMPONENT_META_SPAN_OPEN.with(|open| open.set(self.thread_open));
+    }
+}
+
 fn remember_work(n: usize) {
     if n == 0 || !span_open() {
         return;
@@ -471,6 +547,65 @@ impl std::fmt::Debug for ConnectedDemandLedger<'_> {
 }
 
 impl<'a> ConnectedDemandLedger<'a> {
+    /// A ledger at this one's caps, observing its cancellation, with no
+    /// demand of its own: the ledger a task's dispatcher holds while it
+    /// carries this one's state ([`Self::exchange_state`]).
+    pub(super) fn sibling(&self) -> Self {
+        Self {
+            instantiation_depth_limit: self.instantiation_depth_limit,
+            tail_steps_limit: self.tail_steps_limit,
+            ..Self::new(self.cancellation)
+        }
+    }
+
+    /// Exchange every counter, cap, trip, cost recording and paid
+    /// identity with `other`, a ledger at the same fixed caps: the
+    /// connected demand moves between the dispatchers whole.
+    pub(super) fn exchange_state(&self, other: &Self) {
+        let Self {
+            cancellation: _,
+            active,
+            work_used,
+            work_limit,
+            bytes_used,
+            bytes_limit,
+            query_depth,
+            query_depth_limit,
+            instantiation_depth_limit,
+            tail_steps_limit,
+            tripped,
+            scopes,
+            scope_open,
+            paid,
+            request_effects,
+            schedule_cut,
+        } = self;
+        verter_debug_assert!(
+            *instantiation_depth_limit == other.instantiation_depth_limit
+                && *tail_steps_limit == other.tail_steps_limit,
+            "a ledger exchanges its state with a sibling at its own fixed caps"
+        );
+        active.swap(&other.active);
+        work_used.swap(&other.work_used);
+        work_limit.swap(&other.work_limit);
+        bytes_used.swap(&other.bytes_used);
+        bytes_limit.swap(&other.bytes_limit);
+        query_depth.swap(&other.query_depth);
+        query_depth_limit.swap(&other.query_depth_limit);
+        tripped.swap(&other.tripped);
+        scopes.swap(&other.scopes);
+        scope_open.swap(&other.scope_open);
+        paid.swap(&other.paid);
+        request_effects.swap(&other.request_effects);
+        schedule_cut.swap(&other.schedule_cut);
+    }
+
+    /// How many cost recordings are open.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_cost_scopes_for_tests(&self) -> usize {
+        self.scopes.borrow().len()
+    }
+
     /// Install a ledger at the production caps, observing `cancellation`.
     pub(super) fn new(cancellation: DemandCancellation<'a>) -> Self {
         Self {
@@ -1103,7 +1238,10 @@ impl ConnectedDemandLedger<'_> {
             return Err(ReplayRefusal::Tripped);
         }
         let footprint = receipt.footprint();
-        if u32::from(self.query_depth.get()) + u32::from(footprint.query_depth)
+        // The reader's own nesting bounds where the result's drive, and so
+        // each of its frames, would be entered from.
+        if u32::from(self.query_depth.get())
+            + u32::from(footprint.query_depth.max(footprint.frame_query_depth))
             > u32::from(self.query_depth_limit.get())
         {
             return Err(ReplayRefusal::Depth);

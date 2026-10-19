@@ -241,7 +241,7 @@ pub fn dispatch_inject_parse_fact_for_tests(
 /// an ordinal nothing owns.
 fn hand_to_caller_scope<'h>(
     host: &'h crate::VerterHost,
-    dispatch: verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: verter_type_engine::project_semantic_dispatch::ThreadDispatch<
         'h,
         crate::resolver_core::HostCapabilities,
     >,

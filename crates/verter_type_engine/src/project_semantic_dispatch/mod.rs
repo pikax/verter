@@ -119,6 +119,11 @@ mod owning_dispatch;
 pub use owning_dispatch::OwningDispatch;
 pub mod query_error_disposition;
 mod query_frames;
+#[cfg(any(test, feature = "test-support"))]
+pub use query_frames::{
+    take_call_suspensions_for_tests, CallSuspensionForTests, ContextualRouteEventForTests,
+    OpenRequestStateForTests, SemanticTask, TaskOutcomeForTests,
+};
 pub mod signature_discovery;
 pub mod signature_utility;
 // Private adjacent module: crate-wide compile-time `assert_not_impl_any!`
@@ -560,6 +565,18 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// The facts the root frame of the running drive traced soundly, left
     /// by its completion for the drive's entry to seal a refusal on.
     driven_root_traced: std::cell::RefCell<Option<TracedFacts>>,
+    /// The seam of the conditional decision a frame's step is running: the
+    /// answers its frame has received, the first read they do not answer,
+    /// and how many queries the decision is evaluating in place, which read
+    /// only those answers.
+    decision_seam: std::cell::RefCell<Option<query_frames::DecisionSeam>>,
+    /// The call resolution whose frame is stepping, while its walk runs:
+    /// the walk it resumes and the answers its operand demands read.
+    call_seam: std::cell::RefCell<Option<query_frames::CallSeam>>,
+    /// The flow evaluation whose frame is stepping, while its run lasts:
+    /// the answers its frame received, the contextual callbacks typing now
+    /// and the contextual calls held across its runs.
+    flow_seam: std::cell::RefCell<Option<query_frames::FlowSeam>>,
     /// The binder the running substitution walk replaces, classified once
     /// for every node the walk visits ([`Self::substitution_binder`]).
     /// Emptied at each walk's entry, so it never outlives the hold the
@@ -569,15 +586,29 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// ([`DispatchOperation`]). When the outermost one ends, the receipts
     /// the dispatcher held for it are released, whatever owner stays open.
     operation_depth: std::cell::Cell<u32>,
-    /// The dispatch's share of its graph's construction lane on this
-    /// thread: the authority to read and root the graph's construction
-    /// ordinals while a dispatcher of it lives. The lane owns nothing: each
-    /// operation owns its intermediates and releases them when it ends, and
-    /// a result outlives its operation only through the owning carrier it
-    /// is delivered in (or an explicit builder owner the caller holds).
-    /// Dispatchers may be interleaved and dropped in any order. Declared
-    /// last so it closes after every other field.
+}
+
+/// A dispatcher on the thread that created it, holding its share of its
+/// graph's construction lane on that thread: the authority to read and root
+/// the graph's construction ordinals while a dispatcher of it lives. The lane
+/// owns nothing; each operation owns what it constructs, and a result
+/// outlives its operation only through the carrier it is delivered in.
+/// Dispatchers may be interleaved and dropped in any order. The dispatcher
+/// itself is not bound to the thread — a suspended semantic task owns one
+/// and roots its construction ordinals on its own construction owner
+/// ([`query_frames::SemanticTask`]).
+pub struct ThreadDispatch<'a, C: crate::resolver_core::ResolverCapabilities> {
+    dispatch: ProjectSemanticDispatch<'a, C>,
+    /// Declared after the dispatcher so it closes after every part of it.
     _construction: crate::semantic_query_memo::node_roots::DispatchConstructionLane,
+}
+
+impl<'a, C: crate::resolver_core::ResolverCapabilities> std::ops::Deref for ThreadDispatch<'a, C> {
+    type Target = ProjectSemanticDispatch<'a, C>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.dispatch
+    }
 }
 
 /// One operation of a dispatcher: a query execution or a root connected
@@ -918,7 +949,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     pub fn with_graph_fixture(
         ctx: &'a dyn ResolverContext<C>,
         fixture: crate::semantic_query_memo::graph_fixture::GraphFixture,
-    ) -> Self {
+    ) -> ThreadDispatch<'a, C> {
         Self::bind(ctx, Some(Arc::new(fixture.into_graph())))
     }
 
@@ -928,14 +959,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// `SessionResolverContext`. Test-support builds may additionally use the
     /// explicitly fenced host seam when exercising dispatch in isolation.
     #[must_use]
-    pub fn new(ctx: &'a dyn ResolverContext<C>) -> Self {
+    #[allow(
+        clippy::new_ret_no_self,
+        reason = "a dispatcher is created on its thread, as the handle that roots its construction ordinals there"
+    )]
+    pub fn new(ctx: &'a dyn ResolverContext<C>) -> ThreadDispatch<'a, C> {
         Self::bind(ctx, None)
     }
 
     fn bind(
         ctx: &'a dyn ResolverContext<C>,
         graph: Option<Arc<crate::semantic_query_memo::SemanticGraphStore>>,
-    ) -> Self {
+    ) -> ThreadDispatch<'a, C> {
         // The non-request-bound construction counter belongs only to the
         // explicit test-support seam. Production implementations of the
         // sealed trait are request-bound by construction.
@@ -943,8 +978,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !ctx.is_request_bound() {
             crate::request_context::bump_bare_engine_construction();
         }
-        let snapshot =
-            crate::resolver_core::fact_validation_port::LiveFactValidation::request_snapshot(ctx);
         let mut binding = ctx.attach_engine();
         if let Some(graph) = graph {
             binding.construction =
@@ -955,6 +988,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             crate::semantic_query_memo::node_roots::DispatchConstructionLane::enter(
                 binding.construction.arena(),
             );
+        ThreadDispatch {
+            dispatch: Self::with_binding(ctx, binding),
+            _construction: binding_graph_scope,
+        }
+    }
+
+    /// A dispatcher of `ctx`'s request over `binding`, holding no request
+    /// state of its own yet and no construction owner: its creator roots
+    /// what it constructs.
+    fn with_binding(
+        ctx: &'a dyn ResolverContext<C>,
+        binding: EngineBinding<C::MacroMirrors>,
+    ) -> Self {
+        let snapshot =
+            crate::resolver_core::fact_validation_port::LiveFactValidation::request_snapshot(ctx);
         Self {
             binding,
             policy: ctx.engine_policy(),
@@ -991,10 +1039,115 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             request_local_open: std::cell::RefCell::new(rustc_hash::FxHashSet::default()),
             self_evaluation_receipts: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             driven_root_traced: std::cell::RefCell::new(None),
+            decision_seam: std::cell::RefCell::new(None),
+            call_seam: std::cell::RefCell::new(None),
+            flow_seam: std::cell::RefCell::new(None),
             substitution_binder: std::cell::RefCell::new(None),
             operation_depth: std::cell::Cell::new(0),
-            _construction: binding_graph_scope,
         }
+    }
+
+    /// A dispatcher of this one's request and graph for a semantic task
+    /// that may run on any thread: it shares this dispatcher's immutable
+    /// request inputs and holds none of its request state until
+    /// [`Self::exchange_request_state`] lends it.
+    pub(super) fn task_dispatcher(&self) -> Self {
+        let mut binding = self.ctx.attach_engine();
+        binding.graph = Arc::clone(&self.binding.graph);
+        binding.construction = self.binding.construction.clone();
+        let dispatch = Self::with_binding(self.ctx, binding);
+        Self {
+            connected_demand: self.connected_demand.sibling(),
+            ..dispatch
+        }
+    }
+
+    /// Exchange all of this dispatcher's request state with `other`, a
+    /// dispatcher of the same request ([`Self::task_dispatcher`]): every
+    /// active instantiation and recursion guard, the checker transaction
+    /// with its inference sessions, the build taint stack, the connected
+    /// demand and its cost recordings, and the request's kept results. A
+    /// semantic task borrows the state for its drive and gives it back.
+    pub(super) fn exchange_request_state(&self, other: &Self) {
+        let Self {
+            binding: _,
+            policy: _,
+            cancellation: _,
+            snapshot: _,
+            ctx: _,
+            host_attachment: _,
+            instantiate_active,
+            awaited_active,
+            carrier_normalizing,
+            closedness_active,
+            heritage_ancestry,
+            build_local_taint,
+            homomorphic_aliases,
+            degraded_member_reads,
+            signature_source_headers,
+            active_operand_evidence,
+            lexical_demand_scope,
+            dispatch_txn,
+            relation_env,
+            relation_env_scope,
+            relation_env_by_file,
+            #[cfg(feature = "semantic-observe")]
+            relation_explanations,
+            canonical_evidence_epoch,
+            operation_budget_epoch,
+            connected_demand,
+            published_results,
+            request_local_open,
+            self_evaluation_receipts,
+            driven_root_traced,
+            decision_seam,
+            call_seam,
+            flow_seam,
+            substitution_binder,
+            operation_depth,
+        } = self;
+        instantiate_active.swap(&other.instantiate_active);
+        awaited_active.swap(&other.awaited_active);
+        carrier_normalizing.swap(&other.carrier_normalizing);
+        closedness_active.swap(&other.closedness_active);
+        heritage_ancestry.swap(&other.heritage_ancestry);
+        build_local_taint.swap(&other.build_local_taint);
+        homomorphic_aliases.swap(&other.homomorphic_aliases);
+        degraded_member_reads.swap(&other.degraded_member_reads);
+        signature_source_headers.swap(&other.signature_source_headers);
+        active_operand_evidence.swap(&other.active_operand_evidence);
+        lexical_demand_scope.swap(&other.lexical_demand_scope);
+        dispatch_txn.swap(&other.dispatch_txn);
+        // The relation environment is computed once per request and never
+        // changes: whichever side computed it first hands it to the other.
+        match (relation_env.get(), other.relation_env.get()) {
+            (Some(env), None) => {
+                let _ = other.relation_env.set(*env);
+            }
+            (None, Some(env)) => {
+                let _ = relation_env.set(*env);
+            }
+            _ => {}
+        }
+        relation_env_scope.swap(&other.relation_env_scope);
+        relation_env_by_file.swap(&other.relation_env_by_file);
+        #[cfg(feature = "semantic-observe")]
+        relation_explanations.swap(&other.relation_explanations);
+        canonical_evidence_epoch.swap(&other.canonical_evidence_epoch);
+        operation_budget_epoch.swap(&other.operation_budget_epoch);
+        connected_demand.exchange_state(&other.connected_demand);
+        published_results.swap(&other.published_results);
+        request_local_open.swap(&other.request_local_open);
+        self_evaluation_receipts.swap(&other.self_evaluation_receipts);
+        driven_root_traced.swap(&other.driven_root_traced);
+        decision_seam.swap(&other.decision_seam);
+        call_seam.swap(&other.call_seam);
+        flow_seam.swap(&other.flow_seam);
+        substitution_binder.swap(&other.substitution_binder);
+        // An operation the task's drive enters nests in the lender's open one,
+        // so the request's receipts end with the lender's outermost
+        // operation, never inside a drive.
+        operation_depth.swap(&other.operation_depth);
     }
 
     /// Enter one operation of this dispatcher ([`DispatchOperation`]),
@@ -2592,6 +2745,36 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// The `typeof` query an authored `typeof a.b` written in `canonical`'s
+    /// `owner` scope names: its first segment's value root, read for the
+    /// rest of the path. One root-and-path demand owns namespace and
+    /// value-member resolution: a failed member lookup cannot be retried
+    /// under a joined name that bypasses the module's export domain. `None`
+    /// for an empty path.
+    pub(super) fn typeof_reference_key(
+        &self,
+        canonical: &verter_type_expr::OwnedStr,
+        owner: verter_type_expr::TopLevelOwnerId,
+        value_ref: &verter_type_expr::ValueRef,
+        prc: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<SemanticQueryKey> {
+        let (root, rest) = value_ref.path.split_first()?;
+        let root_key = crate::semantic_query::ValueRootKey {
+            scope: crate::semantic_query::ScopeId {
+                canonical_id: canonical.clone(),
+                owner,
+                local_scope: None,
+                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(owner),
+            },
+            name: verter_type_expr::OwnedStr::from(root.as_str()),
+        };
+        let rest: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr> = rest
+            .iter()
+            .map(|segment| verter_type_expr::OwnedStr::from(segment.as_str()))
+            .collect();
+        Some(self.typeof_key_with_path(root_key, rest, prc))
+    }
+
     /// Push `identity` over `args` onto the active-instantiation stack.
     /// Returns `true` when that same instantiation was not already present
     /// (caller MUST pair with `pop_instantiate_active`). Returns `false`
@@ -4099,9 +4282,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 };
             }
         }
-        // An instantiation read for its value alone, outside any drive, runs
-        // on the continuation runtime: the chain of instantiations its body
-        // reaches waits in heap-owned frames instead of nesting natively.
+        // An instantiation or a `typeof` a running conditional decision
+        // reads is answered by its frame's deliveries, or becomes the
+        // frame's need; any other query the decision reaches evaluates in
+        // place, where only those deliveries answer it. So is one a
+        // contextual callback reads while its call's collector waits.
+        if publication.is_none() && operand_evidence.is_none() {
+            if let Some(read) = self
+                .read_at_decision_seam(&key)
+                .or_else(|| self.read_at_flow_seam(&key))
+            {
+                return read;
+            }
+        }
+        let _nested = self.nested_decision_query();
+        // An instantiation or a `typeof` read for its value alone, outside
+        // any drive, runs on the continuation runtime: the chain of
+        // instantiations and `typeof`s its body reaches waits in heap-owned
+        // frames instead of nesting natively.
         if publication.is_none() && operand_evidence.is_none() && self.drives_on_the_runtime(&key) {
             return self.drive_query(key);
         }
@@ -4769,7 +4967,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             .record_prerequisite(receipt, cost_receipt::Nesting::Entered);
                     }
                     let (read, kept) =
-                        graph.complete_request_local(attempt, flags, output, receipt);
+                        graph.complete_request_local(attempt, flags, output, receipt, &mut capture);
                     if let Some(carrier) = kept {
                         self.keep_published(key, &read, carrier, computed_at);
                     }

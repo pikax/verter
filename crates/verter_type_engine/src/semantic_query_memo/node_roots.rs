@@ -394,6 +394,33 @@ impl ScopeStack {
             .expect("an open construction owner is registered on its thread")
     }
 
+    /// Hand everything a closing task owner holds — its construction
+    /// counts, its roots, its deliveries and the carriers handed to it — to
+    /// the newest owner of its arena open on this thread, which then holds
+    /// them exactly as if they had been constructed under it. A dispatcher's
+    /// lane owns nothing, so it is never the heir: with no owner open they
+    /// are released.
+    fn absorb(&mut self, mut owners: ConstructionOwners) -> Option<ConstructionOwners> {
+        let arena = Arc::clone(&owners.arena);
+        let Some(heir) = self
+            .entries
+            .iter_mut()
+            .rev()
+            .find(|candidate| candidate.is_owner() && Arc::ptr_eq(&candidate.arena, &arena))
+        else {
+            return Some(owners);
+        };
+        heir.constructed.append(&mut owners.constructed);
+        heir.roots.append(&mut owners.roots);
+        heir.held.append(&mut owners.held);
+        for lease in owners.deliveries.drain(..) {
+            // A repeat is another handle on an owner the heir keeps.
+            let _ = heir.adopt(lease);
+        }
+        owners.delivered.clear();
+        None
+    }
+
     /// Remove a closing owner and hand its delivery attachments to the
     /// nearest remaining owner of the same arena: the one it was opened
     /// inside of first, else one opened after it that is still open. A
@@ -480,6 +507,10 @@ struct ConstructionOwners {
     /// under ([`ConstructionSink`]): every delivery read while it is open is
     /// kept here, so the carrier it seals into owns it.
     carrier: bool,
+    /// Whether this owner is a task's ([`TaskConstructionOwner`]) installed
+    /// for one poll: owners the polling thread opened before it are not the
+    /// task's, so what its steps read is never handed to them.
+    task: bool,
     roots: Vec<NodeRoot>,
     /// The ordinals interned while this owner was the innermost one of its
     /// arena: each holds the one count its intern took, released together
@@ -510,6 +541,7 @@ impl ConstructionOwners {
             arena: Arc::clone(arena),
             dispatchers: 0,
             carrier: false,
+            task: false,
             roots: Vec::new(),
             constructed: Vec::new(),
             deliveries: Vec::new(),
@@ -537,6 +569,79 @@ impl ConstructionOwners {
                 None
             }
         }
+    }
+}
+
+/// The construction owner of a task that may run on any thread. Between
+/// polls it holds what the task constructed — the counts its interns took,
+/// the roots and the deliveries its steps left — and while one poll runs it
+/// is the innermost construction owner of its arena on the polling thread
+/// ([`Self::install`]), so the task's construction ordinals stay rooted
+/// across its suspensions whichever thread resumes it. It is an owner, never
+/// a dispatcher's lane: an operation a poll enters finds it open and
+/// constructs under it. Dropping it hands what it holds to the newest owner
+/// of its arena open on the dropping thread.
+pub(crate) struct TaskConstructionOwner {
+    /// `None` only while installed on a thread.
+    owners: Option<ConstructionOwners>,
+}
+
+impl TaskConstructionOwner {
+    pub(crate) fn new(arena: &Arc<NodeArenaCore>) -> Self {
+        let mut owners = ConstructionOwners::new(0, arena);
+        owners.task = true;
+        Self {
+            owners: Some(owners),
+        }
+    }
+
+    /// Make this the innermost construction owner of its arena on this
+    /// thread until the returned installation drops.
+    pub(crate) fn install(&mut self) -> InstalledTaskConstruction<'_> {
+        let mut owners = self
+            .owners
+            .take()
+            .expect("a task's construction owner is installed on one thread at a time");
+        let token = SCOPES.with(|scopes| {
+            let mut scopes = scopes.borrow_mut();
+            owners.token = scopes.mint();
+            let token = owners.token;
+            scopes.entries.push(owners);
+            token
+        });
+        InstalledTaskConstruction {
+            owner: self,
+            token,
+            thread_bound: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Drop for TaskConstructionOwner {
+    fn drop(&mut self) {
+        if let Some(owners) = self.owners.take() {
+            let released = SCOPES.with(|scopes| scopes.borrow_mut().absorb(owners));
+            drop(released);
+        }
+    }
+}
+
+/// One poll's installation of a [`TaskConstructionOwner`]; dropping it takes
+/// the owner back off the thread, unwinding included.
+pub(crate) struct InstalledTaskConstruction<'t> {
+    owner: &'t mut TaskConstructionOwner,
+    token: u64,
+    thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl Drop for InstalledTaskConstruction<'_> {
+    fn drop(&mut self) {
+        let owners = SCOPES.with(|scopes| {
+            let mut scopes = scopes.borrow_mut();
+            let position = scopes.position(self.token);
+            scopes.entries.remove(position)
+        });
+        self.owner.owners = Some(owners);
     }
 }
 
@@ -699,8 +804,9 @@ impl NodeRootScope {
     }
 
     /// Hand a delivery lease to a construction owner on this thread: the
-    /// OLDEST owner of its arena, or the innermost owner when the lease
-    /// names no arena. A closing owner hands its deliveries to another open
+    /// OLDEST owner of its arena at or inside the newest installed task
+    /// owner of that arena ([`TaskConstructionOwner::install`]), or the
+    /// innermost owner when the lease names no arena. A closing owner hands its deliveries to another open
     /// owner of the arena, so a delivery stays held until no owner of its
     /// arena is open on the thread, whichever owner holds it; the oldest is
     /// the one least likely to close first, so the delivery is not handed on
@@ -721,18 +827,24 @@ impl NodeRootScope {
                     let of_arena = |candidate: &ConstructionOwners| {
                         candidate.is_owner() && Arc::as_ptr(&candidate.arena) as usize == arena
                     };
+                    // A task's poll owns what its steps read: an owner the
+                    // polling thread opened before the task was installed
+                    // may close while the task is pending, so the search
+                    // starts at the newest installed task owner.
+                    let floor = scopes
+                        .entries
+                        .iter()
+                        .rposition(|candidate| candidate.task && of_arena(candidate))
+                        .unwrap_or(0);
+                    let entries = &mut scopes.entries[floor..];
                     // A carrier under construction keeps every delivery its
                     // build reads; otherwise the oldest owner does.
-                    match scopes
-                        .entries
+                    match entries
                         .iter()
                         .rposition(|candidate| candidate.carrier && of_arena(candidate))
                     {
-                        Some(carrier) => scopes.entries.get_mut(carrier),
-                        None => scopes
-                            .entries
-                            .iter_mut()
-                            .find(|candidate| of_arena(candidate)),
+                        Some(carrier) => entries.get_mut(carrier),
+                        None => entries.iter_mut().find(|candidate| of_arena(candidate)),
                     }
                 }
                 None => scopes

@@ -2573,7 +2573,7 @@ fn source_flow_type(
     let QueryResult::Value(SemanticQueryOutput {
         value: SemanticQueryValue::FlowReturn(result),
         ..
-    }) = SemanticQueryApi::execute(&dispatch, SemanticQueryKey::FlowReturn(Box::new(key)))
+    }) = SemanticQueryApi::execute(&*dispatch, SemanticQueryKey::FlowReturn(Box::new(key)))
     else {
         panic!("{name} must produce a complete flow return");
     };

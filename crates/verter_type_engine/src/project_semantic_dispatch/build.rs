@@ -906,12 +906,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// Begin a `typeof` build on the continuation runtime: answer it at
-    /// once, or — when the value's type is its authored annotation — begin
-    /// lowering that annotation as a projection that stops at each
-    /// instantiation it reaches, the build [`Self::drain_typeof`] carries
-    /// on. A chain of instantiations the annotation names (an interface
-    /// whose heritage nests a hundred levels) then waits in heap-owned
-    /// frames instead of nesting natively.
+    /// once, or — when the value's type is lowered from its authored value
+    /// position (its annotation, its inferred initializer or its
+    /// const-object shape) — begin that lowering as a projection that stops
+    /// at each instantiation and `typeof` it reaches, the build
+    /// [`Self::drain_typeof`] carries on. A chain of instantiations the
+    /// annotation names (an interface whose heritage nests a hundred
+    /// levels), or of values each initialized from the one before, then
+    /// waits in heap-owned frames instead of nesting natively.
     pub(super) fn begin_typeof(
         &self,
         value_root: &ValueRootKey,
@@ -926,42 +928,280 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// Carry a suspended `typeof` build on: its annotation's projection
-    /// resumes with `delivery`, the instantiation it waited on, and either
-    /// needs another or completes the build's output.
-    pub(super) fn drain_typeof(
+    /// Lower a value's type from the authored value position `locator` —
+    /// its annotation, its inferred initializer or its const-object shape —
+    /// or, on the continuation runtime (`suspend`), begin that lowering as a
+    /// projection that stops at each instantiation and `typeof` it reaches,
+    /// the build [`Self::drain_typeof`] carries on. `None` means the build
+    /// suspended: a chain of values each typed by the one before then waits
+    /// in heap-owned frames instead of nesting natively.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_typeof_body_or_suspend(
         &self,
-        build: &mut TypeofBuild,
-        delivery: Option<SemanticNodeId>,
-    ) -> InstantiatePoll {
-        let TypeofBuild {
+        locator: verter_type_expr::locators::AuthoredBodyLocator,
+        suspend: Option<&mut Option<Box<TypeofBuild>>>,
+        lowering: TypeofBodyScope<'_>,
+        value_root: &ValueRootKey,
+        path: &[verter_type_expr::OwnedStr],
+        context: crate::semantic_query::ProjectionReductionContext,
+        observed_hash: verter_session_query::analysis::types::Hash16,
+    ) -> Option<SemanticNodeId> {
+        let TypeofBodyScope {
             prepared,
             env,
             scope,
             scope_payload,
             shadowing,
+            mut substitutions,
+        } = lowering;
+        let Some(suspended) = suspend else {
+            return Some(self.lower_located_body_with_provenance(
+                locator,
+                verter_session_query::declarations::TypeDeclKind::Alias,
+                &[],
+                &prepared.name_resolution,
+                &env,
+                &scope,
+                scope_payload.as_ref(),
+                &shadowing,
+                &mut substitutions,
+                context,
+            ));
+        };
+        let mut build = Box::new(TypeofBuild {
+            prepared: prepared.clone(),
+            env,
+            scope,
+            scope_payload,
+            shadowing,
             substitutions,
-            self_value,
-            body,
-            ..
-        } = build;
-        let poll = self.drain_located_body_lowering(
-            body,
-            &crate::project_semantic_dispatch::locator_view::LocatorViewInputs {
-                env,
-                scope,
-                name_resolution: &prepared.name_resolution,
-                scope_payload: scope_payload.as_ref(),
-                shadowing,
-                authored_resolution_debt: None,
-                self_value: self_value.as_ref(),
-            },
+            self_value: None,
+            body: TypeofBody::Unstarted,
+            then: TypeofThen::Value,
+            value_root: value_root.clone(),
+            path: verter_type_expr::OwnedSlice::from(path),
+            context,
+            observed_hash,
+        });
+        self.begin_typeof_body(&mut build, prepared.clone(), locator);
+        *suspended = Some(build);
+        None
+    }
+
+    /// Begin lowering the next member position of `build`'s member path as
+    /// its current body: a projection that stops at each instantiation and
+    /// `typeof` it reaches. `false` once every position is lowered.
+    fn begin_next_member_body(&self, build: &mut TypeofBuild) -> bool {
+        let TypeofThen::Member(member) = &mut build.then else {
+            unreachable!("a member lowering continues a member path's build")
+        };
+        let Some((ordinal, facts)) = member.members.positions.pop_front() else {
+            return false;
+        };
+        member.current = Some(facts);
+        let locator = member.members.locator(ordinal);
+        build.self_value = match &locator {
+            verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot) => {
+                Some(slot.anchor.clone())
+            }
+            _ => None,
+        };
+        build.body = TypeofBody::Lowering(self.begin_located_body_lowering(
+            locator,
+            verter_session_query::declarations::TypeDeclKind::Alias,
+            &member.members.class_type_params,
+            &build.env,
+            &build.scope,
+            &mut build.substitutions,
+            member.members.context,
+            &[],
+            super::locator_view_worklist::ProjectionSeam::suspending(),
+        ));
+        true
+    }
+
+    /// The output of a member path's `typeof` whose first member `own` was
+    /// lowered where `declaring` declares it: the rest of the path read from
+    /// it, rooted on the declaring file's content version as the composed
+    /// surface would be.
+    #[allow(clippy::too_many_arguments)]
+    fn member_typeof_output(
+        &self,
+        own: SemanticNodeId,
+        base_partial: bool,
+        declaring: &verter_type_expr::OwnedStr,
+        value_root: &ValueRootKey,
+        path: &[verter_type_expr::OwnedStr],
+        context: crate::semantic_query::ProjectionReductionContext,
+        observed_hash: verter_session_query::analysis::types::Hash16,
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        let mut output = self.project_typeof_path(own, path, context, observed_hash, value_root);
+        output.fold_partial(base_partial);
+        if declaring.as_ref() == value_root.scope.canonical_id.as_ref() {
+            return output;
+        }
+        match self.ctx.ensure_indexed_ready_serve(declaring.as_ref()) {
+            Some(serve) => {
+                output.with_observed_self_roots([(declaring.clone(), serve.indexed.whole_hash)])
+            }
+            None => {
+                output.cache_suppress = true;
+                output
+            }
+        }
+    }
+
+    /// Begin lowering `locator`, a body `prepared` declares, as `build`'s
+    /// current body: a projection that stops at each instantiation and
+    /// `typeof` it reaches.
+    fn begin_typeof_body(
+        &self,
+        build: &mut TypeofBuild,
+        prepared: verter_retention::heap_size::OwnedValue<
+            verter_session_query::type_solver::PreparedValueDecl,
+        >,
+        locator: verter_type_expr::locators::AuthoredBodyLocator,
+    ) {
+        build.self_value = match &locator {
+            verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot)
+                if slot.anchor.space == verter_type_expr::locators::LocatorSymbolSpace::Value =>
+            {
+                Some(slot.anchor.clone())
+            }
+            _ => None,
+        };
+        build.prepared = prepared;
+        build.body = TypeofBody::Lowering(self.begin_located_body_lowering(
+            locator,
+            verter_session_query::declarations::TypeDeclKind::Alias,
+            &[],
+            &build.env,
+            &build.scope,
+            &mut build.substitutions,
+            build.context,
+            &[],
+            super::locator_view_worklist::ProjectionSeam::suspending(),
+        ));
+    }
+
+    /// Lower a function value's signatures — its own declaration's, then
+    /// every declaration it merges — or, on the continuation runtime
+    /// (`suspend`), begin lowering them one at a time as projections that
+    /// stop at each instantiation and `typeof` they reach, the build
+    /// [`Self::drain_typeof`] carries on: a chain of functions each typed by
+    /// the one before (`declare function h1(): ReturnType<typeof h0>`) then
+    /// waits in heap-owned frames instead of nesting natively.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_value_signatures_or_suspend(
+        &self,
+        mut signatures: SignatureLowering,
+        suspend: Option<&mut Option<Box<TypeofBuild>>>,
+        lowering: TypeofBodyScope<'_>,
+        value_root: &ValueRootKey,
+        path: &[verter_type_expr::OwnedStr],
+        context: crate::semantic_query::ProjectionReductionContext,
+        observed_hash: verter_session_query::analysis::types::Hash16,
+    ) -> SignaturesLowered {
+        let TypeofBodyScope {
+            prepared,
+            env,
+            scope,
+            scope_payload,
+            shadowing,
+            mut substitutions,
+        } = lowering;
+        let Some(suspended) = suspend else {
+            loop {
+                match self.next_value_signature(&mut signatures) {
+                    None => return SignaturesLowered::Miss,
+                    Some(None) => {
+                        return SignaturesLowered::Lowered(
+                            self.finish_value_signatures(signatures, &scope, context),
+                        )
+                    }
+                    Some(Some(job)) => {
+                        let node = self.lower_located_body_with_provenance(
+                            job.locator,
+                            verter_session_query::declarations::TypeDeclKind::Alias,
+                            &[],
+                            &job.prepared.name_resolution,
+                            &env,
+                            &scope,
+                            scope_payload.as_ref(),
+                            &shadowing,
+                            &mut substitutions,
+                            context,
+                        );
+                        signatures.record(node);
+                    }
+                }
+            }
+        };
+        let job = match self.next_value_signature(&mut signatures) {
+            None => return SignaturesLowered::Miss,
+            Some(None) => {
+                return SignaturesLowered::Lowered(
+                    self.finish_value_signatures(signatures, &scope, context),
+                )
+            }
+            Some(Some(job)) => job,
+        };
+        let mut build = Box::new(TypeofBuild {
+            prepared: prepared.clone(),
+            env,
+            scope,
+            scope_payload,
+            shadowing,
             substitutions,
-            delivery,
-        );
-        match poll {
-            BodyPoll::Need(key) => InstantiatePoll::Need(key),
-            BodyPoll::Done(node, _) => {
+            self_value: None,
+            body: TypeofBody::Unstarted,
+            then: TypeofThen::Signatures(Box::new(signatures)),
+            value_root: value_root.clone(),
+            path: verter_type_expr::OwnedSlice::from(path),
+            context,
+            observed_hash,
+        });
+        self.begin_typeof_body(&mut build, job.prepared, job.locator);
+        *suspended = Some(build);
+        SignaturesLowered::Suspended
+    }
+
+    /// Carry a suspended `typeof` build on: its current body's projection
+    /// resumes with `delivery`, the instantiation or `typeof` it waited on
+    /// (or its initializer's evaluation resumes with the `typeof` of the
+    /// value it named), and either needs another, begins the value's next
+    /// signature, or completes the build's output.
+    pub(super) fn drain_typeof(
+        &self,
+        build: &mut TypeofBuild,
+        delivery: Option<super::query_frames::FrameDelivery>,
+    ) -> InstantiatePoll {
+        let mut delivery = match &mut build.body {
+            TypeofBody::Unstarted => unreachable!("a build begins its first body before it drains"),
+            TypeofBody::Lowering(_) => {
+                delivery.map(|delivery| self.consume_frame_delivery(delivery))
+            }
+            TypeofBody::Expression(run) => {
+                let source = build
+                    .prepared
+                    .type_annotation
+                    .expression_source
+                    .as_ref()
+                    .expect("an initializer evaluating has an expression source");
+                let evaluated = match self.drain_semantic_expression_source(source, run, delivery) {
+                    super::flow_return::ExpressionSourcePoll::Need(key) => {
+                        return InstantiatePoll::Need(key)
+                    }
+                    super::flow_return::ExpressionSourcePoll::Done(evaluated) => evaluated,
+                };
+                let owner = run.owner();
+                let Some(node) =
+                    self.expression_source_value_type(&build.prepared, source, owner, evaluated)
+                else {
+                    return InstantiatePoll::Done(Box::new(
+                        (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
+                    ));
+                };
                 let output = self.typeof_output(
                     node,
                     false,
@@ -970,12 +1210,112 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     build.context,
                     build.observed_hash,
                 );
-                InstantiatePoll::Done(Box::new(self.with_augmentation_roots(
+                return InstantiatePoll::Done(Box::new(self.with_augmentation_roots(
                     output,
                     Vec::new(),
                     false,
-                )))
+                )));
             }
+        };
+        loop {
+            let TypeofBuild {
+                prepared,
+                env,
+                scope,
+                scope_payload,
+                shadowing,
+                substitutions,
+                self_value,
+                body,
+                ..
+            } = &mut *build;
+            let TypeofBody::Lowering(body) = body else {
+                unreachable!("a build lowering a body keeps lowering bodies")
+            };
+            let poll = self.drain_located_body_lowering(
+                body,
+                &crate::project_semantic_dispatch::locator_view::LocatorViewInputs {
+                    env,
+                    scope,
+                    name_resolution: &prepared.name_resolution,
+                    scope_payload: scope_payload.as_ref(),
+                    shadowing,
+                    authored_resolution_debt: None,
+                    self_value: self_value.as_ref(),
+                },
+                substitutions,
+                delivery.take(),
+            );
+            let node = match poll {
+                BodyPoll::Need(key) => return InstantiatePoll::Need(key),
+                BodyPoll::Done(node, _) => node,
+            };
+            let (node, roots, unobservable) = match &mut build.then {
+                TypeofThen::Value => (node, Vec::new(), false),
+                TypeofThen::Member(member) => {
+                    let facts = member
+                        .current
+                        .take()
+                        .expect("a member lowering records the position it lowered");
+                    member.members.record(facts, node);
+                    if self.begin_next_member_body(build) {
+                        continue;
+                    }
+                    let TypeofThen::Member(member) =
+                        std::mem::replace(&mut build.then, TypeofThen::Value)
+                    else {
+                        unreachable!("the build lowers member positions")
+                    };
+                    let MemberLowering {
+                        members, declaring, ..
+                    } = *member;
+                    let own = self.finish_value_members(members, build.scope.clone());
+                    return InstantiatePoll::Done(Box::new(self.member_typeof_output(
+                        own,
+                        false,
+                        &declaring,
+                        &build.value_root,
+                        &build.path,
+                        build.context,
+                        build.observed_hash,
+                    )));
+                }
+                TypeofThen::Signatures(signatures) => {
+                    signatures.record(node);
+                    match self.next_value_signature(signatures) {
+                        Some(Some(job)) => {
+                            self.begin_typeof_body(build, job.prepared, job.locator);
+                            continue;
+                        }
+                        None => {
+                            return InstantiatePoll::Done(Box::new(
+                                (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
+                            ))
+                        }
+                        Some(None) => {
+                            let TypeofThen::Signatures(signatures) =
+                                std::mem::replace(&mut build.then, TypeofThen::Value)
+                            else {
+                                unreachable!("the build lowers signatures")
+                            };
+                            self.finish_value_signatures(*signatures, &build.scope, build.context)
+                        }
+                    }
+                }
+            };
+            let output = self.typeof_output(
+                node,
+                false,
+                &build.value_root,
+                &build.path,
+                build.context,
+                build.observed_hash,
+            );
+            return InstantiatePoll::Done(Box::new(self.with_augmentation_roots(
+                output,
+                roots,
+                unobservable,
+            )));
         }
     }
 
@@ -1012,7 +1352,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// [`Self::build_typeof`], which with `suspend` stops where the value's
-    /// type is its authored annotation: it hands the annotation's lowering
+    /// type lowers from its authored value position (its annotation, its
+    /// inferred initializer, its const-object shape): it hands that lowering
     /// over in `suspend` for [`Self::drain_typeof`] to carry on, and its own
     /// output is then not the answer.
     fn build_typeof_suspending(
@@ -1020,7 +1361,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         value_root: &ValueRootKey,
         path: &[verter_type_expr::OwnedStr],
         context: crate::semantic_query::ProjectionReductionContext,
-        suspend: Option<&mut Option<Box<TypeofBuild>>>,
+        mut suspend: Option<&mut Option<Box<TypeofBuild>>>,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         // Telemetry for the typeof traversal site.
         if let Some(observer) = verter_audit::current_observer() {
@@ -1553,6 +1894,43 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 } else {
                     context
                 };
+                // On the continuation runtime the member's positions lower
+                // as the frame's projections, each waiting on the
+                // instantiations and `typeof`s its value names.
+                if let Some(suspended) = suspend.as_mut() {
+                    if let Some((member_scope, members)) = self.value_member_plan(
+                        effective_canonical.as_ref(),
+                        effective_owner,
+                        effective_symbol.as_ref(),
+                        &prepared,
+                        first.as_ref(),
+                        member_context,
+                    ) {
+                        let mut build = Box::new(TypeofBuild {
+                            prepared: prepared.clone(),
+                            env: member_scope.env,
+                            scope: member_scope.scope,
+                            scope_payload: member_scope.scope_payload,
+                            shadowing: member_scope.shadowing,
+                            substitutions: Vec::new(),
+                            self_value: None,
+                            body: TypeofBody::Unstarted,
+                            then: TypeofThen::Member(Box::new(MemberLowering {
+                                members,
+                                current: None,
+                                declaring: verter_type_expr::OwnedStr::from(&effective_canonical),
+                            })),
+                            value_root: value_root.clone(),
+                            path: verter_type_expr::OwnedSlice::from(path),
+                            context,
+                            observed_hash,
+                        });
+                        let begun = self.begin_next_member_body(&mut build);
+                        verter_debug_assert!(begun, "a member plan holds a position");
+                        **suspended = Some(build);
+                        return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
+                    }
+                }
                 let mut base_partial = false;
                 let source = self
                     .value_member_source(
@@ -1585,27 +1963,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             .reduce(|composed, base| self.merge_static_surfaces(composed, base))
                     });
                 if let Some(own) = source {
-                    let mut output =
-                        self.project_typeof_path(own, path, context, observed_hash, value_root);
-                    output.fold_partial(base_partial);
                     // The member lowered from the DECLARING file roots on
                     // its content version as the composed surface would.
-                    if effective_canonical.as_ref() == value_root.scope.canonical_id.as_ref() {
-                        return output;
-                    }
-                    return match self
-                        .ctx
-                        .ensure_indexed_ready_serve(effective_canonical.as_ref())
-                    {
-                        Some(serve) => output.with_observed_self_roots([(
-                            verter_type_expr::OwnedStr::from(&effective_canonical),
-                            serve.indexed.whole_hash,
-                        )]),
-                        None => {
-                            output.cache_suppress = true;
-                            output
-                        }
-                    };
+                    return self.member_typeof_output(
+                        own,
+                        base_partial,
+                        &verter_type_expr::OwnedStr::from(&effective_canonical),
+                        value_root,
+                        path,
+                        context,
+                        observed_hash,
+                    );
                 }
             }
         }
@@ -1669,33 +2037,37 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             verter_type_expr::facts::ValueAnnotationClass::Absent
         ) {
             if let Some(source) = prepared.type_annotation.expression_source.as_ref() {
-                match self.execute_semantic_expression_source(source, effective_owner) {
-                    // A mutable declaration widens the fresh literal its
-                    // initializer call returns (`let m = f(1)` over `f<T>(x:
-                    // T): T` is `number`).
-                    Some(node)
-                        if matches!(
-                            prepared.kind,
-                            verter_session_query::declarations::ValueDeclKind::Let
-                                | verter_session_query::declarations::ValueDeclKind::Var
-                        ) && self
-                            .semantic_expression_source_is_fresh(source, effective_owner) =>
-                    {
-                        let members = match self.graph().node_data(node).as_deref() {
-                            Some(SemanticNodeData::Union(members)) => {
-                                Some(members.iter().copied().collect::<Vec<_>>())
-                            }
-                            _ => None,
-                        };
-                        match members {
-                            Some(arms) => {
-                                let widened: Vec<SemanticNodeId> =
-                                    arms.iter().map(|arm| self.widened_literal(*arm)).collect();
-                                self.intern_normalized_union_or_intersection(&widened, true)
-                            }
-                            None => self.widened_literal(node),
-                        }
+                let evaluated = match suspend {
+                    None => self.execute_semantic_expression_source(source, effective_owner),
+                    // On the continuation runtime the source evaluates as
+                    // the frame's build, waiting on each value it names.
+                    Some(suspended) => {
+                        *suspended = Some(Box::new(TypeofBuild {
+                            prepared: prepared.clone(),
+                            env: empty_env,
+                            scope,
+                            scope_payload,
+                            shadowing,
+                            substitutions,
+                            self_value: None,
+                            body: TypeofBody::Expression(Box::new(
+                                super::flow_return::ExpressionSourceRun::new(effective_owner),
+                            )),
+                            then: TypeofThen::Value,
+                            value_root: value_root.clone(),
+                            path: verter_type_expr::OwnedSlice::from(path),
+                            context,
+                            observed_hash,
+                        }));
+                        return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
                     }
+                };
+                match self.expression_source_value_type(
+                    &prepared,
+                    source,
+                    effective_owner,
+                    evaluated,
+                ) {
                     Some(node) => node,
                     None => {
                         // No expression value was produced, so there is no
@@ -1722,84 +2094,41 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         &mut substitutions,
                         context,
                     ),
-                    Some(verter_type_expr::facts::SemanticTypeSource::Authored(locator)) => {
-                        if let Some(suspended) = suspend {
-                            let self_value = match locator {
-                                verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot)
-                                    if slot.anchor.space
-                                        == verter_type_expr::locators::LocatorSymbolSpace::Value =>
-                                {
-                                    Some(slot.anchor.clone())
-                                }
-                                _ => None,
-                            };
-                            let body = self.begin_located_body_lowering(
-                                locator.clone(),
-                                verter_session_query::declarations::TypeDeclKind::Alias,
-                                &[],
-                                &empty_env,
-                                &scope,
-                                &mut substitutions,
-                                context,
-                                &[],
-                                super::locator_view_worklist::ProjectionSeam::suspending(),
-                            );
-                            *suspended = Some(Box::new(TypeofBuild {
-                                prepared: prepared.clone(),
+                    // An authored annotation lowers its own position; a
+                    // complex INFERRED annotation carries no closed fact and
+                    // is recovered by demand through the SAME authored
+                    // value-position locator (the transient value-part
+                    // re-borrow serves the initializer-inferred typed IR).
+                    annotation => {
+                        let locator = match annotation {
+                            Some(verter_type_expr::facts::SemanticTypeSource::Authored(
+                                locator,
+                            )) => locator.clone(),
+                            _ => value_position_locator(&prepared),
+                        };
+                        match self.lower_typeof_body_or_suspend(
+                            locator,
+                            suspend,
+                            TypeofBodyScope {
+                                prepared: &prepared,
                                 env: empty_env,
                                 scope,
                                 scope_payload,
                                 shadowing,
                                 substitutions,
-                                self_value,
-                                body,
-                                value_root: value_root.clone(),
-                                path: verter_type_expr::OwnedSlice::from(path),
-                                context,
-                                observed_hash,
-                            }));
-                            return (QueryResult::Error(QueryError::Miss), empty_signature())
-                                .into();
-                        }
-                        self.lower_located_body_with_provenance(
-                            locator.clone(),
-                            verter_session_query::declarations::TypeDeclKind::Alias,
-                            &[],
-                            &prepared.name_resolution,
-                            &empty_env,
-                            &scope,
-                            scope_payload.as_ref(),
-                            &shadowing,
-                            &mut substitutions,
-                            context,
-                        )
-                    }
-                    // A complex INFERRED annotation carries no closed fact — it is
-                    // recovered by demand through the SAME authored value-position
-                    // locator (the transient value-part re-borrow serves the
-                    // initializer-inferred typed IR).
-                    _ => self.lower_located_body_with_provenance(
-                        verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
-                            verter_type_expr::locators::TypeBodySlot {
-                                anchor: verter_type_expr::locators::AuthoredAnchor {
-                                    canonical_id: prepared.root_identity.canonical_id.clone(),
-                                    owner: prepared.root_identity.owner,
-                                    symbol: prepared.root_identity.symbol_name.clone(),
-                                    space: verter_type_expr::locators::LocatorSymbolSpace::Value,
-                                },
-                                path: verter_type_expr::OwnedSlice::default(),
                             },
-                        ),
-                        verter_session_query::declarations::TypeDeclKind::Alias,
-                        &[],
-                        &prepared.name_resolution,
-                        &empty_env,
-                        &scope,
-                        scope_payload.as_ref(),
-                        &shadowing,
-                        &mut substitutions,
-                        context,
-                    ),
+                            value_root,
+                            path,
+                            context,
+                            observed_hash,
+                        ) {
+                            Some(node) => node,
+                            None => {
+                                return (QueryResult::Error(QueryError::Miss), empty_signature())
+                                    .into()
+                            }
+                        }
+                    }
                 }
             }
         } else if prepared.object_shape.is_some() {
@@ -1807,28 +2136,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // free locators of the authored object — lower the WHOLE authored
             // value position through the located body source (the transient
             // value-part re-borrow serves the object initializer's typed IR).
-            self.lower_located_body_with_provenance(
-                verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
-                    verter_type_expr::locators::TypeBodySlot {
-                        anchor: verter_type_expr::locators::AuthoredAnchor {
-                            canonical_id: prepared.root_identity.canonical_id.clone(),
-                            owner: prepared.root_identity.owner,
-                            symbol: prepared.root_identity.symbol_name.clone(),
-                            space: verter_type_expr::locators::LocatorSymbolSpace::Value,
-                        },
-                        path: verter_type_expr::OwnedSlice::default(),
-                    },
-                ),
-                verter_session_query::declarations::TypeDeclKind::Alias,
-                &[],
-                &prepared.name_resolution,
-                &empty_env,
-                &scope,
-                scope_payload.as_ref(),
-                &shadowing,
-                &mut substitutions,
+            match self.lower_typeof_body_or_suspend(
+                value_position_locator(&prepared),
+                suspend,
+                TypeofBodyScope {
+                    prepared: &prepared,
+                    env: empty_env,
+                    scope,
+                    scope_payload,
+                    shadowing,
+                    substitutions,
+                },
+                value_root,
+                path,
                 context,
-            )
+                observed_hash,
+            ) {
+                Some(node) => node,
+                None => return (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
+            }
         } else if !prepared.signatures.is_empty() {
             // The composed constructor-like object is interned directly.
             let is_class =
@@ -1836,72 +2162,36 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // One signature group per declaration the function merges, in
             // declaration order: every later file's declaration of a global
             // function follows the first's.
-            let mut groups = self.prepared_signature_groups(
+            let signatures = SignatureLowering::new(
+                self,
                 &prepared,
-                &empty_env,
-                &scope,
-                scope_payload.as_ref(),
-                &shadowing,
-                &mut substitutions,
-                context,
+                is_class,
+                std::mem::take(&mut global_peers),
             );
-            // A module's function merges the declarations every
-            // `declare module` block augmenting that module adds, after its
-            // own, in declaration order.
-            let mut augmentation_peers: Vec<ResolvedRootIdentity> = Vec::new();
-            if !is_class
-                && global_peers.is_empty()
-                && effective_owner == verter_type_expr::TopLevelOwnerId::ordinary_file()
-                && !effective_symbol.contains('.')
-            {
-                for block in self.module_file_augmentation_blocks(effective_canonical.as_ref()) {
-                    if self.ambient_block_declares_value(&block, effective_symbol.as_ref()) {
-                        augmentation_peers.push(ResolvedRootIdentity::new_in_owner(
-                            Arc::clone(&block.canonical),
-                            block.owner,
-                            effective_symbol.as_ref(),
-                        ));
-                    }
+            match self.lower_value_signatures_or_suspend(
+                signatures,
+                suspend,
+                TypeofBodyScope {
+                    prepared: &prepared,
+                    env: empty_env,
+                    scope,
+                    scope_payload,
+                    shadowing,
+                    substitutions,
+                },
+                value_root,
+                path,
+                context,
+                observed_hash,
+            ) {
+                SignaturesLowered::Lowered((node, roots, unobservable)) => {
+                    augmentation_roots.extend(roots);
+                    augmentation_unobservable |= unobservable;
+                    node
                 }
-            }
-            for peer in global_peers.iter().chain(&augmentation_peers) {
-                let Some((_, _, _, peer_prepared)) = self.effective_prepared_value_decl(
-                    &peer.canonical_id,
-                    peer.owner,
-                    &peer.symbol_name,
-                ) else {
-                    return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
-                };
-                groups.extend(self.prepared_signature_groups(
-                    &peer_prepared,
-                    &empty_env,
-                    &scope,
-                    scope_payload.as_ref(),
-                    &shadowing,
-                    &mut substitutions,
-                    context,
-                ));
-            }
-            // An EXPORTED function of a module takes further overloads from
-            // every `declare module` block that augments it, one group per
-            // block after the declaration's own: call resolution reads them
-            // later-declaration-first, as the checker does.
-            if !is_class {
-                if let Some(contributions) =
-                    self.exported_function_augmentations(&prepared, context)
-                {
-                    for root in &contributions.contributor_roots {
-                        augmentation_roots.push((root.canonical.clone(), root.whole_hash));
-                    }
-                    augmentation_unobservable |= contributions.source_env_unobservable;
-                    groups.extend(contributions.signature_groups);
+                SignaturesLowered::Miss | SignaturesLowered::Suspended => {
+                    return (QueryResult::Error(QueryError::Miss), empty_signature()).into()
                 }
-            }
-            if !is_class && groups.len() > 1 {
-                self.merged_declaration_signatures_node(groups)
-            } else {
-                let signature_nodes: Vec<SemanticNodeId> = groups.into_iter().flatten().collect();
-                self.value_signature_surface(signature_nodes, is_class, &scope)
             }
         } else if let Some(enumeration) = self.enum_declaration_of(
             effective_canonical.clone(),
@@ -1924,6 +2214,42 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             observed_hash,
         );
         self.with_augmentation_roots(output, augmentation_roots, augmentation_unobservable)
+    }
+
+    /// The type of a value whose declared type is its initializer's
+    /// `evaluated` value: a mutable declaration widens the fresh literal its
+    /// initializer call returns (`let m = f(1)` over `f<T>(x: T): T` is
+    /// `number`). `None` when the initializer produced no value.
+    fn expression_source_value_type(
+        &self,
+        prepared: &verter_session_query::type_solver::PreparedValueDecl,
+        source: &verter_type_expr::facts::SemanticExpressionSource,
+        owner: verter_type_expr::TopLevelOwnerId,
+        evaluated: Option<SemanticNodeId>,
+    ) -> Option<SemanticNodeId> {
+        let node = evaluated?;
+        if !matches!(
+            prepared.kind,
+            verter_session_query::declarations::ValueDeclKind::Let
+                | verter_session_query::declarations::ValueDeclKind::Var
+        ) || !self.semantic_expression_source_is_fresh(source, owner)
+        {
+            return Some(node);
+        }
+        let members = match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Union(members)) => {
+                Some(members.iter().copied().collect::<Vec<_>>())
+            }
+            _ => None,
+        };
+        Some(match members {
+            Some(arms) => {
+                let widened: Vec<SemanticNodeId> =
+                    arms.iter().map(|arm| self.widened_literal(*arm)).collect();
+                self.intern_normalized_union_or_intersection(&widened, true)
+            }
+            None => self.widened_literal(node),
+        })
     }
 
     /// The augmenting blocks' function signatures for an exported function
@@ -1991,7 +2317,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// The visible value signatures of one prepared function declaration,
-    /// lowered and grouped by the declaration that contributes them.
+    /// each with the declaration block it groups by, in declaration order.
     ///
     /// Overload visibility (projection-time rule) comes from the ONE shared
     /// authority — the same rule the member-position overload carrier
@@ -2008,17 +2334,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// member's or a `declare global` block's overloads group by the block
     /// that declares them: the checker's candidate order tries a later
     /// block's before an earlier one's.
-    #[allow(clippy::too_many_arguments)]
-    fn prepared_signature_groups(
+    fn value_signature_jobs(
         &self,
-        prepared: &verter_session_query::type_solver::PreparedValueDecl,
-        env: &FxHashMap<String, SemanticNodeId>,
-        scope: &NodeScopeId,
-        scope_payload: Option<&crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
-        shadowing: &crate::resolver_core::scope_shadowing::ScopeShadowing,
-        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
-        context: crate::semantic_query::ProjectionReductionContext,
-    ) -> Vec<Vec<SemanticNodeId>> {
+        prepared: &verter_retention::heap_size::OwnedValue<
+            verter_session_query::type_solver::PreparedValueDecl,
+        >,
+    ) -> Vec<SignatureJob> {
         let identity = &prepared.root_identity;
         let by_block = identity.symbol_name.contains('.')
             || self
@@ -2038,55 +2359,119 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .iter()
                 .map(|sig| sig.has_implementation_body),
         );
-        let mut groups: Vec<Vec<SemanticNodeId>> = Vec::new();
-        let mut current_block: Option<Option<u32>> = None;
-        for ordinal in visible {
-            let block = by_block
-                .then(|| match &prepared.signatures[ordinal].spans_origin {
-                    verter_type_expr::span_origins::FunctionSpansOrigin::AliasBody { anchor }
-                    | verter_type_expr::span_origins::FunctionSpansOrigin::Member {
-                        anchor, ..
-                    } => Some(anchor.contributor_index),
-                    verter_type_expr::span_origins::FunctionSpansOrigin::Synthetic(_) => None,
-                })
-                .flatten();
-            let locator = verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
-                verter_type_expr::locators::TypeBodySlot {
-                    anchor: verter_type_expr::locators::AuthoredAnchor {
-                        canonical_id: identity.canonical_id.clone(),
-                        owner: identity.owner,
-                        symbol: identity.symbol_name.clone(),
-                        space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+        visible
+            .into_iter()
+            .enumerate()
+            .map(|(position, ordinal)| {
+                let block = by_block
+                    .then(|| match &prepared.signatures[ordinal].spans_origin {
+                        verter_type_expr::span_origins::FunctionSpansOrigin::AliasBody {
+                            anchor,
+                        }
+                        | verter_type_expr::span_origins::FunctionSpansOrigin::Member {
+                            anchor,
+                            ..
+                        } => Some(anchor.contributor_index),
+                        verter_type_expr::span_origins::FunctionSpansOrigin::Synthetic(_) => None,
+                    })
+                    .flatten();
+                let locator = verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+                    verter_type_expr::locators::TypeBodySlot {
+                        anchor: verter_type_expr::locators::AuthoredAnchor {
+                            canonical_id: identity.canonical_id.clone(),
+                            owner: identity.owner,
+                            symbol: identity.symbol_name.clone(),
+                            space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+                        },
+                        path: verter_type_expr::OwnedSlice::from(
+                            vec![
+                                verter_type_expr::locators::TypeBodyPathStep::ValueSignature {
+                                    ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
+                                },
+                            ]
+                            .into_boxed_slice(),
+                        ),
                     },
-                    path: verter_type_expr::OwnedSlice::from(
-                        vec![
-                            verter_type_expr::locators::TypeBodyPathStep::ValueSignature {
-                                ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
-                            },
-                        ]
-                        .into_boxed_slice(),
-                    ),
-                },
-            );
-            let node = self.lower_located_body_with_provenance(
-                locator,
-                verter_session_query::declarations::TypeDeclKind::Alias,
-                &[],
-                &prepared.name_resolution,
-                env,
-                scope,
-                scope_payload,
-                shadowing,
-                substitutions,
-                context,
-            );
-            match groups.last_mut() {
-                Some(group) if current_block == Some(block) => group.push(node),
-                _ => groups.push(vec![node]),
+                );
+                SignatureJob {
+                    prepared: prepared.clone(),
+                    locator,
+                    block,
+                    opens_declaration: position == 0,
+                }
+            })
+            .collect()
+    }
+
+    /// The next signature `signatures` lowers: its own declaration's, then
+    /// each merged declaration's in turn, read as its turn comes. `Some(None)`
+    /// once every one lowered; `None` when a merged declaration has no
+    /// prepared value, which leaves the value without a type.
+    fn next_value_signature(
+        &self,
+        signatures: &mut SignatureLowering,
+    ) -> Option<Option<SignatureJob>> {
+        loop {
+            if let Some(job) = signatures.jobs.pop_front() {
+                signatures.lowering = Some((job.block, job.opens_declaration));
+                return Some(Some(job));
             }
-            current_block = Some(block);
+            let Some(peer) = signatures.peers.pop_front() else {
+                return Some(None);
+            };
+            let (_, _, _, peer_prepared) = self.effective_prepared_value_decl(
+                &peer.canonical_id,
+                peer.owner,
+                &peer.symbol_name,
+            )?;
+            signatures
+                .jobs
+                .extend(self.value_signature_jobs(&peer_prepared));
         }
-        groups
+    }
+
+    /// Compose a function value's lowered signatures into its type: one
+    /// surface, or one overload arm per declaration it merges, after the
+    /// augmenting blocks' overloads of an exported function. Also the files
+    /// those blocks live in, and whether one of them was unobservable.
+    fn finish_value_signatures(
+        &self,
+        signatures: SignatureLowering,
+        scope: &NodeScopeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> (
+        SemanticNodeId,
+        Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+        bool,
+    ) {
+        let SignatureLowering {
+            own,
+            is_class,
+            mut groups,
+            ..
+        } = signatures;
+        let mut augmentation_roots = Vec::new();
+        let mut augmentation_unobservable = false;
+        // An EXPORTED function of a module takes further overloads from
+        // every `declare module` block that augments it, one group per
+        // block after the declaration's own: call resolution reads them
+        // later-declaration-first, as the checker does.
+        if !is_class {
+            if let Some(contributions) = self.exported_function_augmentations(&own, context) {
+                for root in &contributions.contributor_roots {
+                    augmentation_roots.push((root.canonical.clone(), root.whole_hash));
+                }
+                augmentation_unobservable |= contributions.source_env_unobservable;
+                groups.extend(contributions.signature_groups);
+            }
+        }
+        let node = if !is_class && groups.len() > 1 {
+            self.merged_declaration_signatures_node(groups)
+        } else {
+            let signature_nodes: Vec<SemanticNodeId> = groups.into_iter().flatten().collect();
+            self.value_signature_surface(signature_nodes, is_class, scope)
+        };
+        (node, augmentation_roots, augmentation_unobservable)
     }
 
     /// A function value's signatures as one surface: its call signatures,
@@ -5461,7 +5846,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     pub(super) fn drain_instantiate(
         &self,
         build: &mut InstantiateBuild,
-        mut delivery: Option<SemanticNodeId>,
+        mut delivery: Option<
+            crate::project_semantic_dispatch::locator_view_worklist::ProjectionDelivery,
+        >,
     ) -> InstantiatePoll {
         verter_audit::attribute_scope!(Instantiate);
         loop {
@@ -5661,7 +6048,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     fn drain_instantiated_body(
         &self,
         build: &mut InstantiateBuild,
-        delivery: Option<SemanticNodeId>,
+        delivery: Option<
+            crate::project_semantic_dispatch::locator_view_worklist::ProjectionDelivery,
+        >,
     ) -> BodyPoll {
         let InstantiateBuild {
             prepared,
@@ -7469,32 +7858,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         )
     }
 
-    /// The `declare module "…"` blocks that augment the module FILE
-    /// `module` — a block whose specifier, resolved from the file declaring
-    /// it, is `module` — in declaration precedence order. The files that
-    /// can augment it depend on it, so they are indexed first, and the
-    /// augmenter set is observed as [`Self::ambient_module_blocks`]
-    /// observes it.
-    pub(super) fn module_file_augmentation_blocks(&self, module: &str) -> Vec<AmbientModuleBlock> {
-        use verter_session_query::declarations::AugmentationScopeKind;
-        use verter_session_query::resolution::AugmentationTargetKind;
-        for rdep in self.ctx.reverse_dependency_canonicals(module) {
-            let _ = self.transaction_indexed_record(&rdep);
-        }
-        self.module_augmentation_blocks(
-            module,
-            AugmentationTargetKind::ResolvedRelativeCanonical(Arc::from(module)),
-            module,
-            |augmenter, block_scope| match block_scope {
-                AugmentationScopeKind::Module(specifier) => self
-                    .ctx
-                    .resolve_type_dependency_canonical(augmenter, specifier)
-                    .is_some_and(|resolved| resolved == module),
-                AugmentationScopeKind::Global => false,
-            },
-        )
-    }
-
     /// The `declare module` blocks the augmentation index lists for
     /// `target`, filtered by `declares(augmenter, scope)`, in declaration
     /// precedence order, with the augmenter set observed onto the active
@@ -8876,7 +9239,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         lowering: &mut BodyLowering,
         inputs: &crate::project_semantic_dispatch::locator_view::LocatorViewInputs<'_>,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
-        delivery: Option<SemanticNodeId>,
+        delivery: Option<
+            crate::project_semantic_dispatch::locator_view_worklist::ProjectionDelivery,
+        >,
     ) -> BodyPoll {
         let projection = match lowering {
             BodyLowering::Ready(node) => return BodyPoll::Done(*node, false),
@@ -9517,17 +9882,44 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         name: &str,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<SemanticNodeId> {
+        let (member_scope, mut members) =
+            self.value_member_plan(canonical, owner, symbol, prepared, name, context)?;
+        let mut substitutions = Vec::new();
+        while let Some((ordinal, facts)) = members.positions.pop_front() {
+            let value = self.lower_located_body_with_provenance(
+                members.locator(ordinal),
+                verter_session_query::declarations::TypeDeclKind::Alias,
+                &members.class_type_params,
+                &prepared.name_resolution,
+                &member_scope.env,
+                &member_scope.scope,
+                member_scope.scope_payload.as_ref(),
+                &member_scope.shadowing,
+                &mut substitutions,
+                members.context,
+            );
+            members.record(facts, value);
+        }
+        Some(self.finish_value_members(members, member_scope.scope))
+    }
+
+    /// The own member positions of `name` the value's authored object or
+    /// class declares, and the scope their values lower in; `None` when it
+    /// declares none (or a spread or computed key may declare it).
+    fn value_member_plan(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        symbol: &str,
+        prepared: &verter_session_query::type_solver::PreparedValueDecl,
+        name: &str,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<(ValueMemberScope, ValueMembers)> {
         use verter_type_expr::facts::ObjectMemberFact;
         let shape = prepared.object_shape.as_ref()?;
         // Each own member position of the name, with its modifiers.
-        type MemberFacts = (
-            bool,
-            bool,
-            Option<verter_type_expr::ObjectMethodKind>,
-            bool,
-            verter_type_expr::MemberVisibility,
-        );
-        let mut positions: Vec<(u32, MemberFacts)> = Vec::new();
+        let mut positions: std::collections::VecDeque<(u32, ValueMemberFacts)> =
+            std::collections::VecDeque::new();
         for (raw_index, member) in shape.members.iter().enumerate() {
             let ordinal = u32::try_from(raw_index).unwrap_or(u32::MAX);
             let (key, optional, readonly, method_kind, has_body, visibility) = match member {
@@ -9560,9 +9952,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if spelling != name {
                 continue;
             }
-            positions.push((
+            positions.push_back((
                 ordinal,
-                (optional, readonly, method_kind, has_body, visibility),
+                ValueMemberFacts {
+                    optional,
+                    readonly,
+                    method_kind,
+                    has_body,
+                    visibility,
+                },
             ));
         }
         if positions.is_empty() {
@@ -9603,56 +10001,33 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         } else {
             (FxHashMap::default(), Vec::new())
         };
-        let mut substitutions = Vec::new();
-        let mut own: Vec<SurfaceEntry> = Vec::with_capacity(positions.len());
-        for (ordinal, (optional, readonly, method_kind, has_body, visibility)) in positions {
-            let value = self.lower_located_body_with_provenance(
-                verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
-                    verter_type_expr::locators::TypeBodySlot {
-                        anchor: verter_type_expr::locators::AuthoredAnchor {
-                            canonical_id: verter_type_expr::OwnedStr::from(canonical),
-                            owner,
-                            symbol: verter_type_expr::OwnedStr::from(symbol),
-                            space: verter_type_expr::locators::LocatorSymbolSpace::Value,
-                        },
-                        path: verter_type_expr::OwnedSlice::from(
-                            vec![
-                                verter_type_expr::locators::TypeBodyPathStep::Member { ordinal },
-                                verter_type_expr::locators::TypeBodyPathStep::MemberValue,
-                            ]
-                            .into_boxed_slice(),
-                        ),
-                    },
-                ),
-                verter_session_query::declarations::TypeDeclKind::Alias,
-                &class_type_params,
-                &prepared.name_resolution,
-                &env,
-                &scope,
-                scope_payload.as_ref(),
-                &shadowing,
-                &mut substitutions,
+        let own = Vec::with_capacity(positions.len());
+        Some((
+            ValueMemberScope {
+                env,
+                scope,
+                scope_payload,
+                shadowing,
+            },
+            ValueMembers {
+                name: verter_type_expr::OwnedStr::from(name),
+                canonical: verter_type_expr::OwnedStr::from(canonical),
+                owner,
+                symbol: verter_type_expr::OwnedStr::from(symbol),
+                positions,
+                class_type_params,
                 context,
-            );
-            own.push(SurfaceEntry::Member(SurfaceMember {
-                key: crate::semantic_query::AuthoredPropertyKey::string(name),
-                value,
-                optional,
-                readonly,
-                method_kind,
-                has_implementation_body: has_body,
-                visibility,
-                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-                spans: verter_type_expr::MemberSpans::default(),
-                declaration_origin: Some(verter_type_expr::OwnedStr::from(canonical)),
-                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::default(),
-                merge_role: crate::semantic_query::MergeRoleStamp::default(),
-            }));
-        }
-        Some(self.graph().intern_node_with_scope(
-            SemanticNodeData::Object(SurfaceView::from_entries(own, None, false)),
-            scope,
+                own,
+            },
         ))
+    }
+
+    /// The member surface of the values `members` lowered.
+    fn finish_value_members(&self, members: ValueMembers, scope: NodeScopeId) -> SemanticNodeId {
+        self.graph().intern_node_with_scope(
+            SemanticNodeData::Object(SurfaceView::from_entries(members.own, None, false)),
+            scope,
+        )
     }
 
     construction_ordinal_seam! {
@@ -19787,14 +20162,46 @@ struct MappedIndexKey {
 pub(super) enum TypeofStart {
     /// The `typeof` is answered.
     Done(Box<crate::project_semantic_dispatch::walk::QueryBuildOutput>),
-    /// Its value's authored annotation is being lowered.
+    /// Its value's authored value position is being lowered.
     Build(Box<TypeofBuild>),
 }
 
-/// A `typeof` whose value's authored annotation is lowering, between the
-/// steps of its frame: the lowering's scope, the projection itself, and
-/// what the build's output roots on.
+/// The declaration scope a `typeof`'s value-position lowering runs in.
+struct TypeofBodyScope<'p> {
+    prepared: &'p verter_retention::heap_size::OwnedValue<
+        verter_session_query::type_solver::PreparedValueDecl,
+    >,
+    env: FxHashMap<String, SemanticNodeId>,
+    scope: NodeScopeId,
+    scope_payload: Option<crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
+    shadowing: crate::resolver_core::scope_shadowing::ScopeShadowing,
+    substitutions: Vec<(Arc<str>, SemanticNodeId)>,
+}
+
+/// The authored value position of `prepared`'s own declaration: where its
+/// inferred initializer type and its const-object shape are recovered.
+fn value_position_locator(
+    prepared: &verter_session_query::type_solver::PreparedValueDecl,
+) -> verter_type_expr::locators::AuthoredBodyLocator {
+    verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+        verter_type_expr::locators::TypeBodySlot {
+            anchor: verter_type_expr::locators::AuthoredAnchor {
+                canonical_id: prepared.root_identity.canonical_id.clone(),
+                owner: prepared.root_identity.owner,
+                symbol: prepared.root_identity.symbol_name.clone(),
+                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+            },
+            path: verter_type_expr::OwnedSlice::default(),
+        },
+    )
+}
+
+/// A `typeof` whose value position (its annotation, its inferred
+/// initializer or its const-object shape) or one of whose signatures is
+/// lowering, between the steps of its frame: the lowering's scope, the
+/// projection itself, what follows it, and what the build's output roots on.
 pub(super) struct TypeofBuild {
+    /// The declaration the body lowering now belongs to.
     prepared: verter_retention::heap_size::OwnedValue<
         verter_session_query::type_solver::PreparedValueDecl,
     >,
@@ -19804,11 +20211,201 @@ pub(super) struct TypeofBuild {
     shadowing: crate::resolver_core::scope_shadowing::ScopeShadowing,
     substitutions: Vec<(Arc<str>, SemanticNodeId)>,
     self_value: Option<verter_type_expr::locators::AuthoredAnchor>,
-    body: BodyLowering,
+    body: TypeofBody,
+    then: TypeofThen,
     value_root: ValueRootKey,
     path: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
     context: crate::semantic_query::ProjectionReductionContext,
     observed_hash: verter_session_query::analysis::types::Hash16,
+}
+
+/// What a `typeof` build evaluates between its frame's steps.
+enum TypeofBody {
+    /// Nothing yet: the build is about to begin its first body.
+    Unstarted,
+    /// A declaration body's lowering.
+    Lowering(BodyLowering),
+    /// The value's initializer, an expression source.
+    Expression(Box<super::flow_return::ExpressionSourceRun>),
+}
+
+/// What a `typeof` build's lowered body is.
+enum TypeofThen {
+    /// The value's type.
+    Value,
+    /// One of the value's signatures, the rest of which follow it.
+    Signatures(Box<SignatureLowering>),
+    /// The value of one of the member positions a member path reads where
+    /// the value declares it; the rest follow it.
+    Member(Box<MemberLowering>),
+}
+
+/// The modifiers of one own member position.
+#[derive(Clone, Copy)]
+struct ValueMemberFacts {
+    optional: bool,
+    readonly: bool,
+    method_kind: Option<verter_type_expr::ObjectMethodKind>,
+    has_body: bool,
+    visibility: verter_type_expr::MemberVisibility,
+}
+
+/// The scope a value's own member positions lower in.
+struct ValueMemberScope {
+    env: FxHashMap<String, SemanticNodeId>,
+    scope: NodeScopeId,
+    scope_payload: Option<crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
+    shadowing: crate::resolver_core::scope_shadowing::ScopeShadowing,
+}
+
+/// The own member positions of one name a value's authored object or class
+/// declares, lowering one at a time, and the members lowered so far.
+pub(super) struct ValueMembers {
+    name: verter_type_expr::OwnedStr,
+    canonical: verter_type_expr::OwnedStr,
+    owner: verter_type_expr::TopLevelOwnerId,
+    symbol: verter_type_expr::OwnedStr,
+    positions: std::collections::VecDeque<(u32, ValueMemberFacts)>,
+    class_type_params: Vec<verter_type_expr::facts::NarrowTypeParam>,
+    context: crate::semantic_query::ProjectionReductionContext,
+    own: Vec<SurfaceEntry>,
+}
+
+impl ValueMembers {
+    /// The authored value position of the member at `ordinal`.
+    fn locator(&self, ordinal: u32) -> verter_type_expr::locators::AuthoredBodyLocator {
+        verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+            verter_type_expr::locators::TypeBodySlot {
+                anchor: verter_type_expr::locators::AuthoredAnchor {
+                    canonical_id: self.canonical.clone(),
+                    owner: self.owner,
+                    symbol: self.symbol.clone(),
+                    space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+                },
+                path: verter_type_expr::OwnedSlice::from(
+                    vec![
+                        verter_type_expr::locators::TypeBodyPathStep::Member { ordinal },
+                        verter_type_expr::locators::TypeBodyPathStep::MemberValue,
+                    ]
+                    .into_boxed_slice(),
+                ),
+            },
+        )
+    }
+
+    /// Record the lowered `value` of a member position with its modifiers.
+    fn record(&mut self, facts: ValueMemberFacts, value: SemanticNodeId) {
+        self.own.push(SurfaceEntry::Member(SurfaceMember {
+            key: crate::semantic_query::AuthoredPropertyKey::string(self.name.as_ref()),
+            value,
+            optional: facts.optional,
+            readonly: facts.readonly,
+            method_kind: facts.method_kind,
+            has_implementation_body: facts.has_body,
+            visibility: facts.visibility,
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+            spans: verter_type_expr::MemberSpans::default(),
+            declaration_origin: Some(self.canonical.clone()),
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::default(),
+            merge_role: crate::semantic_query::MergeRoleStamp::default(),
+        }));
+    }
+}
+
+/// A member path's `typeof` lowering the member where the value declares
+/// it, one position at a time: the positions, the one lowering now, and
+/// the declaring file the member roots on.
+pub(super) struct MemberLowering {
+    members: ValueMembers,
+    current: Option<ValueMemberFacts>,
+    declaring: verter_type_expr::OwnedStr,
+}
+
+/// A function value's signatures, lowering one at a time: its own
+/// declaration's, then those of each later file's declaration of a global
+/// function. Module augmentations join once in `finish_value_signatures`.
+pub(super) struct SignatureLowering {
+    /// The function's own declaration.
+    own: verter_retention::heap_size::OwnedValue<
+        verter_session_query::type_solver::PreparedValueDecl,
+    >,
+    is_class: bool,
+    /// The signatures queued to lower.
+    jobs: std::collections::VecDeque<SignatureJob>,
+    /// The merged declarations whose signatures follow, not yet read.
+    peers: std::collections::VecDeque<ResolvedRootIdentity>,
+    /// The signature groups lowered so far, one per declaration block.
+    groups: Vec<Vec<SemanticNodeId>>,
+    /// The block of the last signature grouped.
+    current_block: Option<Option<u32>>,
+    /// The block of the signature lowering now, and whether it opens its
+    /// declaration's groups.
+    lowering: Option<(Option<u32>, bool)>,
+}
+
+/// One visible signature of a function value to lower.
+struct SignatureJob {
+    /// The declaration that declares it.
+    prepared: verter_retention::heap_size::OwnedValue<
+        verter_session_query::type_solver::PreparedValueDecl,
+    >,
+    locator: verter_type_expr::locators::AuthoredBodyLocator,
+    /// The declaration block it groups by.
+    block: Option<u32>,
+    /// The first of its declaration's signatures.
+    opens_declaration: bool,
+}
+
+/// How a function value's signatures lowered.
+enum SignaturesLowered {
+    /// Into its type, with the augmenting files it roots on and whether one
+    /// of them was unobservable.
+    Lowered(
+        (
+            SemanticNodeId,
+            Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+            bool,
+        ),
+    ),
+    /// A merged declaration has no prepared value.
+    Miss,
+    /// The lowering continues in the build handed over.
+    Suspended,
+}
+
+impl SignatureLowering {
+    /// The signatures of `own` and its merged global declarations.
+    fn new<C: crate::resolver_core::ResolverCapabilities>(
+        dispatch: &ProjectSemanticDispatch<'_, C>,
+        own: &verter_retention::heap_size::OwnedValue<
+            verter_session_query::type_solver::PreparedValueDecl,
+        >,
+        is_class: bool,
+        global_peers: Vec<ResolvedRootIdentity>,
+    ) -> Self {
+        Self {
+            own: own.clone(),
+            is_class,
+            jobs: dispatch.value_signature_jobs(own).into(),
+            peers: global_peers.into(),
+            groups: Vec::new(),
+            current_block: None,
+            lowering: None,
+        }
+    }
+
+    /// Group the signature that just lowered to `node`.
+    fn record(&mut self, node: SemanticNodeId) {
+        let (block, opens_declaration) = self.lowering.take().expect("a signature was lowering");
+        if opens_declaration {
+            self.current_block = None;
+        }
+        match self.groups.last_mut() {
+            Some(group) if self.current_block == Some(block) => group.push(node),
+            _ => self.groups.push(vec![node]),
+        }
+        self.current_block = Some(block);
+    }
 }
 
 /// A declaration body's lowering in progress.
