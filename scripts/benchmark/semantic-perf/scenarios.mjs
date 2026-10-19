@@ -58,6 +58,22 @@ export function allScenarios() {
     ),
   );
 
+  out.push(
+    scenario(
+      "scale-ambient-export-equals",
+      "ambient-module",
+      "read a named type exported by an ambient module's assigned namespace",
+      'import type { Opt } from "pkg";\n',
+      'Opt["k"]',
+      {
+        files: {
+          "pkg.d.ts":
+            'declare module "pkg" { namespace NS { interface Opt { k: 99 } } export = NS; }\n',
+        },
+      },
+    ),
+  );
+
   // Conditional mapped values over a large, concrete source key domain.
   for (const count of [1000, 3000, 10000]) {
     out.push(
@@ -732,6 +748,7 @@ export const UNCOVERED = [
  * Tiers nest: standard includes quick, stress includes both.
  */
 export const SCENARIO_TIERS = {
+  "scale-ambient-export-equals": "quick",
   "mapped-index-tags-1000": "quick",
   "mapped-index-tags-3000": "standard",
   "mapped-index-tags-10000": "stress",

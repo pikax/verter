@@ -12,6 +12,82 @@
 
 use super::checker_probe_lane_tests::{mismatches_in, ProbeProject};
 
+const ASSIGNED_NAMESPACE: &str = r#"
+declare module "pkg" {
+  namespace NS {
+    interface Opt { k: 99 }
+    type Box<T> = { value: T };
+    namespace Inner { interface Item { k: 7 } }
+  }
+  export = NS;
+}
+declare module "other-pkg" {
+  namespace NS { interface Opt { k: -1 } }
+  export = NS;
+}
+"#;
+
+#[test]
+fn an_ambient_assigned_namespace_exports_its_types() {
+    let files = [("assigned.d.ts", ASSIGNED_NAMESPACE)];
+    let failures = mismatches_in(
+        ProbeProject {
+            files: &files,
+            ..ProbeProject::default()
+        },
+        r#"
+import type { Opt, Opt as Renamed, Box, Inner } from "pkg";
+import * as Pkg from "pkg";
+import type { Opt as OtherOpt } from "other-pkg";
+"#,
+        &[
+            ("Opt[\"k\"]", "99"),
+            ("Renamed[\"k\"]", "99"),
+            ("Pkg.Opt[\"k\"]", "99"),
+            ("Box<42>[\"value\"]", "42"),
+            ("Pkg.Box<43>[\"value\"]", "43"),
+            ("Inner.Item[\"k\"]", "7"),
+            ("Pkg.Inner.Item[\"k\"]", "7"),
+            ("OtherOpt[\"k\"]", "-1"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn an_ambient_assigned_namespace_type_tracks_contributor_edits() {
+    use super::checker_probe_lane_tests::{probe_host, upsert_probe_files, with_probe_on_host};
+    use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node;
+
+    let files = [("assigned.d.ts", ASSIGNED_NAMESPACE)];
+    let project = ProbeProject {
+        files: &files,
+        ..ProbeProject::default()
+    };
+    let host = probe_host(project);
+    let source = r#"import type { Opt } from "pkg"; import * as Pkg from "pkg";"#;
+    let edited = ASSIGNED_NAMESPACE.replace("k: 99", "k: 100");
+    let retargeted = edited.replace(
+        "export = NS",
+        "namespace Other { interface Opt { k: 101 } } export = Other",
+    );
+    for probe in ["Opt[\"k\"]", "Pkg.Opt[\"k\"]"] {
+        for (ambient, expected) in [
+            (ASSIGNED_NAMESPACE, "99"),
+            (edited.as_str(), "100"),
+            (retargeted.as_str(), "101"),
+            (ASSIGNED_NAMESPACE, "99"),
+        ] {
+            upsert_probe_files(&host, &[("assigned.d.ts", ambient)]);
+            for _ in 0..2 {
+                with_probe_on_host(&host, project, source, probe, |dispatch, node| {
+                    assert_eq!(render_node(dispatch, node, 0), expected, "{probe}");
+                });
+            }
+        }
+    }
+}
+
 const AMBIENT: &str = "\
 declare module \"amb\" {
   export function x(): \"x\";

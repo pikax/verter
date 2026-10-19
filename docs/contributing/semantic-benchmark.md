@@ -278,8 +278,10 @@ What is deliberately **not** equal, and how it is reported:
 
 Expected answers are **measured** on tsc 7.0.2, independently of the
 benchmark's tsc arm, by `scripts/benchmark/semantic-perf/measure-expected.mjs`
-in all four `strictNullChecks` × `noImplicitAny` settings, and committed as
-`scripts/benchmark/semantic-perf/expected.json`. Every cell carries its own
+in all four `strictNullChecks` × `noImplicitAny` settings. The default reference is
+`scripts/benchmark/semantic-perf/expected.json`; `--reference <file>` selects a
+fresh measurement outside the checkout. The run records its path and digest,
+which the standalone validator checks again. Every cell carries its own
 immutable provenance (the method — measuring suffix, library, verified tsc
 executable, platform, limits, launcher — plus the tsconfig and source digests
 and a digest of tsc's type output). A scenario may carry its own `method`;
@@ -778,7 +780,7 @@ Useful options (`--help` lists all, with each tier's time): `--tier quick|standa
 `--only relation,spread` (scenario ids or prefixes, from the whole catalog), `--repeat 4`, `--warmup 1`, `--settings all` (all four
 `strictNullChecks` × `noImplicitAny` settings), `--arms verter,tsc-api`,
 `--mem-mb 8192`, `--infra-mb 1024`, `--timeout-ms 60000` (tier default),
-`--startup-allowance-ms 10000` (tier default), `--out <dir>`.
+`--startup-allowance-ms 10000` (tier default), `--out <dir>`, `--reference <file>`.
 
 ### Re-measuring the reference
 
@@ -787,9 +789,14 @@ affected references (every tsc process contained; `--resume` keeps cells
 already measured on the same source by the same method):
 
 ```bash
-node scripts/benchmark/semantic-perf/measure-expected.mjs --only <ids>                  # under verter-supervise
-node scripts/benchmark/semantic-perf/measure-expected.mjs --only <ids> --allow-sampled   # macOS
+node scripts/benchmark/semantic-perf/measure-expected.mjs --only <ids> --out <evidence-dir>/reference.json
+node scripts/benchmark/semantic-perf.mjs --only <ids> --reference <evidence-dir>/reference.json
 ```
+
+On macOS, add `--allow-sampled` to both commands. Measurement `--out` selects
+the reference output file; benchmark `--out` still selects the run directory.
+Keep fresh measurements and transcripts with the run evidence, outside the
+checkout, rather than refreshing a committed record to make a check pass.
 
 The run fails validation until the reference matches the scenario sources,
 the library and the method.

@@ -112,6 +112,7 @@ export const USAGE = `usage: node scripts/benchmark/semantic-perf.mjs [options]
                           every tier: 1 warmup + 3 measured fresh processes per arm, 3 warm repeats in one
                           live process per arm; deadline 60 s (quick), 120 s (standard), 600 s (stress)
   --out <dir>             output directory (default: target/semantic-perf/<timestamp>)
+  --reference <file>      measured CLI reference (default: scripts/benchmark/semantic-perf/expected.json)
   --only <a,b>            only these scenarios and sessions (id or id prefix, from the whole catalog;
                           overrides --tier)
   --settings <s>          strict (default) | all  (the four strictNullChecks x noImplicitAny settings)
@@ -151,6 +152,7 @@ function parseArgs(argv) {
   const opts = {
     tier: "quick",
     out: null,
+    reference: EXPECTED_FILE,
     only: [],
     settings: "strict",
     arms: DEFAULT_ARMS,
@@ -191,6 +193,9 @@ function parseArgs(argv) {
       }
       case "--out":
         opts.out = resolve(next());
+        break;
+      case "--reference":
+        opts.reference = resolve(next());
         break;
       case "--only":
         opts.only = next().split(",").filter(Boolean);
@@ -272,10 +277,11 @@ function parseArgs(argv) {
   return opts;
 }
 
-function loadExpected() {
-  if (!existsSync(EXPECTED_FILE))
-    throw new Error(`the measured reference ${EXPECTED_FILE} is missing; run measure-expected.mjs`);
-  return JSON.parse(readFileSync(EXPECTED_FILE, "utf8"));
+function loadExpected(file) {
+  if (!existsSync(file))
+    throw new Error(`the measured reference ${file} is missing; run measure-expected.mjs`);
+  const source = readFileSync(file, "utf8");
+  return { value: JSON.parse(source), sha256: sha256Text(source) };
 }
 
 /**
@@ -594,6 +600,7 @@ export async function main(argv) {
     console.log(USAGE);
     return 0;
   }
+  const { value: expected, sha256: expectedHash } = loadExpected(opts.reference);
   if (process.platform === "darwin" && !opts.allowSampled) {
     throw new Error(
       "macOS has no kernel-enforced process-tree memory cap: the supervisor samples. Re-run with --allow-sampled to consent; every record will say `containment: sampled`.",
@@ -688,7 +695,6 @@ export async function main(argv) {
   // the two reads means the binary's source is unknown.
   const buildInputsAfterBuild = sourceTree(ROOT, BUILD_INPUTS);
 
-  const expected = loadExpected();
   const libText = readFileSync(LIB_FILE, "utf8");
   // --only picks from the whole catalog; otherwise the tier decides.
   const scenarios = opts.only.length
@@ -879,8 +885,8 @@ export async function main(argv) {
       binaries,
       binariesAfter,
       expected: {
-        file: EXPECTED_FILE,
-        sha256: sha256File(EXPECTED_FILE),
+        file: opts.reference,
+        sha256: expectedHash,
         schema: expected.schema,
         measuredWith: expected.measuredWith,
       },
@@ -906,6 +912,10 @@ export async function main(argv) {
   };
   run.summary = summarize(run, expected, scenarios, sessions);
   const validation = validateRun(run, expected, scenarios, { sessions });
+  if (sha256File(opts.reference) !== expectedHash) {
+    validation.failures.push("the measured reference changed during the run");
+    validation.ok = false;
+  }
   run.validation = validation;
   writeFileSync(join(outDir, "results.json"), JSON.stringify(run, null, 1));
   writeFileSync(join(outDir, "results.md"), renderMarkdown(run));

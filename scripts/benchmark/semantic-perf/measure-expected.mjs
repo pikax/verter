@@ -5,7 +5,7 @@
 //
 //   node scripts/benchmark/semantic-perf/measure-expected.mjs
 //       [--only a,b] [--resume] [--supervisor <exe> | --via-tsc-capped <tsc-capped.mjs>]
-//       [--mem-mb 8192] [--timeout-ms 300000] [--allow-sampled] [--typescript-from <dir>] [--work <dir>]
+//       [--mem-mb 8192] [--timeout-ms 300000] [--allow-sampled] [--typescript-from <dir>] [--work <dir>] [--out <file>]
 //
 // Method (the CLI, independent of the API the benchmark's tsc arm uses): the
 // scenario module plus MEASURING_SUFFIX,
@@ -139,6 +139,7 @@ export function parseMeasurement(stdout, source) {
 }
 
 async function main() {
+  const expectedFile = resolve(arg("--out", EXPECTED));
   const only = (arg("--only", "") ?? "").split(",").filter(Boolean);
   const memMb = Number(arg("--mem-mb", 8192));
   const timeoutMs = Number(arg("--timeout-ms", 300_000));
@@ -164,7 +165,7 @@ async function main() {
   const methodKey = JSON.stringify(method);
   const previous = (() => {
     try {
-      return JSON.parse(readFileSync(EXPECTED, "utf8"));
+      return JSON.parse(readFileSync(expectedFile, "utf8"));
     } catch {
       return null;
     }
@@ -182,7 +183,8 @@ async function main() {
     out.scenarios = Object.fromEntries(
       Object.entries(out.scenarios).sort(([a], [b]) => a.localeCompare(b)),
     );
-    writeFileSync(EXPECTED, JSON.stringify(out, null, 1) + "\n");
+    mkdirSync(dirname(expectedFile), { recursive: true });
+    writeFileSync(expectedFile, JSON.stringify(out, null, 1) + "\n");
   };
   for (const scenario of selectScenarios(only)) {
     const entry = { sourceSha256: sha256Text(scenario.source), settings: {} };
@@ -296,7 +298,7 @@ async function main() {
     save();
   }
   save();
-  console.log(`wrote ${EXPECTED}`);
+  console.log(`wrote ${expectedFile}`);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

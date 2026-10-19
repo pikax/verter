@@ -665,11 +665,11 @@ async function cli(argv) {
     return 2;
   }
   const run = JSON.parse(readFileSync(path, "utf8"));
-  const expectedPath = join(HERE, "expected.json");
+  const expectedPath = run.meta?.expected?.file ?? join(HERE, "expected.json");
   const expected = JSON.parse(readFileSync(expectedPath, "utf8"));
   const failures = [];
   if (sha256File(expectedPath) !== run.meta?.expected?.sha256) {
-    failures.push("the measured reference changed since the run (expected.json digest differs)");
+    failures.push(`the measured reference changed since the run (${expectedPath} digest differs)`);
   }
   failures.push(...rawFileProblems(run));
   const result = validateRun(run, expected, allScenarios(), {

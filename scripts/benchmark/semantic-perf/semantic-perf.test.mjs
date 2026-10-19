@@ -31,6 +31,7 @@ import {
   ROOT,
   TIER_DEFAULTS,
   materialize,
+  main,
 } from "./run.mjs";
 import {
   allScenarios,
@@ -202,6 +203,18 @@ test("the canonical form fails closed on syntax it does not know", () => {
 });
 
 // ---------------------------------------------------------------- catalog and schedule
+
+test("a selected reference is checked before building probes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "semantic-reference-"));
+  const reference = join(dir, "missing.json");
+  try {
+    await assert.rejects(main(["--reference", reference]), (error) =>
+      error.message.includes(reference),
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("every scenario entry declares __BenchInit and __Probe once", () => {
   const ids = new Set();

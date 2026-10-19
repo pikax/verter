@@ -303,6 +303,13 @@ pub(super) enum CarrierFinish {
 /// Keeping this continuation independent of [`CarrierResolverContext`] is what
 /// lets the projection worklist resume it after all argument nodes complete.
 pub(super) enum CarrierArgsContinuation {
+    ExternalModule {
+        specifier: String,
+        decl_name: String,
+        name: Arc<str>,
+        scope: NodeScopeId,
+        context: ProjectionReductionContext,
+    },
     Intern {
         head: RefHeadResolution,
         name: Arc<str>,
@@ -437,6 +444,34 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         in_deferred_position: &dyn Fn() -> bool,
     ) -> CarrierFinish {
         match continuation {
+            CarrierArgsContinuation::ExternalModule {
+                specifier,
+                decl_name,
+                name,
+                scope,
+                context,
+            } => CarrierFinish::Node(
+                self.resolve_external_module_augmentation(
+                    &specifier, &decl_name, &type_args, &scope, context,
+                )
+                .unwrap_or_else(|| {
+                    if matches!(
+                        context.mode,
+                        ProjectionMode::Navigate
+                            | ProjectionMode::Skeleton
+                            | ProjectionMode::Shallow
+                    ) {
+                        self.intern_ref_head_carrier(
+                            RefHeadResolution::Unresolved,
+                            &name,
+                            &scope,
+                            type_args,
+                        )
+                    } else {
+                        self.opaque(QueryError::Miss)
+                    }
+                }),
+            ),
             CarrierArgsContinuation::Intern { head, name, scope } => {
                 CarrierFinish::Node(self.intern_ref_head_carrier(head, &name, &scope, type_args))
             }
@@ -976,14 +1011,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             _ => false,
         };
         if !resolves_to_file {
-            if let NodeScopeId::File { canonical_id, .. } = scope {
-                if let Some(merged) = self.resolve_external_module_augmentation(
-                    canonical_id.as_ref(),
-                    name.as_ref(),
-                    scope,
-                    reduction_context,
-                ) {
-                    return CarrierResolutionPlan::complete(merged);
+            if let NodeScopeId::File {
+                canonical_id,
+                owner,
+                ..
+            } = scope
+            {
+                if let Some((specifier, decl_name)) =
+                    self.external_module_type_target(canonical_id.as_ref(), *owner, name.as_ref())
+                {
+                    return CarrierResolutionPlan::NeedsArgs(
+                        CarrierArgsContinuation::ExternalModule {
+                            specifier,
+                            decl_name,
+                            name: Arc::clone(name),
+                            scope: scope.clone(),
+                            context: reduction_context,
+                        },
+                    );
                 }
             }
         }

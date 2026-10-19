@@ -7951,7 +7951,69 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 == Some(&block.scope)
     }
 
-    /// Resolve a bare type name imported from a NON-FILE (external / ambient)
+    /// Route an imported type through an ambient module's retained inventory.
+    /// The imported spelling, rather than its local alias, selects the member.
+    /// An assigned namespace contributes its exported qualified members under
+    /// the module's own scope; no file-scope identity is fabricated for them.
+    pub(super) fn external_module_type_target(
+        &self,
+        importer: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+    ) -> Option<(String, String)> {
+        use verter_session_query::inputs::shallow::LexicalValueBinding;
+
+        let indexed = self.ctx.ensure_indexed_ready_serve(importer)?.indexed;
+        let (head, rest) = name.split_once('.').unwrap_or((name, ""));
+        let LexicalValueBinding::Import(target) =
+            indexed.shallow_state.visible_value_binding(owner, head)?
+        else {
+            return None;
+        };
+        let member = if target.is_namespace || target.is_import_equals() {
+            if rest.is_empty() {
+                return None;
+            }
+            rest.to_owned()
+        } else if rest.is_empty() {
+            target.imported_name.clone()
+        } else {
+            format!("{}.{rest}", target.imported_name)
+        };
+        let blocks = self.ambient_module_blocks(importer, &target.source_specifier);
+        let assigned = blocks.iter().find_map(|block| {
+            let assigned = block.export_assignment.as_ref()?;
+            let indexed = self
+                .ctx
+                .ensure_indexed_ready_serve(block.canonical.as_ref())?
+                .indexed;
+            let headers = &indexed.shallow_state.headers;
+            headers
+                .augmentation_namespace_blocks
+                .iter()
+                .any(|(scope, namespace)| {
+                    scope == &block.scope
+                        && namespace.owner == block.owner
+                        && namespace.qualified_name == assigned.as_ref()
+                })
+                .then(|| format!("{assigned}.{member}"))
+        });
+        let decl_name = assigned.unwrap_or(member);
+        let declared = blocks.iter().any(|block| {
+            self.ctx
+                .ensure_indexed_ready_serve(block.canonical.as_ref())
+                .is_some_and(|serve| {
+                    let headers = &serve.indexed.shallow_state.headers;
+                    headers
+                        .augmentation_type_header_in(&block.scope, block.owner, &decl_name)
+                        .is_some()
+                        && headers.namespace_member_is_exported(block.owner, &decl_name)
+                })
+        });
+        declared.then(|| (target.source_specifier.clone(), decl_name))
+    }
+
+    /// Resolve a type name imported from a NON-FILE (external / ambient)
     /// module specifier through `declare module "<spec>" { ... }` augmentation.
     ///
     /// This is the canonical Vue/Vite `vite/client` pattern: a virtual module
@@ -7966,40 +8028,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// peer-merge carrier the relative stitch uses (one merge engine, no source
     /// scan).
     ///
-    /// Returns `None` when `name` is not imported from a non-file specifier or
-    /// no `declare module` block contributes it (caller falls through to the
-    /// `Opaque(Miss)` sentinel). A relative / wildcard / global specifier is
+    /// Returns `None` when no `declare module` block contributes `name`.
+    /// The caller retains an unresolved carrier or returns a typed miss,
+    /// according to the projection mode. A relative / wildcard / global specifier is
     /// excluded by `augmenter_matches_target`'s `ExternalSpecifier` arm, so the
     /// index scan returns empty and this yields `None`.
     pub(super) fn resolve_external_module_augmentation(
         &self,
-        scope_canonical: &str,
+        specifier: &str,
         name: &str,
+        type_arguments: &[SemanticNodeId],
         scope: &NodeScopeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<SemanticNodeId> {
         use verter_session_query::facts::registry::InternedSpecifier;
         use verter_session_query::resolution::AugmentationTargetKind;
 
-        // The imported specifier for `name` in the importing file. Only a
-        // NON-FILE specifier reaches here: a specifier resolving to a workspace
-        // file would have resolved `name` through the normal import path before
-        // the miss.
-        let indexed = self
-            .ctx
-            .ensure_indexed_ready_serve(scope_canonical)?
-            .indexed;
-        let specifier = indexed
-            .shallow_state
-            .import_target(name)
-            .map(|t| t.source_specifier.clone())?;
+        let NodeScopeId::File { canonical_id, .. } = scope else {
+            return None;
+        };
+        let scope_canonical = canonical_id.as_ref();
 
         // Contributor discovery for ambient external modules is the
         // ingestion-time global contributor population: a program-root
         // `.d.ts` that nothing imports is recorded when its `IndexedReady`
         // publishes, so lookup does not scan program membership.
-        let target =
-            AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from(specifier.as_str()));
+        let target = AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from(specifier));
         let AugmentationContributions {
             contributor_nodes,
             // The external path DISCARDS the returned `contributor_roots`
@@ -8023,7 +8077,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             AugmentationContribution::TypeBody,
             target,
             name,
-            &[],
+            type_arguments,
             context,
             scope_canonical,
             None,
