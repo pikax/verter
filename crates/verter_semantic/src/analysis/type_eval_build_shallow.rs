@@ -673,6 +673,7 @@ impl<'a> Frame<'a> for DeclarationArrayFrame<'a> {
         }
         Ok(Step::Done(Value::Type(element_union_array(
             std::mem::take(&mut self.element_types),
+            budget,
         ))))
     }
 }
@@ -689,8 +690,15 @@ fn spread_element_types(element_types: &mut Vec<TypeExpr>, source: &TypeExpr) {
 
 /// The mutable array of the union of `element_types`, `any[]` for none.
 /// A literal element beside its widened primitive is that primitive
-/// (`["a" as "a", "b"]` is `string[]`).
-fn element_union_array(element_types: Vec<TypeExpr>) -> TypeExpr {
+/// (`["a" as "a", "b"]` is `string[]`), and a mutable declaration's
+/// widening, which makes equal elements of unequal literals, keeps one of
+/// each (`let flags = [true, false]` is `boolean[]`).
+fn element_union_array(element_types: Vec<TypeExpr>, budget: &InferenceState) -> TypeExpr {
+    let element_types = if budget.widen_fresh_positions {
+        dedupe_type_exprs(element_types)
+    } else {
+        element_types
+    };
     TypeExpr::Array {
         element: Arc::new(if element_types.is_empty() {
             TypeExpr::Primitive(PrimitiveName::Any)
@@ -821,6 +829,7 @@ impl<'a> Frame<'a> for ValueArrayFrame<'a> {
         }
         Ok(Step::Done(Value::Type(element_union_array(
             std::mem::take(&mut self.element_types),
+            budget,
         ))))
     }
 }
