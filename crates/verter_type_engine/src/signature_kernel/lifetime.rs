@@ -118,8 +118,64 @@ pub(super) struct EpochInner {
     /// that finds none; the epoch's storage stays charged for them until
     /// then. Inserted and reclaimed only under [`Self::graph_roots`], so a
     /// [`TokenRoot::Rooted`] token never also has a deferred root.
-    released_roots:
-        Mutex<rustc_hash::FxHashMap<u32, crate::semantic_query_memo::node_roots::NodeRootSet>>,
+    released_roots: Mutex<ReleasedRoots>,
+}
+
+/// The roots a close deferred for an epoch's holders, with the bucket
+/// backing the epoch's storage is charged for. A removal can lower
+/// `HashMap::capacity` through tombstones without freeing the allocation,
+/// so the charged backing moves only on growth or an explicit geometric
+/// shrink, never with the reported capacity.
+#[derive(Default)]
+struct ReleasedRoots {
+    roots: rustc_hash::FxHashMap<u32, crate::semantic_query_memo::node_roots::NodeRootSet>,
+    backing: usize,
+}
+
+impl ReleasedRoots {
+    const ENTRY: usize =
+        std::mem::size_of::<(u32, crate::semantic_query_memo::node_roots::NodeRootSet)>();
+
+    /// Bytes `buckets` charged buckets stand for, control bytes included.
+    fn backing_bytes(buckets: usize) -> usize {
+        buckets * (Self::ENTRY + 1)
+    }
+
+    /// Charge `storage` for backing the table grew past what it is charged
+    /// for.
+    fn settle_growth(&mut self, storage: &super::storage::EpochStorage) {
+        let capacity = self.roots.capacity();
+        if capacity > self.backing {
+            storage.add(Self::backing_bytes(capacity - self.backing));
+            self.backing = capacity;
+        }
+    }
+
+    /// Free the table once empty, or rebuild it at twice its entries once
+    /// its backing exceeds four times them, and settle the charge. The
+    /// rebuilt table holds no tombstone, so its capacity is its backing.
+    fn settle_shrink(&mut self, storage: &super::storage::EpochStorage) {
+        let len = self.roots.len();
+        if len == 0 {
+            self.roots = rustc_hash::FxHashMap::default();
+        } else if self.backing > len.saturating_mul(4) {
+            let mut rebuilt = rustc_hash::FxHashMap::with_capacity_and_hasher(
+                len.saturating_mul(2),
+                Default::default(),
+            );
+            rebuilt.extend(self.roots.drain());
+            self.roots = rebuilt;
+        } else {
+            return;
+        }
+        let capacity = self.roots.capacity();
+        if capacity < self.backing {
+            storage.sub(Self::backing_bytes(self.backing - capacity));
+        } else {
+            storage.add(Self::backing_bytes(capacity - self.backing));
+        }
+        self.backing = capacity;
+    }
 }
 
 /// A type token's entry in its epoch's root table.
@@ -166,7 +222,7 @@ impl EpochInner {
             apply_count: AtomicU64::new(0),
             stranded_tokens: AtomicUsize::new(0),
             holders: AtomicU64::new(0),
-            released_roots: Mutex::new(rustc_hash::FxHashMap::default()),
+            released_roots: Mutex::new(ReleasedRoots::default()),
         }
     }
 
@@ -197,9 +253,8 @@ impl EpochInner {
             return duplicates;
         }
         let mut released = self.released_roots.lock();
-        let before = released.capacity();
         for (index, root) in roots {
-            match released.entry(index) {
+            match released.roots.entry(index) {
                 std::collections::hash_map::Entry::Vacant(slot) => {
                     slot.insert(root);
                 }
@@ -209,11 +264,7 @@ impl EpochInner {
                 }
             }
         }
-        self.storage.map_growth(
-            before,
-            released.capacity(),
-            std::mem::size_of::<(u32, crate::semantic_query_memo::node_roots::NodeRootSet)>(),
-        );
+        released.settle_growth(&self.storage);
         duplicates
     }
 
@@ -224,7 +275,10 @@ impl EpochInner {
         &self,
         index: u32,
     ) -> Option<crate::semantic_query_memo::node_roots::NodeRootSet> {
-        self.released_roots.lock().remove(&index)
+        let mut released = self.released_roots.lock();
+        let root = released.roots.remove(&index)?;
+        released.settle_shrink(&self.storage);
+        Some(root)
     }
 
     /// Drop the deferred roots once no holder of this epoch is alive. The
@@ -233,15 +287,13 @@ impl EpochInner {
     fn drain_released_roots(&self) {
         let drained = {
             let mut released = self.released_roots.lock();
-            if self.holders.load(Ordering::SeqCst) != 0 || released.capacity() == 0 {
+            if self.holders.load(Ordering::SeqCst) != 0 || released.backing == 0 {
                 return;
             }
             std::mem::take(&mut *released)
         };
-        let block = drained.capacity()
-            * (std::mem::size_of::<(u32, crate::semantic_query_memo::node_roots::NodeRootSet)>()
-                + 1);
-        let heap: usize = drained.values().map(|roots| roots.heap_bytes()).sum();
+        let block = ReleasedRoots::backing_bytes(drained.backing);
+        let heap: usize = drained.roots.values().map(|roots| roots.heap_bytes()).sum();
         // The roots drop here, outside the lock.
         drop(drained);
         self.storage.sub(heap + block);
@@ -1553,6 +1605,14 @@ impl SignatureStore {
     #[must_use]
     pub fn current_epoch_storage_charge(&self) -> usize {
         self.current.load().storage.charged()
+    }
+
+    /// Exact bytes the current epoch's storage accounts, before rounding to
+    /// the charged granule.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn current_epoch_storage_used(&self) -> usize {
+        self.current.load().storage.used()
     }
     /// The arena of the graph this kernel is bound to, which issues every
     /// node operand its records name.

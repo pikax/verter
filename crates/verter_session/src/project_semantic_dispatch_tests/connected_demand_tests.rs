@@ -105,6 +105,7 @@ fn stopped_demands_never_offer_unevaluated_subjects_as_positional_values() {
     };
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let number = dispatch
         .graph()
         .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));

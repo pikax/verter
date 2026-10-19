@@ -215,10 +215,14 @@ impl VerterHost {
     pub fn scheduler_style_analyses(
         &self,
         canonical_id: &str,
-    ) -> Option<Arc<Vec<verter_session_query::analysis::style::StyleBlockAnalysis>>> {
+    ) -> Option<
+        verter_session_query::analysis::file_analysis::SharedList<
+            verter_session_query::analysis::style::StyleBlockAnalysis,
+        >,
+    > {
         let snap = self.scheduler.try_get_analysis(canonical_id)?;
         let data = snap.downcast_data::<host_executor::HostAnalysisData>()?;
-        Some(Arc::clone(&data.style_analyses))
+        Some(data.style_analyses.clone())
     }
 
     /// Override-aware file state for a profile.

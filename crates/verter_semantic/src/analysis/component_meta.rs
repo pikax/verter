@@ -125,23 +125,19 @@ fn diagnostic_kind(
 
 fn diagnostics_from_expansion(
     metadata: Option<&verter_session_query::analysis::type_expand::ExpansionMetadata>,
-) -> std::sync::Arc<[ResolutionDiagnostic]> {
+) -> verter_type_expr::ResolutionDiagnostics {
     metadata.map_or_else(
-        || std::sync::Arc::from([]),
+        verter_type_expr::ResolutionDiagnostics::default,
         |metadata| {
             metadata
                 .diagnostics
                 .iter()
                 .map(|diagnostic| ResolutionDiagnostic {
                     kind: diagnostic_kind(diagnostic.reason),
-                    context: std::sync::Arc::from(diagnostic.context.as_str()),
-                    property_name: diagnostic
-                        .property_name
-                        .as_deref()
-                        .map(std::sync::Arc::from),
+                    context: diagnostic.context.as_str().into(),
+                    property_name: diagnostic.property_name.as_deref().map(Into::into),
                 })
-                .collect::<Vec<_>>()
-                .into()
+                .collect()
         },
     )
 }
@@ -2138,7 +2134,7 @@ fn synthesize_model_prop_and_event(
             SourcePosition::Present(SemanticTypeSource::Closed(ClosedTypeFact::Tuple(
                 TuplePayloadFact {
                     readonly: false,
-                    elements: std::sync::Arc::from(
+                    elements: From::from(
                         vec![TupleElementFact {
                             label: Some("value".to_string()),
                             optional: false,

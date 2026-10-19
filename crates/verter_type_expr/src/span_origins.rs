@@ -17,7 +17,7 @@
 //!
 //! [`NoStoredSpan`]: verter_no_storedspan::NoStoredSpan
 
-use std::sync::Arc;
+use crate::OwnedSlice;
 use verter_no_storedspan::NoStoredSpan;
 use verter_no_typeexpr::NoTypeExpr;
 
@@ -92,7 +92,7 @@ pub enum MemberSpansOrigin {
     /// names the member whose spans are recovered.
     Authored {
         anchor: DeclContributorAnchor,
-        member_path: Arc<[u32]>,
+        member_path: OwnedSlice<u32>,
     },
     /// A genuinely synthetic member with no authored origin.
     Synthetic(SourceSynthetic),
@@ -116,7 +116,7 @@ pub enum IndexSignatureSpansOrigin {
     /// The index-signature member reached by `member_path` from the decl body.
     Authored {
         anchor: DeclContributorAnchor,
-        member_path: Arc<[u32]>,
+        member_path: OwnedSlice<u32>,
     },
     /// A synthetic index signature with no authored origin.
     Synthetic(SourceSynthetic),
@@ -144,7 +144,7 @@ pub enum FunctionSpansOrigin {
     /// reached by `member_path` from the decl body.
     Member {
         anchor: DeclContributorAnchor,
-        member_path: Arc<[u32]>,
+        member_path: OwnedSlice<u32>,
     },
     /// A synthetic function with no authored origin.
     Synthetic(SourceSynthetic),

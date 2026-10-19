@@ -3040,6 +3040,7 @@ fn node_publication_score_matches_type_expr_score_per_fact() {
     let host = host();
     let graph = graph_of(&host);
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     for (label, node) in publication_score_corpus(&graph) {
         let node_score = project_node_publication_score_with_dispatch(&dispatch, node);

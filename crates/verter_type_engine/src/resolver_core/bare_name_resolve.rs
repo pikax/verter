@@ -24,8 +24,6 @@
 //! survives the §5.8 deletion of `solver_host.rs`; the dispatch path is
 //! the long-lived consumer.
 
-use std::sync::Arc;
-
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_session_query::type_solver::host::ResolvedRootIdentity;
 
@@ -44,7 +42,7 @@ use verter_session_query::inputs::prepared::TypeParamBinding;
 /// bump; the bundle's maps are never copied).
 ///
 /// [`Self::scope_type_bindings`] is keyed to [`TypeParamBinding`], NOT
-/// to `Arc<PreparedTypeDecl>`; script-setup generic parameters carry
+/// to `verter_retention::heap_size::OwnedValue<PreparedTypeDecl>`; script-setup generic parameters carry
 /// their declaration-site `extends` / default expressions directly
 /// without an intermediate prepared-decl wrapper.
 ///
@@ -57,7 +55,7 @@ use verter_session_query::inputs::prepared::TypeParamBinding;
 /// to carry is redundant.
 #[derive(Clone)]
 pub struct DeclarationScopePayload {
-    bundle: Arc<verter_session_query::inputs::prepared::PreparedInputRecord>,
+    bundle: verter_session_query::inputs::prepared::PreparedInputRef,
     owner: verter_type_expr::TopLevelOwnerId,
 }
 
@@ -77,11 +75,11 @@ impl std::fmt::Debug for DeclarationScopePayload {
 /// A prepared owner scope's owned input record, from whichever prepared
 /// source holds it.
 pub trait PreparedInputSource {
-    fn scope_inputs(&self) -> Arc<verter_session_query::inputs::prepared::PreparedInputRecord>;
+    fn scope_inputs(&self) -> verter_session_query::inputs::prepared::PreparedInputRef;
 }
-impl PreparedInputSource for Arc<verter_session_query::inputs::prepared::PreparedInputRecord> {
-    fn scope_inputs(&self) -> Arc<verter_session_query::inputs::prepared::PreparedInputRecord> {
-        Arc::clone(self)
+impl PreparedInputSource for verter_session_query::inputs::prepared::PreparedInputRef {
+    fn scope_inputs(&self) -> verter_session_query::inputs::prepared::PreparedInputRef {
+        self.clone()
     }
 }
 
@@ -103,9 +101,7 @@ impl DeclarationScopePayload {
 
     /// The prepared bundle this payload views.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn bundle_for_tests(
-        &self,
-    ) -> &Arc<verter_session_query::inputs::prepared::PreparedInputRecord> {
+    pub fn bundle_for_tests(&self) -> &verter_session_query::inputs::prepared::PreparedInputRef {
         &self.bundle
     }
 

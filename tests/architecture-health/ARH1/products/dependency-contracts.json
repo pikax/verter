@@ -999,7 +999,13 @@
         }
       ],
       "allowedImportDirection": {
-        "verter": ["verter_audit", "verter_session_query", "verter_span", "verter_type_expr"],
+        "verter": [
+          "verter_audit",
+          "verter_retention",
+          "verter_session_query",
+          "verter_span",
+          "verter_type_expr"
+        ],
         "external": ["indexmap", "rustc_hash", "tracing"],
         "crateInternal": [
           "cache_runtime",
@@ -1492,6 +1498,9 @@
           "crates/verter_session/tests/cases/compile-fail/public_construction_copy_is_store_only.rs",
           "crates/verter_session/tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs",
           "crates/verter_session/tests/cases/compile-fail/public_diagnostic_error_cannot_detach.rs",
+          "crates/verter_session/tests/cases/compile-fail/public_dispatcher_construction_cannot_detach.rs",
+          "crates/verter_session/tests/cases/compile-fail/public_dispatcher_delivery_cannot_detach.rs",
+          "crates/verter_session/tests/cases/compile-fail/public_dispatcher_output_cannot_be_forged.rs",
           "crates/verter_session/tests/cases/compile-fail/public_node_capability_cannot_be_forged.rs",
           "crates/verter_session/tests/cases/compile-fail/public_owned_carriers_borrow_and_own.rs",
           "crates/verter_session/tests/cases/compile-fail/public_payload_arrays_and_members_cannot_detach.rs",
@@ -1897,6 +1906,9 @@
               "crates/verter_session/tests/cases/compile-fail/public_construction_copy_is_store_only.rs",
               "crates/verter_session/tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs",
               "crates/verter_session/tests/cases/compile-fail/public_diagnostic_error_cannot_detach.rs",
+              "crates/verter_session/tests/cases/compile-fail/public_dispatcher_construction_cannot_detach.rs",
+              "crates/verter_session/tests/cases/compile-fail/public_dispatcher_delivery_cannot_detach.rs",
+              "crates/verter_session/tests/cases/compile-fail/public_dispatcher_output_cannot_be_forged.rs",
               "crates/verter_session/tests/cases/compile-fail/public_owned_carriers_borrow_and_own.rs",
               "crates/verter_session/tests/cases/compile-fail/public_payload_arrays_and_members_cannot_detach.rs",
               "crates/verter_session/tests/cases/compile-fail/public_payload_has_no_construction_copy.rs",

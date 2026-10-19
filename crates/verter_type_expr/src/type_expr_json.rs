@@ -301,7 +301,7 @@ pub fn type_expr_from_json(v: &serde_json::Value) -> Option<TypeExpr> {
                 if s.is_null() {
                     None
                 } else {
-                    s.as_str().map(Arc::<str>::from)
+                    s.as_str().map(OwnedStr::new)
                 }
             });
             let binding_name = v.get("bindingName")?.as_str()?;
@@ -310,10 +310,10 @@ pub fn type_expr_from_json(v: &serde_json::Value) -> Option<TypeExpr> {
             let value_node = v.get("valueNode")?.as_str()?.parse::<u64>().ok()?;
             Some(TypeExpr::SyntheticSlotBinding(Arc::new(
                 SyntheticCarrierKey {
-                    scope_canonical_id: Arc::from(scope_canonical_id),
+                    scope_canonical_id: OwnedStr::new(scope_canonical_id),
                     surface_kind,
                     slot_name,
-                    binding_name: Arc::from(binding_name),
+                    binding_name: OwnedStr::new(binding_name),
                     value_node,
                 },
             )))

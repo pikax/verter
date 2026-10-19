@@ -91,7 +91,7 @@ impl FlowSliceSelection {
 /// reachability result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SliceContent {
-    pub bindings: Arc<crate::flow::binding::FlowBindingMap>,
+    pub bindings: crate::flow::bundle::BindingsRef,
     pub declared_return: Option<GatedType>,
     /// The receiver annotation belongs to this demanded body, not its lexical context.
     pub declared_this: Option<GatedType>,
@@ -3243,9 +3243,9 @@ pub enum NameBinding {
 /// is the only way to turn one into a frame.
 pub struct DefiningFrameDiscovery {
     /// The function's body skeleton.
-    pub skeleton: Arc<FunctionBodySkeleton>,
+    pub skeleton: crate::flow::bundle::SkeletonRef,
     /// The indexed binding correspondence built for the same function.
-    pub bindings: Arc<crate::flow::binding::FlowBindingMap>,
+    pub bindings: crate::flow::bundle::BindingsRef,
     /// The function's OWN type-parameter names.
     pub type_parameters: Arc<[Arc<str>]>,
     /// The ENCLOSING declaration's clause, by name: a class member's
@@ -3293,8 +3293,8 @@ pub enum DefiningFrameError {
 /// relationships, not proof that the discovery inputs came from a parser.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefiningFrameGate {
-    skeleton: Arc<FunctionBodySkeleton>,
-    bindings: Arc<crate::flow::binding::FlowBindingMap>,
+    skeleton: crate::flow::bundle::SkeletonRef,
+    bindings: crate::flow::bundle::BindingsRef,
     type_parameters: Arc<[Arc<str>]>,
     enclosing_type_parameters: Arc<[Arc<str>]>,
     parameters: Arc<FxHashMap<SkeletonBindingId, CaptureParameterLocator>>,
@@ -3954,13 +3954,13 @@ impl DefiningFrameGate {
 
     /// The function's body skeleton.
     #[must_use]
-    pub fn skeleton(&self) -> &Arc<FunctionBodySkeleton> {
+    pub fn skeleton(&self) -> &crate::flow::bundle::SkeletonRef {
         &self.skeleton
     }
 
     /// The function's indexed binding correspondence.
     #[must_use]
-    pub fn bindings(&self) -> &Arc<crate::flow::binding::FlowBindingMap> {
+    pub fn bindings(&self) -> &crate::flow::bundle::BindingsRef {
         &self.bindings
     }
 

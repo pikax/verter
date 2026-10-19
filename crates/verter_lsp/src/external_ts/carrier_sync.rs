@@ -1118,7 +1118,9 @@ fn build_carrier_companions(
         let mut companion = CarrierCompanion::carrier_ide(
             Arc::from(ide_path.as_str()),
             prepared,
-            ide.source_map.clone(),
+            ide.source_map
+                .as_ref()
+                .map(|map| Arc::<str>::from(map.as_str())),
             if ide.is_jsx {
                 ScriptKind::Jsx
             } else {

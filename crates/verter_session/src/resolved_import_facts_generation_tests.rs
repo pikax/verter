@@ -106,7 +106,11 @@ fn a_candidate_entering_the_slot_advances_the_domain_generation() {
     let witness: Vec<FactVersionRef> = host
         .resolved_import_facts_witness_for(key.canonical.as_ref(), key.content_hash)
         .expect("the production witness must be rootable for the owner");
-    let admitted = db.admit(key, Arc::new(ResolvedImportFacts::new()), witness);
+    let admitted = db.admit(
+        key,
+        crate::resolver_core::CachedValue::new(ResolvedImportFacts::new()),
+        witness,
+    );
     assert!(
         admitted,
         "fixture invariant: this admission must succeed, or the assertion below is about a \
@@ -139,7 +143,7 @@ fn a_refused_admission_does_not_advance_the_domain_generation() {
     // Strict admission refuses an EMPTY witness: nothing enters the slot.
     let refused = db.admit(
         key.clone(),
-        Arc::new(ResolvedImportFacts::new()),
+        crate::resolver_core::CachedValue::new(ResolvedImportFacts::new()),
         Vec::new(),
     );
     assert!(
@@ -249,7 +253,7 @@ fn eviction_rides_the_insertion_that_causes_it_rather_than_advancing_separately(
         assert!(
             db.admit(
                 key.clone(),
-                Arc::new(ResolvedImportFacts::new()),
+                crate::resolver_core::CachedValue::new(ResolvedImportFacts::new()),
                 witness.clone()
             ),
             "each admission must enter the slot"
@@ -300,7 +304,11 @@ export const owner = dep;
         let witness: Vec<FactVersionRef> = host
             .resolved_import_facts_witness_for(key.canonical.as_ref(), key.content_hash)
             .expect("the production witness must be rootable for the owner");
-        let _ = db.admit(key, Arc::new(ResolvedImportFacts::new()), witness);
+        let _ = db.admit(
+            key,
+            crate::resolver_core::CachedValue::new(ResolvedImportFacts::new()),
+            witness,
+        );
     };
     admit_edit(1);
     let with_window = db.entry_count();

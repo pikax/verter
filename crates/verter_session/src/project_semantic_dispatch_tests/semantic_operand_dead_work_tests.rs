@@ -878,6 +878,7 @@ fn builtin_utility_route_is_one_instantiate_family() {
 
     let host = host_with_source();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let _trace = enable_dispatch_trace_for_test();
 
     let graph = host.project_type_store().semantic_graph();

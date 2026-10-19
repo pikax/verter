@@ -168,7 +168,7 @@ fn producer_readmits_when_no_single_candidate_holds_both_the_witness_and_the_pay
     db.clear();
 
     // `P_other` — a payload that is NOT what the producer will recompute.
-    let p_other = Arc::new(ResolvedImportFacts::new());
+    let p_other = crate::resolver_core::CachedValue::new(ResolvedImportFacts::new());
     assert_ne!(
         p_other, p_real,
         "the decoy payload must differ from the producer's, or the trap is not set"
@@ -186,11 +186,11 @@ fn producer_readmits_when_no_single_candidate_holds_both_the_witness_and_the_pay
     );
 
     assert!(
-        db.insert_if_absent(key.clone(), Arc::clone(&p_other), w_real.clone()),
+        db.insert_if_absent(key.clone(), p_other.clone(), w_real.clone()),
         "the first seed (W_real, P_other) must be admitted"
     );
     assert!(
-        db.insert_if_absent(key.clone(), Arc::clone(&p_real), w_fake.clone()),
+        db.insert_if_absent(key.clone(), p_real.clone(), w_fake.clone()),
         "the second seed (W_fake, P_real) must be admitted and become the LAST candidate"
     );
 
@@ -211,7 +211,7 @@ fn producer_readmits_when_no_single_candidate_holds_both_the_witness_and_the_pay
     );
     assert_eq!(
         db.retained_bundle_for_tests(&key),
-        Some(Arc::clone(&p_real)),
+        Some(p_real.clone()),
         "the LAST candidate's payload must equal P_real — the second half of the \
          uncorrelated decision"
     );
