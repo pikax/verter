@@ -526,8 +526,11 @@ fn a_named_template_at_the_limit_answers_its_recovery() {
             "`{probe}` is the checker's recovery, not the probe unevaluated: {rendered:.300}"
         );
         assert!(
-            rendered.contains("2590") || matches!(answer, TypeExpr::Primitive(_)),
-            "`{probe}` answers the TS2590 recovery: {rendered:.300}"
+            matches!(
+                answer,
+                TypeExpr::Primitive(verter_type_expr::PrimitiveName::Any)
+            ),
+            "`{probe}` answers the TS2590 recovery, the error type `any`: {rendered:.300}"
         );
     }
 }

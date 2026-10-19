@@ -204,7 +204,7 @@ fn demand_record(
         micros: record.micros,
         outcome: record.outcome,
         observation: super::Observation {
-            checker_recovery: node.as_ref().and_then(super::checker_recovery_code),
+            checker_recovery: node.as_ref().and_then(verter_type_engine::semantic_query_memo::node_roots::NodeRoot::checker_recovery_code),
             ..observe(bytes.as_deref().map_err(Clone::clone))
         },
     }

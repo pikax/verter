@@ -67,6 +67,10 @@ impl TemplateConstituent {
 const HOLE_BYTES: usize =
     std::mem::size_of::<SemanticNodeId>() + std::mem::size_of::<verter_type_expr::OwnedStr>();
 
+/// How many extra copies of each member's text canonicalizing a union of
+/// string literals holds: the stable-key recipe and the interned entry.
+const CANONICALIZATION_TEXT_COPIES: usize = 2;
+
 /// A template literal type's product, factored: its `texts` (one more than
 /// its spans) and each span's normalized constituents, in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,17 +120,30 @@ impl TemplatePlan {
             .try_fold(0usize, |total, text| total.checked_add(text.len()))?;
         let mut total =
             cardinality.checked_mul(super::connected_demand::derived_node_bytes(texts))?;
+        // The concatenated text itself: every text once per concatenation,
+        // every constituent's text once per concatenation it sits in.
+        let mut text_bytes = cardinality.checked_mul(texts)?;
         for span in &self.spans {
             let repeats = cardinality / span.len();
-            let weight = span.iter().try_fold(0usize, |total, constituent| {
-                let (text, holes) = constituent.weight();
-                total.checked_add(text.checked_add(holes.checked_mul(HOLE_BYTES)?)?)
-            })?;
+            let (text, weight) = span
+                .iter()
+                .try_fold((0usize, 0usize), |(text, weight), c| {
+                    let (piece_text, holes) = c.weight();
+                    Some((
+                        text.checked_add(piece_text)?,
+                        weight
+                            .checked_add(piece_text.checked_add(holes.checked_mul(HOLE_BYTES)?)?)?,
+                    ))
+                })?;
+            text_bytes = text_bytes.checked_add(repeats.checked_mul(text)?)?;
             total = total.checked_add(repeats.checked_mul(weight)?)?;
         }
         if cardinality > 1 {
+            // Canonicalizing the union copies each member's text into the
+            // stable-key recipe and again into the interned entry.
             total = total
-                .checked_add(cardinality.checked_mul(super::connected_demand::UNION_ARM_BYTES)?)?;
+                .checked_add(cardinality.checked_mul(super::connected_demand::UNION_ARM_BYTES)?)?
+                .checked_add(text_bytes.checked_mul(CANONICALIZATION_TEXT_COPIES)?)?;
         }
         Some(total)
     }
@@ -333,7 +350,7 @@ mod tests {
         let sum = |plan: &TemplatePlan| {
             texts(plan)
                 .iter()
-                .map(|text| node + union + text.len())
+                .map(|text| node + union + text.len() * (1 + super::CANONICALIZATION_TEXT_COPIES))
                 .sum::<usize>()
         };
         assert_eq!(short.construction_bytes(), Some(sum(&short)));

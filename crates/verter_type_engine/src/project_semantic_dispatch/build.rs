@@ -18499,8 +18499,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.fold_local_partial_completeness(reasons);
             return Err(reasons);
         }
-        let mut members: Vec<SemanticNodeId> =
-            Vec::with_capacity(plan.cardinality().unwrap_or_default());
+        // The charge above refused any product whose count overflows.
+        let mut members: Vec<SemanticNodeId> = Vec::with_capacity(
+            plan.cardinality()
+                .expect("an admitted template product's cardinality fits a usize"),
+        );
         let mut cursor = plan.cursor();
         while let Some(concatenation) = cursor.next_concatenation() {
             members.push(self.template_type_from_concatenation(concatenation));

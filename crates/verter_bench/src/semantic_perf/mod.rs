@@ -553,18 +553,6 @@ fn wire_node_counts(root: &serde_json::Value) -> (usize, Vec<String>, usize) {
     (unknown, samples, conditional)
 }
 
-/// The diagnostic code of `node` when it is the checker's recovered error
-/// type: the wire form spells that type (`any`), not the diagnostic.
-fn checker_recovery_code(node: &NodeRoot) -> Option<u32> {
-    let data = node.node_ref().ok()?.read().ok()?;
-    match &*data {
-        verter_type_engine::semantic_query::SemanticNodeData::Opaque(
-            verter_type_engine::semantic_query::QueryError::CheckerRecovery { diagnostic, .. },
-        ) => Some(diagnostic.code.code()),
-        _ => None,
-    }
-}
-
 /// The wire bytes of `node`'s answer, or why there are none.
 fn wire_bytes(host: &VerterHost, node: Option<&NodeRoot>) -> Result<Vec<u8>, String> {
     let node = node.ok_or_else(|| "no value to observe".to_string())?;
@@ -782,7 +770,7 @@ pub fn run_job(
         let start = Instant::now();
         let cold_bytes = wire_bytes(&host, node.as_ref());
         let mut observation = observe(cold_bytes.as_deref().map_err(Clone::clone));
-        observation.checker_recovery = node.as_ref().and_then(checker_recovery_code);
+        observation.checker_recovery = node.as_ref().and_then(NodeRoot::checker_recovery_code);
         probe.observation = Some(observation);
         for (record, warm_node) in probe.warm.iter_mut().zip(warm_nodes) {
             record.same_answer_as_cold = Some(match (node, warm_node) {
