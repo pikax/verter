@@ -430,17 +430,24 @@ impl LazyBodyFactSource {
             space: SymbolSpace::Type,
         } = key
         {
-            let outcome = verter_type_engine::fact_tracing::consume_source_read(
-                self.memo.class_member_read_hash_in(
-                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    exporter.as_ref(),
-                    member,
-                ),
-            )?;
+            let read = self.memo.class_member_read_hash_in(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                exporter.as_ref(),
+                member,
+            );
+            let Some(outcome) = read.value else {
+                return SourceRead {
+                    value: None,
+                    refusal: read.refusal,
+                };
+            };
             // A truncated fingerprint cannot certify the elements it did not
             // fully walk: decline, so the read keeps conservative evidence.
             if outcome.budget_exceeded {
-                return None;
+                return SourceRead {
+                    value: None,
+                    refusal: read.refusal,
+                };
             }
             let fact = Fact {
                 key: key.clone(),
@@ -448,7 +455,10 @@ impl LazyBodyFactSource {
                 display_hash: compute_display_hash(&outcome.hash),
             };
             self.computed.insert(key.clone(), fact.clone());
-            return Some(fact);
+            return SourceRead {
+                value: Some(fact),
+                refusal: read.refusal,
+            };
         }
         // `name` is the backing LOCAL declaration name probed against the
         // body memo; the emitted `Fact.key` stays the original requested
