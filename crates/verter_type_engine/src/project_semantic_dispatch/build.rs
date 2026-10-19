@@ -504,8 +504,8 @@ fn literal_value_template_text(value: &LiteralValue) -> String {
         LiteralValue::Number(number) => js_number_to_string(*number),
         LiteralValue::Boolean(flag) => if *flag { "true" } else { "false" }.to_string(),
         // `LiteralValue::BigInt` stores the signed base-10 magnitude with no
-        // `n` suffix (see `verter_type_expr_oxc::lower_literal`), which is
-        // exactly TS's interpolated form of a bigint literal.
+        // `n` suffix and an unsigned zero (see `TypeExpr::bigint_literal`),
+        // which is exactly TS's interpolated form of a bigint literal.
         LiteralValue::BigInt(digits) => digits.clone(),
     }
 }

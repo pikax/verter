@@ -363,9 +363,7 @@ fn value<'a>(
         }
         Expression::StringLiteral(s) => TypeExpr::string_literal(s.value.as_str()),
         Expression::NumericLiteral(n) => TypeExpr::number_literal(n.value),
-        Expression::BigIntLiteral(b) => {
-            TypeExpr::Literal(verter_type_expr::LiteralValue::BigInt(b.value.to_string()))
-        }
+        Expression::BigIntLiteral(b) => TypeExpr::bigint_literal(false, &b.value),
         // A signed numeric literal (`-1`, `+1`) and a negated bigint literal
         // (`-1n`) are literals of their own value.
         Expression::UnaryExpression(unary)
@@ -382,9 +380,7 @@ fn value<'a>(
                     TypeExpr::number_literal(-n.value)
                 }
                 Expression::NumericLiteral(n) => TypeExpr::number_literal(n.value),
-                Expression::BigIntLiteral(b) => TypeExpr::Literal(
-                    verter_type_expr::LiteralValue::BigInt(format!("-{}", b.value)),
-                ),
+                Expression::BigIntLiteral(b) => TypeExpr::bigint_literal(true, &b.value),
                 _ => unreachable!("the guard admits only numeric and bigint literal operands"),
             }
         }
