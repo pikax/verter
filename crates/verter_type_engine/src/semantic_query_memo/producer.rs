@@ -273,6 +273,10 @@ struct Parked {
     since: Instant,
     /// The subscription's own waker registration on the flight.
     waker: Option<super::inflight::WakeRegistration>,
+    /// The subscriber registration an armed rendezvous of this flight took,
+    /// retired when the wait resolves or the subscription drops.
+    #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+    rendezvous: super::inflight::SubscriberRegistration,
 }
 
 impl Drop for Subscription<'_> {
@@ -715,7 +719,7 @@ impl Subscription<'_> {
         let mut state = inflight.state.lock();
         let wait_start = Instant::now();
         if !flight_resolved(&state, flags) {
-            if let Err(WaitCycle) = self.park(&state) {
+            if let Err(WaitCycle) = self.park(&state, attempt.prepared.key()) {
                 return Joined::Recursive(Recursion::WaitCycle);
             }
             // Cooperative wait on the flight's condvar until it completes,
@@ -767,7 +771,7 @@ impl Subscription<'_> {
             );
         }
         if self.parked.is_none() {
-            if let Err(WaitCycle) = self.park(&state) {
+            if let Err(WaitCycle) = self.park(&state, attempt.prepared.key()) {
                 return std::task::Poll::Ready(Joined::Recursive(Recursion::WaitCycle));
             }
         }
@@ -788,12 +792,32 @@ impl Subscription<'_> {
     }
 
     /// Register this subscriber's wait-for edge to the flight's producer.
-    fn park(&mut self, state: &super::inflight::InflightState) -> Result<(), WaitCycle> {
+    fn park(
+        &mut self,
+        state: &super::inflight::InflightState,
+        #[cfg_attr(
+            not(any(test, feature = "test-support", feature = "soak-support")),
+            allow(unused_variables)
+        )]
+        key: &crate::semantic_query::SemanticQueryKey,
+    ) -> Result<(), WaitCycle> {
         let producer = state.owner.unwrap_or(self.waiter);
         let edge = self
             .store
             .task_registry
             .register_wait(self.waiter, producer)?;
+        // A rendezvous learns of this registered subscriber while the flight
+        // state is held: the producer's completion needs the same lock, so a
+        // flight that already completed is never counted as a subscriber's
+        // registration event — the registration happens-before the
+        // completion whenever both occur. The registration is held until
+        // the wait resolves or the subscription drops, so the rendezvous's
+        // live-participant oracle never counts a completed subscriber.
+        #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+        let rendezvous = match self.store.armed_flight_rendezvous(key) {
+            Some(rendezvous) => rendezvous.note_subscriber(key, &self.inflight),
+            None => super::inflight::SubscriberRegistration::inactive(),
+        };
         // Test-only: record that this subscriber is about to SUSPEND (it
         // holds `state`, and either parks on the condvar, which atomically
         // releases `state`, or returns pending with its waker registered).
@@ -806,6 +830,8 @@ impl Subscription<'_> {
             #[cfg(feature = "semantic-observe")]
             since: Instant::now(),
             waker: None,
+            #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+            rendezvous,
         });
         Ok(())
     }
@@ -827,8 +853,22 @@ impl Subscription<'_> {
         let prepared = &attempt.prepared;
         // The flight resolved: whatever it woke, this subscriber's waker
         // and wait-for edge are spent.
-        if let Some(registration) = self.parked.take().and_then(|parked| parked.waker) {
-            state.withdraw_waker(registration);
+        if let Some(Parked {
+            waker,
+            #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+            mut rendezvous,
+            ..
+        }) = self.parked.take()
+        {
+            if let Some(registration) = waker {
+                state.withdraw_waker(registration);
+            }
+            // Retire a rendezvous's subscriber registration before any
+            // further engine work on this request, with the flight unlocked
+            // — retirement only removes the token, so it needs no ordering
+            // against the flight's completion.
+            #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+            parking_lot::MutexGuard::unlocked(&mut state, || rendezvous.retire());
         }
         if let Some(wait_start) = wait_start {
             store
@@ -1221,6 +1261,24 @@ impl<'s> ProducerLease<'s> {
         crate::project_semantic_dispatch::cost_receipt::CostIdentity::of_producer(
             self.prepared.as_task_producer(),
         )
+    }
+
+    /// The cold-build boundary of an armed [`super::FlightRendezvous`]: a
+    /// joinable producer of its key parks here, its flight claimed and its
+    /// raw computation not begun, until the rendezvous releases it or the
+    /// producer's own request is cancelled. Called with no memo or flight
+    /// lock held.
+    #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+    pub(crate) fn hold_for_flight_rendezvous(
+        &self,
+        flags: &crate::resolver_core::resolver_context::RequestFlags,
+    ) {
+        if self.independent {
+            return;
+        }
+        if let Some(rendezvous) = self.store.armed_flight_rendezvous(self.prepared.key()) {
+            rendezvous.hold_producer(self.prepared.key(), &self.inflight, flags);
+        }
     }
 
     /// A receipt recording no cost for this producer's computation: a

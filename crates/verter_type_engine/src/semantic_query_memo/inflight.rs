@@ -502,3 +502,409 @@ impl super::SemanticGraphStore {
         self.retire_inflight(&flight.prepared, &flight.inflight, false);
     }
 }
+
+/// Why a [`FlightRendezvous`] wait returned without its event.
+#[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlightRendezvousMiss {
+    /// The event did not arrive within the caller's hang bound. The bound
+    /// only stops a broken schedule from hanging its driver; it never
+    /// decides whether the work overlapped.
+    HangBound,
+}
+
+/// What a [`FlightRendezvous`] has observed of its key's cold producers and
+/// of the subscribers registered to the held producer's flight.
+#[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FlightRendezvousObservation {
+    /// Joinable producers of the key that reached the cold-build boundary
+    /// while the rendezvous was armed. Only the first is held.
+    pub producer_claims: usize,
+    /// Subscribers that registered a wait on the held producer's flight. A
+    /// subscriber of any other flight, key or store is never counted.
+    pub subscribers: usize,
+    /// The held producer is parked at its cold-build boundary now.
+    pub parked: bool,
+    /// The held producer may run (released, or the rendezvous dropped).
+    pub released: bool,
+}
+
+/// The state a rendezvous shares between its driver and the store's hook
+/// points. It names its flight weakly: the allocation stays addressable so
+/// a later flight can never reuse its identity, but the flight's value and
+/// charge retire with the flight.
+#[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+pub(super) struct FlightRendezvousShared {
+    key: crate::semantic_query::SemanticQueryKey,
+    state: Mutex<FlightRendezvousState>,
+    changed: Condvar,
+}
+
+#[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+#[derive(Default)]
+struct FlightRendezvousState {
+    flight: Option<std::sync::Weak<FlightCell>>,
+    producer_claims: usize,
+    subscribers: usize,
+    parked: bool,
+    released: bool,
+    /// The parked producer's request token while it is parked, and the
+    /// tokens of the subscribers counted above — the driver's cancellation
+    /// control over exactly the participants it observes.
+    producer_cancellation: Option<verter_execution::cancellation::CancellationToken>,
+    subscriber_cancellations: Vec<verter_execution::cancellation::CancellationToken>,
+}
+
+#[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+impl FlightRendezvousState {
+    fn observation(&self) -> FlightRendezvousObservation {
+        FlightRendezvousObservation {
+            producer_claims: self.producer_claims,
+            subscribers: self.subscribers,
+            parked: self.parked,
+            released: self.released,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+impl FlightRendezvousShared {
+    /// A joinable producer of `key` reached its cold-build boundary on
+    /// `flight`. The first one parks here, holding no memo or flight lock,
+    /// until the rendezvous releases it or its own request is cancelled;
+    /// later ones are counted and run.
+    pub(super) fn hold_producer(
+        &self,
+        key: &crate::semantic_query::SemanticQueryKey,
+        flight: &Arc<FlightCell>,
+        flags: &crate::resolver_core::resolver_context::RequestFlags,
+    ) {
+        if key != &self.key {
+            return;
+        }
+        let mut state = self.state.lock();
+        state.producer_claims += 1;
+        if state.released || state.flight.is_some() {
+            self.changed.notify_all();
+            return;
+        }
+        state.flight = Some(Arc::downgrade(flight));
+        state.parked = true;
+        state.producer_cancellation = crate::request_context::current_request_cancellation_token();
+        self.changed.notify_all();
+        // Timed parking is the cancellation observation rail, exactly as a
+        // subscriber's wait: a producer whose request is cancelled returns
+        // so its build observes the cancellation, never mutating the
+        // rendezvous or the flight it holds.
+        while !state.released && !flags.is_cancelled() {
+            self.changed
+                .wait_for(&mut state, std::time::Duration::from_millis(2));
+        }
+        state.parked = false;
+        state.producer_cancellation = None;
+        self.changed.notify_all();
+    }
+
+    /// A subscriber of `key` registered its wait on `flight`. Counted only
+    /// when `flight` is the held producer's flight; the returned
+    /// registration retires the cancellation token when the subscriber's
+    /// wait returns, so a completed subscriber is never a cancellable
+    /// participant again. The registration itself stays recorded: the
+    /// subscriber count is the event record, not a liveness probe.
+    pub(super) fn note_subscriber(
+        self: &Arc<Self>,
+        key: &crate::semantic_query::SemanticQueryKey,
+        flight: &Arc<FlightCell>,
+    ) -> SubscriberRegistration {
+        if key != &self.key {
+            return SubscriberRegistration::inactive();
+        }
+        let mut state = self.state.lock();
+        let held = state
+            .flight
+            .as_ref()
+            .is_some_and(|held| std::ptr::eq(held.as_ptr(), Arc::as_ptr(flight)));
+        if !held {
+            return SubscriberRegistration::inactive();
+        }
+        state.subscribers += 1;
+        let token = crate::request_context::current_request_cancellation_token();
+        if let Some(token) = &token {
+            state.subscriber_cancellations.push(token.clone());
+        }
+        self.changed.notify_all();
+        SubscriberRegistration {
+            registration: Some(ActiveSubscriberRegistration {
+                shared: Arc::clone(self),
+                token,
+            }),
+        }
+    }
+
+    /// Retire one counted subscriber's cancellation registration: its wait
+    /// returned, so its token no longer names a live participant. The
+    /// registration count stays: it is the event record the driver's
+    /// readiness oracle reads. No wait condition reads the token list, so
+    /// this changes nothing a driver waits on.
+    fn retire_subscriber(&self, token: Option<&verter_execution::cancellation::CancellationToken>) {
+        let mut state = self.state.lock();
+        if let Some(position) = token.and_then(|token| {
+            state
+                .subscriber_cancellations
+                .iter()
+                .position(|saved| saved.same_source(token))
+        }) {
+            state.subscriber_cancellations.swap_remove(position);
+        }
+    }
+
+    fn release(&self) {
+        self.state.lock().released = true;
+        self.changed.notify_all();
+    }
+
+    fn wait_until(
+        &self,
+        hang_bound: std::time::Duration,
+        reached: impl Fn(&FlightRendezvousState) -> bool,
+    ) -> Result<FlightRendezvousObservation, FlightRendezvousMiss> {
+        let deadline = std::time::Instant::now() + hang_bound;
+        let mut state = self.state.lock();
+        while !reached(&state) {
+            if self.changed.wait_until(&mut state, deadline).timed_out() && !reached(&state) {
+                return Err(FlightRendezvousMiss::HangBound);
+            }
+        }
+        Ok(state.observation())
+    }
+}
+
+/// A counted subscriber's registration with an armed rendezvous. Dropping
+/// it — the subscriber's wait returned, was cancelled or unwound — retires
+/// its cancellation token, so
+/// [`FlightRendezvous::cancel_participants`] only ever names participants
+/// whose wait is still live. The registration count itself stays recorded.
+/// A note that matched no held flight carries no registration and drops as
+/// a no-op.
+#[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+#[must_use = "the registration retires the subscriber when it returns; hold it until the wait ends"]
+pub(super) struct SubscriberRegistration {
+    registration: Option<ActiveSubscriberRegistration>,
+}
+
+/// The counted half of a [`SubscriberRegistration`]: which rendezvous
+/// counts it, and its cancellation token when the subscribing request
+/// carries one.
+#[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+struct ActiveSubscriberRegistration {
+    shared: Arc<FlightRendezvousShared>,
+    token: Option<verter_execution::cancellation::CancellationToken>,
+}
+
+#[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+impl SubscriberRegistration {
+    fn new(registration: Option<ActiveSubscriberRegistration>) -> Self {
+        Self { registration }
+    }
+
+    /// A registration that matched no held flight: dropping it retires
+    /// nothing.
+    pub(super) fn inactive() -> Self {
+        Self::new(None)
+    }
+
+    /// Retire this registration now. Idempotent; the drop path calls it too.
+    pub(super) fn retire(&mut self) {
+        if let Some(ActiveSubscriberRegistration { shared, token }) = self.registration.take() {
+            shared.retire_subscriber(token.as_ref());
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+impl Drop for SubscriberRegistration {
+    fn drop(&mut self) {
+        self.retire();
+    }
+}
+
+/// A scoped rendezvous with the next cold producer of one key on one store.
+///
+/// Armed by [`super::SemanticGraphStore::arm_flight_rendezvous`]. The first
+/// joinable producer of the key that reaches its cold-build boundary
+/// through the dispatcher's synchronous path parks there, after its flight
+/// is claimed and before its raw computation, holding no memo or flight
+/// lock. A subscriber registering its wait on that exact flight is
+/// reported; a subscriber of another key, flight or store never is, and a
+/// warm read reports nothing. The driver then
+/// [`releases`](Self::release) the producer.
+///
+/// Dropping the rendezvous — normal completion, a failed assertion's unwind
+/// or an abandoned schedule — releases a parked producer, wakes every wait
+/// and removes exactly this guard's registration from the store, in any
+/// drop order against other armed guards; nothing it observed is retained
+/// afterwards. It controls only when real work runs, never what it
+/// answers.
+#[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+#[must_use = "the rendezvous disarms when dropped"]
+pub struct FlightRendezvous<'s> {
+    store: &'s super::SemanticGraphStore,
+    shared: Arc<FlightRendezvousShared>,
+}
+
+#[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+impl FlightRendezvous<'_> {
+    /// Wait until the held producer is parked at its cold-build boundary.
+    pub fn wait_producer_parked(
+        &self,
+        hang_bound: std::time::Duration,
+    ) -> Result<FlightRendezvousObservation, FlightRendezvousMiss> {
+        self.shared.wait_until(hang_bound, |state| state.parked)
+    }
+
+    /// Wait until a subscriber registered its wait on the held producer's
+    /// flight.
+    pub fn wait_subscriber_registered(
+        &self,
+        hang_bound: std::time::Duration,
+    ) -> Result<FlightRendezvousObservation, FlightRendezvousMiss> {
+        self.shared
+            .wait_until(hang_bound, |state| state.subscribers > 0)
+    }
+
+    /// Let the held producer run. A producer reaching the boundary later is
+    /// not held.
+    pub fn release(&self) {
+        self.shared.release();
+    }
+
+    /// What the rendezvous has observed so far.
+    #[must_use]
+    pub fn observe(&self) -> FlightRendezvousObservation {
+        self.shared.state.lock().observation()
+    }
+
+    /// Whether the held producer's flight state is unlocked right now: a
+    /// parked producer holds no lock on the flight it owns. `None` when no
+    /// producer is held or its flight has retired.
+    #[must_use]
+    pub fn held_flight_is_unlocked(&self) -> Option<bool> {
+        let flight = self.shared.state.lock().flight.as_ref()?.upgrade()?;
+        let unlocked = flight.state.try_lock().is_some();
+        Some(unlocked)
+    }
+
+    /// The held producer's flight, named weakly exactly as the rendezvous
+    /// names it. Upgrading the result fails once the flight cell is
+    /// destroyed — the observation that the flight itself, not just its
+    /// table entry, is gone — so a driver can hold it past the guard and
+    /// prove nothing retains the flight. `None` while no producer is held.
+    #[must_use]
+    pub fn held_flight_weak(&self) -> Option<std::sync::Weak<FlightCell>> {
+        self.shared.state.lock().flight.clone()
+    }
+
+    /// Cancel the held producer's request and every registered
+    /// subscriber's, through their own cancellation tokens. Each
+    /// participant then returns on its own cancellation rail — the parked
+    /// producer unparks and its build observes the cancellation, a
+    /// subscriber's wait detaches — so a parked schedule can be abandoned
+    /// without hanging any participant. Returns how many live
+    /// participants were cancelled.
+    pub fn cancel_participants(&self) -> usize {
+        let mut tokens = Vec::new();
+        {
+            let mut state = self.shared.state.lock();
+            tokens.extend(state.producer_cancellation.take());
+            tokens.append(&mut state.subscriber_cancellations);
+        }
+        let cancelled = tokens.len();
+        for token in tokens {
+            token.cancel();
+        }
+        cancelled
+    }
+}
+
+#[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+impl Drop for FlightRendezvous<'_> {
+    fn drop(&mut self) {
+        // Remove only this guard's registration, whatever order overlapping
+        // guards end in: a still-armed scope — armed before or after this
+        // one — stays armed exactly as its own guard left it, and the store
+        // disarms once the last guard ends.
+        self.store
+            .flight_rendezvous
+            .lock()
+            .retain(|armed| !Arc::ptr_eq(armed, &self.shared));
+        self.store
+            .flight_rendezvous_armed
+            .fetch_sub(1, std::sync::atomic::Ordering::Release);
+        self.shared.release();
+    }
+}
+
+#[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+impl super::SemanticGraphStore {
+    /// Arm a [`FlightRendezvous`] for `key` on this store until the returned
+    /// guard drops. Another store, and every other key, is unaffected.
+    ///
+    /// `key` must name a query the dispatcher's synchronous path produces:
+    /// an [`crate::semantic_query::SemanticQueryKey::Instantiate`] read is
+    /// evaluated on the continuation runtime, whose frame producers never
+    /// reach the synchronous cold-build hold, so arming one is refused.
+    pub fn arm_flight_rendezvous(
+        &self,
+        key: crate::semantic_query::SemanticQueryKey,
+    ) -> FlightRendezvous<'_> {
+        assert!(
+            !matches!(key, crate::semantic_query::SemanticQueryKey::Instantiate(_)),
+            "an Instantiate key is driven on the continuation runtime; its producers \
+             never reach the synchronous cold-build hold, so a rendezvous armed \
+             for one could never observe them"
+        );
+        let shared = Arc::new(FlightRendezvousShared {
+            key,
+            state: Mutex::new(FlightRendezvousState::default()),
+            changed: Condvar::new(),
+        });
+        self.flight_rendezvous.lock().push(Arc::clone(&shared));
+        self.flight_rendezvous_armed
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+        FlightRendezvous {
+            store: self,
+            shared,
+        }
+    }
+
+    /// Whether no rendezvous is armed on this store.
+    #[must_use]
+    pub fn flight_rendezvous_is_disarmed(&self) -> bool {
+        self.flight_rendezvous.lock().is_empty()
+    }
+
+    /// The armed rendezvous a cold build of `key` reports to: the first
+    /// one armed for that key, so a rendezvous armed later for another key
+    /// never shadows an older live one. Cloned out so no store lock is held
+    /// while a hook point signals or parks. The armed count is the lock-free
+    /// miss path: with no rendezvous armed anywhere on the store, a cold
+    /// build or joined wait never takes the table's mutex at all.
+    pub(super) fn armed_flight_rendezvous(
+        &self,
+        key: &crate::semantic_query::SemanticQueryKey,
+    ) -> Option<Arc<FlightRendezvousShared>> {
+        if self
+            .flight_rendezvous_armed
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 0
+        {
+            return None;
+        }
+        self.flight_rendezvous
+            .lock()
+            .iter()
+            .find(|armed| &armed.key == key)
+            .cloned()
+    }
+}

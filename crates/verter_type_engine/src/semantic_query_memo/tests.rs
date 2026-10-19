@@ -40,4 +40,5 @@ fn production_relation_admission_is_semantic_store_owned() {
     );
 }
 
+mod flight_rendezvous;
 mod substrate;
