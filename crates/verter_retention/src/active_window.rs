@@ -27,7 +27,11 @@
 //! transition of an UNKNOWN charge inside the interval rejects the witness
 //! ([`ActiveWitnessRejection::UnknownProvenance`]) because it could be the
 //! workload's own work or foreign work. Identified foreign owners are
-//! excluded and merely counted.
+//! excluded and merely counted. UNKNOWN ACTIVE bytes charged when a window
+//! opens reject it too ([`ActiveWitnessRejection::UnknownActiveAtOpen`]): the
+//! account keeps the UNKNOWN balance exactly beside the identified ones, and
+//! a charge changing provenance (adopting another owner's holds) moves its
+//! bytes between balances as one transition under the admission lock.
 //!
 //! ## What a window observes
 //!
@@ -81,6 +85,9 @@ pub(crate) struct ActiveWindows {
 struct Registry {
     /// Each owner's ACTIVE bytes charged right now; absent means zero.
     owner_active: HashMap<u64, usize>,
+    /// ACTIVE bytes charged right now by charges of UNKNOWN provenance.
+    /// Identified balances plus this one are the account's ACTIVE bytes.
+    unknown_active: usize,
     states: Vec<WindowState>,
 }
 
@@ -90,12 +97,57 @@ struct WindowState {
     owner: u64,
     opened_at: u64,
     active_at_open: usize,
+    unknown_active_at_open: usize,
     peak_active_bytes: usize,
     rise_bytes: usize,
     fall_bytes: usize,
     transitions: u64,
     foreign_transitions: u64,
     unknown_transitions: u64,
+}
+
+impl Registry {
+    /// Move one owner's balance (UNKNOWN for `None`) by `rise` or `fall`,
+    /// returning an identified owner's balance afterwards.
+    fn apply(&mut self, owner: Option<u64>, rise: usize, fall: usize) -> Option<usize> {
+        let Some(owner) = owner else {
+            self.unknown_active = (self.unknown_active + rise)
+                .checked_sub(fall)
+                .expect("a fall never exceeds the unknown-provenance ACTIVE bytes");
+            return None;
+        };
+        let active = self.owner_active.entry(owner).or_default();
+        *active = (*active + rise)
+            .checked_sub(fall)
+            .expect("a fall never exceeds the owner's recorded ACTIVE bytes");
+        let active = *active;
+        if active == 0 {
+            self.owner_active.remove(&owner);
+        }
+        Some(active)
+    }
+
+    /// Credit every open window with one balance move.
+    fn credit_windows(
+        &mut self,
+        owner: Option<u64>,
+        owner_active: Option<usize>,
+        rise: usize,
+        fall: usize,
+    ) {
+        for state in &mut self.states {
+            match (owner, owner_active) {
+                (Some(owner), Some(active)) if owner == state.owner => {
+                    state.peak_active_bytes = state.peak_active_bytes.max(active);
+                    state.rise_bytes += rise;
+                    state.fall_bytes += fall;
+                    state.transitions += 1;
+                }
+                (Some(_), _) => state.foreign_transitions += 1,
+                (None, _) => state.unknown_transitions += 1,
+            }
+        }
+    }
 }
 
 impl ActiveWindows {
@@ -112,31 +164,29 @@ impl ActiveWindows {
         }
         self.transitions.fetch_add(1, Ordering::Relaxed);
         let mut registry = self.inner.lock();
-        let owner_active = owner.map(|owner| {
-            let active = registry.owner_active.entry(owner).or_default();
-            *active = (*active + rise)
-                .checked_sub(fall)
-                .expect("a fall never exceeds the owner's recorded ACTIVE bytes");
-            let active = *active;
-            if active == 0 {
-                registry.owner_active.remove(&owner);
-            }
-            active
-        });
-        if self.open.load(Ordering::Relaxed) == 0 {
+        let owner_active = registry.apply(owner, rise, fall);
+        if self.open.load(Ordering::Relaxed) != 0 {
+            registry.credit_windows(owner, owner_active, rise, fall);
+        }
+    }
+
+    /// Move `bytes` of ACTIVE attribution from one provenance to another:
+    /// the account's ACTIVE total does not change, the old provenance's
+    /// balance falls and the new one's rises under one registry lock, so no
+    /// window observes a half-applied move. Called with
+    /// the admission lock held.
+    pub(crate) fn rehome_locked(&self, from: Option<u64>, to: Option<u64>, bytes: usize) {
+        if bytes == 0 || from == to {
             return;
         }
-        for state in &mut registry.states {
-            match (owner, owner_active) {
-                (Some(owner), Some(active)) if owner == state.owner => {
-                    state.peak_active_bytes = state.peak_active_bytes.max(active);
-                    state.rise_bytes += rise;
-                    state.fall_bytes += fall;
-                    state.transitions += 1;
-                }
-                (Some(_), _) => state.foreign_transitions += 1,
-                (None, _) => state.unknown_transitions += 1,
-            }
+        // Each side is a numbered transition of its own provenance.
+        self.transitions.fetch_add(2, Ordering::Relaxed);
+        let mut registry = self.inner.lock();
+        let from_active = registry.apply(from, 0, bytes);
+        let to_active = registry.apply(to, bytes, 0);
+        if self.open.load(Ordering::Relaxed) != 0 {
+            registry.credit_windows(from, from_active, 0, bytes);
+            registry.credit_windows(to, to_active, bytes, 0);
         }
     }
 
@@ -144,11 +194,13 @@ impl ActiveWindows {
         let id = self.next_id();
         let mut registry = self.inner.lock();
         let active = registry.owner_active.get(&owner).copied().unwrap_or(0);
+        let unknown = registry.unknown_active;
         registry.states.push(WindowState {
             id,
             owner,
             opened_at: self.transitions.load(Ordering::Relaxed),
             active_at_open: active,
+            unknown_active_at_open: unknown,
             peak_active_bytes: active,
             rise_bytes: 0,
             fall_bytes: 0,
@@ -185,6 +237,7 @@ impl ActiveWindows {
             closed_at: self.transitions.load(Ordering::Relaxed),
             active_at_open: state.active_at_open,
             active_at_close: active,
+            unknown_active_at_open: state.unknown_active_at_open,
             peak_active_bytes: state.peak_active_bytes,
             rise_bytes: state.rise_bytes,
             fall_bytes: state.fall_bytes,
@@ -351,6 +404,9 @@ pub struct ActiveWindowReport {
     /// The owner's ACTIVE bytes charged when the window closed (or was
     /// observed).
     pub active_at_close: usize,
+    /// ACTIVE bytes charged by charges of unknown or mixed provenance when
+    /// the window opened: they may have been the owner's own work.
+    pub unknown_active_at_open: usize,
     /// The most ACTIVE bytes the owner held at once inside the interval,
     /// counting the bytes charged at open.
     pub peak_active_bytes: usize,
@@ -380,6 +436,11 @@ impl ActiveWindowReport {
         if self.unknown_transitions > 0 {
             return Err(ActiveWitnessRejection::UnknownProvenance {
                 transitions: self.unknown_transitions,
+            });
+        }
+        if self.unknown_active_at_open > 0 {
+            return Err(ActiveWitnessRejection::UnknownActiveAtOpen {
+                bytes: self.unknown_active_at_open,
             });
         }
         if self.active_at_open > 0 {
@@ -421,6 +482,13 @@ pub enum ActiveWitnessRejection {
     UnknownProvenance {
         /// How many such transitions.
         transitions: u64,
+    },
+    /// Charges of unknown or mixed provenance already held ACTIVE bytes when
+    /// the window opened, so work spanning the whole interval cannot be
+    /// told apart from the owner's.
+    UnknownActiveAtOpen {
+        /// Bytes charged at open.
+        bytes: usize,
     },
     /// The owner already held ACTIVE bytes when the window opened.
     ActiveAtOpen {

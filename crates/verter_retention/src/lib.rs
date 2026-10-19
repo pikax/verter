@@ -670,6 +670,17 @@ impl SemanticRetentionAccount {
     /// [`RetentionCharge::transfer_to_pinned`], whose target never refuses.
     fn reclassify(&self, from: ChargeClass, to: ChargeClass, bytes: usize, provenance: Provenance) {
         let _admission_lock = self.lock_aggregate_state();
+        self.reclassify_locked(from, to, bytes, provenance);
+    }
+
+    /// [`Self::reclassify`] with the admission lock already held.
+    fn reclassify_locked(
+        &self,
+        from: ChargeClass,
+        to: ChargeClass,
+        bytes: usize,
+        provenance: Provenance,
+    ) {
         if bytes == 0 || from == to {
             return;
         }
@@ -789,16 +800,34 @@ impl Provenance {
 }
 
 impl SemanticRetentionAccount {
-    /// Move `bytes` of ACTIVE attribution from one provenance to another
-    /// when a charge's provenance changes, so the old owner's balance settles.
-    #[inline]
-    fn rehome_active(&self, from: Provenance, to: Provenance, bytes: usize) {
-        if bytes == 0 || from == to {
-            return;
-        }
+    /// A charge of `class` holding `held_bytes` adopts the backing slice of
+    /// another charge: ONE account-locked transaction settles both the
+    /// provenance change (the held bytes move between ACTIVE balances, the
+    /// total unchanged) and the backing's class change, so no window or
+    /// admission observes the adoption half-applied.
+    fn adopt_backing(&self, adoption: BackingAdoption) {
         let _admission_lock = self.lock_aggregate_state();
-        self.note_active_locked(from, 0, bytes);
-        self.note_active_locked(to, bytes, 0);
+        if adoption.class == ChargeClass::Active {
+            self.rehome_active_locked(adoption.from, adoption.to, adoption.held_bytes);
+        }
+        self.reclassify_locked(
+            adoption.backing_class,
+            adoption.class,
+            adoption.backing_bytes,
+            adoption.to,
+        );
+    }
+
+    /// Move `bytes` of ACTIVE attribution from one provenance to another.
+    /// Called only while [`Self::lock_aggregate_state`] is held; compiles to
+    /// nothing in a build without the window.
+    #[inline]
+    fn rehome_active_locked(&self, from: Provenance, to: Provenance, bytes: usize) {
+        #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+        self.active_windows
+            .rehome_locked(from.owner, to.owner, bytes);
+        #[cfg(not(any(test, feature = "test-support", feature = "soak-support")))]
+        let _ = (from, to, bytes);
     }
 
     /// Note an ACTIVE transition of a charge of `provenance` to the open
@@ -813,6 +842,22 @@ impl SemanticRetentionAccount {
         #[cfg(not(any(test, feature = "test-support", feature = "soak-support")))]
         let _ = (provenance, rise, fall);
     }
+}
+
+/// One charge adopting another's backing slice: what
+/// [`SemanticRetentionAccount::adopt_backing`] settles in a single
+/// transaction.
+struct BackingAdoption {
+    /// The adopting charge's class.
+    class: ChargeClass,
+    /// Bytes the adopting charge held before adopting.
+    held_bytes: usize,
+    /// Its provenance before, and after merging the backing's.
+    from: Provenance,
+    to: Provenance,
+    /// The adopted backing's class and bytes.
+    backing_class: ChargeClass,
+    backing_bytes: usize,
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -925,14 +970,20 @@ impl RetentionCharge {
                         .is_some_and(|a| Arc::ptr_eq(a, account)),
                     "the holds' backing is charged to the account their charge is"
                 );
-                if bytes > 0 {
-                    let merged = self.provenance.merged(backing.provenance);
-                    if self.class == ChargeClass::Active {
-                        account.rehome_active(self.provenance, merged, self.bytes);
-                    }
-                    self.provenance = merged;
-                }
-                account.reclassify(backing.class, self.class, bytes, self.provenance);
+                let merged = if bytes > 0 {
+                    self.provenance.merged(backing.provenance)
+                } else {
+                    self.provenance
+                };
+                account.adopt_backing(BackingAdoption {
+                    class: self.class,
+                    held_bytes: self.bytes,
+                    from: self.provenance,
+                    to: merged,
+                    backing_class: backing.class,
+                    backing_bytes: bytes,
+                });
+                self.provenance = merged;
             }
             self.bytes += bytes;
             self.held_backing += bytes;

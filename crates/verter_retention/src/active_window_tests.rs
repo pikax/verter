@@ -34,6 +34,18 @@ fn active(account: &Arc<SemanticRetentionAccount>, bytes: usize) -> RetentionCha
         .expect("active admitted")
 }
 
+/// Identified balances plus the UNKNOWN balance are the account's ACTIVE
+/// bytes, at every point the test samples.
+fn assert_balances_cover_account(account: &Arc<SemanticRetentionAccount>) {
+    let _admission_lock = account.lock_aggregate_state();
+    let registry = account.active_windows.inner.lock();
+    let identified: usize = registry.owner_active.values().sum();
+    assert_eq!(
+        identified + registry.unknown_active,
+        account.active_bytes.load(Ordering::Relaxed)
+    );
+}
+
 /// Bytes are conserved across a report and every transition inside the
 /// interval is numbered on the account's sequence.
 fn assert_conserved(report: &ActiveWindowReport) {
@@ -234,6 +246,19 @@ fn unattributable_work_rejects_the_witness() {
         report.attributed(),
         Err(ActiveWitnessRejection::UnknownProvenance { transitions: 1 })
     );
+
+    // Untagged ACTIVE occupancy spanning the whole window makes no
+    // transition inside it, and is just as unattributable.
+    let spanning = active(&account, 11);
+    assert_balances_cover_account(&account);
+    let report = account.open_active_window(&owner).finish();
+    assert_eq!(report.unknown_transitions, 0);
+    assert_eq!(
+        report.attributed(),
+        Err(ActiveWitnessRejection::UnknownActiveAtOpen { bytes: 11 })
+    );
+    drop(spanning);
+    assert_balances_cover_account(&account);
 }
 
 /// Foreign ACTIVE work that starts and ends strictly inside the window never
@@ -310,11 +335,109 @@ fn provenance_follows_the_charge_and_mixed_provenance_is_unknown() {
         Err(ActiveWitnessRejection::UnknownProvenance { transitions: 3 })
     );
     assert_eq!(account.snapshot().active_bytes, 0);
+    assert_balances_cover_account(&account);
     let fresh = account.open_active_window(&owner);
     let report = fresh.finish();
     assert_eq!((report.active_at_open, report.active_at_close), (0, 0));
     assert!(report.attributed().is_ok());
+
+    // A mixed charge that outlives a whole window: the window sees no
+    // transition, yet the owner's bytes were re-homed to UNKNOWN, so it is
+    // rejected rather than accepted as a zero-activity witness.
+    let handles = OwnedHandles::of(|aliases| names.iter().map(|name| name.offer(aliases)).sum());
+    let mixed = handles
+        .retained_with(
+            active_as(&account, &owner, 10),
+            ChargeCtx::owned_by(&account, &other),
+        )
+        .expect("holds admitted");
+    let unknown = account.snapshot().active_bytes;
+    assert!(unknown >= 10);
+    assert_balances_cover_account(&account);
+    let report = account.open_active_window(&owner).finish();
+    assert_eq!(
+        report.attributed(),
+        Err(ActiveWitnessRejection::UnknownActiveAtOpen { bytes: unknown })
+    );
+    drop(mixed);
+    assert_eq!(account.snapshot().active_bytes, 0);
+    assert_balances_cover_account(&account);
+
+    // After teardown the original owner measures a fresh workload exactly.
+    let window = account.open_active_window(&owner);
+    drop(active_as(&account, &owner, 33));
+    let report = window.finish();
+    assert_conserved(&report);
+    assert_eq!(report.attributed().expect("fresh").peak_active_bytes, 33);
     drop(names);
+}
+
+/// Stops and joins the workers on every exit, an assertion failure included.
+struct Workers {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    handles: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl Workers {
+    fn finish(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        for handle in self.handles.drain(..) {
+            handle.join().expect("worker");
+        }
+    }
+}
+
+impl Drop for Workers {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        for handle in self.handles.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// A window opened between an owned reservation and its release, and one
+/// finished before the release, each see the boundary on exactly one side:
+/// the held bytes are charged at open (rejecting the witness) or at close,
+/// and every transition lands on one side of the boundary or the other.
+#[test]
+fn window_boundaries_fall_on_exactly_one_side_of_a_transition() {
+    let account = account(1 << 30);
+    let owner = account.mint_active_owner();
+
+    let charge = active_as(&account, &owner, 8);
+    let straddling_open = account.open_active_window(&owner);
+    drop(charge);
+    let report = straddling_open.finish();
+    assert_conserved(&report);
+    assert_eq!(
+        (
+            report.active_at_open,
+            report.fall_bytes,
+            report.active_at_close
+        ),
+        (8, 8, 0)
+    );
+    assert_eq!(
+        report.attributed(),
+        Err(ActiveWitnessRejection::ActiveAtOpen { bytes: 8 })
+    );
+
+    let straddling_close = account.open_active_window(&owner);
+    let charge = active_as(&account, &owner, 8);
+    let report = straddling_close.finish();
+    assert_conserved(&report);
+    assert_eq!(
+        (
+            report.active_at_open,
+            report.rise_bytes,
+            report.active_at_close
+        ),
+        (0, 8, 8)
+    );
+    drop(charge);
+    assert_eq!(account.snapshot().active_bytes, 0);
+    assert_balances_cover_account(&account);
 }
 
 /// Windows opened and finished while other threads reserve and release
@@ -329,7 +452,7 @@ fn concurrent_transitions_at_window_boundaries_are_never_lost() {
     let owners: Vec<_> = (0..WORKERS).map(|_| account.mint_active_owner()).collect();
     let measured = owners[0].clone();
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let workers: Vec<_> = (0..WORKERS)
+    let handles: Vec<_> = (0..WORKERS)
         .map(|worker| {
             let owner = owners[worker].clone();
             let account = Arc::clone(&account);
@@ -348,29 +471,27 @@ fn concurrent_transitions_at_window_boundaries_are_never_lost() {
             })
         })
         .collect();
+    let mut workers = Workers { stop, handles };
     while account.active_transition_count() == 0 {
         std::thread::yield_now();
     }
+    // Keep opening windows until enough of them demonstrably spanned worker
+    // transitions: the overlap is required, never hoped for.
     let mut reports = Vec::new();
-    for _ in 0..200 {
+    let mut overlapped = 0usize;
+    while reports.len() < 400 || overlapped < 20 {
         let window = account.open_active_window(&measured);
         reports.push(window.observe());
-        reports.push(window.finish());
+        let report = window.finish();
+        overlapped += usize::from(report.closed_at > report.opened_at);
+        reports.push(report);
     }
-    stop.store(true, Ordering::Relaxed);
-    for worker in workers {
-        worker.join().expect("worker");
-    }
+    workers.finish();
     for report in &reports {
         assert_conserved(report);
     }
     assert_eq!(account.snapshot().active_bytes, 0);
-    assert!(
-        reports
-            .iter()
-            .any(|report| report.closed_at > report.opened_at),
-        "the windows overlapped worker transitions"
-    );
+    assert_balances_cover_account(&account);
 }
 
 /// An unfinished window deregisters when dropped and keeps its account
