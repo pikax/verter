@@ -469,7 +469,8 @@ pub(crate) fn resolve_payload_surface_with_scope(
                     let members = dispatch
                         .owning()
                         .spread_formula_positive_members_for_macro(&formula)
-                        .into_value_in(&builder);
+                        .into_value_in(&builder)
+                        .map_err(NonEmptyReasons::from_demand_trip)?;
                     Ok(Some(members))
                 }
                 other => {

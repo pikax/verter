@@ -7164,6 +7164,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let mut existential_unknown = false;
             let mut accepted = false;
             for target_branch in &target_branches {
+                if !self.charge_relation_work(1) {
+                    return Some(RelationResult::Unknown);
+                }
                 let alternative_checkpoint = self.relation_session_checkpoint();
                 let alternative_bindings_len = bindings.len();
                 match self.relate_projected_object_branch(source_branch, target_branch, bindings) {
@@ -7337,9 +7340,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     QueryResult::Value(formula) => formula,
                     QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
                 };
+                let alternatives = self.object_spread_alternatives(&formula).ok()?;
                 Some(
-                    formula
-                        .alternatives()
+                    alternatives
                         .iter()
                         .map(|alternative| {
                             let mut members = Vec::new();

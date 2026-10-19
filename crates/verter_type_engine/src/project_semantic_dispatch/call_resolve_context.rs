@@ -91,8 +91,8 @@ impl LiteralContext {
 /// One authored position of a call argument: the expression's type, its
 /// combined contextual type (the constituents of the parameter type that
 /// type it), the type parameters whose constraints that contextual type
-/// was read through, its steps from the argument, and whether it is the
-/// argument itself.
+/// was read through, its steps from the argument, whether it is the
+/// argument itself, and whether it is in a const context.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct ArgumentPosition {
     node: SemanticNodeId,
@@ -100,6 +100,10 @@ struct ArgumentPosition {
     through: Arc<[SemanticNodeId]>,
     path: Arc<[ArgumentPathStep]>,
     root: bool,
+    /// The checker's `isConstContext`: an enclosing object or array
+    /// literal of the argument is contextually typed by a `const` type
+    /// parameter, so the position's literals are kept as written.
+    const_context: bool,
 }
 
 impl ArgumentPosition {
@@ -111,6 +115,7 @@ impl ArgumentPosition {
         node: SemanticNodeId,
         contexts: Arc<[SemanticNodeId]>,
         through: Arc<[SemanticNodeId]>,
+        const_context: bool,
     ) -> Self {
         Self {
             node,
@@ -121,6 +126,7 @@ impl ArgumentPosition {
                 None => Arc::clone(&self.path),
             },
             root: false,
+            const_context,
         }
     }
 
@@ -318,6 +324,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             through: Arc::from([]),
             path: Arc::from([]),
             root: true,
+            const_context: false,
         };
         // The parameters the argument deposits into: a regular literal is
         // written as authored into each of them.
@@ -362,6 +369,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         typed.insert(position, node);
                         continue;
                     }
+                    // The positions this one's object or array literal holds
+                    // are in a const context when it is, or when its own
+                    // contextual type is a `const` type parameter.
+                    let nested_const = position.const_context
+                        || position
+                            .contexts
+                            .iter()
+                            .any(|&contextual| self.is_const_type_variable(contextual, declared));
                     let data = graph.node_data(node);
                     match data.as_deref() {
                         Some(SemanticNodeData::Object(surface)) => {
@@ -402,8 +417,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                     .cloned_known()
                                     .and_then(|key| self.argument_member_step(&key))
                                     .map(ArgumentPathStep::Member);
-                                children
-                                    .push((index, position.nested(step, value, contexts, through)));
+                                children.push((
+                                    index,
+                                    position.nested(step, value, contexts, through, nested_const),
+                                ));
                             }
                         }
                         Some(SemanticNodeData::Tuple { elements, .. }) => {
@@ -434,8 +451,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                 );
                                 let through = position.child_through(crossed);
                                 let step = u32::try_from(index).ok().map(ArgumentPathStep::Element);
-                                children
-                                    .push((index, position.nested(step, value, contexts, through)));
+                                children.push((
+                                    index,
+                                    position.nested(step, value, contexts, through, nested_const),
+                                ));
                             }
                         }
                         // An array literal holding a spread or an elision: its
@@ -473,6 +492,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                     element,
                                     contexts,
                                     through,
+                                    nested_const,
                                 ),
                             ));
                         }
@@ -498,6 +518,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                             member,
                                             Arc::clone(&position.contexts),
                                             Arc::clone(&position.through),
+                                            position.const_context,
                                         ),
                                     ));
                                 }
@@ -587,8 +608,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // every parameter the argument reaches is equal to one of them:
         // the decision is then made here, at the position it is for (`{ v:
         // "a" as "a", w: "a" }` deposited into a naked `T` keeps `v` alone).
+        // A const context keeps them as written whatever the argument
+        // reaches (`boxc<const T>(o: { a: T })` over `{ a: [v, "lit"] }`).
         if contexts.is_empty() {
-            return if reached.is_empty() {
+            return if reached.is_empty() || position.const_context {
                 Vec::new()
             } else {
                 fresh
@@ -613,6 +636,28 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             LiteralContext::Widen => fresh,
             LiteralContext::Unknown => Vec::new(),
         }
+    }
+
+    /// The checker's `isConstTypeVariable` over the call's declared type
+    /// parameters: `contextual` is a `const` type parameter, or a union or
+    /// intersection holding one.
+    fn is_const_type_variable(
+        &self,
+        contextual: SemanticNodeId,
+        declared: &[TypeParamDecl],
+    ) -> bool {
+        let is_const = |node: SemanticNodeId| {
+            declared
+                .iter()
+                .any(|decl| decl.is_const && decl.param == node)
+        };
+        is_const(contextual)
+            || self
+                .graph()
+                .node_data(contextual)
+                .as_deref()
+                .and_then(SemanticNodeData::composite_members)
+                .is_some_and(|members| members.iter().any(|&member| is_const(member)))
     }
 
     /// The step into an object literal's member keyed `key`: the literal
