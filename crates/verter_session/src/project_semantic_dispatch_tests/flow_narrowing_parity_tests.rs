@@ -1333,6 +1333,8 @@ export function optional_member_missing() { return objm({}); }
 export function unique_symbol() { return us("a"); }
 export function weak_primitive() { return po(1); }
 export function weak_object() { return po(wo); }
+const af: (x: number) => string = () => "";
+export function annotated_callee() { return af("x"); }
 "#;
 
 /// An optional target property or parameter reports against its declared
@@ -1479,6 +1481,12 @@ fn call_diagnostics_follow_the_checkers_optionality_union_order_and_nullability(
         // The relation does not model the weak-type rule for an object source, so
         // the checker's TS2559 is not reported at all.
         ("weak_object", "(55,43)", &[], &[]),
+        (
+            "annotated_callee",
+            "(57,48)",
+            &["error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'."],
+            &["error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'."],
+        ),
         (
             "mixed_literals",
             "(24,47)",

@@ -28813,6 +28813,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     else {
                         return self.degraded_unrepresentable_callee();
                     };
+                    // The checker still checks the call against the annotated
+                    // type: the executor decides applicability first, and an
+                    // undecided executor leaves the declared-return read.
+                    if let Some(value) =
+                        self.eval_call_via_resolve_call(callee_node, site, arguments)
+                    {
+                        return value;
+                    }
                     return self.call_return_of_callee_node(callee_node, site);
                 }
                 let ordinal = match &target.part {
