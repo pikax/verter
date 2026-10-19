@@ -1260,7 +1260,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 BodyPoll::Done(node, _) => node,
             };
             let (node, roots, unobservable) = match &mut build.then {
-                TypeofThen::Value => (node, Vec::new(), false),
+                TypeofThen::Value => (
+                    self.widen_declared_read_positions(node, &build.prepared),
+                    Vec::new(),
+                    false,
+                ),
                 TypeofThen::Member(member) => {
                     let facts = member
                         .current
@@ -1279,6 +1283,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         members, declaring, ..
                     } = *member;
                     let own = self.finish_value_members(members, build.scope.clone());
+                    let own = self.widen_declared_read_positions(own, &build.prepared);
                     return InstantiatePoll::Done(Box::new(self.member_typeof_output(
                         own,
                         false,
@@ -1972,6 +1977,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             .reduce(|composed, base| self.merge_static_surfaces(composed, base))
                     });
                 if let Some(own) = source {
+                    let own = self.widen_declared_read_positions(own, &prepared);
                     // The member lowered from the DECLARING file roots on
                     // its content version as the composed surface would.
                     return self.member_typeof_output(
@@ -2131,7 +2137,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             context,
                             observed_hash,
                         ) {
-                            Some(node) => node,
+                            Some(node) => self.widen_declared_read_positions(node, &prepared),
                             None => {
                                 return (QueryResult::Error(QueryError::Miss), empty_signature())
                                     .into()
@@ -2161,7 +2167,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 context,
                 observed_hash,
             ) {
-                Some(node) => node,
+                Some(node) => self.widen_declared_read_positions(node, &prepared),
                 None => return (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
             }
         } else if !prepared.signatures.is_empty() {

@@ -144,7 +144,7 @@ pub(crate) enum InferPosition {
     /// Function parameter — the `Argument` rung, contravariant
     /// combination.
     ContravariantParam,
-    /// Function return — the `ReturnType` rung, covariant combination.
+    /// Function return — the enclosing occurrence's rung and orientation.
     Return,
 }
 
@@ -166,12 +166,13 @@ fn inference_occurrence_for_position(
                 VariancePhase::Invariant => VariancePhase::Invariant,
             },
         },
-        // A return changes the priority rung while preserving the enclosing
-        // orientation (including a return nested inside a parameter).
-        InferPosition::Return => InferenceOccurrence {
-            priority: InferenceCandidatePriority::ReturnType,
-            variance: ambient.variance,
-        },
+        // A return keeps the enclosing occurrence whole, its rung included
+        // (`inferFromSignature` applies the returns with no priority of
+        // their own): `sib(() => "q", "x")` over `sib<T extends string>(f:
+        // () => T, o: T)` infers `"q" | "x"`, never the callback's return
+        // alone, and a receiver's function member infers beside the
+        // arguments the same way.
+        InferPosition::Return => ambient,
     }
 }
 

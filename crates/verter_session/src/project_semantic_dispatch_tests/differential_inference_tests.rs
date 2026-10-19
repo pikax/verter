@@ -1458,7 +1458,6 @@ fn primitive_constraint_literals() {
 
 /// An object or array literal argument keeps a literal where the parameter types it with a primitive-constrained type parameter (`isLiteralOfContextualType`), and the parameter keeps it (`hasPrimitiveConstraint`).
 #[test]
-#[ignore = "WRONG-CLEAN / gap in the lane: an object or array literal argument is evaluated before its parameter's contextual type is known, so its members arrive widened"]
 fn pinned_nested_argument_literals_under_a_primitive_constraint() {
     let failures = Matrix::new(PRIMITIVE_CONSTRAINT_LITERALS).four(&[
         (
@@ -1491,19 +1490,11 @@ fn pinned_nested_argument_literals_under_a_primitive_constraint() {
             r#"1 | 2"#,
         ),
     ]);
-    assert!(
-        failures.is_empty(),
-        "{}",
-        failures.join(
-            "
-"
-        )
-    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// The checker keeps an array literal argument's element literals when the parameter's element type is a type parameter with a primitive constraint (`isLiteralOfContextualType`): `ni3(["x", "y"], "x")` is `"x" | "y"`.
 #[test]
-#[ignore = "WRONG-CLEAN in the lane: a call argument is evaluated before its parameter's contextual type is known, so the array literal's elements arrive widened; contextual literal retention for nested argument literals is not modelled yet"]
 fn pinned_array_literal_arguments_keep_literals_under_a_primitive_constraint() {
     let failures = Matrix::new(NO_INFER).four(&[(
         Read::Return(r#"n3"#),
@@ -1512,6 +1503,1185 @@ fn pinned_array_literal_arguments_keep_literals_under_a_primitive_constraint() {
         r#""x" | "y""#,
         r#""x" | "y""#,
     )]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The fixture of [`candidate_literal_contexts`].
+const CANDIDATE_LITERAL_CONTEXTS: &str = r##"
+declare function cb<T extends string>(xs: T[], f: (x: T) => void): T;
+declare function cbo<T extends string>(o: { v: T; f: (x: T) => void }): T;
+declare function ov<T extends string>(x: { v: T }, y: number): 1;
+declare function ov<T extends string>(x: { v: T }, y: string): T;
+declare function ovr<T extends string>(x: { v: T }, y: number): T;
+declare function ovr<T>(x: { v: T }, y: string): T;
+declare function nin2<T extends string>(x: { v: T }, y: { w: NoInfer<T> }): T;
+declare function nin3<T extends string>(x: { v: NoInfer<T> }, y: T): T;
+declare function deepn<T extends number>(x: { a: { b: [T, T] } }): T;
+declare function mixk<T extends string | number>(x: { v: T[] }): T;
+declare function pw<T extends string>(a: { v: T }): T;
+declare function bo<T extends boolean>(x: { v: T }): T;
+declare function pk2<T extends "a" | "b">(x: { k: T }): T;
+declare function ts<T extends `p${string}`>(x: { v: T }): T;
+declare function pnul<T extends string | null>(x: { v: T }): T;
+declare function sib<T extends string>(f: (x: number) => T, o: { v: T }): T;
+declare function sib3<T extends string>(f: () => T, o: T): T;
+declare function sib6<T>(f: () => T, o: T): T;
+declare function sib7<T extends string>(o: T, f: () => T): T;
+declare const c: boolean;
+export function l1() { return cb(["a", "b"], (x) => {}); }
+export function l2() { return cbo({ v: "x", f: (x) => {} }); }
+export function l3() { return ov({ v: "x" }, "s"); }
+export function l4() { return ovr({ v: "x" }, "s"); }
+export function l5() { return nin2({ v: "a" }, { w: "b" }); }
+export function l6() { return nin3({ v: "a" }, "b"); }
+export function l7() { return deepn({ a: { b: [1, 2] } }); }
+export function l8() { return mixk({ v: [1, "a"] }); }
+export function l9() { return pw({ v: c ? "a" : "b" }); }
+export function l10() { return bo({ v: true }); }
+export function l11() { return pk2({ k: "a" }); }
+export function l12() { return ts({ v: "pq" }); }
+export function l13() { return pnul({ v: null }); }
+export function l14() { return sib(() => "q", { v: "x" }); }
+export function l15() { return sib3((): "q" => "q", "x"); }
+export function l16() { return sib6(() => "q", "x"); }
+export function l17() { return sib7("x", () => "q"); }
+declare function sx<T extends string | {}>(x: { v: T }): T;
+declare function ar<T extends string | {}>(x: T[]): T;
+type Text = string;
+type TextOrCount = string | number;
+declare function al<T extends Text>(x: { v: T }): T;
+declare function alu<T extends TextOrCount>(x: { v: T }): T;
+export function l18() { return sx({ v: c ? "a" : 1 }); }
+export function l19() { return sx({ v: c ? "a" : true }); }
+export function l20() { return ar([c ? "a" : 1]); }
+export function l21() { return ar(["a", 1]); }
+export function l22() { return al({ v: "x" }); }
+export function l23() { return alu({ v: "x" }); }
+declare function rv<T extends string>(this: { f: () => T }, x: T): T;
+const ru = { f: (): "a" => "a", rv };
+export function l24() { return ru.rv("b"); }
+declare function kv<T extends string, U>(x: { v: T; w: U }): U;
+declare function kt<T extends string, U>(x: [T, U]): U;
+declare function kn<T extends string, U>(x: { v: T; w: { z: U } }): U;
+declare function ku<T extends string | {}, U>(x: { a: T; b: U }): U;
+export function l25() { return kv({ v: "a", w: "a" }); }
+export function l26() { return kv({ v: "a", w: "b" }); }
+export function l27() { return kt(["a", "a"]); }
+export function l28() { return kn({ v: "a", w: { z: "a" } }); }
+export function l29() { return ku({ a: c ? "a" : 1, b: 1 }); }
+declare function ix<T extends string>(x: { [key: string]: T }): T;
+declare function ixn<T extends string>(x: { [key: number]: T }): T;
+declare function um<T extends Uppercase<string>>(x: { v: T }): T;
+declare function lc<T1 extends T2, T2 extends T3, T3 extends T4, T4 extends T5, T5 extends T6, T6 extends T7, T7 extends T8, T8 extends T9, T9 extends T10, T10 extends T11, T11 extends T12, T12 extends T13, T13 extends T14, T14 extends T15, T15 extends T16, T16 extends T17, T17 extends T18, T18 extends "a" | "b">(x: { v: T1 }): T1;
+export function l30() { return ix({ a: "x" }); }
+export function l31() { return ixn({ 1: "x" }); }
+export function l32() { return um({ v: "AB" }); }
+export function l33() { return lc({ v: "a" }); }
+declare function sv<T>(x: { a: T | "a"; b: T }): T;
+declare function sp<T>(x: { a: T; b: T | "y" }): T;
+declare function sp2<T, U extends string>(x: { a: T; b: U | T[] }): T;
+declare function sp4<T>(x: [T, T | "y"]): T;
+declare function hu<T>(x: { v: T } | { v: "a" }): T;
+declare function hm<T>(x: { v: T | "a" }): T;
+declare function gb<T extends string>(x: { box: { v: T } }): T;
+export function l34() { return sv({ a: "x", b: "x" }); }
+export function l35() { return sv({ a: "x", b: "y" }); }
+export function l36() { return sp({ a: "x", b: "x" }); }
+export function l37() { return sp({ a: "x", b: "z" }); }
+export function l38() { return sp2({ a: "x", b: "x" }); }
+export function l39() { return sp4(["x", "x"]); }
+export function l40() { return hu({ v: "x" }); }
+export function l41() { return hm({ v: "x" }); }
+export function l42() { return pw(c ? { v: "a" } : { v: "b" }); }
+export function l43() { return gb({ box: c ? { v: "a" } : { v: "b" } }); }
+declare function pu<T>(x: { v: T }): T;
+declare function fa<T>(x: T): T[];
+declare function ng(x: { v: "a" | "b" }): 1;
+export function l44() { return pu(c ? { v: "a" } : { v: "b" }); }
+export function l45() { return fa(c ? "a" : "b"); }
+export function l46() { return ng(c ? { v: "a" } : { v: "b" }); }
+declare function tq<T extends { v: "a" | "b" }>(x: T): T;
+declare function tqf<T extends { v: "a" | "b"; f: (n: number) => void }>(x: T): T;
+declare function tqm<T extends { v: "a" | "b" }>(x: { o: T; f: (n: number) => void }): T;
+declare function tqk<T extends { "1": "a" | "b" }>(x: T): T;
+declare function nk<T extends string>(x: { "1": T }): T;
+export function l47() { return tq({ v: "a" }); }
+export function l48() { return tqf({ v: "a", f: (n) => {} }); }
+export function l49() { return tqm({ o: { v: "a" }, f: (n) => {} }); }
+export function l50() { return tqk({ 1: "a" }); }
+export function l51() { return nk({ 1: "x" }); }
+declare function tqs<T extends { v: string; f: (n: number) => void }>(x: T): T;
+export function l52() { return tqs({ v: "a", f: (n) => {} }); }
+declare function tqo<T extends { v: string; f: (n: number) => void }>(o?: T): T;
+declare function tqu<T, U>(x: T | { extra: U; f: (n: number) => void }): U;
+export function l53() { return tqo({ v: "a", f: (n) => {} }); }
+export function l54() { return tqu({ extra: 1, f: (n) => {} }); }
+declare function tt2<T extends string>(x: [...string[], T]): T;
+declare function tup<T extends [string, "a" | "b"]>(x: { t: T; f: (n: number) => void }): T;
+declare function tup2<T extends [...string[], "a" | "b"]>(x: { t: T; f: (n: number) => void }): T;
+export function l55() { return tt2(["x", "a"]); }
+export function l56() { return tup({ t: ["x", "a"], f: (n) => {} }); }
+export function l57() { return tup2({ t: ["x", "a"], f: (n) => {} }); }
+"##;
+
+/// Each candidate evaluates a nested argument literal under its own type
+/// parameter's constraint (`isLiteralOfContextualType`): a literal context
+/// keeps the literal through arrays, tuples, nested objects, conditional
+/// arms and context-sensitive object literals; a rejected overload's
+/// context does not reach the candidate after it; a nested `NoInfer`
+/// position deposits nothing; and a callback's return infers beside its
+/// sibling arguments — and a receiver's function member beside the
+/// arguments — at their priority. Each authored member or element is
+/// decided whole against its own contextual type: a conditional of a kept
+/// and an unkept kind stays whole, where the same literals as separate
+/// elements widen apart; a constraint is read through its named aliases.
+/// A literal kept at one position stays its own: an equal literal at a
+/// sibling member, tuple element or nested member whose contextual type
+/// is no literal context still widens, even where both reach the same
+/// type parameter. A member's contextual type combines every constituent
+/// of a union parameter type, and a conditional's object arms are each
+/// read against the same contextual type, at the argument's root or
+/// nested. A member's contextual type falls
+/// back to an applicable index signature; a string mapping is a string
+/// literal context; and an acyclic constraint chain is read to its end,
+/// however long. A type parameter types an object argument's members
+/// through its constraint, whether the argument is deposited whole or read
+/// by a context-sensitive literal's first pass, which deposits nothing
+/// into a naked type parameter, so a callback member is typed by the
+/// constraint; a numeric key names the member its string spelling names.
+/// A contextual tuple types an element counted from the end by its
+/// trailing fixed element, and a constraint that is a tuple makes the
+/// literal it types a tuple.
+#[test]
+fn candidate_literal_contexts() {
+    let failures = Matrix::new(CANDIDATE_LITERAL_CONTEXTS).four(&[
+        (
+            Read::Return(r#"l1"#),
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+        ),
+        (
+            Read::Return(r#"l2"#),
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+        ),
+        (
+            Read::Return(r#"l3"#),
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+        ),
+        (
+            Read::Return(r#"l4"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"l5"#),
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+        ),
+        (
+            Read::Return(r#"l6"#),
+            r#""b""#,
+            r#""b""#,
+            r#""b""#,
+            r#""b""#,
+        ),
+        (
+            Read::Return(r#"l7"#),
+            r#"1 | 2"#,
+            r#"1 | 2"#,
+            r#"1 | 2"#,
+            r#"1 | 2"#,
+        ),
+        (
+            Read::Return(r#"l8"#),
+            r#""a" | 1"#,
+            r#""a" | 1"#,
+            r#""a" | 1"#,
+            r#""a" | 1"#,
+        ),
+        (
+            Read::Return(r#"l9"#),
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+        ),
+        (
+            Read::Return(r#"l10"#),
+            r#"true"#,
+            r#"true"#,
+            r#"true"#,
+            r#"true"#,
+        ),
+        (
+            Read::Return(r#"l11"#),
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+        ),
+        (
+            Read::Return(r#"l12"#),
+            r#""pq""#,
+            r#""pq""#,
+            r#""pq""#,
+            r#""pq""#,
+        ),
+        (
+            Read::Return(r#"l13"#),
+            r#"null"#,
+            r#"any"#,
+            r#"null"#,
+            r#"any"#,
+        ),
+        (
+            Read::Return(r#"l14"#),
+            r#""q" | "x""#,
+            r#""q" | "x""#,
+            r#""q" | "x""#,
+            r#""q" | "x""#,
+        ),
+        (
+            Read::Return(r#"l15"#),
+            r#""q" | "x""#,
+            r#""q" | "x""#,
+            r#""q" | "x""#,
+            r#""q" | "x""#,
+        ),
+        (
+            Read::Return(r#"l16"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"l17"#),
+            r#""q" | "x""#,
+            r#""q" | "x""#,
+            r#""q" | "x""#,
+            r#""q" | "x""#,
+        ),
+        (
+            Read::Return(r#"l18"#),
+            r#""a" | 1"#,
+            r#""a" | 1"#,
+            r#""a" | 1"#,
+            r#""a" | 1"#,
+        ),
+        (
+            Read::Return(r#"l19"#),
+            r#""a" | true"#,
+            r#""a" | true"#,
+            r#""a" | true"#,
+            r#""a" | true"#,
+        ),
+        (
+            Read::Return(r#"l20"#),
+            r#""a" | 1"#,
+            r#""a" | 1"#,
+            r#""a" | 1"#,
+            r#""a" | 1"#,
+        ),
+        (
+            Read::Return(r#"l21"#),
+            r#"number | "a""#,
+            r#"number | "a""#,
+            r#"number | "a""#,
+            r#"number | "a""#,
+        ),
+        (
+            Read::Return(r#"l22"#),
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+        ),
+        (
+            Read::Return(r#"l23"#),
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+        ),
+        (
+            Read::Return(r#"l24"#),
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+        ),
+        (
+            Read::Return(r#"l25"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"l26"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"l27"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"l28"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"l29"#),
+            r#"number"#,
+            r#"number"#,
+            r#"number"#,
+            r#"number"#,
+        ),
+        (
+            Read::Return(r#"l30"#),
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+        ),
+        (
+            Read::Return(r#"l31"#),
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+        ),
+        (
+            Read::Return(r#"l32"#),
+            r#""AB""#,
+            r#""AB""#,
+            r#""AB""#,
+            r#""AB""#,
+        ),
+        (
+            Read::Return(r#"l33"#),
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+        ),
+        (
+            Read::Return(r#"l34"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"l35"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"l36"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"l37"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"l38"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"l39"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"l40"#),
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+        ),
+        (
+            Read::Return(r#"l41"#),
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+        ),
+        (
+            Read::Return(r#"l42"#),
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+        ),
+        (
+            Read::Return(r#"l43"#),
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+            r#""a" | "b""#,
+        ),
+        (
+            Read::Return(r#"l44"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"l45"#),
+            r#"string[]"#,
+            r#"string[]"#,
+            r#"string[]"#,
+            r#"string[]"#,
+        ),
+        (Read::Return(r#"l46"#), r#"1"#, r#"1"#, r#"1"#, r#"1"#),
+        (
+            Read::Return(r#"l47"#),
+            r#"{ v: "a"; }"#,
+            r#"{ v: "a"; }"#,
+            r#"{ v: "a"; }"#,
+            r#"{ v: "a"; }"#,
+        ),
+        (
+            Read::Return(r#"l48"#),
+            r#"{ v: "a"; f: (n: number) => void; }"#,
+            r#"{ v: "a"; f: (n: number) => void; }"#,
+            r#"{ v: "a"; f: (n: number) => void; }"#,
+            r#"{ v: "a"; f: (n: number) => void; }"#,
+        ),
+        (
+            Read::Return(r#"l49"#),
+            r#"{ v: "a"; }"#,
+            r#"{ v: "a"; }"#,
+            r#"{ v: "a"; }"#,
+            r#"{ v: "a"; }"#,
+        ),
+        (
+            Read::Return(r#"l50"#),
+            r#"{ 1: "a"; }"#,
+            r#"{ 1: "a"; }"#,
+            r#"{ 1: "a"; }"#,
+            r#"{ 1: "a"; }"#,
+        ),
+        (
+            Read::Return(r#"l51"#),
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+        ),
+        (
+            Read::Return(r#"l52"#),
+            r#"{ v: string; f: (n: number) => void; }"#,
+            r#"{ v: string; f: (n: number) => void; }"#,
+            r#"{ v: string; f: (n: number) => void; }"#,
+            r#"{ v: string; f: (n: number) => void; }"#,
+        ),
+        (
+            Read::Return(r#"l53"#),
+            r#"{ v: string; f: (n: number) => void; }"#,
+            r#"{ v: string; f: (n: number) => void; }"#,
+            r#"{ v: string; f: (n: number) => void; }"#,
+            r#"{ v: string; f: (n: number) => void; }"#,
+        ),
+        (
+            Read::Return(r#"l54"#),
+            r#"number"#,
+            r#"number"#,
+            r#"number"#,
+            r#"number"#,
+        ),
+        (
+            Read::Return(r#"l55"#),
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+        ),
+        (
+            Read::Return(r#"l56"#),
+            r#"[string, "a"]"#,
+            r#"[string, "a"]"#,
+            r#"[string, "a"]"#,
+            r#"[string, "a"]"#,
+        ),
+        (
+            Read::Return(r#"l57"#),
+            r#"[string, "a"]"#,
+            r#"[string, "a"]"#,
+            r#"[string, "a"]"#,
+            r#"[string, "a"]"#,
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+const AUTHORED_LITERAL_OCCURRENCES: &str = r##"
+declare const c: boolean;
+declare function pu<T>(x: { v: T }): T;
+declare function pw<T extends string>(a: { v: T }): T;
+declare function tu<T>(x: [T, T]): T;
+declare function kc<const T>(x: { v: T }): T;
+declare function kcn<const T>(x: T): T;
+declare function kcc<const T extends readonly unknown[]>(x: { v: T }): T;
+declare function pa<T>(x: T[]): T;
+const s = "a";
+let sl: "a" = "a";
+const so = { v: "a" } as const;
+export function n1() { return pu({ v: "a" as "a" }); }
+export function n2() { return pu({ v: s }); }
+export function n3() { return pu({ v: sl }); }
+export function n4() { return pu({ v: c ? "a" : ("b" as "b") }); }
+export function n5() { return pu({ v: c ? "a" : sl }); }
+export function n6() { return tu(["a" as "a", "a"]); }
+export function n7() { return pw({ v: c ? "a" : sl }); }
+export function n8() { return kc({ v: { w: "a", n: [1, 2] } }); }
+export function n9() { return kcn({ v: { w: "a" } }); }
+export function n10() { return kcc({ v: ["a", { b: 1 }] }); }
+export function n11() { return pa(["a", "a" as "a"]); }
+export function n12() { return pa([c ? "a" : sl, "b"]); }
+export function n13() { return pu(so); }
+export function n14() { return pu({ v: (("a")) }); }
+export function n15() { return pa([c ? { v: "a" } : { v: sl }]); }
+export function n16() { return pu(c ? { v: "a" } : { v: sl }); }
+export function n17() { return pu({ v: "a" satisfies string }); }
+export function n18() { return pu({ v: ["a" as const, "b"] }); }
+declare function id<T>(x: T): T;
+export function n19() { return id(c ? { a: 1 } : { a: 2 }); }
+export function n20() { return id(c ? { a: 2 } : { a: 1 }); }
+export function n21() { return id(c ? { a: 1 } : { a: "s" }); }
+export function n22() { return id(c ? { a: 1 } : { a: 2, b: "x" }); }
+declare function fa<T>(x: T): T[];
+export function n23() { return pu({ v: c ? -1 : 2 }); }
+export function n24() { return fa(-1); }
+export function n25() { return fa(c ? -1 : 2); }
+export function n26() { return pa([c ? -1n : 2n]); }
+let sb: "b" = "b";
+export function n27() { return id({ v: sl }); }
+export function n28() { return pu({ v: c ? "a" : sb }); }
+export function n29() { return pu({ v: so }); }
+export function n30() { return pa(["a" as "a"]); }
+export function n31() { return pu({ v: ["a"] as const }); }
+export function n32() { return id({ v: "a" as "a", w: "b" }); }
+export function n33() { return pu({ v: { w: sl } }); }
+export function n34() { return pa([sl, "b"]); }
+export function n35() { return pu({ v: c ? <const>"a" : "a" }); }
+export function n36() { return pu({ v: <const>["a"] }); }
+export function n37() { return id({ v: <const>"a", w: "b" }); }
+declare const c2: boolean;
+export function n38() { return pu(c ? { v: "a" as "a" } : { v: "a" as "a" }); }
+export function n39() { return pu(c ? { v: "a" as "a" } : { v: "b" }); }
+export function n40() { return pu(c ? { v: "a" as "a" } : { v: "a" }); }
+export function n41() { return pu(c ? { v: sl } : { w: 1, v: "b" as "b" }); }
+export function n42() { return pa(c ? ["a" as "a"] : ["b" as "b"]); }
+export function n43() { return pu(c ? { v: { w: "a" as "a" } } : { v: { w: "b" as "b" } }); }
+export function n44() { return pu(c ? { v: s } : { v: sl }); }
+export function n45() { return pu(c ? (c2 ? { v: "a" as "a" } : { v: sl }) : { v: "b" as "b" }); }
+export function n46() { return id({ v: "a" as "a", w: "a" }); }
+export function n47() { return id({ v: sl, w: "a" }); }
+export function n48() { return id({ v: sl, w: s }); }
+export function n49() { return id({ v: "a" as "a", v2: s, 0: sl }); }
+export function n50() { return pa(["a" as "a", ...([] as [])]); }
+export function n51() { return pa([, "a" as "a"]); }
+export function n52(p: "a") { return pu({ v: p }); }
+export function n53(s: "a") { return pu({ v: s }); }
+export function n54(p: "a") { return id({ v: p, w: "b" }); }
+export function n55(o: { v: "a" }) { return pu({ v: o.v }); }
+export function n56() { return kc({ v: [sl, "b"] }); }
+export function n57(p: number) { return kc({ v: [p, "b"] }); }
+"##;
+
+/// A literal's freshness belongs to its authored occurrence: a fresh
+/// literal read through a `const` binding or `satisfies` still widens, a
+/// conditional of a fresh and an asserted arm widens, an equal asserted
+/// literal at a sibling element does not keep a fresh one, a whole stored
+/// argument keeps its literal, and a `const` type parameter keeps every
+/// nested literal readonly. A conditional's object arms the widening makes
+/// alike are one type in either order, while arms that stay unlike keep
+/// both. A signed numeric or negated bigint literal is as fresh as an
+/// unsigned one, alone or as a conditional arm.
+#[test]
+fn authored_literal_occurrences() {
+    let failures = Matrix::new(AUTHORED_LITERAL_OCCURRENCES).four(&[
+        (
+            Read::Return(r#"n2"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"n4"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"n6"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"n7"#),
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+        ),
+        (
+            Read::Return(r#"n8"#),
+            r#"{ readonly w: "a"; readonly n: readonly [1, 2]; }"#,
+            r#"{ readonly w: "a"; readonly n: readonly [1, 2]; }"#,
+            r#"{ readonly w: "a"; readonly n: readonly [1, 2]; }"#,
+            r#"{ readonly w: "a"; readonly n: readonly [1, 2]; }"#,
+        ),
+        (
+            Read::Return(r#"n9"#),
+            r#"{ readonly v: { readonly w: "a"; }; }"#,
+            r#"{ readonly v: { readonly w: "a"; }; }"#,
+            r#"{ readonly v: { readonly w: "a"; }; }"#,
+            r#"{ readonly v: { readonly w: "a"; }; }"#,
+        ),
+        (
+            Read::Return(r#"n10"#),
+            r#"readonly ["a", { readonly b: 1; }]"#,
+            r#"readonly ["a", { readonly b: 1; }]"#,
+            r#"readonly ["a", { readonly b: 1; }]"#,
+            r#"readonly ["a", { readonly b: 1; }]"#,
+        ),
+        (
+            Read::Return(r#"n11"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"n12"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"n13"#),
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+        ),
+        (
+            Read::Return(r#"n14"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"n15"#),
+            r#"{ v: string; }"#,
+            r#"{ v: string; }"#,
+            r#"{ v: string; }"#,
+            r#"{ v: string; }"#,
+        ),
+        (
+            Read::Return(r#"n16"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"n17"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"n18"#),
+            r#"string[]"#,
+            r#"string[]"#,
+            r#"string[]"#,
+            r#"string[]"#,
+        ),
+        (
+            Read::Return(r#"n19"#),
+            r#"{ a: number; }"#,
+            r#"{ a: number; }"#,
+            r#"{ a: number; }"#,
+            r#"{ a: number; }"#,
+        ),
+        (
+            Read::Return(r#"n20"#),
+            r#"{ a: number; }"#,
+            r#"{ a: number; }"#,
+            r#"{ a: number; }"#,
+            r#"{ a: number; }"#,
+        ),
+        (
+            Read::Return(r#"n21"#),
+            r#"{ a: number; } | { a: string; }"#,
+            r#"{ a: number; } | { a: string; }"#,
+            r#"{ a: number; } | { a: string; }"#,
+            r#"{ a: number; } | { a: string; }"#,
+        ),
+        (
+            Read::Return(r#"n22"#),
+            r#"{ a: number; b?: undefined; } | { a: number; b: string; }"#,
+            r#"{ a: number; b?: undefined; } | { a: number; b: string; }"#,
+            r#"{ a: number; b?: undefined; } | { a: number; b: string; }"#,
+            r#"{ a: number; b?: undefined; } | { a: number; b: string; }"#,
+        ),
+        (
+            Read::Return(r#"n23"#),
+            r#"number"#,
+            r#"number"#,
+            r#"number"#,
+            r#"number"#,
+        ),
+        (
+            Read::Return(r#"n24"#),
+            r#"number[]"#,
+            r#"number[]"#,
+            r#"number[]"#,
+            r#"number[]"#,
+        ),
+        (
+            Read::Return(r#"n25"#),
+            r#"number[]"#,
+            r#"number[]"#,
+            r#"number[]"#,
+            r#"number[]"#,
+        ),
+        (
+            Read::Return(r#"n26"#),
+            r#"bigint"#,
+            r#"bigint"#,
+            r#"bigint"#,
+            r#"bigint"#,
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// An asserted, const-asserted or stored literal nested in an object or
+/// array literal argument is not fresh: it keeps its literal type where
+/// the checker keeps it (`pu({ v: "a" as "a" })` is `"a"`), at any depth
+/// and in a whole argument a naked parameter infers from, beside a fresh
+/// sibling that widens. A conditional of a fresh and a stored arm of one
+/// literal keeps it (`c ? "a" : sl` with `sl: "a"`), and one of a fresh
+/// and a stored arm of different literals widens (`c ? "a" : sb`).
+#[test]
+fn nested_regular_literals_keep_their_type() {
+    let mut failures = Matrix::new(AUTHORED_LITERAL_OCCURRENCES).four(&[
+        (
+            Read::Return(r#"n1"#),
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+        ),
+        (
+            Read::Return(r#"n3"#),
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+        ),
+        (
+            Read::Return(r#"n5"#),
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+        ),
+        (
+            Read::Return(r#"n27"#),
+            r#"{ v: "a"; }"#,
+            r#"{ v: "a"; }"#,
+            r#"{ v: "a"; }"#,
+            r#"{ v: "a"; }"#,
+        ),
+        (
+            Read::Return(r#"n28"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"n29"#),
+            r#"{ readonly v: "a"; }"#,
+            r#"{ readonly v: "a"; }"#,
+            r#"{ readonly v: "a"; }"#,
+            r#"{ readonly v: "a"; }"#,
+        ),
+        (
+            Read::Return(r#"n30"#),
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+        ),
+        (
+            Read::Return(r#"n31"#),
+            r#"readonly ["a"]"#,
+            r#"readonly ["a"]"#,
+            r#"readonly ["a"]"#,
+            r#"readonly ["a"]"#,
+        ),
+        (
+            Read::Return(r#"n32"#),
+            r#"{ v: "a"; w: string; }"#,
+            r#"{ v: "a"; w: string; }"#,
+            r#"{ v: "a"; w: string; }"#,
+            r#"{ v: "a"; w: string; }"#,
+        ),
+        (
+            Read::Return(r#"n33"#),
+            r#"{ w: "a"; }"#,
+            r#"{ w: "a"; }"#,
+            r#"{ w: "a"; }"#,
+            r#"{ w: "a"; }"#,
+        ),
+        (
+            Read::Return(r#"n34"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"n35"#),
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+        ),
+        (
+            Read::Return(r#"n36"#),
+            r#"readonly ["a"]"#,
+            r#"readonly ["a"]"#,
+            r#"readonly ["a"]"#,
+            r#"readonly ["a"]"#,
+        ),
+        (
+            Read::Return(r#"n37"#),
+            r#"{ v: "a"; w: string; }"#,
+            r#"{ v: "a"; w: string; }"#,
+            r#"{ v: "a"; w: string; }"#,
+            r#"{ v: "a"; w: string; }"#,
+        ),
+    ]);
+    // Each object or array arm of a conditional argument is its own
+    // expression: its asserted or stored literals stay regular, and an
+    // equal literal another arm writes fresh widens.
+    failures.extend(Matrix::new(AUTHORED_LITERAL_OCCURRENCES).same(&[
+        (Read::Return(r#"n38"#), r#""a""#),
+        (Read::Return(r#"n39"#), r#"string"#),
+        (Read::Return(r#"n40"#), r#"string"#),
+        (Read::Return(r#"n41"#), r#""a" | "b""#),
+        (Read::Return(r#"n42"#), r#""a" | "b""#),
+        (Read::Return(r#"n43"#), r#"{ w: "a"; } | { w: "b"; }"#),
+        (Read::Return(r#"n44"#), r#"string"#),
+        (Read::Return(r#"n45"#), r#""a" | "b""#),
+    ]));
+    // A regular literal at one member is no reason to keep an equal fresh
+    // literal at a sibling member, and an array literal's elements before
+    // a spread, or past an elision, are still addressed by their index.
+    failures.extend(Matrix::new(AUTHORED_LITERAL_OCCURRENCES).same(&[
+        (Read::Return(r#"n46"#), r#"{ v: "a"; w: string; }"#),
+        (Read::Return(r#"n47"#), r#"{ v: "a"; w: string; }"#),
+        (Read::Return(r#"n48"#), r#"{ v: "a"; w: string; }"#),
+        (Read::Return(r#"n49"#), r#"{ v: "a"; v2: string; 0: "a"; }"#),
+        (Read::Return(r#"n50"#), r#""a""#),
+    ]));
+    failures.extend(Matrix::new(AUTHORED_LITERAL_OCCURRENCES).four(&[(
+        Read::Return(r#"n51"#),
+        r#""a" | undefined"#,
+        r#""a""#,
+        r#""a" | undefined"#,
+        r#""a""#,
+    )]));
+    // A read of a parameter of the call's own function is as fresh as
+    // that parameter, classified in the function's scope: a parameter
+    // that shadows a top-level binding is read as itself, never as the
+    // binding it shadows (`s: "a"` is regular where the top-level
+    // `const s = "a"` is fresh).
+    failures.extend(Matrix::new(AUTHORED_LITERAL_OCCURRENCES).same(&[
+        (Read::Return(r#"n52"#), r#""a""#),
+        (Read::Return(r#"n53"#), r#""a""#),
+        (Read::Return(r#"n54"#), r#"{ v: "a"; w: string; }"#),
+        (Read::Return(r#"n55"#), r#""a""#),
+    ]));
+    // A fresh literal beside a regular read keeps its type in a const
+    // context: the array literal's contextual type is a `const` type
+    // parameter, whatever the parameters the argument reaches.
+    failures.extend(Matrix::new(AUTHORED_LITERAL_OCCURRENCES).same(&[
+        (Read::Return(r#"n56"#), r#"readonly ["a", "b"]"#),
+        (Read::Return(r#"n57"#), r#"readonly [number, "b"]"#),
+    ]));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+const DECLARED_LITERAL_OCCURRENCES: &str = r##"
+declare const c: boolean;
+let sl: "a" = "a";
+const s = "a";
+let d1 = { v: "a" as "a", w: "b" };
+const d2 = { v: "a" as "a", w: "b" };
+let d3 = { o: { v: sl, w: "b" } };
+const d4 = { o: { v: sl, w: "b" } };
+let d5 = ["a" as "a"];
+let d6 = ["a" as "a", "b"];
+let d7 = { v: c ? "a" : sl };
+let d8 = { v: [sl, "b"] };
+let d9 = { v: [sl] };
+let d10 = "a" as "a";
+let d11 = c ? "a" : sl;
+let d12 = { v: s };
+const d13 = [{ v: sl, w: 1 }];
+let d14 = { v: c ? "a" : ("b" as "b") };
+let d15 = { v: { w: sl } };
+let d16 = s;
+let d17 = c ? s : 1;
+let d18 = [s];
+const d19 = { v: s };
+let d20 = { o: { v: "a" as "a", w: "b" } };
+let d21 = ["a"] as const;
+let d22 = { m: () => "a" };
+let d23 = { v: "a" } satisfies { v: string };
+let d24 = { v: ["a", 1] as const, w: [1] };
+let d25 = c ? "a" : ("a" as "a");
+declare const c2: boolean;
+let d26 = c ? (c2 ? "a" : "b") : ("a" as "a");
+let d27 = c ? (c2 ? "a" : "b") : "c";
+let d28 = { v: c ? (c2 ? "a" : sl) : "b" };
+let d29 = [s, "x" as "x"];
+let d30 = { v: s, w: { u: c ? s : sl } };
+declare const o: { w: number };
+const so = { v: "a" as "a" };
+let d31 = c ? { v: s } : { v: 1 };
+let d32 = { ...o, v: s };
+let d33 = c ? { v: s } : { v: sl };
+let d34 = c ? [s] : [1];
+let d35 = { a: { ...o, v: s } };
+let d36 = { ...o, v: c ? "a" : sl };
+let d37 = { ...so, v: s };
+let d38 = { v: s, ...o };
+declare const ov: { v: "a" };
+let d39 = { v: s, ...ov };
+let d40 = c ? { v: s, k: 1 } : { v: sl, k: "z" };
+let d41 = c ? { v: sl, k: 1 } : { v: s, k: "z" };
+let d42 = { ...{ v: s } };
+let d43 = { ...{ v: sl } };
+let d44 = [...[s]];
+"##;
+
+/// A declaration's initializer keeps each literal's freshness per authored
+/// occurrence: a mutable declaration widens only the fresh literals it
+/// writes, so an asserted, const-asserted or stored literal keeps its type
+/// beside a fresh sibling that widens — as a member at any depth, as an
+/// array element, at the top level — and a union of a fresh literal and
+/// its regular counterpart is the regular one. A fresh literal widens
+/// wherever its position closes: a member, an element, an arrow's body,
+/// and through a conditional nested in a conditional's branch.
+#[test]
+fn declared_literal_occurrences() {
+    let failures = Matrix::new(DECLARED_LITERAL_OCCURRENCES).same(&[
+        (Read::Type("typeof d1"), r#"{ v: "a"; w: string; }"#),
+        (Read::Type("typeof d2"), r#"{ v: "a"; w: string; }"#),
+        (Read::Type("typeof d3"), r#"{ o: { v: "a"; w: string; }; }"#),
+        (Read::Type("typeof d4"), r#"{ o: { v: "a"; w: string; }; }"#),
+        (Read::Type("typeof d5"), r#""a"[]"#),
+        (Read::Type("typeof d6"), r#"string[]"#),
+        (Read::Type("typeof d8"), r#"{ v: string[]; }"#),
+        (Read::Type("typeof d9"), r#"{ v: "a"[]; }"#),
+        (Read::Type("typeof d10"), r#""a""#),
+        (Read::Type("typeof d13"), r#"{ v: "a"; w: number; }[]"#),
+        (Read::Type("typeof d14"), r#"{ v: string; }"#),
+        (Read::Type("typeof d15"), r#"{ v: { w: "a"; }; }"#),
+        (
+            Read::Type("typeof d20"),
+            r#"{ o: { v: "a"; w: string; }; }"#,
+        ),
+        (Read::Type("typeof d21"), r#"readonly ["a"]"#),
+        (Read::Type("typeof d22"), r#"{ m: () => string; }"#),
+        (Read::Type("typeof d23"), r#"{ v: string; }"#),
+        (
+            Read::Type("typeof d24"),
+            r#"{ v: readonly ["a", 1]; w: number[]; }"#,
+        ),
+        (Read::Type("typeof d25"), r#""a""#),
+        (Read::Type("typeof d26"), r#"string"#),
+        (Read::Type("typeof d27"), r#"string"#),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A read in a declaration's mutable location is as fresh as its binding:
+/// a `const` holding a widening literal reads as that fresh literal, so a
+/// member, an element or a mutable declaration of it widens, and a
+/// conditional of a fresh literal and a stored read of the same literal is
+/// the regular one — through a nested conditional, beside an asserted
+/// element, and through a member read of the declaration. A member read
+/// widens in each object or array arm of a conditional and beside a
+/// spread, while a later spread's own member of that key keeps its type.
+#[test]
+fn declared_reads_follow_their_binding_freshness() {
+    let failures = Matrix::new(DECLARED_LITERAL_OCCURRENCES).same(&[
+        (Read::Type("typeof d7"), r#"{ v: "a"; }"#),
+        (Read::Type("typeof d11"), r#""a""#),
+        (Read::Type("typeof d12"), r#"{ v: string; }"#),
+        (Read::Type("typeof d16"), r#"string"#),
+        (Read::Type("typeof d17"), r#"string | number"#),
+        (Read::Type("typeof d18"), r#"string[]"#),
+        (Read::Type("typeof d19"), r#"{ v: string; }"#),
+        (Read::Type("typeof d28"), r#"{ v: string; }"#),
+        (Read::Type("typeof d29"), r#"string[]"#),
+        (
+            Read::Type("typeof d30"),
+            r#"{ v: string; w: { u: "a"; }; }"#,
+        ),
+        (Read::Type("typeof d30.w"), r#"{ u: "a"; }"#),
+        (Read::Type("typeof d30.v"), r#"string"#),
+        (
+            Read::Type("typeof d31"),
+            r#"{ v: string; } | { v: number; }"#,
+        ),
+        (Read::Type("typeof d32"), r#"{ w: number; v: string; }"#),
+        (Read::Type("typeof d33"), r#"{ v: string; }"#),
+        (Read::Type("typeof d34"), r#"string[] | number[]"#),
+        (
+            Read::Type("typeof d35"),
+            r#"{ a: { w: number; v: string; }; }"#,
+        ),
+        (Read::Type("typeof d36"), r#"{ w: number; v: "a"; }"#),
+        (Read::Type("typeof d37"), r#"{ v: string; }"#),
+        (Read::Type("typeof d38"), r#"{ w: number; v: string; }"#),
+        (Read::Type("typeof d39"), r#"{ v: "a"; }"#),
+        (
+            Read::Type("typeof d40"),
+            r#"{ v: string; k: number; } | { v: "a"; k: string; }"#,
+        ),
+        (
+            Read::Type("typeof d41"),
+            r#"{ v: "a"; k: number; } | { v: string; k: string; }"#,
+        ),
+        (Read::Type("typeof d42"), r#"{ v: string; }"#),
+        (Read::Type("typeof d43"), r#"{ v: "a"; }"#),
+        (Read::Type("typeof d44"), r#"string[]"#),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+const DECLARED_READ_USES: &str = r##"
+declare const c: boolean;
+declare function pu<T>(x: { v: T }): T;
+declare function id<T>(x: T): T;
+declare function fa<T>(x: T): T[];
+let sl: "a" = "a";
+const s = "a";
+let e1 = s;
+const e2 = { v: s };
+let e3 = c ? "a" : sl;
+let e4 = { v: c ? "a" : sl };
+const e5 = [s];
+let e6 = c ? s : 1;
+const e7 = { o: { v: s, w: sl } };
+let e8 = c ? ("b" as "b") : s;
+let e9 = { v: [s, sl] };
+let e10 = c ? { v: s } : null;
+let e11 = [c ? "a" : sl, "x" as "x"];
+let e12 = { ...{ v: s } };
+let e13 = { ...{ v: sl } };
+export function m1() { return pu({ v: e1 }); }
+export function m2() { return id(e2); }
+export function m3() { return pu({ v: e3 }); }
+export function m4() { return id(e4); }
+export function m5() { return fa(e5); }
+export function m6() { return pu({ v: e6 }); }
+export function m7() { return id(e7.o); }
+export function m8() { return id(e8); }
+export function m9() { return pu(e4); }
+export function m10() { return id(e9); }
+export function m11() { return id(e10); }
+export function m12() { return id(e7.o.v); }
+export function m13() { return id(e11); }
+export function m14() { return pu(e12); }
+export function m15() { return pu(e13); }
+"##;
+
+/// A declaration's type, widened by the freshness of the bindings its
+/// initializer reads, is what a later read of it stores: as a call
+/// argument, whole or nested, and through a member read. Each element of an
+/// array literal widens its own reads before the elements join, so a fresh
+/// read beside an equal regular one in another element still widens.
+#[test]
+fn declared_reads_reach_their_stored_uses() {
+    let mut failures = Matrix::new(DECLARED_READ_USES).same(&[
+        (Read::Return(r#"m1"#), r#"string"#),
+        (Read::Return(r#"m2"#), r#"{ v: string; }"#),
+        (Read::Return(r#"m3"#), r#""a""#),
+        (Read::Return(r#"m4"#), r#"{ v: "a"; }"#),
+        (Read::Return(r#"m5"#), r#"string[][]"#),
+        (Read::Return(r#"m6"#), r#"string | number"#),
+        (Read::Return(r#"m7"#), r#"{ v: string; w: "a"; }"#),
+        (Read::Return(r#"m8"#), r#"string"#),
+        (Read::Return(r#"m9"#), r#""a""#),
+        (Read::Return(r#"m10"#), r#"{ v: string[]; }"#),
+        (Read::Return(r#"m12"#), r#"string"#),
+        (Read::Return(r#"m13"#), r#"("a" | "x")[]"#),
+        (Read::Return(r#"m14"#), r#"string"#),
+        (Read::Return(r#"m15"#), r#""a""#),
+    ]);
+    failures.extend(Matrix::new(DECLARED_READ_USES).four(&[(
+        Read::Return(r#"m11"#),
+        r#"{ v: string; } | null"#,
+        r#"{ v: string; }"#,
+        r#"{ v: string; } | null"#,
+        r#"{ v: string; }"#,
+    )]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
