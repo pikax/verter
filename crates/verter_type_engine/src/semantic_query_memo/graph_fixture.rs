@@ -285,6 +285,44 @@ mod tests {
     }
 
     #[test]
+    fn a_task_owner_keeps_what_its_poll_reads_under_an_older_owner_of_the_polling_thread() {
+        use crate::semantic_query::{QueryResult, SemanticQueryValue};
+        use crate::semantic_query_memo::node_roots::{NodeRootScope, TaskConstructionOwner};
+
+        let harness = GraphFixture::new();
+        let mut task = TaskConstructionOwner::new(&harness.graph.arena.core);
+        // The polling thread has its own operation open on the same graph
+        // when it polls the task, and closes it while the task is pending.
+        let unrelated = harness.graph.enter_node_root_scope();
+        let lease = {
+            let _poll = task.install();
+            let node = harness
+                .graph
+                .intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                    "read by the task".into(),
+                )));
+            let read = QueryResult::Value(SemanticQueryValue::TypeNode(node));
+            let lease = harness
+                .graph
+                .lease_delivery(
+                    crate::semantic_query_memo::delivery_lease::DeliveredAllocations::value(&read),
+                )
+                .unwrap();
+            drop(lease.clone());
+            lease
+        };
+        drop(unrelated);
+        let _resumed = task.install();
+        assert_eq!(
+            NodeRootScope::retained_deliveries_for_tests(),
+            1,
+            "the delivery the task's poll read stays with the task, not the \
+             polling thread's unrelated owner that closed while it was pending"
+        );
+        drop(lease);
+    }
+
+    #[test]
     fn a_dispatcher_lane_keeps_no_delivery_and_its_operation_keeps_each_once() {
         use crate::semantic_query::{QueryResult, SemanticQueryValue};
         use crate::semantic_query_memo::node_roots::{DispatchConstructionLane, NodeRootScope};
