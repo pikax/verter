@@ -963,7 +963,8 @@ impl FamilyKey {
                 visit(mapper.parameter_node);
                 visit(mapper.key_space);
                 visit(mapper.value_expr);
-                mapper.name_remap.into_iter().for_each(visit);
+                mapper.name_remap.into_iter().for_each(&mut visit);
+                mapper.modifiers_type.into_iter().for_each(visit);
             }
             FamilyKey::Conditional {
                 check,

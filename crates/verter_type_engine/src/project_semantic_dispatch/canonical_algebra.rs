@@ -2852,6 +2852,7 @@ fn hash_shallow_identity<H: std::hash::Hasher>(data: &SemanticNodeData, hasher: 
             mapper.kind.hash(hasher);
             mapper.over_type_variable.hash(hasher);
             mapper.name_remap.is_some().hash(hasher);
+            mapper.modifiers_type.is_some().hash(hasher);
         }
         carrier @ (D::TypeOf(_) | D::BareRef(_) | D::ImportType(_)) => {
             carrier.typeof_head().hash(hasher);
@@ -3484,7 +3485,9 @@ fn compare_shallow(
             {
                 return false;
             }
-            if !push_opt(work, ma.name_remap, mb.name_remap) {
+            if !push_opt(work, ma.name_remap, mb.name_remap)
+                || !push_opt(work, ma.modifiers_type, mb.modifiers_type)
+            {
                 return false;
             }
             work.push((*sa, *sb));

@@ -588,3 +588,30 @@ fn branded_key_space_never_enumerates_its_brand_members() {
         );
     }
 }
+
+/// A mapping over a key parameter constrained to `keyof T` — the shape of
+/// TypeScript's own `Pick` — reads its modifiers from `T`
+/// (`getModifiersTypeFromMappedType`): each selected property keeps its
+/// `readonly` and `?`. TypeScript 7.0.2: `PickOf<R, "a" | "b">` is `{
+/// readonly a: 1; b?: 2; }`. The key parameter's constraint decides it, so
+/// the same mapping over a literal key union, or over a parameter with an
+/// unrelated constraint, keeps no source modifiers.
+#[test]
+fn a_mapping_over_a_keyof_constrained_key_parameter_keeps_source_modifiers() {
+    let source = "interface R { readonly a: 1; b?: 2; c: 3 }\n\
+        type PickOf<T, K extends keyof T> = { [P in K]: T[P] };\n\
+        type PickStr<T, K extends string> = { [P in K]: K extends keyof T ? T[K] : never };\n\
+        type ByKeys<T> = { [P in keyof T]: T[P] };";
+    let failures = evaluated_mismatches(
+        source,
+        &[
+            ("PickOf<R, 'a' | 'b'>", "{ readonly a: 1; b?: 2; }"),
+            ("PickOf<R, 'b'>", "{ b?: 2; }"),
+            ("PickOf<R, 'c'>", "{ c: 3; }"),
+            ("ByKeys<R>", "{ readonly a: 1; b?: 2; c: 3; }"),
+            ("{ [P in 'a' | 'b']: R[P] }", "{ a: 1; b: 2 | undefined; }"),
+            ("PickStr<R, 'a'>", "{ a: 1; }"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

@@ -9326,6 +9326,43 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             }
             index
         });
+        // A kept modifier is read off the modifiers type — the
+        // `build_mapped_type` mirror: `source` itself, or the `X` of a key
+        // parameter constrained to `keyof X`, whose member an `X[P]` value
+        // reads as it is.
+        let inherits_modifiers = optionality == crate::semantic_query::OptionalityMod::Keep
+            || readonly_mod == crate::semantic_query::ReadonlyMod::Keep;
+        let modifiers_members = mapper
+            .modifiers_type
+            .filter(|_| inherits_modifiers)
+            .and_then(|modifiers| {
+                self.dispatch
+                    .mapped_surface_source_members_for_projection(modifiers, self.context)
+            })
+            .map(|(members, partial_classes)| {
+                if !partial_classes.is_empty() {
+                    self.mark_partial_with(partial_classes);
+                }
+                members
+            });
+        let modifiers_member_index = modifiers_members.as_ref().map(|members| {
+            let mut index = rustc_hash::FxHashMap::default();
+            for member in members {
+                if let Some(key) = member.key.cloned_known() {
+                    index.entry(key).or_insert(member);
+                }
+            }
+            index
+        });
+        let value_reads_modifiers_member = modifiers_member_index.is_some()
+            && mapper.modifiers_type.is_some_and(|modifiers| {
+                crate::semantic_query::MapperKind::classify_value_expr(
+                    self.graph(),
+                    mapper.value_expr,
+                    modifiers,
+                    mapper.parameter_node,
+                ) == crate::semantic_query::MapperKind::Identity
+            });
         for key in keys.into_iter() {
             // Cancellation before this key's remap substitution.
             //
@@ -9377,6 +9414,10 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 let source_member = source_member_index
                     .as_ref()
                     .and_then(|index| index.get(&key.key).copied());
+                let modifiers_member = match &modifiers_member_index {
+                    Some(index) => index.get(&key.key).copied(),
+                    None => source_member,
+                };
                 // Optionality / readonly resolution per TS semantics:
                 //   - Add → always on
                 //   - Remove → always off
@@ -9388,14 +9429,14 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     crate::semantic_query::OptionalityMod::Add => true,
                     crate::semantic_query::OptionalityMod::Remove => false,
                     crate::semantic_query::OptionalityMod::Keep => {
-                        source_member.map(|m| m.optional).unwrap_or(false)
+                        modifiers_member.map(|m| m.optional).unwrap_or(false)
                     }
                 };
                 let readonly = match readonly_mod {
                     crate::semantic_query::ReadonlyMod::Add => true,
                     crate::semantic_query::ReadonlyMod::Remove => false,
                     crate::semantic_query::ReadonlyMod::Keep => {
-                        source_member.map(|m| m.readonly).unwrap_or(false)
+                        modifiers_member.map(|m| m.readonly).unwrap_or(false)
                     }
                 };
                 // Identity fast path — use source_member.value
@@ -9430,6 +9471,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 // match would fail at the publication boundary.
                 let value = if let (Some(sm), true) = (source_member, value_is_identity) {
                     sm.value
+                } else if let (Some(mm), true) = (modifiers_member, value_reads_modifiers_member) {
+                    mm.value
                 } else if value_is_identity {
                     match self.execute_read_folding_partial(SemanticQueryKey::IndexedAccess {
                         base: source,
