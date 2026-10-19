@@ -2869,6 +2869,37 @@ fn indexed_call_ir_preserves_nested_calls_and_rebases_program_points() {
     ));
 }
 
+/// An angle-bracket const assertion (`<const>"a"`) pins the literal it
+/// asserts exactly as `"a" as const` does: a call argument's nested
+/// position records the asserted literal as a regular contributor, never
+/// the lowered `const` type name.
+#[test]
+fn angle_bracket_const_assertion_pins_an_argument_literal_like_as_const() {
+    fn provenance(source: &str) -> Option<Arc<verter_type_expr::IndexedLiteralProvenance>> {
+        let allocator = oxc_allocator::Allocator::default();
+        let expression =
+            verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+                .parse_expression()
+                .expect("fixture expression");
+        let crate::analysis::type_eval_build::IndexedValueExpression::Call(call) =
+            crate::analysis::type_eval_build::lower_indexed_value_expression(&expression, source)
+        else {
+            panic!("a direct call lowers to indexed call IR");
+        };
+        call.args[0].literal_provenance.clone()
+    }
+    let angle = provenance(r#"f({ v: c ? <const>"a" : "a" })"#);
+    let as_const = provenance(r#"f({ v: c ? "a" as const : "a" })"#);
+    assert_eq!(angle, as_const);
+    let angle = angle.expect("the member records its regular contributor");
+    assert!(matches!(
+        angle.positions[0].regular.as_ref(),
+        [verter_type_expr::IndexedRegularLiteralSource::Pinned(TypeExpr::Literal(
+            verter_type_expr::LiteralValue::String(value)
+        ))] if &**value == "a"
+    ));
+}
+
 /// A member call on a call's result lowers its callee as a member read off
 /// the call before it, which is also its receiver, so the call keeps no
 /// separate receiver record: `b.m().m()` is `Call { callee: Member {
