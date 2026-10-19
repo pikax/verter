@@ -535,62 +535,25 @@ impl Drop for ConstructionOwners {
 }
 
 /// The delivery owners one construction owner holds: the first few in an
-/// inline array scanned with integer compares — most owners hold a handful,
-/// and a debug build hashes each insert through several calls — then a
-/// sorted list searched by bisection, and a hash set once the list reaches
-/// [`DELIVERED_SORTED_MAX`]. A sorted insert shifts the list's tail, so the
-/// cap keeps each insert's shift bounded: an owner with any number of
-/// deliveries records each in constant time.
+/// inline array scanned with integer compares — most owners hold a handful
+/// — then an open-addressed address set, which records each further owner
+/// in constant time with a multiply and a few compares rather than the
+/// calls a general hash set's probe takes in a debug build.
 #[derive(Default)]
 struct DeliveredOwners {
     inline: [usize; DELIVERED_INLINE],
     inline_len: usize,
-    spilled: Option<SpilledOwners>,
+    spilled: Option<verter_retention::word_set::WordSet>,
 }
 
-/// The delivery owners past the inline array.
-enum SpilledOwners {
-    Sorted(Vec<usize>),
-    Hashed(rustc_hash::FxHashSet<usize>),
-}
-
-/// Delivery owners [`DeliveredOwners`] keeps before it spills to a list.
+/// Delivery owners [`DeliveredOwners`] keeps before it spills to a set.
 const DELIVERED_INLINE: usize = 8;
-
-/// The longest sorted list [`DeliveredOwners`] keeps before it moves its
-/// owners to a hash set.
-const DELIVERED_SORTED_MAX: usize = 256;
 
 impl DeliveredOwners {
     /// Record `owner`; `false` when it was already recorded.
     fn insert(&mut self, owner: usize) -> bool {
-        match self.spilled.as_mut() {
-            Some(SpilledOwners::Hashed(set)) => return set.insert(owner),
-            Some(SpilledOwners::Sorted(sorted)) => {
-                let mut low = 0;
-                let mut high = sorted.len();
-                while low < high {
-                    let middle = low + (high - low) / 2;
-                    let held = sorted[middle];
-                    if held == owner {
-                        return false;
-                    }
-                    if held < owner {
-                        low = middle + 1;
-                    } else {
-                        high = middle;
-                    }
-                }
-                if sorted.len() < DELIVERED_SORTED_MAX {
-                    sorted.insert(low, owner);
-                } else {
-                    let mut set: rustc_hash::FxHashSet<usize> = sorted.drain(..).collect();
-                    set.insert(owner);
-                    self.spilled = Some(SpilledOwners::Hashed(set));
-                }
-                return true;
-            }
-            None => {}
+        if let Some(set) = self.spilled.as_mut() {
+            return set.insert(owner);
         }
         let mut index = 0;
         while index < self.inline_len {
@@ -604,11 +567,9 @@ impl DeliveredOwners {
             self.inline_len += 1;
             return true;
         }
-        let mut spilled = Vec::with_capacity(DELIVERED_INLINE * 4);
-        spilled.extend_from_slice(&self.inline);
-        spilled.push(owner);
-        spilled.sort_unstable();
-        self.spilled = Some(SpilledOwners::Sorted(spilled));
+        let mut set: verter_retention::word_set::WordSet = self.inline.iter().copied().collect();
+        set.insert(owner);
+        self.spilled = Some(set);
         true
     }
 }
@@ -1216,10 +1177,10 @@ impl<T> Constructed<T> {
 
 #[cfg(test)]
 mod delivered_owners_tests {
-    use super::{DeliveredOwners, SpilledOwners, DELIVERED_SORTED_MAX};
+    use super::{DeliveredOwners, DELIVERED_INLINE};
 
-    /// Each owner is recorded once, in the inline array, the sorted list
-    /// and the hash set, whatever order the owners arrive in.
+    /// Each owner is recorded once, in the inline array and in the set,
+    /// whatever order the owners arrive in.
     #[test]
     fn each_owner_is_recorded_once_across_the_spill() {
         let owners: Vec<usize> = (0..600usize).map(|i| (i * 7919) % 631 * 16).collect();
@@ -1235,19 +1196,22 @@ mod delivered_owners_tests {
         }
     }
 
-    /// An owner holding more deliveries than the sorted list keeps records
-    /// them in a hash set, so no insert shifts an unbounded list.
+    /// Owners past the inline array move to the set together with the
+    /// inline ones, each once.
     #[test]
-    fn many_deliveries_move_to_a_hash_set() {
+    fn many_deliveries_move_to_the_set() {
         let mut delivered = DeliveredOwners::default();
-        for owner in 0..DELIVERED_SORTED_MAX {
+        for owner in 0..DELIVERED_INLINE {
             assert!(delivered.insert(owner * 16));
         }
-        assert!(matches!(delivered.spilled, Some(SpilledOwners::Sorted(_))));
-        assert!(delivered.insert(DELIVERED_SORTED_MAX * 16));
-        let Some(SpilledOwners::Hashed(set)) = &delivered.spilled else {
-            panic!("a full sorted list must move to a hash set");
+        assert!(delivered.spilled.is_none());
+        let total = DELIVERED_INLINE * 64;
+        for owner in DELIVERED_INLINE..total {
+            assert!(delivered.insert(owner * 16));
+        }
+        let Some(set) = &delivered.spilled else {
+            panic!("owners past the inline array must move to the set");
         };
-        assert_eq!(set.len(), DELIVERED_SORTED_MAX + 1);
+        assert_eq!(set.len(), total);
     }
 }

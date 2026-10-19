@@ -481,7 +481,7 @@ pub struct CanonicalEvidence {
     pub(crate) refusal: Option<checker_policy::OperationRefusal>,
     /// Nodes already scope-classified — one sidecar lookup per unique node
     /// per canonicalization, regardless of how many walks revisit it.
-    seen_nodes: FxHashSet<SemanticNodeId>,
+    seen_nodes: verter_retention::word_set::WordSet,
     /// The roots [`Self::inspected_file_roots`] holds, so recording one is
     /// constant time however many files the walk inspects.
     seen_roots: FxHashSet<ObservedGraphSelfRoot>,
@@ -756,11 +756,14 @@ impl CanonicalEvidence {
         for root in other.inspected_file_roots {
             self.note_file_root(root);
         }
-        self.seen_nodes.extend(other.seen_nodes);
+        for node in other.seen_nodes.iter() {
+            self.seen_nodes.insert(node);
+        }
     }
 
     fn record_file_root(&mut self, graph: &SemanticGraphStore, node: SemanticNodeId) {
-        if !self.seen_nodes.insert(node) {
+        let word = usize::try_from(node.0).expect("node ordinals fit the address space");
+        if !self.seen_nodes.insert(word) {
             return;
         }
         if let Some(NodeScopeId::File {

@@ -1,20 +1,23 @@
 //! A visited set for the short graph walks the dispatcher runs per query.
 
 use super::SemanticNodeId;
+use verter_retention::word_set::WordSet;
 
-/// Node ids [`SmallNodeSet`] keeps inline before it spills to a hash set.
+/// Node ids [`SmallNodeSet`] keeps inline before it spills to a word set.
 const INLINE: usize = 16;
 
 /// The nodes one walk has visited: the first few in an inline array scanned
-/// with integer compares, every one in a hash set once the array fills.
+/// with integer compares, every one in an open-addressed [`WordSet`] once
+/// the array fills.
 ///
 /// Most walks visit a handful of nodes. A hash set allocates on its first
 /// insert and hashes and probes on every one, which an unoptimized build
-/// pays through several generic calls per visit; the inline scan does not.
+/// pays through several generic calls per visit; the inline scan does not,
+/// and the word set past it probes with a multiply and plain compares.
 pub(crate) struct SmallNodeSet {
     inline: [SemanticNodeId; INLINE],
     len: usize,
-    spilled: Option<rustc_hash::FxHashSet<SemanticNodeId>>,
+    spilled: Option<WordSet>,
 }
 
 impl Default for SmallNodeSet {
@@ -31,7 +34,7 @@ impl SmallNodeSet {
     /// Record `node`; `false` when it was already recorded.
     pub(crate) fn insert(&mut self, node: SemanticNodeId) -> bool {
         if let Some(spilled) = self.spilled.as_mut() {
-            return spilled.insert(node);
+            return spilled.insert(word(node));
         }
         if self.inline_contains(node) {
             return false;
@@ -41,9 +44,8 @@ impl SmallNodeSet {
             self.len += 1;
             return true;
         }
-        let mut spilled: rustc_hash::FxHashSet<SemanticNodeId> =
-            self.inline.iter().copied().collect();
-        spilled.insert(node);
+        let mut spilled: WordSet = self.inline.iter().map(|held| word(*held)).collect();
+        spilled.insert(word(node));
         self.spilled = Some(spilled);
         true
     }
@@ -58,6 +60,11 @@ impl SmallNodeSet {
         }
         false
     }
+}
+
+/// A node ordinal as the word the spilled set keys it by.
+fn word(node: SemanticNodeId) -> usize {
+    usize::try_from(node.0).expect("node ordinals fit the address space")
 }
 
 #[cfg(test)]

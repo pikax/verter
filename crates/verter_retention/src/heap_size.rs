@@ -24,7 +24,7 @@
 
 use std::sync::Arc;
 
-use rustc_hash::FxHashSet;
+use super::word_set::WordSet;
 
 pub use verter_retention_derive::HeapSize;
 
@@ -51,7 +51,7 @@ pub trait IterativeNode {
 /// offered to, and the iterative nodes still to measure.
 pub struct HeapMeter<'h, 't> {
     handles: &'h mut AliasSet,
-    raw: FxHashSet<usize>,
+    raw: WordSet,
     pending: Vec<&'t dyn IterativeNode>,
     walking: bool,
 }
@@ -61,7 +61,7 @@ impl<'h, 't> HeapMeter<'h, 't> {
     pub fn new(handles: &'h mut AliasSet) -> Self {
         Self {
             handles,
-            raw: FxHashSet::default(),
+            raw: WordSet::new(),
             pending: Vec::new(),
             walking: false,
         }

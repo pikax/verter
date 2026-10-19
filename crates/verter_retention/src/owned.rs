@@ -432,7 +432,7 @@ impl OwnedHandles {
                 }
             }
         } else {
-            let mut seen: rustc_hash::FxHashSet<usize> = merged.iter().map(address).collect();
+            let mut seen: super::word_set::WordSet = merged.iter().map(address).collect();
             for node in other.0 {
                 if seen.insert(address(&node)) {
                     merged.push(node);

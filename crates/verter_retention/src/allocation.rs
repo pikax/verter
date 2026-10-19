@@ -58,7 +58,7 @@
 
 use std::sync::Arc;
 
-use rustc_hash::FxHashSet;
+use super::word_set::WordSet;
 
 /// Allocator bookkeeping one heap block costs beside its payload.
 pub const ALLOCATION_HEADER_BYTES: usize = 16;
@@ -129,7 +129,7 @@ pub struct AliasSet {
     /// array scanned by index, which costs a debug build no call per key.
     inline: [usize; ALIAS_INLINE],
     inline_len: usize,
-    spilled: Option<FxHashSet<usize>>,
+    spilled: Option<WordSet>,
     /// When collecting leaves, the distinct leaf names the measurement
     /// reached, which it then does not count.
     leaves: Option<Vec<Arc<str>>>,
@@ -285,7 +285,7 @@ impl AliasSet {
             self.inline_len += 1;
             return true;
         }
-        let mut spilled: FxHashSet<usize> = self.inline.iter().copied().collect();
+        let mut spilled: WordSet = self.inline.iter().copied().collect();
         self.inline_len = 0;
         spilled.insert(key);
         self.spilled = Some(spilled);
@@ -295,9 +295,7 @@ impl AliasSet {
     /// Distinct allocations counted so far.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.spilled
-            .as_ref()
-            .map_or(self.inline_len, FxHashSet::len)
+        self.spilled.as_ref().map_or(self.inline_len, WordSet::len)
     }
 
     /// Whether nothing has been counted.
