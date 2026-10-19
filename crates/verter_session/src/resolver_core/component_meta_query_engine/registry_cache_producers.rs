@@ -199,7 +199,11 @@ impl ComponentMetaQueryEngine<'_> {
                             arc_key.clone(),
                             std::sync::Arc::new(
                                 verter_type_engine::component_meta_caches::ImportedRegistryEntry {
-                                    value: Some(std::sync::Arc::new(symbol)),
+                                    value: Some(
+                                        verter_session_query::retention::heap_size::OwnedValue::new(
+                                            symbol,
+                                        ),
+                                    ),
                                     fact_dep_signature: sig.facts,
                                     // A simulated concurrent publish stamps the
                                     // live project generation, exactly as the
@@ -261,11 +265,7 @@ impl ComponentMetaQueryEngine<'_> {
         exported_name: &str,
         observed_keyed_hash: Option<verter_session_query::analysis::types::Hash16>,
     ) -> verter_type_engine::cache_runtime::singleflight::ComputeAdmission<
-        Option<
-            std::sync::Arc<
-                verter_session_query::declarations::metadata::ResolvedImportedRegistrySymbol,
-            >,
-        >,
+        verter_type_engine::component_meta_caches::ImportedRegistryValue,
         verter_type_engine::component_meta_caches::ImportedRegistryEntry,
     > {
         #[cfg(test)]
@@ -324,7 +324,8 @@ impl ComponentMetaQueryEngine<'_> {
                 };
             }
         };
-        let resolved_value = resolved.map(std::sync::Arc::new);
+        let resolved_value =
+            resolved.map(verter_session_query::retention::heap_size::OwnedValue::new);
         #[cfg(test)]
         if super::FORCE_IMPORTED_REGISTRY_ADMISSION_REFUSAL.with(|f| f.get()) {
             // Deterministically reproduce the production admission-refusal
@@ -373,13 +374,7 @@ impl ComponentMetaQueryEngine<'_> {
     fn finish_imported_registry_lookup(
         &mut self,
         key: (String, verter_type_expr::TopLevelOwnerId, String),
-        host_value: Option<
-            Option<
-                std::sync::Arc<
-                    verter_session_query::declarations::metadata::ResolvedImportedRegistrySymbol,
-                >,
-            >,
-        >,
+        host_value: Option<verter_type_engine::component_meta_caches::ImportedRegistryValue>,
     ) -> Option<verter_session_query::declarations::metadata::ResolvedImportedRegistrySymbol> {
         let result = match host_value {
             Some(cached) => cached.as_deref().cloned(),

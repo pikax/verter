@@ -63,7 +63,7 @@ fn read_index(sites: &[(u32, u32)]) -> (SkeletonSpanIndex, FlowBindingRef) {
         .iter()
         .map(|&(start, end)| IndexedRead {
             site_span: span(start, end),
-            path: Arc::from(Vec::new().into_boxed_slice()),
+            path: Default::default(),
         })
         .collect();
     reads.sort_by_key(|read| read.site_span);

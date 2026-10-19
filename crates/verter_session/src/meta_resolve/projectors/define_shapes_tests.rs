@@ -284,7 +284,7 @@ defineEmits<{ save: [id: number] }>()
             macro_index: 7,
             payload: verter_type_expr::locators::MacroPayloadPosition::TypeArgument,
         }),
-        path: std::sync::Arc::from(
+        path: From::from(
             vec![verter_type_engine::semantic_query::PropertyKey::identifier(
                 "save",
             )]
@@ -323,7 +323,8 @@ defineEmits<{ save: [id: number] }>()
     let analysis = host
         .get_component_meta("/App.vue")
         .expect("component must resolve")
-        .into_analysis();
+        .analysis()
+        .clone();
     assert_eq!(analysis.events.len(), 1, "fixture declares exactly 1 event");
 
     // Sanity: the UNTAMPERED analysis materializes cleanly — the typed
@@ -357,7 +358,7 @@ defineEmits<{ save: [id: number] }>()
             macro_index: 0,
             payload: verter_type_expr::locators::MacroPayloadPosition::TypeArgument,
         }),
-        path: std::sync::Arc::from(
+        path: From::from(
             vec![verter_type_engine::semantic_query::PropertyKey::identifier(
                 "not_a_member",
             )]

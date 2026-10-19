@@ -128,6 +128,14 @@ impl QueryNode for StaleGenerationQueryNode {
     type Discriminant = FactCandidateDiscriminant;
     type Value = String;
 
+    fn candidate_footprint(
+        &self,
+        _key: &Self::Key,
+        value: &Self::Value,
+    ) -> verter_session_query::retention::Footprint {
+        verter_session_query::retention::heap_size::footprint(value)
+    }
+
     fn inflight(&self) -> &InflightTable<QueryFlightKey<Self::Key>> {
         &self.inflight
     }
@@ -232,6 +240,14 @@ impl QueryNode for SkewedDiscriminantQueryNode {
     type Key = u32;
     type Discriminant = FactCandidateDiscriminant;
     type Value = String;
+
+    fn candidate_footprint(
+        &self,
+        _key: &Self::Key,
+        value: &Self::Value,
+    ) -> verter_session_query::retention::Footprint {
+        verter_session_query::retention::heap_size::footprint(value)
+    }
 
     fn inflight(&self) -> &InflightTable<QueryFlightKey<Self::Key>> {
         &self.inflight
@@ -688,6 +704,14 @@ impl QueryNode for WideQueryNode {
     type Key = u32;
     type Value = String;
     type Discriminant = FactCandidateDiscriminant;
+    fn candidate_footprint(
+        &self,
+        _key: &Self::Key,
+        value: &Self::Value,
+    ) -> verter_session_query::retention::Footprint {
+        verter_session_query::retention::heap_size::footprint(value)
+    }
+
     fn inflight(&self) -> &InflightTable<QueryFlightKey<u32>> {
         &self.artifact.inflight
     }

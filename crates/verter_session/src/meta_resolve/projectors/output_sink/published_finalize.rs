@@ -138,6 +138,7 @@ fn finalize_published_prop_source(
     // Raise the resolved source ONCE — the observed INPUT node for the
     // reducer AND its no-poison input fact (one lowering, no re-lower).
     let Some(input) = dispatch
+        .owning()
         .raise_semantic_type_source_to_hot(
             &current,
             verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
@@ -147,6 +148,7 @@ fn finalize_published_prop_source(
                 interior_failures: None,
             },
         )
+        .into_value_in(query_engine.builder())
         .at_optional_boundary()
     else {
         // Unraisable under the live view — the source publishes shallow
@@ -167,7 +169,9 @@ fn finalize_published_prop_source(
     // after it.
     let shallow_node = shallow_source.and_then(|shallow| {
         dispatch
+            .owning()
             .raise_authored_locator_to_hot(shallow, transit_ctx)
+            .into_value_in(query_engine.builder())
             .at_optional_boundary()
     });
     if let Some(shallow) = shallow_source {

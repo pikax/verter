@@ -174,6 +174,12 @@ impl AliasSet {
         Self::with(None, Some(Vec::new()), true)
     }
 
+    /// Whether this measures an owned cell's value, which reaches no raw
+    /// `Arc`.
+    pub(crate) fn measures_cell(&self) -> bool {
+        self.in_cell
+    }
+
     /// An empty set for a figure that charges nothing: it counts every
     /// owned handle it reaches in full, once.
     #[must_use]
@@ -194,6 +200,24 @@ impl AliasSet {
             }
             None => false,
         }
+    }
+
+    /// Take over the owned allocations `inner` reached, each once across
+    /// both sets, and return the bytes of those this set counts in full
+    /// instead of collecting. A data tree whose part is measured on a set
+    /// of its own — one that counts the part's raw `Arc`s, which a tree's
+    /// cell owns — hands that part's owned handles to the cell's set.
+    pub fn absorb(&mut self, inner: &mut AliasSet) -> usize {
+        let mut counted = 0;
+        for child in inner.take_children().into_vec() {
+            if !self.first_allocation(&child) {
+                continue;
+            }
+            if !self.collect_child(|| Arc::clone(&child)) {
+                counted += super::owned::counted_in_full(&*child, self);
+            }
+        }
+        counted
     }
 
     /// The owned children the measurement reached, each once.

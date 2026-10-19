@@ -25,8 +25,6 @@
 //! `['$props']` to the concrete props object without learning
 //! evaluator-side special cases.
 
-use std::sync::Arc;
-
 use verter_session_query::analysis::types::{AnalyzedMacro, AnalyzedMacroKind};
 use verter_type_expr::facts::{
     FactOrLocator, ResolvedLocalShape, SemanticTypeSource, SynthesizedMemberFact,
@@ -87,7 +85,7 @@ pub const VUE_INSTANCE_SLOTS_MEMBER: &str = "$slots";
 #[must_use]
 pub fn empty_vue_default_value_symbol() -> LoweredValueDecl {
     lowered_value_decl_for_synthesised_default(SemanticTypeSource::Synthesized(
-        ResolvedLocalShape::Object(Arc::from(Vec::new().into_boxed_slice())),
+        ResolvedLocalShape::Object(From::from(Vec::new().into_boxed_slice())),
     ))
 }
 
@@ -150,7 +148,7 @@ pub fn synthesise_vue_default_value_symbol(macros: &[AnalyzedMacro]) -> Option<L
     // fingerprint) is the shared synthesised-default constructor — one recipe
     // for every framework synth leg.
     Some(lowered_value_decl_for_synthesised_default(
-        SemanticTypeSource::Synthesized(ResolvedLocalShape::Object(Arc::from(
+        SemanticTypeSource::Synthesized(ResolvedLocalShape::Object(From::from(
             members.into_boxed_slice(),
         ))),
     ))

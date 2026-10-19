@@ -103,19 +103,22 @@ pub(crate) fn lower_and_project_to_expanded_node(
     scope_owner: verter_type_expr::TopLevelOwnerId,
     expr: &TypeExpr,
 ) -> Option<AdmittedRouteProjectionNode> {
-    let _scope = dispatch.enter_construction_scope();
+    let scope = dispatch.enter_construction_scope();
     use verter_type_engine::project_semantic_dispatch::raise::node_raised_shape_for_eq_with_dispatch;
 
     use verter_type_engine::semantic_query::{
         PathSegment, ProjectionMode, QueryResult, SemanticQueryKey,
     };
 
-    let base = dispatch.lower_type_expr_in_owner_scope_with_mode(
-        scope_canonical_id,
-        scope_owner,
-        expr,
-        ProjectionMode::Expanded,
-    )?;
+    let base = dispatch
+        .owning()
+        .lower_type_expr_in_owner_scope_with_mode(
+            scope_canonical_id,
+            scope_owner,
+            expr,
+            ProjectionMode::Expanded,
+        )
+        .into_value_in(&scope)?;
     let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base,
         path: verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
@@ -153,7 +156,7 @@ pub(crate) fn project_class_a_terminal_node(
     scope_owner: verter_type_expr::TopLevelOwnerId,
     expr: &TypeExpr,
 ) -> Option<AdmittedRouteProjectionNode> {
-    let _scope = dispatch.enter_construction_scope();
+    let scope = dispatch.enter_construction_scope();
     use verter_type_engine::project_semantic_dispatch::raise::node_raised_shape_facts_with_dispatch;
 
     use verter_type_engine::semantic_query::{
@@ -163,20 +166,26 @@ pub(crate) fn project_class_a_terminal_node(
     let (base_expr, path_segments) =
         crate::meta_resolve::dispatch_helpers::decompose_indexed_access_chain(expr);
     let (base, project_path) = if path_segments.is_empty() {
-        let base = dispatch.lower_type_expr_in_owner_scope_with_mode(
-            scope_canonical_id,
-            scope_owner,
-            expr,
-            ProjectionMode::Expanded,
-        )?;
+        let base = dispatch
+            .owning()
+            .lower_type_expr_in_owner_scope_with_mode(
+                scope_canonical_id,
+                scope_owner,
+                expr,
+                ProjectionMode::Expanded,
+            )
+            .into_value_in(&scope)?;
         (base, verter_type_expr::OwnedSlice::<PathSegment>::default())
     } else {
-        let base = dispatch.lower_type_expr_in_owner_scope_with_mode(
-            scope_canonical_id,
-            scope_owner,
-            base_expr,
-            ProjectionMode::Navigate,
-        )?;
+        let base = dispatch
+            .owning()
+            .lower_type_expr_in_owner_scope_with_mode(
+                scope_canonical_id,
+                scope_owner,
+                base_expr,
+                ProjectionMode::Navigate,
+            )
+            .into_value_in(&scope)?;
         (base, path_segments)
     };
     let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {

@@ -269,10 +269,10 @@ fn lowers_synthetic_slot_binding_with_content_free_id() {
                 verter_type_engine::semantic_query::PrimitiveKind::String,
             ));
     let key = SyntheticCarrierKey {
-        scope_canonical_id: Arc::from("/Comp.vue"),
+        scope_canonical_id: From::from("/Comp.vue"),
         surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
-        slot_name: Some(Arc::from("default")),
-        binding_name: Arc::from("row"),
+        slot_name: Some(From::from("default")),
+        binding_name: From::from("row"),
         value_node: backing.0,
     };
     let expr = TypeExpr::SyntheticSlotBinding(Arc::new(key.clone()));

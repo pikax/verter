@@ -274,10 +274,10 @@ pub struct OrderedSfcStructureAnalysis {
     pub artifact_token: String,
     pub inventory:
         std::sync::Arc<verter_language::parse_artifact::carrier_inventory::CarrierBlockInventory>,
-    pub source_space_tokens: std::sync::Arc<[String]>,
-    pub block_tokens: std::sync::Arc<[String]>,
-    pub markup_node_tokens: std::sync::Arc<[String]>,
-    pub attribute_tokens: std::sync::Arc<[String]>,
+    pub source_space_tokens: crate::retention::owned::OwnedSlice<String>,
+    pub block_tokens: crate::retention::owned::OwnedSlice<String>,
+    pub markup_node_tokens: crate::retention::owned::OwnedSlice<String>,
+    pub attribute_tokens: crate::retention::owned::OwnedSlice<String>,
 }
 
 /// What kind of member this public-instance entry represents.

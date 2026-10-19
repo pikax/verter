@@ -215,7 +215,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 Some(ModuleExportBinding::Namespace(dependency)) => {
                     self.graph().intern_node_with_scope(
                         SemanticNodeData::new_import_type(
-                            Arc::clone(dependency),
+                            dependency.clone(),
                             verter_type_expr::OwnedSlice::from([]),
                             Arc::from([]),
                             true,
@@ -230,7 +230,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 }
                 None => continue,
             };
-            members.push(Self::module_member(Arc::clone(name), node, module));
+            members.push(Self::module_member(name.clone(), node, module));
         }
         let scope = NodeScopeId::File {
             canonical_id: verter_type_expr::OwnedStr::from(module),
@@ -628,14 +628,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     pub(super) fn module_member(
-        name: Arc<str>,
+        name: impl Into<verter_type_expr::OwnedStr>,
         value: SemanticNodeId,
         origin: &str,
     ) -> SurfaceMember {
         SurfaceMember {
-            key: crate::semantic_query::AuthoredPropertyKey::String(
-                verter_type_expr::OwnedStr::from(name),
-            ),
+            key: crate::semantic_query::AuthoredPropertyKey::String(name.into()),
             value,
             optional: false,
             readonly: false,

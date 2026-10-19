@@ -15,16 +15,10 @@ use crate::OwnedStr;
 
 fn empty_projected_surface() -> ProjectedSurfaceFact {
     ProjectedSurfaceFact {
-        members: std::sync::Arc::from(Vec::<ProjectedMemberFact>::new().into_boxed_slice()),
-        call_signatures: std::sync::Arc::from(
-            Vec::<FunctionSignatureFact>::new().into_boxed_slice(),
-        ),
-        construct_signatures: std::sync::Arc::from(
-            Vec::<FunctionSignatureFact>::new().into_boxed_slice(),
-        ),
-        index_signatures: std::sync::Arc::from(
-            Vec::<ProjectedIndexSignatureFact>::new().into_boxed_slice(),
-        ),
+        members: From::from(Vec::<ProjectedMemberFact>::new().into_boxed_slice()),
+        call_signatures: From::from(Vec::<FunctionSignatureFact>::new().into_boxed_slice()),
+        construct_signatures: From::from(Vec::<FunctionSignatureFact>::new().into_boxed_slice()),
+        index_signatures: From::from(Vec::<ProjectedIndexSignatureFact>::new().into_boxed_slice()),
         has_index_signature: false,
     }
 }
@@ -45,7 +39,7 @@ fn projected_member_path_fact_discriminates_base_and_path() {
     };
     let mk = |canonical: &str, macro_index: u32, path: &[&str]| ProjectedTypeFact::MemberPath {
         base: base(canonical, macro_index),
-        path: std::sync::Arc::from(
+        path: From::from(
             path.iter()
                 .map(|segment| FactPropertyKey::identifier(*segment))
                 .collect::<Vec<_>>()
@@ -125,7 +119,7 @@ fn projected_callable_occurrence_fact_discriminates_base_subject_and_projection(
         save,
         ProjectedTypeFact::MemberPath {
             base: base("/App.vue", 0),
-            path: std::sync::Arc::from(Vec::<FactPropertyKey>::new().into_boxed_slice()),
+            path: From::from(Vec::<FactPropertyKey>::new().into_boxed_slice()),
         },
         "callable-params vs member-path over the same base"
     );
@@ -219,7 +213,7 @@ fn projected_index_position_fact_discriminates_base_ordinal_and_position() {
         value,
         ProjectedTypeFact::MemberPath {
             base: base("/App.vue", 0),
-            path: std::sync::Arc::from(Vec::<FactPropertyKey>::new().into_boxed_slice()),
+            path: From::from(Vec::<FactPropertyKey>::new().into_boxed_slice()),
         },
         "index-position vs member-path over the same base"
     );

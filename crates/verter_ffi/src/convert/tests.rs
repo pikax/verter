@@ -296,7 +296,7 @@ fn materialized_publication(r#type: TypeExpr) -> host::meta_resolve::Materialize
     };
     host::meta_resolve::MaterializedTypePublication::for_test(
         verter_type_expr::PublicationResult::Published {
-            selected_source: std::sync::Arc::new(selected_source),
+            selected_source: verter_type_expr::SharedTypeSource::new(selected_source),
             semantic_authority: verter_type_expr::SemanticAuthority::Resolved,
             exactness: verter_type_expr::ResolutionExactness::ExactConcrete,
             reason: Box::new(verter_type_expr::PublicationReason::ResolvedExactConcrete),
@@ -313,7 +313,7 @@ fn materialized_publication(r#type: TypeExpr) -> host::meta_resolve::Materialize
 fn type_publication_wire_keeps_outcome_and_terminal_display_separate() {
     let published = host::meta_resolve::MaterializedTypePublication::for_test(
         verter_type_expr::PublicationResult::Published {
-            selected_source: std::sync::Arc::new(
+            selected_source: verter_type_expr::SharedTypeSource::new(
                 verter_type_expr::facts::SemanticTypeSource::Closed(
                     verter_type_expr::facts::ClosedTypeFact::Leaf(
                         verter_type_expr::facts::LeafTypeFact::Primitive(PrimitiveName::String),
@@ -1837,8 +1837,8 @@ fn virtual_file_arc_to_string() {
     let source = "a😀b";
     let response = host::VirtualFileResponse {
         id: "Comp.vue._VERTER_.script.ts".to_string(),
-        code: Arc::from("export default {}"),
-        source_map: Some(Arc::from("{\"mappings\":\"\"}")),
+        code: verter_type_expr::OwnedStr::from("export default {}"),
+        source_map: Some(verter_type_expr::OwnedStr::from("{\"mappings\":\"\"}")),
         lang: Some("ts".to_string()),
         stale: true,
         diagnostics: host::DiagnosticsSnapshot {
@@ -1880,7 +1880,7 @@ fn host_virtual_file_to_ffi_uses_utf16_conversion_for_embedded_diagnostics() {
     let source = "a😀b";
     let response = host::VirtualFileResponse {
         id: "x".to_string(),
-        code: Arc::from(""),
+        code: verter_type_expr::OwnedStr::from(""),
         source_map: None,
         lang: None,
         stale: false,
@@ -1911,7 +1911,7 @@ fn host_virtual_file_to_ffi_uses_utf16_conversion_for_embedded_diagnostics() {
 fn virtual_file_no_source_map() {
     let response = host::VirtualFileResponse {
         id: "x".to_string(),
-        code: Arc::from(""),
+        code: verter_type_expr::OwnedStr::from(""),
         source_map: None,
         lang: None,
         stale: false,
@@ -2539,7 +2539,7 @@ fn ffi_seam_response_serialises_mode_fields() {
     // JS). The downgrade case is a cold miss (`cache_hit == false`).
     let response = host::VirtualFileResponse {
         id: "Comp.vue".to_string(),
-        code: Arc::from("export default {}"),
+        code: verter_type_expr::OwnedStr::from("export default {}"),
         source_map: None,
         lang: Some("ts".to_string()),
         stale: false,
@@ -2563,7 +2563,7 @@ fn ffi_seam_response_serialises_mode_fields() {
     // slot reports session/session/None and `cache_hit == true`.
     let session_response = host::VirtualFileResponse {
         id: "Comp.vue".to_string(),
-        code: Arc::from(""),
+        code: verter_type_expr::OwnedStr::from(""),
         source_map: None,
         lang: None,
         stale: false,

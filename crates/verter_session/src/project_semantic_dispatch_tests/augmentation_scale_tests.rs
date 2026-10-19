@@ -431,6 +431,7 @@ fn finite_batch_reads_match_single_keys_across_projection_modes() {
         .resolve_named_symbol("/read.ts", "Values", Some(ProjectionMode::Navigate))
         .expect("object subject");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     // Supply the accessor kind directly at the surface boundary: this
     // control isolates the consumer from authored signature-kind lowering.
@@ -713,6 +714,7 @@ fn merged_global_instantiation_preserves_approximation_from_every_declaration() 
             host.ensure_indexed_ready(file).unwrap();
         }
         let dispatch = ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
         let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
         let mut first = None;
         for file in ["/a.ts", "/b.ts", "/a.ts"] {
@@ -903,9 +905,17 @@ fn growing_merged_contributors_between_answers_retains_only_the_answers() {
             "superseded versions must not stay retained: {label}"
         );
         assert!(
-            grown.snapshot_leases <= baseline.snapshot_leases
-                && grown.pinned_bytes <= baseline.pinned_bytes,
+            grown.snapshot_leases <= baseline.snapshot_leases,
             "superseded parse snapshots must not stay pinned: {label}"
+        );
+        // A cell the first step's surviving answers still reach — a name a
+        // superseded declaration charged — passes from that declaration's
+        // bundle to the answers keeping it, pinned, when the bundle is
+        // superseded; nothing else may stay.
+        assert!(
+            grown.pinned_bytes <= baseline.pinned_bytes + (first.pinned_bytes - setup.pinned_bytes),
+            "pinned bytes may exceed a fresh engine's only by what the first step handed out: \
+             first={first:?}, {label}"
         );
         let first_answers = first
             .memo_candidates

@@ -1661,19 +1661,21 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         })
     }
 
-    /// The subject's candidates of `kind`, read from `SignaturesOfType`, each
-    /// as the graph signature node a node-based consumer reads: the authored
-    /// node for a leaf, and for a composite the node form of its descriptor
-    /// (the kernel's parameter layout and binders, with the return read
-    /// through `ReadSignatureResult`). No signature is chosen, merged or
-    /// reordered here.
-    pub fn shared_signature_nodes(
-        &self,
-        subject: SemanticNodeId,
-        kind: GraphSignatureKind,
-    ) -> SharedSignatureNodes {
-        let first = self.signature_set_value(subject, kind);
-        self.shared_signature_nodes_from(subject, kind, first)
+    construction_ordinal_seam! {
+        /// The subject's candidates of `kind`, read from `SignaturesOfType`, each
+        /// as the graph signature node a node-based consumer reads: the authored
+        /// node for a leaf, and for a composite the node form of its descriptor
+        /// (the kernel's parameter layout and binders, with the return read
+        /// through `ReadSignatureResult`). No signature is chosen, merged or
+        /// reordered here.
+        fn shared_signature_nodes(
+            &self,
+            subject: SemanticNodeId,
+            kind: GraphSignatureKind,
+        ) -> SharedSignatureNodes {
+            let first = self.signature_set_value(subject, kind);
+            self.shared_signature_nodes_from(subject, kind, first)
+        }
     }
 
     /// [`Self::shared_signature_nodes`] in the order call resolution tries
@@ -1690,15 +1692,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         self.shared_signature_nodes_ordered(subject, kind, first, true)
     }
 
-    /// [`Self::shared_signature_nodes`] over an already-dispatched first
-    /// read.
-    pub fn shared_signature_nodes_from(
-        &self,
-        subject: SemanticNodeId,
-        kind: GraphSignatureKind,
-        first: Result<crate::signature_kernel::SignatureSetValue, IncompleteReason>,
-    ) -> SharedSignatureNodes {
-        self.shared_signature_nodes_ordered(subject, kind, first, false)
+    construction_ordinal_seam! {
+        /// [`Self::shared_signature_nodes`] over an already-dispatched first
+        /// read.
+        fn shared_signature_nodes_from(
+            &self,
+            subject: SemanticNodeId,
+            kind: GraphSignatureKind,
+            first: Result<crate::signature_kernel::SignatureSetValue, IncompleteReason>,
+        ) -> SharedSignatureNodes {
+            self.shared_signature_nodes_ordered(subject, kind, first, false)
+        }
     }
 
     /// The shared read in declaration order, or with `resolution` in the
@@ -1832,99 +1836,101 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .collect())
     }
 
-    /// Every candidate's positional slots at `position`, read under ONE
-    /// pinned view of the set's own epoch; no semantics is dispatched while
-    /// it is held.
-    pub fn raw_positional_reads(
-        &self,
-        value: &crate::signature_kernel::SignatureSetValue,
-        position: usize,
-    ) -> Result<Vec<RawPositional>, SignatureSetReadFailure> {
-        use crate::signature_kernel::{PositionalShape, TypeAt};
+    construction_ordinal_seam! {
+        /// Every candidate's positional slots at `position`, read under ONE
+        /// pinned view of the set's own epoch; no semantics is dispatched while
+        /// it is held.
+        fn raw_positional_reads(
+            &self,
+            value: &crate::signature_kernel::SignatureSetValue,
+            position: usize,
+        ) -> Result<Vec<RawPositional>, SignatureSetReadFailure> {
+            use crate::signature_kernel::{PositionalShape, TypeAt};
 
-        let unsettled = SignatureSetReadFailure::Incomplete(IncompleteReason::UnsettledInput);
-        let store = self.graph().signature_store();
-        let raw: Result<Vec<RawPositional>, ()> = {
-            let view = SemanticReadView::pin(store);
-            if value.set.epoch().is_some_and(|epoch| epoch != view.epoch()) {
-                return Err(SignatureSetReadFailure::Retired);
-            }
-            let candidates: Vec<SignatureCandidate> = match view.read_set(value.set) {
-                Ok(crate::signature_kernel::BorrowedSet::Empty) => Vec::new(),
-                Ok(crate::signature_kernel::BorrowedSet::One { candidate, .. }) => vec![candidate],
-                Ok(crate::signature_kernel::BorrowedSet::Many(list)) => list.to_vec(),
-                Err(_) => return Err(unsettled),
-            };
-            let mut out = Vec::with_capacity(candidates.len());
-            let mut failed = false;
-            for candidate in &candidates {
-                let Ok(descriptor) = view.descriptor(candidate.signature) else {
-                    failed = true;
-                    break;
+            let unsettled = SignatureSetReadFailure::Incomplete(IncompleteReason::UnsettledInput);
+            let store = self.graph().signature_store();
+            let raw: Result<Vec<RawPositional>, ()> = {
+                let view = SemanticReadView::pin(store);
+                if value.set.epoch().is_some_and(|epoch| epoch != view.epoch()) {
+                    return Err(SignatureSetReadFailure::Retired);
+                }
+                let candidates: Vec<SignatureCandidate> = match view.read_set(value.set) {
+                    Ok(crate::signature_kernel::BorrowedSet::Empty) => Vec::new(),
+                    Ok(crate::signature_kernel::BorrowedSet::One { candidate, .. }) => vec![candidate],
+                    Ok(crate::signature_kernel::BorrowedSet::Many(list)) => list.to_vec(),
+                    Err(_) => return Err(unsettled),
                 };
-                let Ok(template) = view.template(descriptor.template) else {
-                    failed = true;
-                    break;
-                };
-                let Ok(shape) = view.shape(template.input_shape) else {
-                    failed = true;
-                    break;
-                };
-                let Ok(layout) = view.layout(shape.parameter_layout) else {
-                    failed = true;
-                    break;
-                };
-                let receiver_slot = match shape.this_parameter {
-                    Some(id) => match view.slot(id) {
-                        Ok(slot) => Some(*slot),
-                        Err(_) => {
-                            failed = true;
-                            break;
-                        }
-                    },
-                    None => None,
-                };
-                let positional = PositionalShape::new(
-                    layout,
-                    receiver_slot,
-                    shape.signature_semantic_flags,
-                    &NO_VOID_FACTS,
-                );
-                let argument = match positional.type_at(position) {
-                    TypeAt::Absent => None,
-                    TypeAt::One(slot) => match view.type_token_node(slot.ty) {
-                        Ok(node) => Some((node, slot.optionality.includes_undefined)),
-                        Err(_) => {
-                            failed = true;
-                            break;
-                        }
-                    },
-                    // A rest run with a required tail, and a still-generic
-                    // rest, are not a single positional type.
-                    TypeAt::Run { .. } | TypeAt::GenericRest { .. } => {
+                let mut out = Vec::with_capacity(candidates.len());
+                let mut failed = false;
+                for candidate in &candidates {
+                    let Ok(descriptor) = view.descriptor(candidate.signature) else {
                         failed = true;
                         break;
-                    }
-                };
-                let receiver = match positional.receiver() {
-                    Some(slot) => match view.type_token_node(slot.ty) {
-                        Ok(node) => Some(node),
-                        Err(_) => {
+                    };
+                    let Ok(template) = view.template(descriptor.template) else {
+                        failed = true;
+                        break;
+                    };
+                    let Ok(shape) = view.shape(template.input_shape) else {
+                        failed = true;
+                        break;
+                    };
+                    let Ok(layout) = view.layout(shape.parameter_layout) else {
+                        failed = true;
+                        break;
+                    };
+                    let receiver_slot = match shape.this_parameter {
+                        Some(id) => match view.slot(id) {
+                            Ok(slot) => Some(*slot),
+                            Err(_) => {
+                                failed = true;
+                                break;
+                            }
+                        },
+                        None => None,
+                    };
+                    let positional = PositionalShape::new(
+                        layout,
+                        receiver_slot,
+                        shape.signature_semantic_flags,
+                        &NO_VOID_FACTS,
+                    );
+                    let argument = match positional.type_at(position) {
+                        TypeAt::Absent => None,
+                        TypeAt::One(slot) => match view.type_token_node(slot.ty) {
+                            Ok(node) => Some((node, slot.optionality.includes_undefined)),
+                            Err(_) => {
+                                failed = true;
+                                break;
+                            }
+                        },
+                        // A rest run with a required tail, and a still-generic
+                        // rest, are not a single positional type.
+                        TypeAt::Run { .. } | TypeAt::GenericRest { .. } => {
                             failed = true;
                             break;
                         }
-                    },
-                    None => None,
-                };
-                out.push(RawPositional { receiver, argument });
-            }
-            if failed {
-                Err(())
-            } else {
-                Ok(out)
-            }
-        };
-        raw.map_err(|()| unsettled)
+                    };
+                    let receiver = match positional.receiver() {
+                        Some(slot) => match view.type_token_node(slot.ty) {
+                            Ok(node) => Some(node),
+                            Err(_) => {
+                                failed = true;
+                                break;
+                            }
+                        },
+                        None => None,
+                    };
+                    out.push(RawPositional { receiver, argument });
+                }
+                if failed {
+                    Err(())
+                } else {
+                    Ok(out)
+                }
+            };
+            raw.map_err(|()| unsettled)
+        }
     }
 
     /// The parameter positions one signature comparison relates, read
@@ -2281,20 +2287,22 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .collect()
     }
 
-    /// Both buckets of the subject's shared list as signature nodes, call
-    /// then construct; the reason either list did not settle otherwise.
-    pub fn shared_signature_buckets(
-        &self,
-        subject: SemanticNodeId,
-    ) -> Result<(Vec<SemanticNodeId>, Vec<SemanticNodeId>), IncompleteReason> {
-        let bucket = |kind| match self.shared_signature_nodes(subject, kind) {
-            SharedSignatureNodes::Nodes(nodes) => Ok(nodes),
-            SharedSignatureNodes::Incomplete(reason) => Err(reason),
-        };
-        Ok((
-            bucket(GraphSignatureKind::Call)?,
-            bucket(GraphSignatureKind::Construct)?,
-        ))
+    construction_ordinal_seam! {
+        /// Both buckets of the subject's shared list as signature nodes, call
+        /// then construct; the reason either list did not settle otherwise.
+        fn shared_signature_buckets(
+            &self,
+            subject: SemanticNodeId,
+        ) -> Result<(Vec<SemanticNodeId>, Vec<SemanticNodeId>), IncompleteReason> {
+            let bucket = |kind| match self.shared_signature_nodes(subject, kind) {
+                SharedSignatureNodes::Nodes(nodes) => Ok(nodes),
+                SharedSignatureNodes::Incomplete(reason) => Err(reason),
+            };
+            Ok((
+                bucket(GraphSignatureKind::Call)?,
+                bucket(GraphSignatureKind::Construct)?,
+            ))
+        }
     }
 
     /// The parameters and binders an authored signature node carries.

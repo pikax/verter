@@ -32,9 +32,13 @@ type Bindings = ModuleExportBindings;
 
 #[derive(Default)]
 struct ModuleInputs {
-    masked: FxHashSet<Arc<str>>,
+    masked: FxHashSet<verter_type_expr::OwnedStr>,
     local: Bindings,
-    named: Vec<(Arc<str>, String, Arc<str>)>,
+    named: Vec<(
+        verter_type_expr::OwnedStr,
+        String,
+        verter_type_expr::OwnedStr,
+    )>,
     stars: Vec<String>,
     facts: FxHashSet<FactVersionRef>,
     evidence: Option<FactReadSetFinalise>,
@@ -112,7 +116,7 @@ impl VerterHost {
         ctx: Context<'_>,
         view: &dyn StoreView,
         canonical: &str,
-    ) -> Option<Arc<ModuleExportTable>> {
+    ) -> Option<crate::resolver_core::CachedValue<ModuleExportTable>> {
         let canonical = ctx.normalized_analysis_canonical(canonical);
         let db = &self.resolver.runtime.routes;
         let key = table_key(ctx, &canonical);
@@ -159,7 +163,7 @@ impl VerterHost {
                 verter_type_engine::cache_runtime::propagate_non_admission(reason);
             }
             if matches!(run.role, SingleflightRole::Leader) {
-                Some(Arc::clone(&run.value.table))
+                Some(run.value.table.clone())
             } else {
                 let _build = db.module_export_build_lock.lock();
                 self.build_module_export_tables(ctx, view, &canonical, || {
@@ -213,10 +217,10 @@ impl VerterHost {
                 .collect();
             for (name, target) in &shallow.exports {
                 self.count_module_export_work(1);
-                let name: Arc<str> = Arc::from(name.as_str());
-                inputs.masked.insert(Arc::clone(&name));
-                if type_only_exports.contains(name.as_ref())
-                    || namespace_exports.contains(name.as_ref())
+                let name = verter_type_expr::OwnedStr::from(name.as_str());
+                inputs.masked.insert(name.clone());
+                if type_only_exports.contains(name.as_str())
+                    || namespace_exports.contains(name.as_str())
                 {
                     continue;
                 }
@@ -240,7 +244,9 @@ impl VerterHost {
                                 ) {
                                     inputs.local.insert(
                                         name,
-                                        Some(ModuleExportBinding::Namespace(Arc::from(dependency))),
+                                        Some(ModuleExportBinding::Namespace(
+                                            verter_type_expr::OwnedStr::from(dependency),
+                                        )),
                                     );
                                 } else {
                                     inputs
@@ -256,7 +262,9 @@ impl VerterHost {
                                     inputs.named.push((
                                         name,
                                         dependency,
-                                        Arc::from(import.imported_name.as_str()),
+                                        verter_type_expr::OwnedStr::from(
+                                            import.imported_name.as_str(),
+                                        ),
                                     ));
                                 } else {
                                     // Ambient imports resolve through TypeOf's
@@ -295,7 +303,7 @@ impl VerterHost {
                             inputs.named.push((
                                 name,
                                 dependency,
-                                Arc::from(original_name.as_str()),
+                                verter_type_expr::OwnedStr::from(original_name.as_str()),
                             ));
                         } else if let Some(root) = ambient_dispatch
                             .get_or_insert_with(|| {
@@ -324,8 +332,10 @@ impl VerterHost {
                 };
                 if let Some(name) = &route.exported_namespace {
                     inputs.local.insert(
-                        Arc::from(name.as_str()),
-                        Some(ModuleExportBinding::Namespace(Arc::from(dependency))),
+                        verter_type_expr::OwnedStr::from(name.as_str()),
+                        Some(ModuleExportBinding::Namespace(
+                            verter_type_expr::OwnedStr::from(dependency),
+                        )),
                     );
                 } else {
                     inputs.stars.push(dependency);
@@ -356,7 +366,8 @@ impl VerterHost {
     ) -> Result<ExportTableFlight, ()> {
         let db = &self.resolver.runtime.routes;
         let mut inputs: FxHashMap<String, ModuleInputs> = FxHashMap::default();
-        let mut tables: FxHashMap<String, Arc<ModuleExportTable>> = FxHashMap::default();
+        let mut tables: FxHashMap<String, crate::resolver_core::CachedValue<ModuleExportTable>> =
+            FxHashMap::default();
         let mut parents: FxHashMap<String, Vec<String>> = FxHashMap::default();
         let mut pending = vec![canonical.to_owned()];
         while let Some(module) = pending.pop() {
@@ -443,11 +454,11 @@ impl VerterHost {
                         }
                         match next.get(name) {
                             Some(existing) if existing != binding && existing.is_some() => {
-                                next.insert(Arc::clone(name), None);
+                                next.insert(name.clone(), None);
                                 owned += 1;
                             }
                             None => {
-                                next.insert(Arc::clone(name), binding.clone());
+                                next.insert(name.clone(), binding.clone());
                                 owned += 1;
                             }
                             _ => {}
@@ -456,13 +467,13 @@ impl VerterHost {
                 }
                 for (name, binding) in &input.local {
                     self.count_module_export_work(1);
-                    next.insert(Arc::clone(name), binding.clone());
+                    next.insert(name.clone(), binding.clone());
                     owned += 1;
                 }
                 for (name, dependency, original) in &input.named {
                     self.count_module_export_work(1);
                     if let Some(binding) = child(dependency).get(original) {
-                        next.insert(Arc::clone(name), binding.clone());
+                        next.insert(name.clone(), binding.clone());
                         owned += 1;
                     }
                 }
@@ -516,68 +527,111 @@ impl VerterHost {
                 admission = admission.and(admissions.get(&dependency).copied().unwrap_or(Ok(())));
             }
             let receipt = ResultReceipt::retained_join(receipts, db.module_export_account.get());
-            let facts: Arc<[FactVersionRef]> = Arc::from([FactVersionRef::Receipt(receipt)]);
+            let facts = verter_session_query::declarations::module_exports::ModuleExportFacts::new(
+                Box::from([FactVersionRef::Receipt(receipt)]),
+            );
             let mut own_bytes = std::mem::size_of::<ModuleExportRetention>()
                 + dependency_charges.len() * std::mem::size_of::<Arc<ModuleExportRetention>>();
             for module in &component {
-                let input = &inputs[module];
                 let map = &bindings[module];
                 let owned = writes.get(module).copied().unwrap_or(0);
-                // A 64-bit HAMT has at most 13 levels of 32 slots. Bound
-                // copied paths by either those paths or the entire map.
+                // The persistent structure is a third-party HAMT whose node
+                // layout is not observable, so its backing is charged by a
+                // declared convention: every written slot may copy its
+                // path, and a 64-bit HAMT has at most 13 levels of 32
+                // slots. Bound copied paths by either those paths or the
+                // entire map.
                 let slots = (map.len() * 2 + 32).min(owned * 13 * 32);
                 own_bytes += std::mem::size_of::<ModuleExportTable>()
                     + 8 * std::mem::size_of::<usize>()
                     + 2 * std::mem::size_of::<FactVersionRef>()
                     + 2 * module.len()
-                    + slots * std::mem::size_of::<(Arc<str>, Option<ModuleExportBinding>)>()
-                    + input
-                        .local
-                        .iter()
-                        .map(|(name, binding)| {
-                            name.len()
-                                + match binding {
-                                    Some(ModuleExportBinding::Value(root)) => {
-                                        root.canonical_id.len() + root.symbol_name.len()
-                                    }
-                                    Some(ModuleExportBinding::Namespace(module)) => module.len(),
-                                    None => 0,
-                                }
-                        })
-                        .sum::<usize>();
+                    + slots
+                        * std::mem::size_of::<(
+                            verter_type_expr::OwnedStr,
+                            Option<ModuleExportBinding>,
+                        )>();
             }
+            // The names and identities the component's own bindings
+            // introduce are owned strings, charged by their own cells: the
+            // retention record holds them, once each, for as long as any
+            // table sharing the structure lives. Inherited ones are held by
+            // the dependency records it keeps.
+            let introduced = verter_session_query::retention::owned::OwnedHandles::of(|aliases| {
+                component
+                    .iter()
+                    .map(|module| {
+                        let input = &inputs[module];
+                        input
+                            .local
+                            .iter()
+                            .map(|(name, binding)| {
+                                name.offer(aliases)
+                                    + match binding {
+                                        Some(ModuleExportBinding::Value(root)) => {
+                                            root.canonical_id.offer(aliases)
+                                                + root.symbol_name.offer(aliases)
+                                        }
+                                        Some(ModuleExportBinding::Namespace(module)) => {
+                                            module.offer(aliases)
+                                        }
+                                        None => 0,
+                                    }
+                            })
+                            .sum::<usize>()
+                            + input
+                                .named
+                                .iter()
+                                .map(|(name, _, _)| name.offer(aliases))
+                                .sum::<usize>()
+                    })
+                    .sum()
+            });
             let retention = match admission {
-                Ok(()) => {
-                    match verter_session_query::facts::receipt::reserve_retained_with_evidence(
+                // The introduced names are held first, the record and its
+                // evidence last: a refusal of either leaves every name its
+                // callers' and claims no evidence.
+                Ok(()) => match introduced.hold(
+                    verter_session_query::retention::owned::ChargeCtx::new(
                         db.module_export_account.get(),
-                        own_bytes,
-                        &[&facts],
-                    ) {
-                        RetentionAdmission::Admitted(charge) => {
-                            Some(Arc::new(ModuleExportRetention {
-                                charge,
-                                dependencies: dependency_charges,
-                            }))
-                        }
-                        RetentionAdmission::Refused(_) => {
-                            admission = Err(NonAdmissionReason::RetentionPressure);
-                            None
+                    ),
+                ) {
+                    Ok(names) => {
+                        match verter_session_query::facts::receipt::reserve_retained_with_evidence(
+                            db.module_export_account.get(),
+                            own_bytes,
+                            &[&facts],
+                        ) {
+                            RetentionAdmission::Admitted(charge) => {
+                                Some(Arc::new(ModuleExportRetention {
+                                    charge: charge.holding(names),
+                                    dependencies: dependency_charges,
+                                }))
+                            }
+                            RetentionAdmission::Refused(_) => {
+                                admission = Err(NonAdmissionReason::RetentionPressure);
+                                None
+                            }
                         }
                     }
-                }
+                    Err(_) => {
+                        admission = Err(NonAdmissionReason::RetentionPressure);
+                        None
+                    }
+                },
                 Err(_) => None,
             };
             for module in component {
-                let table = Arc::new(ModuleExportTable {
+                let table = crate::resolver_core::CachedValue::new(ModuleExportTable {
                     bindings: bindings.remove(&module).expect("folded component member"),
-                    facts: Arc::clone(&facts),
+                    facts: facts.clone(),
                     retention: retention.clone(),
                     owned_binding_slots: writes.get(&module).copied().unwrap_or(0),
                 });
                 if admission.is_ok() {
-                    let stored = db.module_exports.insert_arc_with_kind(
+                    let stored = db.module_exports.insert_value_with_kind(
                         table_key(ctx, &module),
-                        Arc::clone(&table),
+                        table.clone(),
                         table.facts.to_vec(),
                         "route_db.module_exports",
                     );
@@ -590,7 +644,7 @@ impl VerterHost {
             }
         }
         Ok(ExportTableFlight {
-            table: Arc::clone(&tables[canonical]),
+            table: tables[canonical].clone(),
             admission: admissions.get(canonical).copied().unwrap_or(Ok(())),
         })
     }

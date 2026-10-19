@@ -249,7 +249,10 @@ fn evaluate_types_reuses_cached_results_until_the_file_changes() {
     .expect("second evaluation should reuse the cache");
 
     assert_eq!(first.props.len(), second.props.len());
-    assert!(Arc::ptr_eq(&first_cache, &second_cache));
+    assert!(verter_retention::heap_size::OwnedValue::ptr_eq(
+        &first_cache,
+        &second_cache
+    ));
 
     session
         .upsert("Comp.vue", sfc("count: number; label: string"))
@@ -263,7 +266,10 @@ fn evaluate_types_reuses_cached_results_until_the_file_changes() {
     .expect("updated file should repopulate the cache");
 
     assert!(third.props.iter().any(|field| field.name == "label"));
-    assert!(!Arc::ptr_eq(&second_cache, &third_cache));
+    assert!(!verter_retention::heap_size::OwnedValue::ptr_eq(
+        &second_cache,
+        &third_cache
+    ));
 }
 
 /// PUBLIC BOUNDARY — a deep macro path projection whose TERMINAL hop misses

@@ -71,6 +71,7 @@ fn with_probe<R>(
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     let node = dispatch
         .normalize_node_keeping_declaration_refs_for_tests(
             result.return_type(),
@@ -275,6 +276,7 @@ fn kernel_effects_read_the_declared_predicate_under_the_call_map() {
         crate::HostConfig::default(),
     ));
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let prim = |kind| graph.intern_node(SemanticNodeData::Primitive(kind));
     let (unknown, boolean, number, void) = (
@@ -538,6 +540,7 @@ fn predicates_participate_in_identity_ordering_and_display() {
         crate::HostConfig::default(),
     ));
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let prim = |kind| graph.intern_node(SemanticNodeData::Primitive(kind));
     let (unknown, boolean, void, string) = (

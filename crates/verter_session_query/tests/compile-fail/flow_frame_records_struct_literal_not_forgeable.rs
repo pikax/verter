@@ -9,7 +9,7 @@ use verter_session_query::flow::slice::{
 
 fn frame(gate: &DefiningFrameGate) -> DefiningFrameGate {
     DefiningFrameGate {
-        skeleton: Arc::clone(gate.skeleton()),
+        skeleton: gate.skeleton().clone(),
         ..gate.clone()
     }
 }

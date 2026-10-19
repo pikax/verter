@@ -32,6 +32,7 @@ fn deferred_signature_sources_capture_outer_binders_and_exclude_their_own_clause
         file_language: crate::FileLanguage::script_ts(), aliases: Vec::new(),
     }).unwrap();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let number = prim(&d, PrimitiveKind::Number);
     let string = prim(&d, PrimitiveKind::String);
     let v = d.graph().intern_node(SemanticNodeData::TypeParam {
@@ -172,6 +173,7 @@ fn receiver_utilities_distinguish_incomplete_signatures_from_exact_absence() {
     use super::signature_utility::SignatureUtility;
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let context =
         verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit();
     let incomplete = dispatch
@@ -346,6 +348,7 @@ fn read_return(
 fn direct_signature_matches_only_its_own_kind() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let string = prim(&d, PrimitiveKind::String);
     let call = signature(
         &d,
@@ -386,6 +389,7 @@ fn direct_signature_matches_only_its_own_kind() {
 fn empty_is_a_complete_negative_distinct_from_incomplete() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let object = callable(&d, vec![], vec![]);
     assert_eq!(
         ready(discover(&d, object, SignatureKind::Call)),
@@ -417,6 +421,7 @@ fn empty_is_a_complete_negative_distinct_from_incomplete() {
 fn object_surface_keeps_authored_order_and_overload_ordinals() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let string = prim(&d, PrimitiveKind::String);
     let number = prim(&d, PrimitiveKind::Number);
     let boolean = prim(&d, PrimitiveKind::Boolean);
@@ -474,6 +479,7 @@ fn object_surface_keeps_authored_order_and_overload_ordinals() {
 fn alias_and_constraint_settle_to_the_signature_shape() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let string = prim(&d, PrimitiveKind::String);
     let f = signature(
         &d,
@@ -511,6 +517,7 @@ fn alias_and_constraint_settle_to_the_signature_shape() {
 fn optionality_and_tuple_rest_flatten_under_the_active_context() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let string = prim(&d, PrimitiveKind::String);
     let number = prim(&d, PrimitiveKind::Number);
     let tuple = d.graph().intern_node(SemanticNodeData::Tuple {
@@ -580,6 +587,7 @@ fn optionality_and_tuple_rest_flatten_under_the_active_context() {
 fn enumeration_forces_no_body_and_an_unrecoverable_body_effect_forces_none() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let string = prim(&d, PrimitiveKind::String);
     let node = d.graph().intern_node(SemanticNodeData::Signature {
         kind: SignatureKind::Call,
@@ -643,6 +651,7 @@ fn enumeration_forces_no_body_and_an_unrecoverable_body_effect_forces_none() {
 fn declared_result_applies_the_call_map_once_and_leaks_no_binder_token() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let number = prim(&d, PrimitiveKind::Number);
     let t = d.graph().intern_node(SemanticNodeData::TypeParam {
         decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("Ret"),
@@ -714,6 +723,7 @@ fn declared_result_applies_the_call_map_once_and_leaks_no_binder_token() {
 fn union_common_match_builds_one_candidate_with_mapped_constituents() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let string = prim(&d, PrimitiveKind::String);
     let number = prim(&d, PrimitiveKind::Number);
     let boolean = prim(&d, PrimitiveKind::Boolean);
@@ -763,6 +773,7 @@ fn union_common_match_builds_one_candidate_with_mapped_constituents() {
 fn union_synthesis_is_restricted_and_absent_arm_yields_no_signatures() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let string = prim(&d, PrimitiveKind::String);
     let number = prim(&d, PrimitiveKind::Number);
     let a = signature(
@@ -819,6 +830,7 @@ fn union_synthesis_is_restricted_and_absent_arm_yields_no_signatures() {
 fn intersection_dedups_by_signature_equivalence_in_authored_order() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let string = prim(&d, PrimitiveKind::String);
     let number = prim(&d, PrimitiveKind::Number);
     let first = signature(
@@ -902,6 +914,7 @@ fn mixin_construct_intersections_follow_the_checker_mixin_rule() {
 
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let string = prim(&d, PrimitiveKind::String);
     let any = prim(&d, PrimitiveKind::Any);
     let instance_a = d.graph().intern_node(SemanticNodeData::Literal(
@@ -1121,6 +1134,7 @@ fn signature_set_of(
 fn signatures_of_type_do_not_warm_hit_across_semantic_contexts() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let string = prim(&d, PrimitiveKind::String);
     let sig = signature(
         &d,
@@ -1177,6 +1191,7 @@ fn read_signature_result_distinct_demands_do_not_alias() {
     use verter_type_engine::semantic_query::{QueryResult, SemanticQueryApi, SemanticQueryKey};
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let string = prim(&d, PrimitiveKind::String);
     let sig = signature(
         &d,
@@ -1254,6 +1269,7 @@ fn generic_identity(
 fn generic_union_members_match_exactly_under_binder_correspondence() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let string = prim(&d, PrimitiveKind::String);
     let store = d.graph().signature_store();
 
@@ -1376,6 +1392,7 @@ fn apparent_primitives_read_the_resolved_global_population() {
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let ctx = crate::resolver_core::HostResolverContext::new(&with_lib, &store_view, overlay);
     let d = ProjectSemanticDispatch::new(&ctx);
+    let _builder = d.enter_construction_scope();
     let _scope =
         super::LexicalDemandScopeGuard::push(&d.lexical_demand_scope, Arc::from("/ws/main.ts"));
     let store = d.graph().signature_store();
@@ -1432,6 +1449,7 @@ fn candidate_identity_is_independent_of_intern_order() {
     let observe = |warm_first: bool| {
         let host = host();
         let d = ProjectSemanticDispatch::new(host.as_ref());
+        let _builder = d.enter_construction_scope();
         if warm_first {
             // Unrelated nodes and signatures interned before the subject.
             for kind in [
@@ -1501,6 +1519,7 @@ fn candidate_identity_is_independent_of_intern_order() {
 fn untyped_javascript_signatures_publish_the_untyped_flag() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let any = prim(&d, PrimitiveKind::Any);
     let string = prim(&d, PrimitiveKind::String);
     let flagged = |file: &str, param_ty: SemanticNodeId| {
@@ -1549,6 +1568,7 @@ fn untyped_javascript_signatures_publish_the_untyped_flag() {
 fn each_read_reports_the_authored_node_its_own_subject_carries() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let string = prim(&d, PrimitiveKind::String);
     let number = prim(&d, PrimitiveKind::Number);
     let authored_at = |return_type_span: Option<verter_span::Span>, return_type| {
@@ -1641,6 +1661,7 @@ fn utility_inference_reads_the_last_shared_signature_and_never_a_union_or_binder
 
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let string = prim(&d, PrimitiveKind::String);
     let number = prim(&d, PrimitiveKind::Number);
     let boolean = prim(&d, PrimitiveKind::Boolean);
@@ -1736,6 +1757,7 @@ fn deferred_callable_headers_keep_event_parameters_without_demanding_the_return(
         })
         .unwrap();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
     let scope = NodeScopeId::File {
         canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
@@ -1815,6 +1837,7 @@ fn with_deferred_utility_header(
         file_language: crate::FileLanguage::script_ts(), aliases: Vec::new(),
     }).unwrap();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
     let scope = NodeScopeId::File {
         canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),

@@ -328,7 +328,7 @@ impl PayloadHeap for SemanticNodeData {
             }
             Self::ImportType(_) => {
                 if let Some((specifier, qualifier, _typeof_query)) = self.import_type_head() {
-                    visit_arc_str(specifier, visitor);
+                    specifier.visit_payload_heap(visitor);
                     qualifier.visit_payload_heap(visitor);
                 }
                 visit_arc_slice(self.carrier_type_args(), visitor);

@@ -7,20 +7,25 @@ use crate::retention::RetentionCharge;
 use crate::type_solver::ResolvedRootIdentity;
 
 pub type ModuleExportBindings = imbl::GenericHashMap<
-    Arc<str>,
+    verter_type_expr::OwnedStr,
     Option<ModuleExportBinding>,
     rustc_hash::FxBuildHasher,
     imbl::shared_ptr::DefaultSharedPtr,
 >;
 
-pub type ModuleExportBindingRef<'a> = (&'a Arc<str>, &'a Option<ModuleExportBinding>);
+pub type ModuleExportBindingRef<'a> = (
+    &'a verter_type_expr::OwnedStr,
+    &'a Option<ModuleExportBinding>,
+);
 
 #[derive(Debug, Clone)]
 pub struct ModuleExportTable {
     /// `None` is an ambiguous star binding. Retaining it makes ambiguity
     /// propagate through later barrels; absence alone would lose that fact.
     pub bindings: ModuleExportBindings,
-    pub facts: Arc<[FactVersionRef]>,
+    /// The table's proof, one self-charged cell every table of its
+    /// component shares: charged once, by its own cell.
+    pub facts: ModuleExportFacts,
     /// The charge follows the shared HAMT nodes, including nodes inherited
     /// from dependency tables after their cache entries have been evicted.
     pub retention: Option<Arc<ModuleExportRetention>>,
@@ -28,6 +33,9 @@ pub struct ModuleExportTable {
     /// child structure shared unchanged. Used for footprint/work evidence.
     pub owned_binding_slots: usize,
 }
+
+/// A component's shared export-table proof.
+pub type ModuleExportFacts = verter_retention::heap_size::OwnedValue<Box<[FactVersionRef]>>;
 
 #[derive(Debug)]
 pub struct ModuleExportRetention {
@@ -159,11 +167,11 @@ pub(crate) fn sort_bytes<T>(items: &mut [T], key: impl Fn(&T) -> &[u8]) -> usize
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModuleExportBinding {
     Value(ResolvedRootIdentity),
-    Namespace(Arc<str>),
+    Namespace(verter_type_expr::OwnedStr),
 }
 
 impl verter_retention::heap_size::HeapSize for ModuleExportTable {
-    /// The fact slice; the persistent binding structure is charged by the
+    /// The shared proof cell; the persistent binding structure is charged by the
     /// table's retention record, which follows the shared nodes, and a table
     /// without one is estimated by the binding slots it wrote.
     fn heap_size<'t>(
@@ -175,10 +183,11 @@ impl verter_retention::heap_size::HeapSize for ModuleExportTable {
         } else {
             verter_retention::allocation::heap_block_bytes(
                 self.owned_binding_slots
-                    * std::mem::size_of::<(Arc<str>, Option<ModuleExportBinding>)>(),
+                    * std::mem::size_of::<(verter_type_expr::OwnedStr, Option<ModuleExportBinding>)>(
+                    ),
             )
         };
-        bindings + crate::retention::allocation::fact_slice_bytes(&self.facts, meter.handles())
+        bindings + self.facts.heap_size(meter)
     }
 }
 
