@@ -694,9 +694,9 @@ impl ScriptFactProvider for SvelteScriptProvider {
                             local_binding,
                             import_source: candidate.import_source.clone(),
                             symbol: verter_type_expr::ResolvedSymbolIdentity {
-                                canonical_id: Arc::from(canonical_id),
+                                canonical_id: canonical_id.into(),
                                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                                symbol: Arc::from(candidate.imported_name.as_str()),
+                                symbol: candidate.imported_name.as_str().into(),
                             },
                         });
                     } else {

@@ -728,13 +728,16 @@ fn prepare_local_value_decl_outcome_with_base(
 
     let authored_route = match &prepared.type_annotation.reference_head {
         verter_type_expr::facts::AuthoredReferenceHeadFact::Bare { local_name, .. } => {
-            Some((Arc::clone(local_name), Arc::<[Arc<str>]>::from([])))
+            Some((Arc::<str>::from(local_name), Arc::<[Arc<str>]>::from([])))
         }
         verter_type_expr::facts::AuthoredReferenceHeadFact::Qualified {
             local_root,
             member_path,
             ..
-        } => Some((Arc::clone(local_root), Arc::clone(member_path))),
+        } => Some((
+            Arc::<str>::from(local_root),
+            Arc::<[Arc<str>]>::from(member_path),
+        )),
         _ => None,
     };
     if let Some((local_name, member_path)) = authored_route {

@@ -10364,11 +10364,7 @@ pub(super) trait FlowDemandDriver {
         planned: &verter_session_query::retention::heap_size::OwnedTree<
             crate::cache_runtime::flow_slice_node::PlannedFlowSlice,
         >,
-    ) -> Option<
-        verter_session_query::retention::heap_size::OwnedTree<
-            verter_session_query::flow::flow_ir::FlowSliceIR,
-        >,
-    >;
+    ) -> Option<verter_session_query::flow::flow_ir::SharedFlowSliceIR>;
     fn flow_slice_hash(
         &self,
         key: crate::cache_runtime::flow_slice_node::FlowSliceHashKey,
@@ -10796,11 +10792,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         planned: &verter_session_query::retention::heap_size::OwnedTree<
             crate::cache_runtime::flow_slice_node::PlannedFlowSlice,
         >,
-    ) -> Option<
-        verter_session_query::retention::heap_size::OwnedTree<
-            verter_session_query::flow::flow_ir::FlowSliceIR,
-        >,
-    > {
+    ) -> Option<verter_session_query::flow::flow_ir::SharedFlowSliceIR> {
         self.flow_slice_driver().lookup_lowered(key, planned)
     }
     fn flow_slice_hash(
@@ -11536,11 +11528,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         planned: &verter_session_query::retention::heap_size::OwnedTree<
             crate::cache_runtime::flow_slice_node::PlannedFlowSlice,
         >,
-    ) -> Option<
-        verter_session_query::retention::heap_size::OwnedTree<
-            verter_session_query::flow::flow_ir::FlowSliceIR,
-        >,
-    > {
+    ) -> Option<verter_session_query::flow::flow_ir::SharedFlowSliceIR> {
         self.driver.flow_slice_lowered(key, planned)
     }
     fn flow_slice_hash(
