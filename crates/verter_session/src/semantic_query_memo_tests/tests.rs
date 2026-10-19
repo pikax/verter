@@ -10447,3 +10447,90 @@ fn repeated_close_and_re_intern_under_a_held_epoch_keeps_one_root_per_token() {
     );
     assert!(store.node_is_live(a_param), "A is still open");
 }
+
+/// Closing and re-interning documents again and again under an unrelated
+/// epoch holder keeps the epoch's accounted storage flat: the deferred-root
+/// table is charged for the backing it actually holds, and the final
+/// holder's drop returns the account below where the first close found it.
+///
+/// Discriminating against charging the deferred-root table by the rise of
+/// its reported capacity: a removal that leaves a tombstone lowers that
+/// capacity without freeing anything, so the next insert reusing the
+/// tombstone is charged again as new backing, every cycle, while neither
+/// the stranded-majority trigger nor the record cap advances.
+#[test]
+fn repeated_close_and_re_intern_under_a_held_epoch_keeps_epoch_storage_flat() {
+    let store = SemanticGraphStore::new();
+    let kernel = store.signature_store();
+    let documents: Vec<(String, Vec<SemanticNodeId>)> = {
+        let _build = store.enter_node_root_scope();
+        let mut documents = Vec::new();
+        let mut order = Vec::new();
+        for doc in 0..16u8 {
+            let canonical = format!("/w/doc{doc}.ts");
+            let scope = release_file_scope(&canonical, doc);
+            let nodes: Vec<SemanticNodeId> = (0..10 + usize::from(doc) * 13)
+                .map(|param| {
+                    store.intern_node_with_scope(
+                        release_type_param(&canonical, doc, &format!("T{param}")),
+                        scope.clone(),
+                    )
+                })
+                .collect();
+            order.extend(nodes.iter().copied());
+            documents.push((canonical, nodes));
+        }
+        // Tokens are interned in a scrambled order, so a document's
+        // deferred roots spread across the table's groups.
+        let mut state = 0x9e37_79b9_u32;
+        for index in (1..order.len()).rev() {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            order.swap(index, state as usize % (index + 1));
+        }
+        for node in order {
+            kernel.intern_type_token(node, None).unwrap();
+        }
+        documents
+    };
+    let epoch = kernel.epoch();
+    let records = kernel.interned_len();
+    let unrelated_holder = kernel.lease_epoch(epoch).unwrap();
+    let used_before_close = kernel.current_epoch_storage_used();
+
+    // One document stays closed, so the deferred table is never empty
+    // between cycles and its removals leave tombstones behind.
+    let (kept_closed, _) = &documents[0];
+    store.close_canonical(kept_closed);
+    let cycle = |round: usize| {
+        for (canonical, nodes) in &documents[1..] {
+            let report = store.close_canonical(canonical);
+            assert!(
+                !report.signature_epoch_replaced,
+                "round {round}: {report:?}"
+            );
+            for node in nodes {
+                kernel.intern_type_token(*node, None).unwrap();
+            }
+        }
+    };
+    cycle(0);
+    let used_after_warm_round = kernel.current_epoch_storage_used();
+    for round in 1..4 {
+        cycle(round);
+    }
+    assert_eq!(kernel.epoch(), epoch);
+    assert_eq!(kernel.interned_len(), records, "premise: no record grows");
+    assert_eq!(
+        kernel.current_epoch_storage_used(),
+        used_after_warm_round,
+        "close/re-intern cycles account no new storage"
+    );
+
+    drop(unrelated_holder);
+    assert!(
+        kernel.current_epoch_storage_used() <= used_before_close,
+        "the last holder's drop returns every deferred byte: {} > {}",
+        kernel.current_epoch_storage_used(),
+        used_before_close
+    );
+}

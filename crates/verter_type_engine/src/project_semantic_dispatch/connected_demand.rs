@@ -723,6 +723,7 @@ impl<'a> ConnectedDemandLedger<'a> {
                 ledger: self,
                 root,
                 entered_query_depth,
+                _operation: None,
             },
             trip,
         )
@@ -1168,6 +1169,15 @@ impl ConnectedDemandLedger<'_> {
         }
     }
 
+    /// Release the receipts an ended demand paid: each roots the operands
+    /// its computation names, and the next root demand starts unpaid anyway.
+    pub(super) fn release_paid(&self) {
+        if !self.active.get() {
+            let paid = std::mem::take(&mut *self.paid.borrow_mut());
+            drop(paid);
+        }
+    }
+
     /// Whether this demand has paid `identity`'s receipt and its closure.
     pub fn is_paid(&self, identity: &CostIdentity) -> bool {
         self.paid.borrow().contains(identity)
@@ -1586,11 +1596,20 @@ pub struct ConnectedDemandGuard<'g> {
     ledger: &'g ConnectedDemandLedger<'g>,
     root: bool,
     entered_query_depth: bool,
+    /// The dispatcher operation a root demand is: its construction owner
+    /// and the receipts it paid are released when the demand ends, never
+    /// kept by the dispatcher.
+    _operation: Option<super::DispatchOperation<'g>>,
 }
 
-impl ConnectedDemandGuard<'_> {
+impl<'g> ConnectedDemandGuard<'g> {
     pub(super) fn is_root(&self) -> bool {
         self.root
+    }
+
+    /// Run this root demand as one dispatcher operation.
+    pub(super) fn own_operation(&mut self, operation: super::DispatchOperation<'g>) {
+        self._operation = Some(operation);
     }
 }
 

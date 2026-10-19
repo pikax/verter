@@ -923,8 +923,8 @@ pub(crate) fn build_flow_slice_content(
     index: &verter_session_query::function_program::FunctionProgramIndex,
     entry: &FunctionProgramEntry,
     selection: Option<&FlowSliceSelection>,
-    skeleton: &Arc<FunctionBodySkeleton>,
-    bindings: Arc<verter_session_query::flow::binding::FlowBindingMap>,
+    skeleton: &verter_session_query::flow::bundle::SkeletonRef,
+    bindings: verter_session_query::flow::bundle::BindingsRef,
     carrier_module: bool,
     snapshot: &verter_session_query::source::snapshot::SnapshotKey,
     context: Option<&NestedFlowContext>,
@@ -1060,8 +1060,8 @@ pub(crate) fn build_flow_slice_content(
     // environment only.
     let frame_gate = DefiningFrameGate::seal(
         DefiningFrameDiscovery {
-            skeleton: Arc::clone(skeleton),
-            bindings: Arc::clone(&bindings),
+            skeleton: skeleton.clone(),
+            bindings: bindings.clone(),
             type_parameters: Arc::from(type_param_names.clone()),
             enclosing_type_parameters: enclosing_type_parameters
                 .iter()
@@ -1113,7 +1113,7 @@ pub(crate) fn build_flow_slice_content(
         Some(context) => context.this().cloned(),
         None if untyped_declaration_this => Some(SliceThis::Untyped),
         None => resolved.enclosing_this.and_then(|this| {
-            let class = Arc::clone(&entry.key().declaration.name);
+            let class = Arc::<str>::from(&entry.key().declaration.name);
             Some(match this {
                 verter_semantic::analysis::function_program::EnclosingThis::Instance => {
                     SliceThis::Instance {
@@ -4054,7 +4054,7 @@ pub(crate) fn build_flow_capture_authority(
     });
     Some(finder.found?.map(|declared| SliceCaptureAuthority {
         binding: locator.binding().clone(),
-        name: locator.declaration().name.clone(),
+        name: Arc::<str>::from(&locator.declaration().name),
         declared,
         source: locator.source().clone(),
     }))
@@ -4463,8 +4463,13 @@ impl<'a> Lowerer<'a> {
         // Writes of one binding at one path share their answer: asking the
         // read index again per write would cost the binding's reads per
         // write.
-        let mut answered: FxHashMap<(SkeletonBindingId, Arc<[SkeletonPathSegment]>), bool> =
-            FxHashMap::default();
+        let mut answered: FxHashMap<
+            (
+                SkeletonBindingId,
+                verter_session_query::retention::owned::OwnedSlice<SkeletonPathSegment>,
+            ),
+            bool,
+        > = FxHashMap::default();
         skeleton
             .span_index
             .writes_within(loop_span)
@@ -4477,7 +4482,7 @@ impl<'a> Lowerer<'a> {
                 }
                 match &write.binding {
                     Some(FlowBindingRef::Local(binding)) => *answered
-                        .entry((*binding, Arc::clone(&write.path)))
+                        .entry((*binding, write.path.clone()))
                         .or_insert_with(|| {
                             self.binding_is_read_after_loop_at_path(
                                 *binding,

@@ -7,7 +7,7 @@
 //! `resolve_component_meta` publishes its result into TWO warm caches:
 //!
 //! 1. the validated `resolver_runtime().component_meta` cache, admitted
-//!    via `insert_arc_with_kind` inside
+//!    via `insert_value_with_kind` inside
 //!    `store_cached_resolved_meta_for_view_fingerprint`, and
 //! 2. the legacy `cached_resolved_meta` mirror, stored as a
 //!    `ResolvedComponentMetaCacheEntry` by `mirror_cached_resolved_meta_arc`.
@@ -122,7 +122,10 @@ fn legacy_mirror_facts_for_view(
 /// view_fingerprint=0)`. Reads the ADMITTED set regardless of validation
 /// (the strip contract is about what is admitted, not what currently
 /// validates).
-fn validated_cache_signatures(host: &VerterHost, owner: &str) -> Vec<Arc<[FactVersionRef]>> {
+fn validated_cache_signatures(
+    host: &VerterHost,
+    owner: &str,
+) -> Vec<crate::resolver_core::OwnedFactSignature> {
     validated_cache_signatures_for_view(host, owner, 0)
 }
 
@@ -130,7 +133,7 @@ fn validated_cache_signatures_for_view(
     host: &VerterHost,
     owner: &str,
     view_fingerprint: u64,
-) -> Vec<Arc<[FactVersionRef]>> {
+) -> Vec<crate::resolver_core::OwnedFactSignature> {
     let key =
         crate::host_manage::component_meta_request_impl::resolved_meta_cache_key_with_view_fingerprint(
             owner,

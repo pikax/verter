@@ -68,7 +68,17 @@ impl<'h, 't> HeapMeter<'h, 't> {
     }
 
     /// `true` the first time the raw allocation of `arc` is offered.
+    ///
+    /// Only a data tree's own cell ([`Tree`]) owns raw `Arc`s; any other
+    /// owned cell's value reaches none (see [`super::owned`]), so a debug
+    /// build fails the measurement of such a value that reaches one.
     pub fn first<T: ?Sized>(&mut self, arc: &Arc<T>) -> bool {
+        verter_debug_assert::verter_debug_assert!(
+            !self.handles.measures_cell(),
+            "an owned value reaches a raw `Arc<{}>`: an allocation a caller can clone out of a \
+             delivered value must be an owned handle charged by itself",
+            std::any::type_name::<T>()
+        );
         self.raw.insert(Arc::as_ptr(arc).cast::<()>() as usize)
     }
 
@@ -406,6 +416,13 @@ pub fn owned_tree<T: HeapSize + Send + Sync + 'static>(value: T) -> OwnedTree<T>
     Owned::new(Tree(value))
 }
 
+impl<T> Tree<T> {
+    /// The tree, out of its cell's value ([`Owned::try_unwrap`]).
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+}
+
 impl<T> std::ops::Deref for Tree<T> {
     type Target = T;
     fn deref(&self) -> &T {
@@ -426,8 +443,13 @@ impl<T: std::fmt::Debug> std::fmt::Debug for Tree<T> {
 }
 
 impl<T: HeapSize + Send + Sync + 'static> Measured for Tree<T> {
+    /// The tree's cell owns the raw `Arc`s the tree keeps (see the module
+    /// docs), so they are counted on a set of the tree's own; the owned
+    /// handles the tree reaches pass to the cell's set.
     fn heap_bytes(&self, aliases: &mut AliasSet) -> usize {
-        self.0.heap_size(&mut HeapMeter::new(aliases))
+        let mut tree = AliasSet::new();
+        let bytes = self.0.heap_size(&mut HeapMeter::new(&mut tree));
+        bytes + aliases.absorb(&mut tree)
     }
 }
 
@@ -558,6 +580,22 @@ impl<T: HeapSize + Send + Sync + 'static + Default> Default for OwnedValue<T> {
     }
 }
 
+impl<T: HeapSize + Send + Sync + 'static + serde::Serialize> serde::Serialize for OwnedValue<T> {
+    /// Serializes as its value.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        (**self).serialize(serializer)
+    }
+}
+
+impl<'de, T: HeapSize + Send + Sync + 'static + serde::Deserialize<'de>> serde::Deserialize<'de>
+    for OwnedValue<T>
+{
+    /// A new allocation of the decoded value, charged by its first owner.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        T::deserialize(deserializer).map(Self::new)
+    }
+}
+
 impl<T: HeapSize + Send + Sync + 'static> HeapSize for OwnedValue<T> {
     /// Charged by its own cell.
     fn heap_size<'t>(&'t self, meter: &mut HeapMeter<'_, 't>) -> usize {
@@ -565,11 +603,43 @@ impl<T: HeapSize + Send + Sync + 'static> HeapSize for OwnedValue<T> {
     }
 }
 
+// A cached value cell owns exactly its value: it carries a type expression
+// or a stored span exactly when the value does.
+impl<T: HeapSize + Send + Sync + 'static + verter_no_typeexpr::__private::NoTypeExprWitness>
+    verter_no_typeexpr::__private::NoTypeExprWitness for OwnedValue<T>
+{
+}
+impl<
+        T: HeapSize + Send + Sync + 'static + verter_no_storedspan::__private::NoStoredSpanWitness,
+    > verter_no_storedspan::__private::NoStoredSpanWitness for OwnedValue<T>
+{
+}
+
 impl<T: HeapSize + Send + Sync + 'static> Measured for OwnedValue<T> {
     /// A nested owned value: charged by its own cell.
     fn heap_bytes(&self, aliases: &mut AliasSet) -> usize {
         self.offer(aliases)
     }
+}
+
+/// The heap `value` keeps reachable, measured by its [`HeapSize`] with
+/// nested owned handles offered to `aliases`: the [`Measured`] figure of a
+/// data tree an owned list keeps as its items ([`measured_by_heap_size`]).
+pub fn measured_heap_bytes<T: HeapSize>(value: &T, aliases: &mut AliasSet) -> usize {
+    value.heap_size(&mut HeapMeter::new(aliases))
+}
+
+/// Implement [`Measured`] for data trees through their [`HeapSize`], so an
+/// [`super::owned::OwnedSlice`] can keep them as items.
+#[macro_export]
+macro_rules! measured_by_heap_size {
+    ($($t:ty),* $(,)?) => {
+        $(impl $crate::owned::Measured for $t {
+            fn heap_bytes(&self, aliases: &mut $crate::allocation::AliasSet) -> usize {
+                $crate::heap_size::measured_heap_bytes(self, aliases)
+            }
+        })*
+    };
 }
 
 #[cfg(test)]

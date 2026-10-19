@@ -905,6 +905,10 @@ impl VerterHost {
             raw_source: &serve.indexed.raw_source,
         };
         let dispatch = ProjectSemanticDispatch::new(ctx);
+        // The projection composes delivered and constructed nodes across
+        // dispatcher operations before it renders graph-free text; this
+        // explicit builder owns every one of them until the state is built.
+        let _builder = dispatch.enter_construction_scope();
 
         // The semantic input plan is the kernel's decision (C2): which
         // authored macros carry demands, their lane, index derivations,
@@ -1505,10 +1509,13 @@ impl VerterHost {
                             // rendered `symbol` demands a setup binding the
                             // declaration surface cannot satisfy, which
                             // fails the whole macro rather than one member.
-                            let render_node = dispatch.widen_owner_local_nominal_typeofs(
+                            // The widened carrier owns the rendered node for
+                            // the render and the reference collection below.
+                            let widened = dispatch.owning().widen_owner_local_nominal_typeofs(
                                 reduced.node_id(),
                                 owner_canonical,
                             );
+                            let render_node = *widened.value();
                             // `render_tsc_node` itself fails closed (typed
                             // `Err`) on a NESTED resolver degradation baked
                             // into the rendered text — see its doc comment.

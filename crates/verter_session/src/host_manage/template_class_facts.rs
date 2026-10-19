@@ -154,39 +154,12 @@ pub(crate) fn build_template_class_semantic_facts(
         verter_type_engine::fact_signature_helpers::install_fact_tracer(
             &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
             || {
-                let requested = select_requested_subjects(raw, script);
-                let dispatch = ProjectSemanticDispatch::new(ctx);
-                let mut rows = Vec::with_capacity(requested.len());
-                let mut subjects = Vec::with_capacity(requested.len());
-                let mut completeness = TemplateClassFactsCompleteness::Complete;
-
-                for requested_subject in &requested {
-                    let subject = join_subject(ctx, canonical, script, requested_subject);
-                    let row = match subject {
-                        TemplateClassSubject::Binding {
-                            ref declaration, ..
-                        } => classify_binding(
-                            &dispatch,
-                            canonical,
-                            declaration.clone(),
-                            subject.clone(),
-                        ),
-                        TemplateClassSubject::Prop { ref payload, .. } => {
-                            classify_prop(&dispatch, canonical, script, payload, subject.clone())
-                        }
-                        TemplateClassSubject::Unresolved { .. } => unresolved_row(
-                            subject.clone(),
-                            ClosedLiteralDomainUnresolvedReason::AnalysisUnavailable,
-                            ReactiveWrapperUnresolvedReason::AnalysisUnavailable,
-                        ),
-                    };
-                    if row.wrapper.completeness == TemplateClassFactsCompleteness::ReturnOnly {
-                        completeness = TemplateClassFactsCompleteness::ReturnOnly;
-                    }
-                    subjects.push(subject);
-                    rows.push(row);
-                }
-                (subjects, rows, completeness)
+                classify_requested_subjects(
+                    &ProjectSemanticDispatch::new(ctx),
+                    canonical,
+                    script,
+                    raw,
+                )
             },
         );
 
@@ -509,6 +482,47 @@ fn classify_binding(
     }
 }
 
+/// Classify every requested `:class` subject of `raw` through `dispatch`.
+fn classify_requested_subjects(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    canonical: &str,
+    script: TemplateClassScriptInputs<'_>,
+    raw: &RawTemplateData,
+) -> (
+    Vec<TemplateClassSubject>,
+    Vec<TemplateClassSemanticFactRow>,
+    TemplateClassFactsCompleteness,
+) {
+    let ctx = dispatch.ctx;
+    let requested = select_requested_subjects(raw, script);
+    let mut rows = Vec::with_capacity(requested.len());
+    let mut subjects = Vec::with_capacity(requested.len());
+    let mut completeness = TemplateClassFactsCompleteness::Complete;
+
+    for requested_subject in &requested {
+        let subject = join_subject(ctx, canonical, script, requested_subject);
+        let row = match subject {
+            TemplateClassSubject::Binding {
+                ref declaration, ..
+            } => classify_binding(dispatch, canonical, declaration.clone(), subject.clone()),
+            TemplateClassSubject::Prop { ref payload, .. } => {
+                classify_prop(dispatch, canonical, script, payload, subject.clone())
+            }
+            TemplateClassSubject::Unresolved { .. } => unresolved_row(
+                subject.clone(),
+                ClosedLiteralDomainUnresolvedReason::AnalysisUnavailable,
+                ReactiveWrapperUnresolvedReason::AnalysisUnavailable,
+            ),
+        };
+        if row.wrapper.completeness == TemplateClassFactsCompleteness::ReturnOnly {
+            completeness = TemplateClassFactsCompleteness::ReturnOnly;
+        }
+        subjects.push(subject);
+        rows.push(row);
+    }
+    (subjects, rows, completeness)
+}
+
 fn classify_prop(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     canonical: &str,
@@ -553,7 +567,8 @@ fn classify_prop(
     // TYPED raise boundary: a genuine absence stays `MissingDependency`, but a
     // typed query failure publishes ITS OWN reason through the single
     // disposition authority instead of being erased into "missing dependency".
-    let hot = match dispatch.raise_semantic_type_source_to_hot(
+    // The raised carrier owns the node for the whole classification below.
+    let raised = dispatch.owning().raise_semantic_type_source_to_hot(
         &source,
         SourceRaiseContext {
             scope_canonical_id: canonical,
@@ -561,8 +576,9 @@ fn classify_prop(
             context,
             interior_failures: None,
         },
-    ) {
-        SourceRaiseOutcome::Raised(hot) => hot,
+    );
+    let hot = match raised.value() {
+        SourceRaiseOutcome::Raised(hot) => *hot,
         SourceRaiseOutcome::Absent => {
             return unresolved_row(
                 subject,
@@ -570,7 +586,7 @@ fn classify_prop(
                 ReactiveWrapperUnresolvedReason::MissingDependency,
             );
         }
-        SourceRaiseOutcome::Failed(err) => return unresolved_row_from_query(subject, &err),
+        SourceRaiseOutcome::Failed(err) => return unresolved_row_from_query(subject, err),
     };
     classify_node(dispatch, hot.node(), subject, route_candidate.as_ref())
 }
@@ -637,9 +653,12 @@ fn classify_node(
         .filter(|_| carrier_instantiation_args(dispatch, node, &mut FxHashSet::default()).is_some())
     {
         let expected = [candidate.symbol.clone()];
-        match dispatch.demand_terminal_symbol_instantiation(node, &expected) {
+        let demanded = dispatch
+            .owning()
+            .demand_terminal_symbol_instantiation(node, &expected);
+        match demanded.value() {
             TerminalSymbolInstantiationDemandOutcome::Complete(Some(terminal)) => {
-                let symbol = terminal.symbol;
+                let symbol = terminal.symbol.clone();
                 if candidate.symbol == symbol {
                     let Some(inner) = terminal.args.first().copied() else {
                         return unresolved_row(
@@ -665,7 +684,7 @@ fn classify_node(
                 }
             }
             TerminalSymbolInstantiationDemandOutcome::Partial(reason) => {
-                let (domain_reason, wrapper_reason) = unresolved_reasons_from_identity(reason);
+                let (domain_reason, wrapper_reason) = unresolved_reasons_from_identity(*reason);
                 return unresolved_row(subject, domain_reason, wrapper_reason);
             }
             TerminalSymbolInstantiationDemandOutcome::Complete(None) => {}
@@ -709,12 +728,15 @@ fn classify_closed_domain(
 ) -> ClosedLiteralDomain {
     let context =
         ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
-    let normalized = match dispatch.normalize_node_for_structural_fact_demand(node, context) {
-        StructuralFactDemandOutcome::Complete(node) => node,
+    let demanded = dispatch
+        .owning()
+        .normalize_node_for_structural_fact_demand(node, context);
+    let normalized = match demanded.value() {
+        StructuralFactDemandOutcome::Complete(node) => *node,
         StructuralFactDemandOutcome::Recovered { reasons, .. }
         | StructuralFactDemandOutcome::Partial(reasons) => {
             return ClosedLiteralDomain::Unresolved {
-                reason: unresolved_reasons_from_partial(reasons).0,
+                reason: unresolved_reasons_from_partial(*reasons).0,
                 exactness: ResolutionExactness::Incomplete,
             };
         }
@@ -760,18 +782,20 @@ fn classify_normalized_domain(
                 let context = ProjectionReductionContext::structural_transit_with_mode(
                     ProjectionMode::Navigate,
                 );
-                let normalized =
-                    match dispatch.normalize_node_for_structural_fact_demand(member, context) {
-                        StructuralFactDemandOutcome::Complete(node) => node,
-                        StructuralFactDemandOutcome::Recovered { reasons, .. }
-                        | StructuralFactDemandOutcome::Partial(reasons) => {
-                            unresolved = Some(ClosedLiteralDomain::Unresolved {
-                                reason: unresolved_reasons_from_partial(reasons).0,
-                                exactness: ResolutionExactness::Incomplete,
-                            });
-                            break;
-                        }
-                    };
+                let demanded = dispatch
+                    .owning()
+                    .normalize_node_for_structural_fact_demand(member, context);
+                let normalized = match demanded.value() {
+                    StructuralFactDemandOutcome::Complete(node) => *node,
+                    StructuralFactDemandOutcome::Recovered { reasons, .. }
+                    | StructuralFactDemandOutcome::Partial(reasons) => {
+                        unresolved = Some(ClosedLiteralDomain::Unresolved {
+                            reason: unresolved_reasons_from_partial(*reasons).0,
+                            exactness: ResolutionExactness::Incomplete,
+                        });
+                        break;
+                    }
+                };
                 match classify_normalized_domain(dispatch, normalized, visited, remaining) {
                     ClosedLiteralDomain::Strings(member_values) => {
                         for value in member_values.iter().cloned() {
@@ -870,7 +894,7 @@ fn closed_domain_source(domain: &ClosedLiteralDomain) -> Option<SemanticTypeSour
         .collect::<Vec<_>>();
     let fact = match leaves.as_slice() {
         [leaf] => ClosedTypeFact::Leaf(leaf.clone()),
-        _ => ClosedTypeFact::LeafUnion(Arc::from(leaves.into_boxed_slice())),
+        _ => ClosedTypeFact::LeafUnion(From::from(leaves.into_boxed_slice())),
     };
     Some(SemanticTypeSource::Closed(fact))
 }
@@ -1174,6 +1198,10 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "template_class_ownership_tests.rs"]
+mod ownership_tests;
 
 #[cfg(test)]
 mod attribution_tests {

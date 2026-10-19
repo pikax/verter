@@ -369,6 +369,7 @@ fn locator_shape_nodes_exclude_caller_relative_stamps() {
         .expect("owner must materialise");
 
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let expr = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![ObjectMember::Property(
             ObjectProperty::synthetic_public_key(
@@ -450,6 +451,7 @@ fn locator_shape_infer_identity_matches_eager_and_relowering() {
         .ensure_indexed_ready(OWNER_ID)
         .expect("owner must materialise");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let scope = NodeScopeId::File {
         canonical_id: verter_type_expr::OwnedStr::from(OWNER_ID),
@@ -531,6 +533,7 @@ fn authored_infer_identity_uses_locator_and_exact_path_not_body_text() {
         .ensure_indexed_ready(OWNER_ID)
         .expect("owner must materialise");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let scope = NodeScopeId::File {
         canonical_id: verter_type_expr::OwnedStr::from(OWNER_ID),
@@ -590,6 +593,7 @@ fn eager_and_locator_routes_share_authored_infer_identity() {
         .ensure_indexed_ready(OWNER_ID)
         .expect("owner must materialise");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let scope = NodeScopeId::File {
         canonical_id: verter_type_expr::OwnedStr::from(OWNER_ID),
@@ -652,6 +656,7 @@ fn spread_fragments_keep_the_authored_root_and_member_path() {
         .ensure_indexed_ready(OWNER_ID)
         .expect("owner must materialise");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let scope = NodeScopeId::File {
         canonical_id: verter_type_expr::OwnedStr::from(OWNER_ID),
@@ -734,6 +739,7 @@ fn locator_predeclares_carrier_template_and_signature_bound_infers() {
         .ensure_indexed_ready(OWNER_ID)
         .expect("owner must materialise");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let scope = NodeScopeId::File {
         canonical_id: verter_type_expr::OwnedStr::from(OWNER_ID),
@@ -828,6 +834,7 @@ fn locator_shape_infer_predeclaration_does_not_capture_ordinary_sibling_ref() {
         .ensure_indexed_ready(OWNER_ID)
         .expect("owner must materialise");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let scope = NodeScopeId::File {
         canonical_id: verter_type_expr::OwnedStr::from(OWNER_ID),
@@ -909,6 +916,7 @@ fn locator_spread_shape_is_one_ordered_program() {
         .ensure_indexed_ready(OWNER_ID)
         .expect("owner must materialise");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = NodeScopeId::File {
         canonical_id: verter_type_expr::OwnedStr::from(OWNER_ID),
         owner: TopLevelOwnerId::ordinary_file(),

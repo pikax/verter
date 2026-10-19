@@ -338,10 +338,10 @@ fn member_shape_hash_changes_when_member_added() {
 fn synthetic_carrier(scope: &str, binding_name: &str, value_node: u64) -> TypeExpr {
     use verter_type_expr::{SyntheticCarrierKey, SyntheticCarrierSurfaceKind};
     TypeExpr::synthetic_slot_binding(SyntheticCarrierKey {
-        scope_canonical_id: Arc::from(scope),
+        scope_canonical_id: From::from(scope),
         surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
-        slot_name: Some(Arc::from("default")),
-        binding_name: Arc::from(binding_name),
+        slot_name: Some(From::from("default")),
+        binding_name: From::from(binding_name),
         value_node,
     })
 }
@@ -869,8 +869,8 @@ fn value_body_fingerprint_fallback_matches_legacy_unknown_shape() {
 /// no type parameters, no parameters, an optional authored-return body slot.
 fn signature_fact(has_authored_return: bool) -> FunctionSignature {
     FunctionSignature {
-        type_parameters: Arc::from(Vec::<NarrowTypeParam>::new().into_boxed_slice()),
-        parameters: Arc::from(Vec::<FunctionParamFact>::new().into_boxed_slice()),
+        type_parameters: From::from(Vec::<NarrowTypeParam>::new().into_boxed_slice()),
+        parameters: From::from(Vec::<FunctionParamFact>::new().into_boxed_slice()),
         return_source: if has_authored_return {
             verter_type_expr::facts::FunctionReturnSource::Declared(
                 verter_type_expr::locators::FunctionReturnLocator::Authored(TypeBodySlot {

@@ -228,6 +228,7 @@ fn closed_no_arg_bare_ref_source_enumerates_equals_eager() {
         "export type S = { a: string; b: number };\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/s.ts");
     let string_ty = primitive(&dispatch, PrimitiveKind::String);
 
@@ -295,6 +296,7 @@ fn closed_fixed_key_generic_value_position_only_t_enumerates() {
         "export interface Foo<T> { label?: string; items?: T }\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/foo.ts");
     let t_param = outer_type_param(&dispatch, "T");
     let string_ty = primitive(&dispatch, PrimitiveKind::String);
@@ -362,6 +364,7 @@ fn closed_fixed_key_generic_import_type_source_enumerates() {
     // carrier is interned under so the relative `./dep` specifier resolves.
     upsert_ts(&host, "/owner.ts", "export const x = 1;\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let owner_scope = file_scope(&dispatch, "/owner.ts");
     let t_param = outer_type_param(&dispatch, "T");
     let string_ty = primitive(&dispatch, PrimitiveKind::String);
@@ -413,6 +416,7 @@ fn literal_union_import_type_keyspace_enumerates() {
     upsert_ts(&host, "/keys.ts", "export type Keys = 'a' | 'b';\n");
     upsert_ts(&host, "/owner.ts", "export const x = 1;\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let owner_scope = file_scope(&dispatch, "/owner.ts");
     let string_ty = primitive(&dispatch, PrimitiveKind::String);
 
@@ -444,6 +448,7 @@ fn define_slots_shaped_mapped_over_closed_bare_ref_source_equals_eager() {
         "export type S = { default: string; header: number };\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/slots.ts");
     // Value body: a closed function-ish surface (closed `any` here — the value
     // axis is not under test, the KEY domain is).
@@ -508,6 +513,7 @@ fn genuinely_open_sources_still_carrier_stop() {
         "export type Open<T> = { fixed: string } & T;\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/pb.ts");
     let open_scope = file_scope(&dispatch, "/open.ts");
     let t_param = outer_type_param(&dispatch, "T");
@@ -581,6 +587,7 @@ fn miss_source_carrier_stops() {
     let host = host();
     upsert_ts(&host, "/rec.ts", "export type Rec = { self: Rec };\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/rec.ts");
     let string_ty = primitive(&dispatch, PrimitiveKind::String);
 
@@ -608,6 +615,7 @@ fn recursive_body_closed_key_domain_enumerates_bounded() {
     let host = host();
     upsert_ts(&host, "/rec.ts", "export type Rec = { self: Rec };\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/rec.ts");
     let string_ty = primitive(&dispatch, PrimitiveKind::String);
 
@@ -640,6 +648,7 @@ fn self_alias_loop_source_carrier_stops() {
             let host = host();
             upsert_ts(&host, "/loop.ts", "export type Loop = Loop;\n");
             let dispatch = ProjectSemanticDispatch::new(&host);
+            let _builder = dispatch.enter_construction_scope();
             let scope = file_scope(&dispatch, "/loop.ts");
             let string_ty = primitive(&dispatch, PrimitiveKind::String);
 
@@ -672,6 +681,7 @@ fn key_domain_undecidable_source_answers_open() {
     let host = host();
     upsert_ts(&host, "/d.ts", "export type D = { a: string };\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/d.ts");
     let string_ty = primitive(&dispatch, PrimitiveKind::String);
 
@@ -730,6 +740,7 @@ fn key_domain_budget_exhaustion_carrier_stops() {
             let host = host();
             upsert_ts(&host, "/d.ts", "export type D = { a: string };\n");
             let dispatch = ProjectSemanticDispatch::new(&host);
+            let _builder = dispatch.enter_construction_scope();
             let scope = file_scope(&dispatch, "/d.ts");
             let string_ty = primitive(&dispatch, PrimitiveKind::String);
 
@@ -810,6 +821,7 @@ fn literal_union_bare_ref_keyspace_enumerates() {
     let host = host();
     upsert_ts(&host, "/keys.ts", "export type Keys = 'a' | 'b';\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/keys.ts");
     let string_ty = primitive(&dispatch, PrimitiveKind::String);
 
@@ -939,6 +951,7 @@ fn value_producing_builtin_source_over_open_generic_carrier_stops_no_leak() {
         "export type Wrapped<T> = ReturnType<() => { fixed: string } & T>;\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let wrap_scope = file_scope(&dispatch, "/wrap.ts");
     let t_param = outer_type_param(&dispatch, "T");
     let string_ty = primitive(&dispatch, PrimitiveKind::String);
@@ -1010,6 +1023,7 @@ fn value_producing_builtin_source_over_open_generic_carrier_stops_no_leak() {
 fn closed_builtin_source_still_enumerates_under_role_split() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let string_ty = primitive(&dispatch, PrimitiveKind::String);
     let number_ty = primitive(&dispatch, PrimitiveKind::Number);
 
@@ -1075,6 +1089,7 @@ fn policy_model_refactor_is_behavior_preserving() {
     let host = host();
     upsert_ts(&host, "/bp.ts", "export type S = { a: string };\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/bp.ts");
     let string_ty = primitive(&dispatch, PrimitiveKind::String);
     let t_param = outer_type_param(&dispatch, "T");
@@ -1148,6 +1163,7 @@ fn bare_ref_decl_conditional_recursion_terminates() {
                 "export type Rec<T> = T extends Rec<T> ? { a: string } : { b: string };\n",
             );
             let dispatch = ProjectSemanticDispatch::new(&host);
+            let _builder = dispatch.enter_construction_scope();
             let scope = file_scope(&dispatch, "/rec_cond.ts");
             let string_ty = primitive(&dispatch, PrimitiveKind::String);
             let t_param = outer_type_param(&dispatch, "T");

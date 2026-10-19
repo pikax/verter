@@ -1143,7 +1143,7 @@ fn annotation_source(
 fn shape_member_span_origin(contributor: DeclContributorAnchor, ordinal: u32) -> MemberSpansOrigin {
     MemberSpansOrigin::Authored {
         anchor: contributor,
-        member_path: Arc::from(vec![ordinal]),
+        member_path: From::from(vec![ordinal]),
     }
 }
 
@@ -1159,7 +1159,7 @@ fn signature_spans_origin(
         },
         LoweredSignatureOrigin::ShapeMember { ordinal } => FunctionSpansOrigin::Member {
             anchor: contributor,
-            member_path: Arc::from(vec![ordinal]),
+            member_path: From::from(vec![ordinal]),
         },
         LoweredSignatureOrigin::Synthetic => FunctionSpansOrigin::Synthetic(SourceSynthetic),
     }
@@ -1421,7 +1421,7 @@ fn object_shape_fact(
                         readonly: index_sig.readonly,
                         span_origin: IndexSignatureSpansOrigin::Authored {
                             anchor: contributor,
-                            member_path: Arc::from(vec![ordinal]),
+                            member_path: From::from(vec![ordinal]),
                         },
                     })
                 }
@@ -6142,15 +6142,14 @@ fn expanded_field_authority(
     exactness: verter_session_query::analysis::type_expand::ExpansionExactness,
     diagnostics: &[verter_session_query::analysis::type_expand::ExpansionDiagnostic],
 ) -> verter_type_expr::ResolvedTypeAuthority {
-    let diagnostics: Arc<[verter_type_expr::ResolutionDiagnostic]> = diagnostics
+    let diagnostics: verter_type_expr::ResolutionDiagnostics = diagnostics
         .iter()
         .map(|diagnostic| verter_type_expr::ResolutionDiagnostic {
             kind: publication_diagnostic_kind(diagnostic.reason),
-            context: Arc::from(diagnostic.context.as_str()),
-            property_name: diagnostic.property_name.as_deref().map(Arc::from),
+            context: diagnostic.context.as_str().into(),
+            property_name: diagnostic.property_name.as_deref().map(Into::into),
         })
-        .collect::<Vec<_>>()
-        .into();
+        .collect();
     verter_type_expr::ResolvedTypeAuthority::present(
         source,
         publication_exactness(exactness),

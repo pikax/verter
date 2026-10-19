@@ -105,7 +105,9 @@ impl EngineStores {
                     .charged_to(caches.clone()),
             ),
             intrinsics: Arc::new(crate::intrinsic_registry::IntrinsicRegistry::with_defaults()),
-            imported_registry: Arc::new(ImportedRegistryDb::with_counter(Arc::clone(cache_live))),
+            imported_registry: Arc::new(
+                ImportedRegistryDb::with_counter(Arc::clone(cache_live)).charged_to(caches.clone()),
+            ),
             declarations: Arc::new(
                 DeclarationLookupDb::with_counter(Arc::clone(cache_live))
                     .charged_to(caches.clone()),
@@ -230,6 +232,9 @@ impl OutputAuthority {
         node: SemanticNodeId,
     ) -> Option<OutputTypeExpr> {
         self.bind(dispatch);
+        // One dispatcher operation: what the raise interns is owned until
+        // the sealed carrier holds it.
+        let _operation = dispatch.enter_operation(true);
         let raised = dispatch.output_shell_raise_sealed(node);
         if raised.is_none() {
             // The note is UNCONDITIONAL — it also fires for a genuinely-absent
@@ -254,6 +259,9 @@ impl OutputAuthority {
         context: ProjectionReductionContext,
     ) -> MaterializedOutputTypeExpr {
         self.bind(dispatch);
+        // One dispatcher operation: the reduction's intermediates are owned
+        // until the materialized carrier roots its node.
+        let _operation = dispatch.enter_operation(true);
         dispatch.raise_and_reduce_with_context(node, context)
     }
 }

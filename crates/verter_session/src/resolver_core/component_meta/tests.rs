@@ -540,7 +540,7 @@ fn resolve_component_meta_parts_fallthrough_skips_imported_define_emits_when_eva
                                                 verter_type_expr::facts::ResolvedLocalShape::Tuple(
                                                     verter_type_expr::facts::TuplePayloadFact {
                                                         readonly: false,
-                                                        elements: std::sync::Arc::from(vec![
+                                                        elements: From::from(vec![
                                                             verter_type_expr::facts::TupleElementFact {
                                                                 label: Some("value".to_string()),
                                                                 optional: false,

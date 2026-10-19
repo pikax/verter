@@ -461,6 +461,11 @@ impl<P: Program> SemanticExecution<P> {
     /// open demand); `Pending` means the chain's tip waits on an outside
     /// producer that will wake `waker`. The only way an execution runs:
     /// frames never drive, and a poll never runs inside a frame's step.
+    ///
+    /// Only a producer wakes `waker`: cancelling the request does not. A stop
+    /// is observed at the next poll, so an executor holding a pending drive
+    /// re-polls it (or drops it) when its request is cancelled, as
+    /// [`block_on`] does by parking for at most [`PARK_SLICE`].
     pub(crate) fn poll(
         &mut self,
         program: &mut P,

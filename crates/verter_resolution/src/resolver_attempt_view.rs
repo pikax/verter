@@ -157,8 +157,7 @@ impl ResolverObservation for ResolverAttemptView {
     fn function_body_skeleton(
         &self,
         _key: &FlowFunctionObservationKey,
-    ) -> AttemptOutcome<Option<Arc<verter_session_query::flow::skeleton::FunctionBodySkeleton>>>
-    {
+    ) -> AttemptOutcome<Option<verter_session_query::flow::bundle::SkeletonRef>> {
         unavailable(ResolverObservationKind::FunctionBodySkeleton)
     }
 
