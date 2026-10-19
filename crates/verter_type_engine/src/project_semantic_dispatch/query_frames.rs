@@ -492,6 +492,17 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> SemanticTask<'p,
         self.execution.live_frames()
     }
 
+    /// The free-type-variable summaries the task's dispatcher holds — the
+    /// request-scoped summary population it inherited from its lender
+    /// ([`ProjectSemanticDispatch::free_type_variable_summaries_for_tests`])
+    /// plus whatever its own drives have composed.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn free_type_variable_summaries_for_tests(&self) -> usize {
+        self.program.as_ref().map_or(0, |program| {
+            program.dispatch.free_type_variable_summaries_for_tests()
+        })
+    }
+
     /// From now on, have another task produce each demand a call's walk
     /// suspends on before this task claims it, so the walk waits on it with
     /// its collector held, until [`Self::release_held_call_needs_for_tests`].
@@ -564,6 +575,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             open_obligation_frames: self.dispatch_txn.borrow().reentry().depth(),
             collecting_sessions: self.dispatch_txn.borrow().collecting_sessions_for_tests(),
         }
+    }
+
+    /// How many rooted nodes this dispatcher holds a free-type-variable
+    /// summary for: the request-scoped population a lent semantic task
+    /// inherits with the rest of the request state and returns with it.
+    pub fn free_type_variable_summaries_for_tests(&self) -> usize {
+        self.free_type_variables.borrow().len()
     }
 }
 

@@ -14186,8 +14186,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 QueryResult::Value(formula) => formula,
                 QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
             };
-            let single_closed = matches!(formula.alternatives(), [only] if only.closed().is_some());
-            let members = self.spread_formula_positive_members_for_macro(&formula);
+            let single_closed = formula.width() == 1 && formula.all_alternatives_closed();
+            let members = self
+                .spread_formula_positive_members_for_macro(&formula)
+                .ok()?;
             Some((members, !single_closed))
         }
     }

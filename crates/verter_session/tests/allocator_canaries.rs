@@ -751,3 +751,6 @@ mod expression_source_selection_allocation;
 
 #[path = "allocation_cases/recursive_paths.rs"]
 mod recursive_paths_allocation;
+
+#[path = "allocation_cases/recursive_growth.rs"]
+mod recursive_growth_allocation;
