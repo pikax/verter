@@ -1,28 +1,30 @@
+use std::sync::Arc;
+
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_type_expr::{ExcessPropertyOrigin, MemberVisibility, ObjectMethodKind};
 
+use super::object_spread_product::{
+    MemberState, NarrowFailure, NestedProduct, PathStep, ProductLeaf, ProductNode,
+    ResidualExcessClass, SpreadFragment, SpreadProduct,
+};
 use super::walk::QueryBuildOutput;
 use super::ProjectSemanticDispatch;
+use crate::semantic_query::checker_policy::{cross_product_union, OperationRefusal, ProductFactor};
 use crate::semantic_query::object_spread_projection::{
     evaluator_support, note_collision_comparison, note_member_visit,
 };
 use crate::semantic_query::{
     AuthoredAccessorEffect, AuthoredMethodEffect, AuthoredPropertyEffect, AuthoredPropertyKey,
-    ExactOptionalPropertyPolicy, ExcessEligibility, IndexDomain, MemberFacets,
-    ObjectConstructionEffect, ObjectProjectionFormula, ObjectProjectionIndex,
-    ObjectProjectionSelector, ObjectProjectionSignature, ObjectSignatureKind, ObjectSpreadProgram,
-    ObjectSpreadProjectionContext, PositiveKeyPresence, PrimitiveKind, ProjectionEvidence,
-    PropertyKey, QueryError, QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
-    SemanticQueryValue, SurfaceMember,
+    CheckerDiagnosticOperation, ExactOptionalPropertyPolicy, ExcessEligibility, IndexDomain,
+    MemberFacets, ObjectConstructionEffect, ObjectProjectionAlternative, ObjectProjectionFormula,
+    ObjectProjectionIndex, ObjectProjectionSelector, ObjectSignatureKind, ObjectSpreadProgram,
+    ObjectSpreadProjectionContext, PartialReasonSet, PositiveKeyPresence, PrimitiveKind,
+    ProjectionEvidence, PropertyKey, QueryError, QueryResult, RecoveryBasis, SemanticNodeData,
+    SemanticNodeId, SemanticQueryKey, SemanticQueryValue, SurfaceMember,
 };
-use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
-
-const DISTRIBUTION_CAP: usize = 1024;
-const SPREAD_DEPTH_CAP: usize = 8;
 
 /// Hash lookup uses JS property identity; the stored member keeps its authored
 /// spelling for enumeration. Count actual hash-table equality comparisons.
-#[derive(Clone)]
 struct CollisionKey(PropertyKey);
 
 impl CollisionKey {
@@ -51,20 +53,14 @@ impl std::hash::Hash for CollisionKey {
     }
 }
 
-#[derive(Clone)]
-struct MemberState {
-    key: PropertyKey,
-    presence: PositiveKeyPresence,
-    value: ProjectionEvidence<SemanticNodeId>,
-    facets: ProjectionEvidence<MemberFacets>,
-}
-
-#[derive(Clone)]
+/// The fold of ONE alternative: built from empty along that alternative's
+/// path through the product, read into its alternative, and dropped. No
+/// state is shared or copied between alternatives.
 struct EvalState {
     members: Vec<MemberState>,
     member_positions: FxHashMap<CollisionKey, usize>,
     indices: Vec<ObjectProjectionIndex>,
-    signatures: Vec<ObjectProjectionSignature>,
+    signatures: Vec<crate::semantic_query::ObjectProjectionSignature>,
     residual_operands: Vec<SemanticNodeId>,
     possible_writes: Vec<PropertyKey>,
     direct_excess_candidates: Vec<PropertyKey>,
@@ -125,60 +121,90 @@ enum EvalFailure {
     /// reason is propagated unchanged so operational partials stay
     /// distinguishable from a genuine miss.
     Operational(QueryError),
-    /// The correlated alternative product exceeded the distribution cap.
-    DistributionLimit { actual: usize },
-    /// Nested spread expansion exceeded the depth cap.
-    DepthLimit { depth: usize },
+    /// The connected demand could not pay for the construction.
+    Exhausted(PartialReasonSet),
     /// A nested program projection re-entered an in-flight query.
     Recursive(SemanticNodeId),
 }
 
-impl EvalFailure {
-    fn into_query_error(self) -> QueryError {
-        match self {
-            EvalFailure::Operational(error) => error,
-            EvalFailure::DistributionLimit { actual } => {
-                QueryError::BudgetExceeded(BudgetExceededFailure {
-                    domain: BudgetDomain::ProjectionOperation,
-                    limit: DISTRIBUTION_CAP,
-                    actual: actual as u64,
-                    context: "object spread alternative product".into(),
-                })
-            }
-            EvalFailure::DepthLimit { depth } => {
-                QueryError::BudgetExceeded(BudgetExceededFailure {
-                    domain: BudgetDomain::ProjectionOperation,
-                    limit: SPREAD_DEPTH_CAP,
-                    actual: depth as u64,
-                    context: "object spread nesting depth".into(),
-                })
-            }
-            EvalFailure::Recursive(_) => unreachable!("recursion is not an error channel"),
+impl From<NarrowFailure> for EvalFailure {
+    fn from(failure: NarrowFailure) -> Self {
+        match failure {
+            NarrowFailure::Query(error) => Self::Operational(error),
+            NarrowFailure::Recursive(node) => Self::Recursive(node),
+            NarrowFailure::Exhausted(reasons) => Self::Exhausted(reasons),
         }
     }
 }
 
-/// How a residual spread operand classifies for excess eligibility.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ResidualExcessClass {
-    /// A semantically generic operand: suppresses every direct candidate.
-    Generic,
-    /// An operand that cannot be classified: indeterminate, not suppression.
-    Unclassified,
-    /// A residual that carries no generic-spread evidence (for example an
-    /// unresolved computed key): no eligibility effect.
-    Neutral,
-}
-
-struct SpreadAlternative {
-    members: Vec<MemberState>,
-    indices: Vec<ObjectProjectionIndex>,
-    residual: bool,
-}
-
 struct PropertySpreadChain {
     base: SemanticNodeId,
-    programs: Vec<ObjectSpreadProgram>,
+    /// The chain's programs, outermost first.
+    programs: Vec<SemanticNodeId>,
+    /// How many tail writes the programs hold together.
+    writes: usize,
+}
+
+/// What a selector reads of each spread fragment: the facts kept, or
+/// `None` when it reads the whole construction.
+#[derive(Clone, Copy)]
+enum FragmentReads<'s> {
+    Keys(&'s [PropertyKey], bool),
+    Indices(Option<IndexDomain>),
+}
+
+impl FragmentReads<'_> {
+    fn of(selector: &ObjectProjectionSelector) -> Option<FragmentReads<'_>> {
+        match selector {
+            ObjectProjectionSelector::Surface | ObjectProjectionSelector::ExcessEligibility => None,
+            ObjectProjectionSelector::Key(key) => {
+                Some(FragmentReads::Keys(std::slice::from_ref(key), false))
+            }
+            ObjectProjectionSelector::RelationShape(keys) => Some(FragmentReads::Keys(keys, true)),
+            ObjectProjectionSelector::IndexDomain(domain)
+            | ObjectProjectionSelector::EnumerableValueEnvelope(domain) => {
+                Some(FragmentReads::Indices(Some(*domain)))
+            }
+            ObjectProjectionSelector::Signature(_) => Some(FragmentReads::Indices(None)),
+        }
+    }
+
+    /// The part of `fragment` the selector can observe. Openness always
+    /// survives: it taints every earlier fact, read or not.
+    fn narrow(self, fragment: &SpreadFragment) -> SpreadFragment {
+        let (members, indices): (Vec<MemberState>, Vec<ObjectProjectionIndex>) = match self {
+            FragmentReads::Keys(keys, keep_indices) => (
+                fragment
+                    .members
+                    .iter()
+                    .filter(|member| {
+                        keys.iter()
+                            .any(|selected| selected.element_access_collides(&member.key))
+                    })
+                    .cloned()
+                    .collect(),
+                if keep_indices {
+                    fragment.indices.to_vec()
+                } else {
+                    Vec::new()
+                },
+            ),
+            FragmentReads::Indices(domain) => (
+                Vec::new(),
+                fragment
+                    .indices
+                    .iter()
+                    .filter(|index| domain == Some(index.domain()))
+                    .cloned()
+                    .collect(),
+            ),
+        };
+        SpreadFragment {
+            members: Arc::from(members),
+            indices: Arc::from(indices),
+            residual: fragment.residual,
+        }
+    }
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
@@ -223,6 +249,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// Build the factored product of `program_id` for `selector`.
+    ///
+    /// Two stages. The first is selector-independent: every effect's layer
+    /// is built over the WHOLE program, and the product's size is checked
+    /// against the checker's cross-product limit before any selector prunes
+    /// an effect — a construction too complex to build is too complex
+    /// whichever of its facts a consumer reads. The second keeps the
+    /// selector's live suffix and narrows each fragment to the facts the
+    /// selector reads, so arms that differ only in unread facts collapse
+    /// into one: a selected-key read never multiplies by unrelated arms.
     pub(super) fn build_project_object_spread(
         &self,
         program_id: SemanticNodeId,
@@ -238,32 +274,133 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let program = program.share();
         drop(data);
 
-        let start = selector_live_start(&program, selector);
-        let mut states = vec![EvalState::empty()];
-        for effect in program.effects.iter().skip(start) {
-            let next = match self.apply_object_effect(states, effect, selector, context) {
-                Ok(states) => states,
-                Err(EvalFailure::Recursive(node)) => {
-                    return self.object_projection_recursive(node);
-                }
-                Err(failure) => {
-                    return self.object_projection_failure(failure.into_query_error());
-                }
-            };
-            states = next;
+        // Pay for the per-effect layers before allocating them.
+        let layer_bytes = program.effects.len().saturating_mul(
+            2 * std::mem::size_of::<ProductNode>()
+                + std::mem::size_of::<ProductFactor>()
+                + std::mem::size_of::<ProductLeaf>(),
+        );
+        if let Err(EvalFailure::Exhausted(reasons)) =
+            self.charge_spread_construction(program.effects.len(), layer_bytes)
+        {
+            return self.object_projection_exhausted(reasons);
         }
 
-        let alternatives = states
-            .into_iter()
-            .map(|state| self.finish_object_alternative(state, selector))
-            .collect::<Vec<_>>();
+        let start = selector_live_start(&program, selector);
+        let mut factors = Vec::with_capacity(program.effects.len());
+        let mut live = Vec::with_capacity(program.effects.len() - start);
+        for (index, effect) in program.effects.iter().enumerate() {
+            let layer = match effect {
+                ObjectConstructionEffect::Spread(operand) => {
+                    match self.spread_operand_product(*operand, context, true) {
+                        Ok(layer) => layer,
+                        Err(EvalFailure::Exhausted(reasons)) => {
+                            return self.object_projection_exhausted(reasons);
+                        }
+                        // A construction refusal or resource failure is
+                        // selector-independent and never shadowed.
+                        Err(EvalFailure::Operational(error)) if is_construction_refusal(&error) => {
+                            return self.object_projection_failure(error);
+                        }
+                        // A shadowed operand that cannot be classified
+                        // contributes nothing the selector reads, and no
+                        // factor the product can count.
+                        Err(_) if index < start => continue,
+                        Err(EvalFailure::Recursive(node)) => {
+                            return self.object_projection_recursive(node);
+                        }
+                        Err(EvalFailure::Operational(error)) => {
+                            return self.object_projection_failure(error);
+                        }
+                    }
+                }
+                _ => ProductNode::leaf(ProductLeaf::Direct {
+                    program: program_id,
+                    effect: index as u32,
+                    closed: self.direct_effect_is_closed(effect),
+                }),
+            };
+            factors.push(match layer.bounds().width {
+                1 => ProductFactor::Single,
+                width => ProductFactor::Union(usize::try_from(width).unwrap_or(usize::MAX)),
+            });
+            if index >= start {
+                live.push(layer);
+            }
+        }
+        if let Err(refusal) = cross_product_union(factors, CheckerDiagnosticOperation::ObjectSpread)
+        {
+            return self.object_projection_refused(refusal, program_id);
+        }
+
+        let mut root = ProductNode::overlay(live);
+        if let Some(reads) = FragmentReads::of(selector) {
+            root = match root.narrowed(
+                &|fragment| reads.narrow(fragment),
+                &mut |nested| self.narrowed_nested_product(nested, selector, context),
+                &mut |units| {
+                    self.charge_spread_construction(units, 0)
+                        .map_err(|failure| match failure {
+                            EvalFailure::Exhausted(reasons) => NarrowFailure::Exhausted(reasons),
+                            _ => unreachable!("charging only exhausts"),
+                        })
+                },
+            ) {
+                Ok(root) => root,
+                Err(NarrowFailure::Recursive(node)) => {
+                    return self.object_projection_recursive(node)
+                }
+                Err(NarrowFailure::Query(error)) => return self.object_projection_failure(error),
+                Err(NarrowFailure::Exhausted(reasons)) => {
+                    return self.object_projection_exhausted(reasons)
+                }
+            };
+        }
+        let mut product =
+            SpreadProduct::new(root, selector.clone(), context.optional_property_policy());
+        if product.width() == 1 && !product.is_finished() {
+            // A single alternative is folded once, here, so every read of
+            // the kept formula reuses it instead of folding it again.
+            if let Err(reasons) = self.charge_product_alternative(&product) {
+                return self.object_projection_exhausted(reasons);
+            }
+            let alternative = self.product_alternative(&product, 0);
+            product = SpreadProduct::new(
+                ProductNode::Finished(Arc::new(alternative)),
+                selector.clone(),
+                context.optional_property_policy(),
+            );
+        }
+        let formula = ObjectProjectionFormula::from_product(product);
         (
-            QueryResult::Value(SemanticQueryValue::ObjectProjection(
-                evaluator_support::formula(alternatives),
-            )),
+            QueryResult::Value(SemanticQueryValue::ObjectProjection(formula)),
             self.project_generation_signature(),
         )
             .into()
+    }
+
+    /// A nested program read under the enclosing selector: its own
+    /// narrowed product, so a selected-key read stays narrow all the way
+    /// down.
+    fn narrowed_nested_product(
+        &self,
+        nested: &NestedProduct,
+        selector: &ObjectProjectionSelector,
+        context: ObjectSpreadProjectionContext,
+    ) -> Result<ProductNode, NarrowFailure> {
+        let read = self.execute_via_cold_build_helper(SemanticQueryKey::ProjectObjectSpread {
+            program: nested.operand,
+            selector: selector.clone(),
+            context,
+        });
+        match read.value {
+            QueryResult::Value(SemanticQueryValue::ObjectProjection(formula)) => {
+                Ok(ProductNode::nested(nested.operand, formula))
+            }
+            QueryResult::Value(_) => Err(NarrowFailure::Query(QueryError::Miss)),
+            QueryResult::Error(error) => Err(NarrowFailure::Query(error)),
+            QueryResult::Recursive(node) => Err(NarrowFailure::Recursive(node)),
+        }
     }
 
     fn object_projection_failure(&self, error: QueryError) -> QueryBuildOutput<SemanticQueryValue> {
@@ -274,6 +411,43 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .into();
         output.mark_partial();
         output.cache_suppress = true;
+        output
+    }
+
+    /// The connected demand could not pay for the construction: a typed
+    /// partial of the demand's own trip, never a smaller product.
+    fn object_projection_exhausted(
+        &self,
+        reasons: PartialReasonSet,
+    ) -> QueryBuildOutput<SemanticQueryValue> {
+        let (limit, actual, context) = self.connected_demand.limit_report(reasons);
+        let mut output = self.object_projection_failure(QueryError::BudgetExceeded(
+            verter_session_query::inputs::budget::BudgetExceededFailure {
+                domain: verter_session_query::inputs::budget::BudgetDomain::ProjectionOperation,
+                limit,
+                actual,
+                context: context.into(),
+            },
+        ));
+        output.mark_partial_with(reasons);
+        output
+    }
+
+    /// The construction's cross product reaches the checker's limit: its
+    /// TS2590 recovery, a resource partial, with the program as the
+    /// recovery's authored form. Nothing of the product is kept.
+    fn object_projection_refused(
+        &self,
+        refusal: OperationRefusal,
+        program: SemanticNodeId,
+    ) -> QueryBuildOutput<SemanticQueryValue> {
+        self.fold_local_partial_completeness(PartialReasonSet::OPERATION_BUDGET);
+        let mut output = self.object_projection_failure(QueryError::CheckerRecovery {
+            diagnostic: refusal.diagnostic(),
+            basis: RecoveryBasis::Budget,
+            origin: Some(program),
+        });
+        output.mark_partial_with(PartialReasonSet::OPERATION_BUDGET);
         output
     }
 
@@ -291,11 +465,131 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         output
     }
 
+    /// Pay for `units` of construction work and `bytes` of what it builds
+    /// before building it. Outside a connected demand nothing is charged.
+    fn charge_spread_construction(&self, units: usize, bytes: usize) -> Result<(), EvalFailure> {
+        if !self.connected_demand.is_active() {
+            return Ok(());
+        }
+        self.connected_demand
+            .charge_units(units)
+            .and_then(|()| self.connected_demand.reserve_bytes(bytes))
+            .map_err(|reasons| {
+                self.fold_local_partial_completeness(reasons);
+                EvalFailure::Exhausted(reasons)
+            })
+    }
+
+    /// Read alternative `index` of `product`: fold the leaves on its path
+    /// from an empty state and finish the fold for the product's selector.
+    /// The caller has already paid for it.
+    pub(super) fn product_alternative(
+        &self,
+        product: &SpreadProduct,
+        index: u64,
+    ) -> ObjectProjectionAlternative {
+        let mut state = EvalState::empty();
+        let mut finished = None;
+        let walked = product.root.walk_path(index, &mut |step| {
+            match step {
+                PathStep::Leaf(leaf) => self.apply_product_leaf(&mut state, leaf, product),
+                PathStep::Nested(nested, local) => {
+                    let alternative = self.product_alternative(nested.formula.product(), local);
+                    self.merge_nested_alternative(
+                        &mut state,
+                        nested.operand,
+                        &alternative,
+                        product.policy,
+                    );
+                }
+                PathStep::Finished(alternative) => finished = Some(alternative.clone()),
+            }
+            Ok::<(), std::convert::Infallible>(())
+        });
+        let Ok(()) = walked;
+        match finished {
+            Some(alternative) => alternative,
+            None => self.finish_object_alternative(state, &product.selector),
+        }
+    }
+
+    fn apply_product_leaf(
+        &self,
+        state: &mut EvalState,
+        leaf: &ProductLeaf,
+        product: &SpreadProduct,
+    ) {
+        let selector = &product.selector;
+        let policy = product.policy;
+        match leaf {
+            ProductLeaf::Direct {
+                program, effect, ..
+            } => {
+                let Some(program) = self.spread_program(*program) else {
+                    verter_debug_assert::verter_debug_assert!(
+                        false,
+                        "a direct leaf's program node is retained"
+                    );
+                    return;
+                };
+                if let Some(effect) = program.effects.get(*effect as usize) {
+                    self.apply_direct_effect(state, effect, selector, policy);
+                }
+            }
+            ProductLeaf::Spread(fragment) => self.merge_spread_fragment(state, fragment, policy),
+            ProductLeaf::CopiedWrites { programs, .. } => {
+                // The inner objects' own writes arrive as copied properties.
+                // Each required public write overwrites independently of the
+                // caller's prior state, so no intermediate surface is needed.
+                for program in programs.iter().rev() {
+                    let Some(program) = self.spread_program(*program) else {
+                        verter_debug_assert::verter_debug_assert!(
+                            false,
+                            "a copied-writes program node is retained"
+                        );
+                        continue;
+                    };
+                    for effect in program.effects.iter().skip(1) {
+                        let ObjectConstructionEffect::DirectProperty(effect) = effect else {
+                            unreachable!("property_spread_chain validates every tail");
+                        };
+                        let key = effect.key.cloned_known().expect("validated known key");
+                        state
+                            .direct_excess_candidates
+                            .retain(|candidate| !candidate.element_access_collides(&key));
+                        state
+                            .accessor_getters
+                            .retain(|candidate| !candidate.element_access_collides(&key));
+                        self.apply_named_write(
+                            state,
+                            key,
+                            effect.value,
+                            false,
+                            authored_property_facets(effect),
+                            true,
+                            policy,
+                        );
+                    }
+                }
+            }
+            ProductLeaf::Residual { operand, class } => {
+                retain_semantic_residual(state, *operand, *class);
+            }
+        }
+    }
+
+    fn spread_program(&self, program: SemanticNodeId) -> Option<ObjectSpreadProgram> {
+        match self.graph().node_data(program)?.as_ref() {
+            SemanticNodeData::ObjectSpreadProgram(program) => Some(program.share()),
+            _ => None,
+        }
+    }
+
     fn finish_object_alternative(
         &self,
         state: EvalState,
         selector: &ObjectProjectionSelector,
-    ) -> crate::semantic_query::ObjectProjectionAlternative {
+    ) -> ObjectProjectionAlternative {
         let mut positive = state
             .members
             .into_iter()
@@ -340,7 +634,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             _ => Vec::new(),
         };
-        let excess = if state.generic_spread_seen {
+        // A narrowed read folds only the facts its selector observes, so the
+        // direct candidates other keys' copies would retire are not known:
+        // excess eligibility is a whole-construction fact.
+        let excess = if FragmentReads::of(selector).is_some() {
+            ExcessEligibility::Indeterminate
+        } else if state.generic_spread_seen {
             ExcessEligibility::SuppressedByGenericSpread
         } else if state.unclassified_spread_seen {
             ExcessEligibility::Indeterminate
@@ -365,87 +664,56 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         })
     }
 
-    fn apply_object_effect(
+    fn apply_direct_effect(
         &self,
-        states: Vec<EvalState>,
+        state: &mut EvalState,
         effect: &ObjectConstructionEffect,
         selector: &ObjectProjectionSelector,
-        context: ObjectSpreadProjectionContext,
-    ) -> Result<Vec<EvalState>, EvalFailure> {
+        policy: ExactOptionalPropertyPolicy,
+    ) {
         match effect {
-            ObjectConstructionEffect::Spread(operand) => {
-                self.apply_spread_operand(states, *operand, context, 0)
+            ObjectConstructionEffect::Spread(_) => {
+                unreachable!("a spread is its own product layer, never a direct leaf")
             }
-            ObjectConstructionEffect::DirectProperty(effect) => Ok(states
-                .into_iter()
-                .map(|mut state| {
-                    self.apply_direct_property(&mut state, effect, selector, context);
-                    state
-                })
-                .collect()),
-            ObjectConstructionEffect::DirectMethod(effect) => Ok(states
-                .into_iter()
-                .map(|mut state| {
-                    self.apply_direct_method(&mut state, effect, selector, context);
-                    state
-                })
-                .collect()),
-            ObjectConstructionEffect::DirectGet(effect) => Ok(states
-                .into_iter()
-                .map(|mut state| {
-                    self.apply_direct_accessor(&mut state, effect, true, selector, context);
-                    state
-                })
-                .collect()),
-            ObjectConstructionEffect::DirectSet(effect) => Ok(states
-                .into_iter()
-                .map(|mut state| {
-                    self.apply_direct_accessor(&mut state, effect, false, selector, context);
-                    state
-                })
-                .collect()),
+            ObjectConstructionEffect::DirectProperty(effect) => {
+                self.apply_direct_property(state, effect, selector, policy);
+            }
+            ObjectConstructionEffect::DirectMethod(effect) => {
+                self.apply_direct_method(state, effect, selector, policy);
+            }
+            ObjectConstructionEffect::DirectGet(effect) => {
+                self.apply_direct_accessor(state, effect, true, selector, policy);
+            }
+            ObjectConstructionEffect::DirectSet(effect) => {
+                self.apply_direct_accessor(state, effect, false, selector, policy);
+            }
             ObjectConstructionEffect::DirectIndex(effect) => {
-                let domains = self.index_domains(effect.key_type);
-                Ok(states
-                    .into_iter()
-                    .map(|mut state| {
-                        for domain in &domains {
-                            replace_index(
-                                &mut state.indices,
-                                evaluator_support::index(
-                                    *domain,
-                                    effect.key_type,
-                                    ProjectionEvidence::Proven(effect.value_type),
-                                    ProjectionEvidence::Proven(effect.readonly),
-                                    effect.spans,
-                                    effect.declaration_origin.clone(),
-                                ),
-                            );
-                        }
-                        state
-                    })
-                    .collect())
+                for domain in self.index_domains(effect.key_type) {
+                    replace_index(
+                        &mut state.indices,
+                        evaluator_support::index(
+                            domain,
+                            effect.key_type,
+                            ProjectionEvidence::Proven(effect.value_type),
+                            ProjectionEvidence::Proven(effect.readonly),
+                            effect.spans,
+                            effect.declaration_origin.clone(),
+                        ),
+                    );
+                }
             }
-            ObjectConstructionEffect::DirectCall(node) => Ok(states
-                .into_iter()
-                .map(|mut state| {
-                    state.signatures.push(evaluator_support::signature(
-                        ObjectSignatureKind::Call,
-                        *node,
-                    ));
-                    state
-                })
-                .collect()),
-            ObjectConstructionEffect::DirectConstruct(node) => Ok(states
-                .into_iter()
-                .map(|mut state| {
-                    state.signatures.push(evaluator_support::signature(
-                        ObjectSignatureKind::Construct,
-                        *node,
-                    ));
-                    state
-                })
-                .collect()),
+            ObjectConstructionEffect::DirectCall(node) => {
+                state.signatures.push(evaluator_support::signature(
+                    ObjectSignatureKind::Call,
+                    *node,
+                ));
+            }
+            ObjectConstructionEffect::DirectConstruct(node) => {
+                state.signatures.push(evaluator_support::signature(
+                    ObjectSignatureKind::Construct,
+                    *node,
+                ));
+            }
         }
     }
 
@@ -454,7 +722,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         state: &mut EvalState,
         effect: &AuthoredPropertyEffect,
         selector: &ObjectProjectionSelector,
-        context: ObjectSpreadProjectionContext,
+        policy: ExactOptionalPropertyPolicy,
     ) {
         let Some(key) = self.resolve_authored_key(&effect.key) else {
             self.apply_unknown_direct_key(state, effect.value, selector);
@@ -471,7 +739,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             effect.optional,
             facets,
             false,
-            context.optional_property_policy(),
+            policy,
         );
         state
             .direct_excess_candidates
@@ -486,7 +754,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         state: &mut EvalState,
         effect: &AuthoredMethodEffect,
         selector: &ObjectProjectionSelector,
-        context: ObjectSpreadProjectionContext,
+        policy: ExactOptionalPropertyPolicy,
     ) {
         let Some(key) = self.resolve_authored_key(&effect.key) else {
             self.apply_unknown_direct_key(state, effect.signature, selector);
@@ -513,7 +781,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             effect.optional,
             facets,
             false,
-            context.optional_property_policy(),
+            policy,
         );
         state
             .direct_excess_candidates
@@ -529,7 +797,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         effect: &AuthoredAccessorEffect,
         getter: bool,
         selector: &ObjectProjectionSelector,
-        context: ObjectSpreadProjectionContext,
+        policy: ExactOptionalPropertyPolicy,
     ) {
         let value = self.accessor_value(effect.signature, getter);
         let Some(key) = self.resolve_authored_key(&effect.key) else {
@@ -560,7 +828,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 effect.optional,
                 facets,
                 false,
-                context.optional_property_policy(),
+                policy,
             );
         } else if let Some(index) = state.member_position(&key) {
             state.members[index].facets = ProjectionEvidence::Proven(facets);
@@ -683,26 +951,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 };
             }
             Some(index) => {
-                let left = state.members[index].clone();
-                let merged_value = match (left.value, incoming_value) {
+                let left = &state.members[index];
+                let merged_value = match (&left.value, incoming_value) {
                     (ProjectionEvidence::Proven(left), ProjectionEvidence::Proven(right)) => {
-                        ProjectionEvidence::Proven(self.structural_union(left, right))
+                        ProjectionEvidence::Proven(self.structural_union(*left, right))
                     }
                     _ => ProjectionEvidence::Indeterminate,
                 };
+                let presence = if left.presence == PositiveKeyPresence::Required {
+                    PositiveKeyPresence::Required
+                } else {
+                    PositiveKeyPresence::Optional
+                };
+                let facets = if left.facets == incoming_facets {
+                    incoming_facets
+                } else {
+                    ProjectionEvidence::Indeterminate
+                };
                 state.members[index] = MemberState {
                     key,
-                    presence: if left.presence == PositiveKeyPresence::Required {
-                        PositiveKeyPresence::Required
-                    } else {
-                        PositiveKeyPresence::Optional
-                    },
+                    presence,
                     value: merged_value,
-                    facets: if left.facets == incoming_facets {
-                        incoming_facets
-                    } else {
-                        ProjectionEvidence::Indeterminate
-                    },
+                    facets,
                 };
             }
         }
@@ -809,16 +1079,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         current
     }
 
-    fn apply_spread_operand(
+    /// The product layer one spread operand contributes. `top` marks the
+    /// object literal's own operand, which first merges a union of one
+    /// object type and arms that spread into an empty object (the
+    /// checker's `tryMergeUnionOfObjectTypeAndEmptyObject`): `{ ...o?.x }`
+    /// copies `x`'s properties as optional ones, never a union of the copy
+    /// and `{}`. Any other union is a choice over its arms.
+    fn spread_operand_product(
         &self,
-        states: Vec<EvalState>,
         operand: SemanticNodeId,
         context: ObjectSpreadProjectionContext,
-        depth: usize,
-    ) -> Result<Vec<EvalState>, EvalFailure> {
-        if depth > SPREAD_DEPTH_CAP {
-            return Err(EvalFailure::DepthLimit { depth });
-        }
+        top: bool,
+    ) -> Result<ProductNode, EvalFailure> {
         let operand = self.normalize_spread_operand_node(operand);
         let Some(data) = self.graph().node_data(operand) else {
             return Err(EvalFailure::Operational(QueryError::Miss));
@@ -827,107 +1099,59 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticNodeData::Union(arms) => {
                 let arms = arms.members_arc();
                 drop(data);
-                // The object literal's own spread operand first merges a
-                // union of one object type and arms that spread into an
-                // empty object (the checker's
-                // `tryMergeUnionOfObjectTypeAndEmptyObject`): `{ ...o?.x }`
-                // copies `x`'s properties as optional ones, never a union
-                // of the copy and `{}`.
-                if depth == 0 {
+                if top {
                     match self.merge_object_or_empty_union(&arms) {
-                        Some(UnionSpreadMerge::Empty) => return Ok(states),
+                        Some(UnionSpreadMerge::Empty) => {
+                            return Ok(ProductNode::overlay(Vec::new()))
+                        }
                         Some(UnionSpreadMerge::Partial(surface)) => {
-                            let mut alternative = self.surface_spread_alternative(&surface);
-                            for member in &mut alternative.members {
-                                member.presence = PositiveKeyPresence::Optional;
-                            }
-                            return Ok(states
-                                .into_iter()
-                                .map(|mut state| {
-                                    self.merge_spread_alternative(
-                                        &mut state,
-                                        &alternative,
-                                        context.optional_property_policy(),
-                                    );
-                                    state
+                            let mut fragment = self.surface_spread_fragment(&surface)?;
+                            fragment.members = fragment
+                                .members
+                                .iter()
+                                .cloned()
+                                .map(|member| MemberState {
+                                    presence: PositiveKeyPresence::Optional,
+                                    ..member
                                 })
-                                .collect());
+                                .collect();
+                            return Ok(ProductNode::leaf(ProductLeaf::Spread(fragment)));
                         }
                         None => {}
                     }
                 }
-                let product = states.len().saturating_mul(arms.len());
-                if arms.len() > DISTRIBUTION_CAP || product > DISTRIBUTION_CAP {
-                    return Err(EvalFailure::DistributionLimit {
-                        actual: product.max(arms.len()),
-                    });
+                // One choice point per arm, paid before any arm is built.
+                self.charge_spread_construction(
+                    arms.len(),
+                    arms.len()
+                        .saturating_mul(std::mem::size_of::<ProductNode>() + 8),
+                )?;
+                let mut choice = Vec::with_capacity(arms.len());
+                for arm in arms.iter().copied() {
+                    choice.push(self.spread_operand_product(arm, context, false)?);
                 }
-                let mut distributed = Vec::with_capacity(product);
-                for state in states {
-                    for arm in arms.iter().copied() {
-                        distributed.extend(self.apply_spread_operand(
-                            vec![state.clone()],
-                            arm,
-                            context,
-                            depth + 1,
-                        )?);
-                    }
-                }
-                Ok(distributed)
+                Ok(ProductNode::choice(choice))
             }
             SemanticNodeData::Object(surface) => {
                 let surface = surface.clone();
                 drop(data);
-                let alternative = self.surface_spread_alternative(&surface);
-                Ok(states
-                    .into_iter()
-                    .map(|mut state| {
-                        self.merge_spread_alternative(
-                            &mut state,
-                            &alternative,
-                            context.optional_property_policy(),
-                        );
-                        state
-                    })
-                    .collect())
+                Ok(ProductNode::leaf(ProductLeaf::Spread(
+                    self.surface_spread_fragment(&surface)?,
+                )))
             }
             SemanticNodeData::ObjectSpreadProgram(_) => {
                 drop(data);
                 if let Some(chain) = self.property_spread_chain(operand)? {
-                    // Each inner object starts its own spread operand at depth
-                    // zero, as the general evaluator does. Outer distribution
-                    // must not suppress its nullable merge or consume its fuse.
-                    let mut states = self.apply_spread_operand(states, chain.base, context, 0)?;
-                    // The inner objects' own writes arrive as copied properties.
-                    // Each required public write overwrites independently of the
-                    // caller's prior state, so no intermediate surface is needed.
-                    for program in chain.programs.iter().rev() {
-                        for effect in program.effects.iter().skip(1) {
-                            let ObjectConstructionEffect::DirectProperty(effect) = effect else {
-                                unreachable!("property_spread_chain validates every tail");
-                            };
-                            let key = effect.key.cloned_known().expect("validated known key");
-                            let facets = authored_property_facets(effect);
-                            for state in &mut states {
-                                state
-                                    .direct_excess_candidates
-                                    .retain(|candidate| !candidate.element_access_collides(&key));
-                                state
-                                    .accessor_getters
-                                    .retain(|candidate| !candidate.element_access_collides(&key));
-                                self.apply_named_write(
-                                    state,
-                                    key.clone(),
-                                    effect.value,
-                                    false,
-                                    facets.clone(),
-                                    true,
-                                    context.optional_property_policy(),
-                                );
-                            }
-                        }
-                    }
-                    return Ok(states);
+                    // Each inner object starts its own spread operand as the
+                    // object literal's own, as the general evaluator does.
+                    let base = self.spread_operand_product(chain.base, context, true)?;
+                    return Ok(ProductNode::overlay(vec![
+                        base,
+                        ProductNode::leaf(ProductLeaf::CopiedWrites {
+                            programs: Arc::from(chain.programs),
+                            writes: chain.writes,
+                        }),
+                    ]));
                 }
                 let nested =
                     self.execute_via_cold_build_helper(SemanticQueryKey::ProjectObjectSpread {
@@ -935,20 +1159,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         selector: ObjectProjectionSelector::Surface,
                         context,
                     });
-                let formula = match nested.value {
-                    QueryResult::Value(SemanticQueryValue::ObjectProjection(formula)) => formula,
-                    QueryResult::Value(_) => {
-                        return Err(EvalFailure::Operational(QueryError::Miss))
+                match nested.value {
+                    QueryResult::Value(SemanticQueryValue::ObjectProjection(formula)) => {
+                        Ok(ProductNode::nested(operand, formula))
                     }
-                    QueryResult::Error(error) => return Err(EvalFailure::Operational(error)),
-                    QueryResult::Recursive(node) => return Err(EvalFailure::Recursive(node)),
-                };
-                self.merge_nested_formula(states, operand, &formula, context)
+                    QueryResult::Value(_) => Err(EvalFailure::Operational(QueryError::Miss)),
+                    QueryResult::Error(error) => Err(EvalFailure::Operational(error)),
+                    QueryResult::Recursive(node) => Err(EvalFailure::Recursive(node)),
+                }
             }
             SemanticNodeData::Primitive(
                 PrimitiveKind::Never | PrimitiveKind::Null | PrimitiveKind::Undefined,
-            ) => Ok(states),
-            data if right_spreads_to_nothing(data) => Ok(states),
+            ) => Ok(ProductNode::overlay(Vec::new())),
+            data if right_spreads_to_nothing(data) => Ok(ProductNode::overlay(Vec::new())),
             SemanticNodeData::Opaque(
                 error @ (QueryError::RecursiveRef { .. }
                 | QueryError::AliasCycle { .. }
@@ -961,14 +1184,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 } else {
                     ResidualExcessClass::Unclassified
                 };
-                drop(data);
-                Ok(states
-                    .into_iter()
-                    .map(|mut state| {
-                        retain_semantic_residual(&mut state, operand, class);
-                        state
-                    })
-                    .collect())
+                Ok(ProductNode::leaf(ProductLeaf::Residual { operand, class }))
             }
         }
     }
@@ -982,6 +1198,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         mut operand: SemanticNodeId,
     ) -> Result<Option<PropertySpreadChain>, EvalFailure> {
         let mut programs = Vec::new();
+        let mut writes = 0usize;
         let mut visited = FxHashSet::default();
         // bounded-loop: visited-set cycle stop returns an uncacheable recursion carrier.
         loop {
@@ -999,6 +1216,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             else {
                 break;
             };
+            // Pay for the link (its tail scan and both id lists) before
+            // growing them: the chain is as long as the nesting is deep.
+            self.charge_spread_construction(
+                1 + tail.len(),
+                2 * std::mem::size_of::<SemanticNodeId>(),
+            )?;
             if !tail.iter().all(|effect| {
                 matches!(effect, ObjectConstructionEffect::DirectProperty(property)
                     if !property.optional
@@ -1010,68 +1233,55 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if !visited.insert(operand) {
                 return Err(EvalFailure::Recursive(operand));
             }
-            programs.push(program.share());
+            programs.push(operand);
+            writes += tail.len();
             operand = *base;
         }
         Ok((!programs.is_empty()).then_some(PropertySpreadChain {
             base: operand,
             programs,
+            writes,
         }))
     }
 
-    fn merge_nested_formula(
+    /// Copy one alternative of a nested program onto `state`, as a spread
+    /// of that object.
+    fn merge_nested_alternative(
         &self,
-        states: Vec<EvalState>,
+        state: &mut EvalState,
         operand: SemanticNodeId,
-        formula: &ObjectProjectionFormula,
-        context: ObjectSpreadProjectionContext,
-    ) -> Result<Vec<EvalState>, EvalFailure> {
-        let product = states.len().saturating_mul(formula.alternatives().len());
-        if product > DISTRIBUTION_CAP {
-            return Err(EvalFailure::DistributionLimit { actual: product });
+        alternative: &ObjectProjectionAlternative,
+        policy: ExactOptionalPropertyPolicy,
+    ) {
+        let mut members = Vec::new();
+        alternative.positive().visit(|fact| {
+            note_member_visit();
+            members.push(MemberState {
+                key: fact.key().clone(),
+                presence: fact.presence(),
+                value: fact.value().clone(),
+                facets: fact.facets().clone(),
+            });
+        });
+        let fragment = SpreadFragment {
+            members: Arc::from(members),
+            indices: Arc::from(alternative.indices()),
+            residual: alternative.closed().is_none(),
+        };
+        self.merge_spread_fragment(state, &fragment, policy);
+        if fragment.residual {
+            // The nested program already classified its own residual:
+            // propagate that classification instead of re-guessing.
+            // `merge_spread_fragment` already tainted the pre-existing
+            // state before writing the nested proven facts; do not
+            // re-taint them.
+            let class = match alternative.excess() {
+                ExcessEligibility::SuppressedByGenericSpread => ResidualExcessClass::Generic,
+                ExcessEligibility::Indeterminate => ResidualExcessClass::Unclassified,
+                ExcessEligibility::Eligible { .. } => ResidualExcessClass::Neutral,
+            };
+            retain_residual_bookkeeping(state, operand, class);
         }
-        let mut merged = Vec::with_capacity(product);
-        for state in states {
-            for alternative in formula.alternatives() {
-                let mut spread = SpreadAlternative {
-                    members: Vec::new(),
-                    indices: alternative.indices().to_vec(),
-                    residual: alternative.closed().is_none(),
-                };
-                alternative.positive().visit(|fact| {
-                    note_member_visit();
-                    spread.members.push(MemberState {
-                        key: fact.key().clone(),
-                        presence: fact.presence(),
-                        value: fact.value().clone(),
-                        facets: fact.facets().clone(),
-                    });
-                });
-                let mut branch = state.clone();
-                self.merge_spread_alternative(
-                    &mut branch,
-                    &spread,
-                    context.optional_property_policy(),
-                );
-                if spread.residual {
-                    // The nested program already classified its own residual:
-                    // propagate that classification instead of re-guessing.
-                    // `merge_spread_alternative` already tainted the
-                    // pre-existing state before writing the nested proven
-                    // facts; do not re-taint them.
-                    let class = match alternative.excess() {
-                        ExcessEligibility::SuppressedByGenericSpread => {
-                            ResidualExcessClass::Generic
-                        }
-                        ExcessEligibility::Indeterminate => ResidualExcessClass::Unclassified,
-                        ExcessEligibility::Eligible { .. } => ResidualExcessClass::Neutral,
-                    };
-                    retain_residual_bookkeeping(&mut branch, operand, class);
-                }
-                merged.push(branch);
-            }
-        }
-        Ok(merged)
     }
 
     /// The checker's `tryMergeUnionOfObjectTypeAndEmptyObject` over a spread
@@ -1098,10 +1308,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         })
     }
 
-    fn surface_spread_alternative(
+    /// The copied facts of a closed object surface, its bytes reserved
+    /// before they are built.
+    fn surface_spread_fragment(
         &self,
         surface: &crate::semantic_query::SurfaceView,
-    ) -> SpreadAlternative {
+    ) -> Result<SpreadFragment, EvalFailure> {
+        let facts = surface.positive_members().len() + surface.index_signatures.len();
+        self.charge_spread_construction(
+            1 + facts,
+            facts.saturating_mul(std::mem::size_of::<MemberState>()),
+        )?;
         let members = surface
             .positive_members()
             .iter()
@@ -1120,7 +1337,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     facets: ProjectionEvidence::Proven(member_facets_from_surface(member)),
                 })
             })
-            .collect();
+            .collect::<Vec<_>>();
         let mut indices = Vec::new();
         for index in surface.index_signatures.iter() {
             for domain in self.index_domains(index.key_type) {
@@ -1134,27 +1351,27 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 ));
             }
         }
-        SpreadAlternative {
-            members,
-            indices,
+        Ok(SpreadFragment {
+            members: Arc::from(members),
+            indices: Arc::from(indices),
             // A closed `Object` surface contributes no residual openness;
             // only a nested program's own residual propagates (see
-            // `merge_nested_formula`).
+            // `merge_nested_alternative`).
             residual: false,
-        }
+        })
     }
 
-    fn merge_spread_alternative(
+    fn merge_spread_fragment(
         &self,
         state: &mut EvalState,
-        alternative: &SpreadAlternative,
+        alternative: &SpreadFragment,
         policy: ExactOptionalPropertyPolicy,
     ) {
         if alternative.residual {
             taint_named_members(state);
             taint_indices(state);
         }
-        for member in &alternative.members {
+        for member in alternative.members.iter() {
             if member.presence == PositiveKeyPresence::Required {
                 state
                     .direct_excess_candidates
@@ -1209,7 +1426,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .accessor_getters
                 .retain(|candidate| !candidate.element_access_collides(&member.key));
         }
-        for index in &alternative.indices {
+        for index in alternative.indices.iter() {
             replace_index(
                 &mut state.indices,
                 evaluator_support::index(
@@ -1222,6 +1439,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 ),
             );
         }
+    }
+
+    /// Whether a direct effect leaves the key domain closed: only a
+    /// computed key that resolves to no literal opens it.
+    fn direct_effect_is_closed(&self, effect: &ObjectConstructionEffect) -> bool {
+        let key = match effect {
+            ObjectConstructionEffect::DirectProperty(effect) => &effect.key,
+            ObjectConstructionEffect::DirectMethod(effect) => &effect.key,
+            ObjectConstructionEffect::DirectGet(effect)
+            | ObjectConstructionEffect::DirectSet(effect) => &effect.key,
+            _ => return true,
+        };
+        self.resolve_authored_key(key).is_some()
     }
 
     fn resolve_authored_key(&self, key: &AuthoredPropertyKey) -> Option<PropertyKey> {
@@ -1263,6 +1493,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             _ => Vec::new(),
         }
     }
+}
+
+/// Failures that refuse the construction itself, whichever facts a
+/// selector reads.
+fn is_construction_refusal(error: &QueryError) -> bool {
+    matches!(
+        error,
+        QueryError::CheckerRecovery { .. }
+            | QueryError::BudgetExceeded(_)
+            | QueryError::Cancelled
+            | QueryError::ExecutionAborted(_)
+    )
 }
 
 fn selector_live_start(
