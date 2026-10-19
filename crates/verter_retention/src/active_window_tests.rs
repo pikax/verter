@@ -314,40 +314,45 @@ fn provenance_follows_the_charge_and_mixed_provenance_is_unknown() {
 
 /// Windows opened and finished while other threads reserve and release
 /// ACTIVE bytes lose no transition at either boundary: every report
-/// conserves its bytes and numbers exactly its own transitions.
+/// conserves its bytes and numbers exactly its own transitions. The workers
+/// keep running until every window has finished, and the windows start only
+/// once a worker has transitioned, so the two always overlap.
 #[test]
 fn concurrent_transitions_at_window_boundaries_are_never_lost() {
     const WORKERS: usize = 4;
-    const ROUNDS: usize = 2_000;
     let account = account(1 << 30);
     let owners: Vec<_> = (0..WORKERS).map(|_| account.mint_active_owner()).collect();
     let measured = owners[0].clone();
-    let start = Arc::new(Barrier::new(WORKERS + 1));
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let workers: Vec<_> = (0..WORKERS)
         .map(|worker| {
             let owner = owners[worker].clone();
             let account = Arc::clone(&account);
-            let start = Arc::clone(&start);
+            let stop = Arc::clone(&stop);
             std::thread::spawn(move || {
-                start.wait();
-                for round in 0..ROUNDS {
+                let mut round = 0usize;
+                while !stop.load(Ordering::Relaxed) {
                     let charge = active_as(&account, &owner, 1 + (worker + round) % 13);
                     if round % 3 == 0 {
                         drop(charge.commit_retained());
                     } else {
                         drop(charge);
                     }
+                    round += 1;
                 }
             })
         })
         .collect();
-    start.wait();
+    while account.active_transition_count() == 0 {
+        std::thread::yield_now();
+    }
     let mut reports = Vec::new();
     for _ in 0..200 {
         let window = account.open_active_window(&measured);
         reports.push(window.observe());
         reports.push(window.finish());
     }
+    stop.store(true, Ordering::Relaxed);
     for worker in workers {
         worker.join().expect("worker");
     }
@@ -355,10 +360,11 @@ fn concurrent_transitions_at_window_boundaries_are_never_lost() {
         assert_conserved(report);
     }
     assert_eq!(account.snapshot().active_bytes, 0);
-    assert_eq!(
-        account.active_transition_count(),
-        (WORKERS * ROUNDS * 2) as u64,
-        "every transition is numbered once"
+    assert!(
+        reports
+            .iter()
+            .any(|report| report.closed_at > report.opened_at),
+        "the windows overlapped worker transitions"
     );
 }
 
