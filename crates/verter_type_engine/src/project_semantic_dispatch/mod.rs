@@ -130,6 +130,7 @@ pub mod signature_utility;
 // guards for the output-materialization carrier escape fence. No runtime
 // consumer depends on it; it exists only for its `const _` build-time checks.
 pub mod call_resolve;
+mod declared_read_widening;
 pub mod dispatch_txn;
 pub mod flow_return;
 pub(crate) mod flow_return_callee;
@@ -180,6 +181,7 @@ mod signature_instantiation;
 pub(crate) mod substitute;
 pub mod symbol_identity;
 pub mod symbolic_root;
+mod template_product;
 mod template_relation;
 pub mod walk;
 

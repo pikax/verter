@@ -1984,6 +1984,12 @@ pub struct ValueTypeAnnotationFact {
     /// literal types — read, they widen wherever a bare literal would.
     #[serde(default)]
     pub literal_freshness: DeclaredLiteralFreshness,
+    /// Whether the initializer-inferred type holds positions whose
+    /// widening waits on the bindings they read
+    /// ([`crate::DeclaredReadProvenance`]): its `typeof` then reads them
+    /// from the declaration's transient value parts.
+    #[serde(default)]
+    pub defers_read_widening: bool,
 }
 
 /// Whether a value declaration's declared type is the checker's WIDENING

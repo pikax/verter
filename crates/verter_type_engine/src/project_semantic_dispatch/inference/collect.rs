@@ -38,7 +38,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         mut bound: SemanticNodeId,
         occurrence: InferenceOccurrence,
     ) -> bool {
-        let (call_policy, deposit_is_top_level) = {
+        // A context-sensitive literal's first-pass reading relates, but is
+        // no candidate for a naked type parameter: that parameter keeps its
+        // constraint for the second pass's contextual typing.
+        if self
+            .dispatch_txn
+            .borrow()
+            .call_argument_withholds(param_node, bound)
+        {
+            return true;
+        }
+        let (call_policy, deposit_is_top_level, context_keeps) = {
             let txn = self.dispatch_txn.borrow();
             (
                 txn.active_session()
@@ -46,6 +56,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     .zip(txn.call_argument_literal_mode()),
                 txn.call_argument_target_is_top_level(param_node)
                     || txn.call_argument_is_whole(bound),
+                txn.call_argument_context_keeps(param_node),
             )
         };
         if let Some((policy, literal_mode)) = call_policy {
@@ -56,7 +67,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             // literal (the constraint is an upper-bound check, not a
             // widening target: `cstr<T extends string>("a")` is `"a"`);
             // nested positions — an array element, an object member —
-            // widen as before.
+            // widen unless the argument's contextual typing kept them — the
+            // authored expression holding the literal has a literal context
+            // for its contextual type (`isLiteralOfContextualType`: `{ v: "x" }`
+            // against `{ v: T }` keeps `"x"` for `T extends string`), as does an object
+            // argument deposited whole at a naked position whose constraint
+            // gives the member a literal context.
             if literal_mode == crate::semantic_query::ArgumentLiteralMode::Widened {
                 // A fresh union (a call's result whose literal members are
                 // fresh, `h(1)` over `h<T>(x: T): T | undefined`) is kept
@@ -80,7 +96,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     && policy == crate::semantic_query::ConstParamPolicy::NonConst
                     && !fresh_literals.is_empty();
                 if !preserve_top_literal {
-                    bound = self.call_inference_candidate(bound, policy);
+                    bound = if policy == crate::semantic_query::ConstParamPolicy::NonConst
+                        && !context_keeps.is_empty()
+                    {
+                        self.contextual_literal_candidate(bound, &context_keeps, policy)
+                    } else {
+                        self.call_inference_candidate(bound, policy)
+                    };
                 } else {
                     // A preserved literal at a naked position is FRESH
                     // provenance for an unconstrained parameter (the note

@@ -2483,6 +2483,113 @@ fn a_spread_work_refusal_is_sealed_per_isolated_root_and_heals() {
     );
 }
 
+/// Unions `A` of 100 and `B` of 80 string literals.
+fn template_unions() -> String {
+    let union = |name: &str, prefix: &str, count: usize| {
+        let arms: Vec<String> = (0..count).map(|i| format!("\"{prefix}{i}\"")).collect();
+        format!("type {name} = {};\n", arms.join(" | "))
+    };
+    format!("{}{}", union("A", "a", 100), union("B", "b", 80))
+}
+
+/// The reduction of `${A}-${B}` over [`template_unions`] as a root key.
+fn template_reduction_key(
+    host: &Arc<VerterHost>,
+    source: &str,
+) -> verter_type_engine::semantic_query::SemanticQueryKey {
+    super::checker_probe_lane_tests::with_probe_on_host(
+        host,
+        Default::default(),
+        source,
+        "[A, B]",
+        |dispatch, node| {
+            let args = match dispatch.graph().node_data(node).as_deref() {
+                Some(verter_type_engine::semantic_query::SemanticNodeData::Tuple {
+                    elements,
+                    ..
+                }) => elements
+                    .iter()
+                    .map(|element| element.value)
+                    .collect::<Vec<_>>(),
+                other => panic!("the probe reads the pair [A, B], got {other:?}"),
+            };
+            verter_type_engine::semantic_query::SemanticQueryKey::TemplateLiteralReduce {
+                pattern: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from([
+                    verter_type_expr::OwnedStr::from(""),
+                    verter_type_expr::OwnedStr::from("-"),
+                    verter_type_expr::OwnedStr::from(""),
+                ]),
+                args: Arc::from(args),
+                context: dispatch.template_literal_reduce_context(),
+            }
+        },
+    )
+}
+
+/// A template whose product the work allowance cannot pay for stops as a
+/// typed work refusal, never as a smaller or empty union. The refusal is
+/// sealed for its isolated root and allowances only: an exact repeat
+/// answers it without reconstructing anything, a demand inside a different
+/// enclosing ledger evaluates for itself, a higher allowance completes the
+/// 8,000-arm union, and an edit to a span evaluates afresh.
+#[test]
+fn a_template_work_refusal_is_sealed_per_isolated_root_and_heals() {
+    use verter_type_engine::semantic_query::PartialReasonSet;
+    let full = super::connected_demand::MAX_CONNECTED_PROJECTION_WORK;
+    let source = template_unions();
+    let measured = {
+        let host = super::checker_probe_lane_tests::default_probe_host();
+        let key = template_reduction_key(&host, &source);
+        root_read(&host, &key, full)
+    };
+    assert!(
+        !measured.partial && measured.work >= 8_000,
+        "the full allowance builds all 8,000 concatenations: {measured:?}"
+    );
+
+    let host = super::checker_probe_lane_tests::default_probe_host();
+    let key = template_reduction_key(&host, &source);
+    let limited = measured.work / 2;
+    let refused = root_read(&host, &key, limited);
+    assert!(
+        refused.partial
+            && refused
+                .reasons
+                .contains(PartialReasonSet::PROJECTION_WORK_LIMIT),
+        "half the work cannot build every concatenation: {refused:?}"
+    );
+
+    let before = semantic_misses(&host);
+    assert_eq!(root_read(&host, &key, limited), refused);
+    assert_eq!(
+        semantic_misses(&host),
+        before,
+        "the exact repeat answers its sealed refusal without reconstruction"
+    );
+
+    let before = semantic_misses(&host);
+    let enclosed = root_read_with_context(&host, &key, limited, 24, 1);
+    assert!(enclosed.partial);
+    assert!(
+        semantic_misses(&host) > before,
+        "a demand inside another ledger never inherits the refusal"
+    );
+
+    let healed = root_read(&host, &key, full);
+    assert!(
+        !healed.partial && healed.work >= 8_000,
+        "a higher allowance recomputes and completes: {healed:?}"
+    );
+
+    let edited = template_reduction_key(&host, &source.replace("\"a0\"", "\"z0\""));
+    let before = semantic_misses(&host);
+    let _ = root_read(&host, &edited, limited);
+    assert!(
+        semantic_misses(&host) > before,
+        "an edit to a span evaluates afresh"
+    );
+}
+
 /// `{ ...a, ...b }` over 33- and 33-member object unions has 1,089
 /// correlated constituents — each pairs one `a` arm with one `b` arm, never
 /// an `a` key with another arm's value — and inference over the spread
